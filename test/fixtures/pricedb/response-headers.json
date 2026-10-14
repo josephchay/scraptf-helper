@@ -1,0 +1,469 @@
+[
+ {
+  "name": "schema.json",
+  "url": "https://sku.pricedb.io/api/schema",
+  "method": "GET",
+  "status": 200,
+  "bytes": 21328477,
+  "headers": {
+   "age": "1651",
+   "cache-control": "max-age=7200",
+   "cf-cache-status": "HIT",
+   "content-encoding": "br",
+   "content-type": "application/json; charset=utf-8",
+   "etag": "W/\"145733a-S44268dstHsQF3VLPVZRzvblAy0\""
+  }
+ },
+ {
+  "name": "effect-list.json",
+  "url": "https://sku.pricedb.io/api/effect/list",
+  "method": "GET",
+  "status": 200,
+  "bytes": 20963,
+  "headers": {
+   "cf-cache-status": "DYNAMIC",
+   "content-encoding": "br",
+   "content-type": "application/json; charset=utf-8",
+   "etag": "W/\"51e4-VevT8AVjvcNkntxMSc3JwBWJ22g\""
+  }
+ },
+ {
+  "name": "paint-list.json",
+  "url": "https://sku.pricedb.io/api/paint/list",
+  "method": "GET",
+  "status": 200,
+  "bytes": 1387,
+  "headers": {
+   "cf-cache-status": "DYNAMIC",
+   "content-encoding": "br",
+   "content-type": "application/json; charset=utf-8",
+   "etag": "W/\"56b-ZYUzdaGb+hX5sVyrP7pl/wt1aXY\""
+  }
+ },
+ {
+  "name": "paintkit-list.json",
+  "url": "https://sku.pricedb.io/api/paintkit/list",
+  "method": "GET",
+  "status": 200,
+  "bytes": 8564,
+  "headers": {
+   "cf-cache-status": "DYNAMIC",
+   "content-encoding": "br",
+   "content-type": "application/json; charset=utf-8",
+   "etag": "W/\"2175-UcbyQ1jY03a5KfdTetV4wy70nqs\""
+  }
+ },
+ {
+  "name": "quality-list.json",
+  "url": "https://sku.pricedb.io/api/quality/list",
+  "method": "GET",
+  "status": 200,
+  "bytes": 241,
+  "headers": {
+   "cf-cache-status": "DYNAMIC",
+   "content-encoding": "br",
+   "content-type": "application/json; charset=utf-8",
+   "etag": "W/\"f1-wpKv9T9ut5R+9JHuVU1prvg7p+g\""
+  }
+ },
+ {
+  "name": "wear-list.json",
+  "url": "https://sku.pricedb.io/api/wear/list",
+  "method": "GET",
+  "status": 200,
+  "bytes": 178,
+  "headers": {
+   "cf-cache-status": "DYNAMIC",
+   "content-encoding": "br",
+   "content-type": "application/json; charset=utf-8",
+   "etag": "W/\"b2-aBRPd8IG5ITzcO26b4t03s11xw4\""
+  }
+ },
+ {
+  "name": "sku-0.json",
+  "url": "https://sku.pricedb.io/api/sku/378%3B6",
+  "method": "GET",
+  "status": 200,
+  "bytes": 333,
+  "headers": {
+   "cf-cache-status": "DYNAMIC",
+   "content-encoding": "br",
+   "content-type": "application/json; charset=utf-8",
+   "etag": "W/\"14d-7Pbv9A/2cWj+ls1YDUEiQHUOOUQ\""
+  }
+ },
+ {
+  "name": "sku-1.json",
+  "url": "https://sku.pricedb.io/api/sku/30177%3B5%3Bu13",
+  "method": "GET",
+  "status": 200,
+  "bytes": 352,
+  "headers": {
+   "cf-cache-status": "DYNAMIC",
+   "content-encoding": "br",
+   "content-type": "application/json; charset=utf-8",
+   "etag": "W/\"160-mhj6M2shGtQKxuIrox/hiDe0sDQ\""
+  }
+ },
+ {
+  "name": "sku-2.json",
+  "url": "https://sku.pricedb.io/api/sku/378%3B5%3Bu13%3Bstrange",
+  "method": "GET",
+  "status": 200,
+  "bytes": 360,
+  "headers": {
+   "cf-cache-status": "DYNAMIC",
+   "content-encoding": "br",
+   "content-type": "application/json; charset=utf-8",
+   "etag": "W/\"168-faXTz1g9zfYk+LiRiBc18S9LUA0\""
+  }
+ },
+ {
+  "name": "sku-3.json",
+  "url": "https://sku.pricedb.io/api/sku/205%3B11%3Baustralium%3Bkt-3",
+  "method": "GET",
+  "status": 200,
+  "bytes": 392,
+  "headers": {
+   "cf-cache-status": "DYNAMIC",
+   "content-encoding": "br",
+   "content-type": "application/json; charset=utf-8",
+   "etag": "W/\"188-297UOmnhknNyLZCIrdu/VYYmNPk\""
+  }
+ },
+ {
+  "name": "sku-4.json",
+  "url": "https://sku.pricedb.io/api/sku/15000%3B15%3Bu701%3Bw1%3Bpk14",
+  "method": "GET",
+  "status": 200,
+  "bytes": 370,
+  "headers": {
+   "cf-cache-status": "DYNAMIC",
+   "content-encoding": "br",
+   "content-type": "application/json; charset=utf-8",
+   "etag": "W/\"172-ZJFiuRqSljDNgfIDu5BjXE81Wys\""
+  }
+ },
+ {
+  "name": "sku-5.json",
+  "url": "https://sku.pricedb.io/api/sku/20003%3B6%3Bkt-3%3Btd-205%3Bod-6526%3Boq-6",
+  "method": "GET",
+  "status": 200,
+  "bytes": 396,
+  "headers": {
+   "cf-cache-status": "DYNAMIC",
+   "content-encoding": "br",
+   "content-type": "application/json; charset=utf-8",
+   "etag": "W/\"18c-n14prJXnR1pSQg196zLnRaoI+6w\""
+  }
+ },
+ {
+  "name": "sku-6.json",
+  "url": "https://sku.pricedb.io/api/sku/5041%3B6%3Bc11",
+  "method": "GET",
+  "status": 200,
+  "bytes": 346,
+  "headers": {
+   "cf-cache-status": "DYNAMIC",
+   "content-encoding": "br",
+   "content-type": "application/json; charset=utf-8",
+   "etag": "W/\"15a-GPg45Ln9jX/sHAZwSR5saIOP2ho\""
+  }
+ },
+ {
+  "name": "sku-7.json",
+  "url": "https://sku.pricedb.io/api/sku/6522%3B6%3Btd-378",
+  "method": "GET",
+  "status": 200,
+  "bytes": 349,
+  "headers": {
+   "cf-cache-status": "DYNAMIC",
+   "content-encoding": "br",
+   "content-type": "application/json; charset=utf-8",
+   "etag": "W/\"15d-qw6SnsbxHi/6nt8KT6bxekIuDz0\""
+  }
+ },
+ {
+  "name": "sku-8.json",
+  "url": "https://sku.pricedb.io/api/sku/200%3B6%3Buncraftable",
+  "method": "GET",
+  "status": 200,
+  "bytes": 354,
+  "headers": {
+   "cf-cache-status": "DYNAMIC",
+   "content-encoding": "br",
+   "content-type": "application/json; charset=utf-8",
+   "etag": "W/\"162-QqNrXAPl+tSwTAo+lr5maL11dA8\""
+  }
+ },
+ {
+  "name": "sku-9.json",
+  "url": "https://sku.pricedb.io/api/sku/16105%3B15%3Bw3",
+  "method": "GET",
+  "status": 200,
+  "bytes": 351,
+  "headers": {
+   "cf-cache-status": "DYNAMIC",
+   "content-encoding": "br",
+   "content-type": "application/json; charset=utf-8",
+   "etag": "W/\"15f-UDCtDZP5H8wouSe/Fd06tTgKyns\""
+  }
+ },
+ {
+  "name": "name-0.json",
+  "url": "https://sku.pricedb.io/api/name/Burning%20Flames%20Team%20Captain",
+  "method": "GET",
+  "status": 200,
+  "bytes": 346,
+  "headers": {
+   "cf-cache-status": "DYNAMIC",
+   "content-encoding": "br",
+   "content-type": "application/json; charset=utf-8",
+   "etag": "W/\"15a-ww1FnaU71VJkANPdPnLG+lTnDUo\""
+  }
+ },
+ {
+  "name": "name-1.json",
+  "url": "https://sku.pricedb.io/api/name/Strange%20Professional%20Killstreak%20Australium%20Rocket%20Launcher",
+  "method": "GET",
+  "status": 200,
+  "bytes": 392,
+  "headers": {
+   "cf-cache-status": "DYNAMIC",
+   "content-encoding": "br",
+   "content-type": "application/json; charset=utf-8",
+   "etag": "W/\"188-297UOmnhknNyLZCIrdu/VYYmNPk\""
+  }
+ },
+ {
+  "name": "name-2.json",
+  "url": "https://sku.pricedb.io/api/name/Strange%20Unusual%20Burning%20Flames%20Team%20Captain",
+  "method": "GET",
+  "status": 200,
+  "bytes": 360,
+  "headers": {
+   "cf-cache-status": "DYNAMIC",
+   "content-encoding": "br",
+   "content-type": "application/json; charset=utf-8",
+   "etag": "W/\"168-faXTz1g9zfYk+LiRiBc18S9LUA0\""
+  }
+ },
+ {
+  "name": "name-3.json",
+  "url": "https://sku.pricedb.io/api/name/The%20Team%20Captain",
+  "method": "GET",
+  "status": 200,
+  "bytes": 333,
+  "headers": {
+   "cf-cache-status": "DYNAMIC",
+   "content-encoding": "br",
+   "content-type": "application/json; charset=utf-8",
+   "etag": "W/\"14d-7Pbv9A/2cWj+ls1YDUEiQHUOOUQ\""
+  }
+ },
+ {
+  "name": "name-4.json",
+  "url": "https://sku.pricedb.io/api/name/Festivized%20Specialized%20Killstreak%20Huntsman",
+  "method": "GET",
+  "status": 200,
+  "bytes": 369,
+  "headers": {
+   "cf-cache-status": "DYNAMIC",
+   "content-encoding": "br",
+   "content-type": "application/json; charset=utf-8",
+   "etag": "W/\"171-pN8d+/Vj2Do2DeSddFSHZfv/SHU\""
+  }
+ },
+ {
+  "name": "name-5.json",
+  "url": "https://sku.pricedb.io/api/name/Hot%20Night%20Owl%20Sniper%20Rifle%20(Factory%20New)",
+  "method": "GET",
+  "status": 200,
+  "bytes": 370,
+  "headers": {
+   "cf-cache-status": "DYNAMIC",
+   "content-encoding": "br",
+   "content-type": "application/json; charset=utf-8",
+   "etag": "W/\"172-ZJFiuRqSljDNgfIDu5BjXE81Wys\""
+  }
+ },
+ {
+  "name": "name-6.json",
+  "url": "https://sku.pricedb.io/api/name/Mann%20Co.%20Supply%20Crate%20%2311",
+  "method": "GET",
+  "status": 200,
+  "bytes": 346,
+  "headers": {
+   "cf-cache-status": "DYNAMIC",
+   "content-encoding": "br",
+   "content-type": "application/json; charset=utf-8",
+   "etag": "W/\"15a-GPg45Ln9jX/sHAZwSR5saIOP2ho\""
+  }
+ },
+ {
+  "name": "name-7.json",
+  "url": "https://sku.pricedb.io/api/name/Non-Craftable%20Scattergun",
+  "method": "GET",
+  "status": 200,
+  "bytes": 354,
+  "headers": {
+   "cf-cache-status": "DYNAMIC",
+   "content-encoding": "br",
+   "content-type": "application/json; charset=utf-8",
+   "etag": "W/\"162-QqNrXAPl+tSwTAo+lr5maL11dA8\""
+  }
+ },
+ {
+  "name": "pdb-item-key.json",
+  "url": "https://pricedb.io/api/item/5021%3B6",
+  "method": "GET",
+  "status": 200,
+  "bytes": 148,
+  "headers": {
+   "cf-cache-status": "DYNAMIC",
+   "content-encoding": "br",
+   "content-type": "application/json; charset=utf-8",
+   "etag": "W/\"94-iYDi5S2oMXt8yqK+HNqGTzuJIuk\"",
+   "ratelimit-limit": "360",
+   "ratelimit-policy": "360;w=60",
+   "ratelimit-remaining": "359",
+   "ratelimit-reset": "60"
+  }
+ },
+ {
+  "name": "pdb-item-378.json",
+  "url": "https://pricedb.io/api/item/378%3B6",
+  "method": "GET",
+  "status": 200,
+  "bytes": 129,
+  "headers": {
+   "cf-cache-status": "DYNAMIC",
+   "content-encoding": "br",
+   "content-type": "application/json; charset=utf-8",
+   "etag": "W/\"81-TkewxkMU/yNz3e4MLQDxuWDY5wU\"",
+   "ratelimit-limit": "360",
+   "ratelimit-policy": "360;w=60",
+   "ratelimit-remaining": "358",
+   "ratelimit-reset": "59"
+  }
+ },
+ {
+  "name": "pdb-item-unusual.json",
+  "url": "https://pricedb.io/api/item/30177%3B5%3Bu13",
+  "method": "GET",
+  "status": 200,
+  "bytes": 154,
+  "headers": {
+   "cf-cache-status": "DYNAMIC",
+   "content-encoding": "br",
+   "content-type": "application/json; charset=utf-8",
+   "etag": "W/\"9a-Ojys036fhQTVtqMXO8wbJqdnHl0\"",
+   "ratelimit-limit": "360",
+   "ratelimit-policy": "360;w=60",
+   "ratelimit-remaining": "357",
+   "ratelimit-reset": "57"
+  }
+ },
+ {
+  "name": "pdb-item-aus.json",
+  "url": "https://pricedb.io/api/item/205%3B11%3Baustralium",
+  "method": "GET",
+  "status": 200,
+  "bytes": 170,
+  "headers": {
+   "cf-cache-status": "DYNAMIC",
+   "content-encoding": "br",
+   "content-type": "application/json; charset=utf-8",
+   "etag": "W/\"aa-2a8zV0ncnZ4jd9IdbI3VC9uXTl4\"",
+   "ratelimit-limit": "360",
+   "ratelimit-policy": "360;w=60",
+   "ratelimit-remaining": "356",
+   "ratelimit-reset": "55"
+  }
+ },
+ {
+  "name": "pdb-item-skin.json",
+  "url": "https://pricedb.io/api/item/15000%3B15%3Bu701%3Bw1%3Bpk14",
+  "method": "GET",
+  "status": 404,
+  "bytes": 26,
+  "headers": {
+   "cf-cache-status": "DYNAMIC",
+   "content-type": "application/json; charset=utf-8",
+   "etag": "W/\"1a-OGCZ7mpBmq6OmUNB8wW474wfapE\"",
+   "ratelimit-limit": "360",
+   "ratelimit-policy": "360;w=60",
+   "ratelimit-remaining": "355",
+   "ratelimit-reset": "53"
+  }
+ },
+ {
+  "name": "pdb-item-404.json",
+  "url": "https://pricedb.io/api/item/999999%3B6",
+  "method": "GET",
+  "status": 404,
+  "bytes": 26,
+  "headers": {
+   "cf-cache-status": "DYNAMIC",
+   "content-type": "application/json; charset=utf-8",
+   "etag": "W/\"1a-OGCZ7mpBmq6OmUNB8wW474wfapE\"",
+   "ratelimit-limit": "360",
+   "ratelimit-policy": "360;w=60",
+   "ratelimit-remaining": "354",
+   "ratelimit-reset": "52"
+  }
+ },
+ {
+  "name": "pdb-bulk.json",
+  "url": "https://pricedb.io/api/items-bulk",
+  "method": "POST",
+  "status": 200,
+  "bytes": 1163,
+  "headers": {
+   "cf-cache-status": "DYNAMIC",
+   "content-encoding": "br",
+   "content-type": "application/json; charset=utf-8",
+   "etag": "W/\"48b-39HSZFy8l9n8WBnuq9QBSs1iBP0\"",
+   "ratelimit-limit": "360",
+   "ratelimit-policy": "360;w=60",
+   "ratelimit-remaining": "353",
+   "ratelimit-reset": "50"
+  }
+ },
+ {
+  "name": "pdb-history-key.json",
+  "url": "https://pricedb.io/api/item-history/5021%3B6",
+  "method": "GET",
+  "status": 200,
+  "bytes": 42041,
+  "headers": {
+   "cf-cache-status": "DYNAMIC",
+   "content-encoding": "br",
+   "content-type": "application/json; charset=utf-8",
+   "etag": "W/\"a439-cxTHB7qtgF7TT2E3HMaBdrHUHkk\"",
+   "ratelimit-limit": "360",
+   "ratelimit-policy": "360;w=60",
+   "ratelimit-remaining": "352",
+   "ratelimit-reset": "48"
+  }
+ },
+ {
+  "name": "pdb-autob.json",
+  "url": "https://pricedb.io/api/autob/items",
+  "method": "GET",
+  "status": 200,
+  "bytes": 8389941,
+  "headers": {
+   "age": "4401",
+   "cache-control": "max-age=14400",
+   "cf-cache-status": "HIT",
+   "content-encoding": "br",
+   "content-type": "application/json; charset=utf-8",
+   "etag": "W/\"800641-AJjEsnq17Wb+FYPLr1dj1JvmfCA\"",
+   "ratelimit-limit": "360",
+   "ratelimit-policy": "360;w=60",
+   "ratelimit-remaining": "359",
+   "ratelimit-reset": "60"
+  }
+ }
+]

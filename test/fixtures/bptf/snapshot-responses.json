@@ -1,0 +1,372 @@
+{
+  "_meta": {
+    "constructed": true,
+    "basis": "Shapes from DESIGN_BRIEF 2.2 (client library types and 2021-2022 fixtures) and TF2 schema attribute conventions. NOT captured live: no access token was available and keyed endpoints are not called while building fixtures.",
+    "steamids": "Made-up 765611980000000xx values.",
+    "attributeStorage": "Float-stored attributes carry the meaningful number in float_value (134, 142, 187, 261, 725, 1004-1009, 2012-2014, 2025, 2027, 2053, 380/382/384); integer-stored ones in value (214, 834, 2041). Values may arrive as strings."
+  },
+  "responses": {
+    "Strange Pain Train": {
+      "id": null,
+      "appid": 440,
+      "sku": "Strange Pain Train",
+      "createdAt": 1791958000,
+      "listings": [
+        {
+          "steamid": "76561198000000001",
+          "offers": 1,
+          "buyout": 1,
+          "details": "Buying Strange Pain Trains",
+          "intent": "buy",
+          "timestamp": 1791950000,
+          "bump": 1791958000,
+          "price": 63.11,
+          "currencies": { "metal": 63.11 },
+          "userAgent": { "client": "TF2Autobot", "lastPulse": 1791958700 },
+          "item": { "defindex": 154, "quality": 11, "quantity": "1", "attributes": [ { "defindex": 214, "value": 0, "float_value": 0 } ] }
+        },
+        {
+          "steamid": "76561198000000002",
+          "offers": 1,
+          "buyout": 0,
+          "details": "",
+          "intent": "buy",
+          "timestamp": "1791950100",
+          "bump": "1791958100",
+          "price": 60,
+          "currencies": { "keys": 0, "metal": 60 },
+          "item": { "defindex": "154", "quality": "11", "attributes": [] }
+        },
+        {
+          "steamid": "76561198000000003",
+          "offers": 1,
+          "buyout": 1,
+          "details": "Spelled + parts",
+          "intent": "sell",
+          "timestamp": 1791940000,
+          "bump": 1791957000,
+          "price": 140,
+          "currencies": { "keys": 1, "metal": 75.33 },
+          "userAgent": { "client": "User Agent", "lastPulse": 1791958600 },
+          "item": {
+            "id": "15000000001",
+            "original_id": "14000000001",
+            "defindex": 154,
+            "level": 5,
+            "quality": 11,
+            "quantity": 1,
+            "origin": 8,
+            "custom_name": "Choo Choo",
+            "attributes": [
+              { "defindex": 214, "value": 1234, "float_value": 1.729e-42 },
+              { "defindex": 380, "value": 1101529088, "float_value": 21 },
+              { "defindex": 379, "value": 12, "float_value": 1.68e-44 },
+              { "defindex": 382, "value": 1106247680, "float_value": 30 },
+              { "defindex": 1009, "value": 1065353216, "float_value": 1 },
+              { "defindex": 500, "value": "Choo Choo" }
+            ]
+          }
+        },
+        {
+          "steamid": "76561198000000004",
+          "offers": 0,
+          "buyout": 1,
+          "details": "",
+          "intent": "sell",
+          "timestamp": 1791930000,
+          "bump": 1791956000,
+          "price": 0,
+          "currencies": { "usd": 0.89 },
+          "userAgent": { "client": "Marketplace.tf", "lastPulse": 1791958000 },
+          "item": {
+            "id": "15000000002",
+            "defindex": 154,
+            "quality": 11,
+            "attributes": [ { "defindex": 214, "value": 0 } ],
+            "marketplace_sku": "154;11",
+            "marketplace_price": 0.89,
+            "marketplace_bot_steamid": "76561198000000099"
+          }
+        },
+        {
+          "offers": 1,
+          "details": "broken: no steamid",
+          "intent": "buy",
+          "currencies": { "metal": 1 },
+          "item": { "defindex": 154, "quality": 11 }
+        }
+      ]
+    },
+    "Burning Flames Team Captain": {
+      "id": null,
+      "appid": 440,
+      "sku": "Burning Flames Team Captain",
+      "createdAt": 1791958500,
+      "listings": [
+        {
+          "steamid": "76561198000000011",
+          "offers": 1,
+          "buyout": 1,
+          "details": "",
+          "intent": "buy",
+          "timestamp": 1791950000,
+          "bump": 1791958000,
+          "currencies": { "keys": 60, "metal": 0 },
+          "item": { "defindex": 378, "quality": 5, "attributes": [ { "defindex": 134, "value": 1095761920, "float_value": 13 } ] }
+        },
+        {
+          "steamid": "76561198000000012",
+          "offers": 1,
+          "buyout": 1,
+          "details": "Team Spirit painted only",
+          "intent": "buy",
+          "timestamp": 1791950000,
+          "bump": 1791958000,
+          "currencies": { "keys": 62.5 },
+          "item": {
+            "defindex": 378,
+            "quality": 5,
+            "attributes": [
+              { "defindex": "134", "float_value": "13" },
+              { "defindex": 142, "value": 1262066332, "float_value": 12073019 },
+              { "defindex": 261, "value": 1253973616, "float_value": 5801378 }
+            ]
+          }
+        },
+        {
+          "steamid": "76561198000000013",
+          "offers": 1,
+          "buyout": 1,
+          "details": "",
+          "intent": "sell",
+          "timestamp": 1791940000,
+          "bump": 1791957000,
+          "currencies": { "keys": 75 },
+          "item": {
+            "id": "15000000011",
+            "defindex": 378,
+            "quality": 5,
+            "attributes": [
+              { "defindex": 134, "float_value": 13 },
+              { "defindex": 1004, "value": 0, "float_value": 0 },
+              { "defindex": 1005, "value": 1065353216, "float_value": 1 }
+            ]
+          }
+        }
+      ]
+    },
+    "Strange Burning Flames Team Captain": {
+      "id": null,
+      "appid": 440,
+      "sku": "Strange Burning Flames Team Captain",
+      "createdAt": 1791958500,
+      "listings": [
+        {
+          "steamid": "76561198000000021",
+          "offers": 1,
+          "buyout": 1,
+          "details": "",
+          "intent": "buy",
+          "timestamp": 1791950000,
+          "bump": 1791958000,
+          "currencies": { "keys": 80 },
+          "item": { "defindex": 378, "quality": 5, "attributes": [ { "defindex": 134, "float_value": 13 }, { "defindex": 214, "value": 0 } ] }
+        }
+      ]
+    },
+    "Strange Professional Killstreak Australium Rocket Launcher": {
+      "id": null,
+      "appid": 440,
+      "sku": "Strange Professional Killstreak Australium Rocket Launcher",
+      "createdAt": 1791958600,
+      "listings": [
+        {
+          "steamid": "76561198000000031",
+          "offers": 1,
+          "buyout": 1,
+          "details": "",
+          "intent": "buy",
+          "timestamp": 1791950000,
+          "bump": 1791958000,
+          "currencies": { "keys": 40, "metal": 11.11 },
+          "item": {
+            "defindex": 205,
+            "quality": 11,
+            "attributes": [
+              { "defindex": 2027, "value": 1065353216, "float_value": 1 },
+              { "defindex": 2025, "value": 1077936128, "float_value": 3 },
+              { "defindex": 214, "value": 0 }
+            ]
+          }
+        },
+        {
+          "steamid": "76561198000000032",
+          "offers": 1,
+          "buyout": 1,
+          "details": "only Hot Rod Tornado",
+          "intent": "buy",
+          "timestamp": 1791950000,
+          "bump": 1791958000,
+          "currencies": { "keys": 45 },
+          "item": {
+            "defindex": 205,
+            "quality": 11,
+            "attributes": [
+              { "defindex": 2027, "float_value": 1 },
+              { "defindex": 2025, "float_value": 3 },
+              { "defindex": 2014, "float_value": 7 },
+              { "defindex": 2013, "float_value": 2004 }
+            ]
+          }
+        },
+        {
+          "steamid": "76561198000000033",
+          "offers": 1,
+          "buyout": 1,
+          "details": "no attributes: name supplies killstreak and australium",
+          "intent": "buy",
+          "timestamp": 1791950000,
+          "bump": 1791958000,
+          "currencies": { "keys": 39 },
+          "item": { "defindex": 205, "quality": 11 }
+        }
+      ]
+    },
+    "Strange Festivized Rocket Launcher": {
+      "id": null,
+      "appid": 440,
+      "sku": "Strange Festivized Rocket Launcher",
+      "createdAt": 1791958600,
+      "listings": [
+        {
+          "steamid": "76561198000000041",
+          "offers": 1,
+          "buyout": 1,
+          "details": "",
+          "intent": "buy",
+          "timestamp": 1791950000,
+          "bump": 1791958000,
+          "currencies": { "metal": 30 },
+          "item": { "defindex": 205, "quality": 11, "attributes": [ { "defindex": 2053, "float_value": 1 } ] }
+        }
+      ]
+    },
+    "Night Owl Sniper Rifle (Minimal Wear)": {
+      "id": null,
+      "appid": 440,
+      "sku": "Night Owl Sniper Rifle (Minimal Wear)",
+      "createdAt": 1791958700,
+      "listings": [
+        {
+          "steamid": "76561198000000051",
+          "offers": 1,
+          "buyout": 1,
+          "details": "",
+          "intent": "buy",
+          "timestamp": 1791950000,
+          "bump": 1791958000,
+          "currencies": { "metal": 5 },
+          "item": { "defindex": 15000, "quality": 15, "attributes": [ { "defindex": 834, "value": 14 }, { "defindex": 725, "value": 1053609165, "float_value": 0.4 } ] }
+        },
+        {
+          "steamid": "76561198000000052",
+          "offers": 1,
+          "buyout": 1,
+          "details": "wear from the name",
+          "intent": "buy",
+          "timestamp": 1791950000,
+          "bump": 1791958000,
+          "currencies": { "metal": 4.88 },
+          "item": { "defindex": 15000, "quality": 15, "attributes": [ { "defindex": 834, "value": "14" } ] }
+        }
+      ]
+    },
+    "Mann Co. Supply Crate #82": {
+      "id": null,
+      "appid": 440,
+      "sku": "Mann Co. Supply Crate #82",
+      "createdAt": 1791958800,
+      "listings": [
+        {
+          "steamid": "76561198000000061",
+          "offers": 1,
+          "buyout": 1,
+          "details": "",
+          "intent": "buy",
+          "timestamp": 1791950000,
+          "bump": 1791958000,
+          "currencies": { "metal": 1.11 },
+          "item": { "defindex": 5022, "quality": 6, "attributes": [ { "defindex": 187, "value": 1118044160, "float_value": 82 } ] }
+        }
+      ]
+    },
+    "Strangifier": {
+      "id": null,
+      "appid": 440,
+      "sku": "Strangifier",
+      "createdAt": 1791958800,
+      "listings": [
+        {
+          "steamid": "76561198000000071",
+          "offers": 1,
+          "buyout": 1,
+          "details": "",
+          "intent": "buy",
+          "timestamp": 1791950000,
+          "bump": 1791958000,
+          "currencies": { "metal": 9 },
+          "item": { "defindex": 6522, "quality": 6, "attributes": [ { "defindex": 2012, "value": 1110966272, "float_value": 46 } ] }
+        }
+      ]
+    },
+    "Mega Strike Taunt: The Bunnyhopper": {
+      "id": null,
+      "appid": 440,
+      "sku": "Mega Strike Taunt: The Bunnyhopper",
+      "createdAt": 1791958900,
+      "listings": [
+        {
+          "steamid": "76561198000000081",
+          "offers": 1,
+          "buyout": 1,
+          "details": "",
+          "intent": "buy",
+          "timestamp": 1791950000,
+          "bump": 1791958000,
+          "currencies": { "keys": 30 },
+          "item": { "defindex": 30920, "quality": 5, "attributes": [ { "defindex": 2041, "value": 3010, "float_value": 4.217e-42 } ] }
+        }
+      ]
+    },
+    "Non-Craftable Bill's Hat": {
+      "id": null,
+      "appid": 440,
+      "sku": "Non-Craftable Bill's Hat",
+      "createdAt": 1791959000,
+      "listings": [
+        {
+          "steamid": "76561198000000091",
+          "offers": 1,
+          "buyout": 1,
+          "details": "",
+          "intent": "buy",
+          "timestamp": 1791950000,
+          "bump": 1791958000,
+          "currencies": { "metal": 20 },
+          "item": { "defindex": 126, "quality": 6, "flag_cannot_craft": true, "attributes": [] }
+        },
+        {
+          "steamid": "76561198000000092",
+          "offers": 1,
+          "buyout": 1,
+          "details": "craftability from the name only",
+          "intent": 0,
+          "timestamp": 1791950000,
+          "bump": 1791958000,
+          "currencies": { "metal": 19.88 },
+          "item": { "defindex": 126, "quality": 6 }
+        }
+      ]
+    }
+  }
+}

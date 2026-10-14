@@ -1,0 +1,22 @@
+{
+  "_meta": {
+    "constructed": true,
+    "basis": "Classic docs shape (users keyed by steamid; bans object) and the swagger array form. NOT captured live (needs a token). Steamids are made up."
+  },
+  "objectForm": {
+    "users": {
+      "76561198000000001": { "name": "Clean Buyer", "avatar": "https://avatars.example/1.jpg", "last_online": 1791950000, "bans": {} },
+      "76561198000000002": { "name": "Site Banned", "last_online": 1791950000, "bans": { "all": { "end": -1, "reason": "Scamming" } } },
+      "76561198000000003": { "name": "SteamRep Scammer", "bans": { "steamrep_scammer": 1 } },
+      "76561198000000004": { "name": "Trade Banned", "bans": { "valve": { "economy": 1, "community": 0, "vac": 0 } } },
+      "76561198000000005": { "name": "VAC only", "bans": { "valve": { "vac": 1 } } },
+      "76561198000000006": { "name": "Caution only", "bans": { "steamrep_caution": 1 } }
+    }
+  },
+  "arrayForm": {
+    "users": [
+      { "steamid": "76561198000000007", "name": "Array User", "bans": [] },
+      { "steamid": "76561198000000008", "name": "Array Banned", "bans": { "all": { "end": 1800000000 } } }
+    ]
+  }
+}

@@ -1,0 +1,204 @@
+/* Design tokens. Dark is the default palette; light applies for data-theme="light",
+   or for data-theme="system" when the OS prefers light. Text colours are chosen
+   for at least 4.5:1 on surfaces, hover and selected rows in both themes. */
+
+:root {
+  color-scheme: dark;
+  --font: 'Segoe UI Variable', 'Segoe UI', system-ui, sans-serif;
+  --mono: 'Cascadia Mono', 'Cascadia Code', Consolas, ui-monospace, monospace;
+
+  --nav-w: 208px;
+  --radius: 10px;
+  --radius-sm: 6px;
+
+  --bg: #0e1117;
+  --bg-nav: #0b0e13;
+  --surface: #151a22;
+  --surface-2: #1b212b;
+  --surface-3: #232b37;
+  --input-bg: #10141b;
+  --row-hover: #1b212b;
+  --row-selected: #212c3f;
+  --seg-active: #2c3646;
+  --border: #252d39;
+  --border-soft: #1d242e;
+  --border-strong: #343e4d;
+
+  --text: #e3e7ee;
+  --text-muted: #98a2b3;
+  --text-faint: #6f7a8c;
+
+  --accent: #6ea8fe;
+  --accent-weak: rgba(110, 168, 254, 0.13);
+  --primary: #2f6fdb;
+  --primary-hover: #3a7be6;
+  --on-primary: #ffffff;
+  --focus: #8ab4ff;
+
+  --good: #3ecf8e;
+  --good-weak: rgba(62, 207, 142, 0.14);
+  --bad: #ff6b6b;
+  --bad-weak: rgba(255, 107, 107, 0.14);
+  --on-bad: #1d0606;
+  --warn: #f0b429;
+  --warn-weak: rgba(240, 180, 41, 0.14);
+  --info: #7cc4fa;
+  --info-weak: rgba(124, 196, 250, 0.13);
+  --muted-weak: rgba(152, 162, 179, 0.14);
+
+  --tip-bg: #0a0d13;
+  --tip-border: #343e4d;
+  --tip-text: #e8ecf2;
+  --tip-muted: #a3adbd;
+  --tip-good: #5ee0a0;
+  --tip-bad: #ff8f8f;
+
+  --shadow: 0 8px 24px rgba(0, 0, 0, 0.45), 0 1px 3px rgba(0, 0, 0, 0.4);
+  --backdrop: rgba(3, 5, 9, 0.55);
+  --scroll-thumb: #343e4d;
+
+  /* TF2 quality colours; the dimmer ones are lifted to stay readable on dark. */
+  --q-normal: #b2b2b2;
+  --q-genuine: #70a27c;
+  --q-vintage: #7896cc;
+  --q-unusual: #ad85d6;
+  --q-unique: #ffd700;
+  --q-community: #70b04a;
+  --q-valve: #e070ba;
+  --q-selfmade: #70b04a;
+  --q-strange: #dd7d46;
+  --q-haunted: #38f3ab;
+  --q-collectors: #e86b6b;
+  --q-decorated: #fafafa;
+}
+
+:root[data-theme='light'] {
+  color-scheme: light;
+  --bg: #f4f6f9;
+  --bg-nav: #eceff4;
+  --surface: #ffffff;
+  --surface-2: #f6f8fb;
+  --surface-3: #edf1f6;
+  --input-bg: #ffffff;
+  --row-hover: #f3f6fa;
+  --row-selected: #edf3fc;
+  --seg-active: #ffffff;
+  --border: #dde3ea;
+  --border-soft: #e9edf2;
+  --border-strong: #c5cfdb;
+  --text: #18202b;
+  --text-muted: #556274;
+  --text-faint: #6b7686;
+  --accent: #1f63d6;
+  --accent-weak: rgba(31, 99, 214, 0.1);
+  --primary: #1f63d6;
+  --primary-hover: #1a56bd;
+  --focus: #1f63d6;
+  --good: #0f7b4b;
+  --good-weak: rgba(15, 123, 75, 0.1);
+  --bad: #c42b2b;
+  --bad-weak: rgba(196, 43, 43, 0.09);
+  --on-bad: #ffffff;
+  --warn: #8f5b00;
+  --warn-weak: rgba(198, 135, 0, 0.12);
+  --info: #1d6fb8;
+  --info-weak: rgba(29, 111, 184, 0.09);
+  --muted-weak: rgba(85, 98, 116, 0.1);
+  --tip-bg: #1b2230;
+  --tip-border: #1b2230;
+  --shadow: 0 8px 24px rgba(20, 30, 50, 0.14), 0 1px 3px rgba(20, 30, 50, 0.12);
+  --backdrop: rgba(20, 28, 40, 0.35);
+  --scroll-thumb: #c5cfdb;
+  --q-normal: #666666;
+  --q-genuine: #4d7455;
+  --q-vintage: #476291;
+  --q-unusual: #8650ac;
+  --q-unique: #7f6100;
+  --q-community: #3b7420;
+  --q-valve: #a50f79;
+  --q-selfmade: #3b7420;
+  --q-strange: #a84f1c;
+  --q-haunted: #0a7550;
+  --q-collectors: #aa0000;
+  --q-decorated: #5e6a78;
+}
+
+@media (prefers-color-scheme: light) {
+  :root[data-theme='system'] {
+    color-scheme: light;
+    --bg: #f4f6f9;
+    --bg-nav: #eceff4;
+    --surface: #ffffff;
+    --surface-2: #f6f8fb;
+    --surface-3: #edf1f6;
+    --input-bg: #ffffff;
+    --row-hover: #f3f6fa;
+    --row-selected: #edf3fc;
+    --seg-active: #ffffff;
+    --border: #dde3ea;
+    --border-soft: #e9edf2;
+    --border-strong: #c5cfdb;
+    --text: #18202b;
+    --text-muted: #556274;
+    --text-faint: #6b7686;
+    --accent: #1f63d6;
+    --accent-weak: rgba(31, 99, 214, 0.1);
+    --primary: #1f63d6;
+    --primary-hover: #1a56bd;
+    --focus: #1f63d6;
+    --good: #0f7b4b;
+    --good-weak: rgba(15, 123, 75, 0.1);
+    --bad: #c42b2b;
+    --bad-weak: rgba(196, 43, 43, 0.09);
+  --on-bad: #ffffff;
+    --warn: #8f5b00;
+    --warn-weak: rgba(198, 135, 0, 0.12);
+    --info: #1d6fb8;
+    --info-weak: rgba(29, 111, 184, 0.09);
+    --muted-weak: rgba(85, 98, 116, 0.1);
+    --tip-bg: #1b2230;
+    --tip-border: #1b2230;
+    --shadow: 0 8px 24px rgba(20, 30, 50, 0.14), 0 1px 3px rgba(20, 30, 50, 0.12);
+    --backdrop: rgba(20, 28, 40, 0.35);
+    --scroll-thumb: #c5cfdb;
+    --q-normal: #666666;
+    --q-genuine: #4d7455;
+    --q-vintage: #476291;
+    --q-unusual: #8650ac;
+    --q-unique: #7f6100;
+    --q-community: #3b7420;
+    --q-valve: #a50f79;
+    --q-selfmade: #3b7420;
+    --q-strange: #a84f1c;
+    --q-haunted: #0a7550;
+    --q-collectors: #aa0000;
+    --q-decorated: #5e6a78;
+  }
+}
+
+/* Quality classes, keyed by quality id (see format.ts qualityClass). */
+.q-0 { color: var(--q-normal); }
+.q-1 { color: var(--q-genuine); }
+.q-3 { color: var(--q-vintage); }
+.q-5 { color: var(--q-unusual); }
+.q-6 { color: var(--q-unique); }
+.q-7 { color: var(--q-community); }
+.q-8 { color: var(--q-valve); }
+.q-9 { color: var(--q-selfmade); }
+.q-10, .q-12 { color: var(--text); }
+.q-11 { color: var(--q-strange); }
+.q-13 { color: var(--q-haunted); }
+.q-14 { color: var(--q-collectors); }
+.q-15 { color: var(--q-decorated); }
+
+/* Tones: set --tone/--tone-weak, then components read them. */
+.tone-good { --tone: var(--good); --tone-weak: var(--good-weak); }
+.tone-bad { --tone: var(--bad); --tone-weak: var(--bad-weak); }
+.tone-warn { --tone: var(--warn); --tone-weak: var(--warn-weak); }
+.tone-info { --tone: var(--info); --tone-weak: var(--info-weak); }
+.tone-accent { --tone: var(--accent); --tone-weak: var(--accent-weak); }
+.tone-muted { --tone: var(--text-muted); --tone-weak: var(--muted-weak); }
+
+.tone-text-good { color: var(--good); }
+.tone-text-bad { color: var(--bad); }
+.tone-text-warn { color: var(--warn); }

@@ -1,0 +1,48 @@
+TF2 Flip Desk
+Copyright 2026 Joseph
+
+This product includes work derived from the following projects.
+
+------------------------------------------------------------------------------
+scrap.tf-item-information — https://github.com/NetroScript/scrap.tf-item-information
+Copyright NetroScript. Licensed under the Apache License, Version 2.0.
+The link menu (src/shared/links.ts) and parts of the saved-page parser
+(src/service/import/scraptfHtml.ts) follow its link templates and item-name
+handling. The full licence text is in
+reference/scrap.tf-item-information-master/LICENSE and at
+http://www.apache.org/licenses/LICENSE-2.0
+
+------------------------------------------------------------------------------
+node-tf2-sku — https://github.com/TF2Autobot/node-tf2-sku
+MIT License. Copyright (c) 2020 IdiNium/Nicklas Marc Pedersen.
+Ported in src/shared/sku.ts.
+
+------------------------------------------------------------------------------
+node-tf2-schema — https://github.com/TF2Autobot/node-tf2-schema
+MIT License. Copyright (c) Nicklas Marc Pedersen and contributors.
+The getName item-naming logic is ported in src/service/connectors/schemaNames.ts.
+
+MIT License text (applies to the two MIT-licensed works above):
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+------------------------------------------------------------------------------
+Data sources: prices by PriceDB.io (https://pricedb.io); buy orders and item
+data from backpack.tf (https://backpack.tf). Used through their public APIs
+under their terms.

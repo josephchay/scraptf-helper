@@ -1,0 +1,147 @@
+{
+  "_meta": {
+    "constructed": true,
+    "basis": "swagger v4PricesResponse (see swagger-excerpt.json) plus the observed `response` wrapper (DESIGN_BRIEF 2.3). NOT captured live (needs an API key). The Craftable level appears in both the object form and the array form (PHP list for priceindex 0)."
+  },
+  "response": {
+    "success": 1,
+    "current_time": 1791958000,
+    "raw_usd_value": 0.026,
+    "usd_currency": "metal",
+    "usd_currency_index": 5002,
+    "items": {
+      "Mann Co. Supply Crate Key": {
+        "defindex": [5021],
+        "prices": {
+          "6": {
+            "Tradable": {
+              "Craftable": [
+                { "currency": "metal", "value": 64.66, "value_high": 64.88, "value_raw": 64.77, "last_update": 1791900000, "difference": 0.11 }
+              ],
+              "Non-Craftable": [
+                { "currency": "metal", "value": 62.11, "value_raw": 62.11, "last_update": 1791000000, "difference": 0 }
+              ]
+            }
+          }
+        }
+      },
+      "Team Captain": {
+        "defindex": [378],
+        "prices": {
+          "5": {
+            "Tradable": {
+              "Craftable": {
+                "13": { "currency": "keys", "value": 60, "value_high": 70, "value_raw": 4204.35, "last_update": 1791000000, "difference": 0, "australium": false },
+                "361": { "currency": "keys", "value": 55, "last_update": 1790000000, "difference": 0 }
+              }
+            }
+          },
+          "6": {
+            "Tradable": {
+              "Craftable": [ { "currency": "metal", "value": 1.33, "value_high": 1.44, "last_update": 1789000000, "difference": 0 } ],
+              "Non-Craftable": [ { "currency": "metal", "value": 1.11, "last_update": 1789000000, "difference": 0 } ]
+            }
+          },
+          "11": {
+            "Tradable": {
+              "Craftable": { "0": { "currency": "metal", "value": 12.33, "last_update": 1789000000, "difference": 0 } }
+            }
+          }
+        }
+      },
+      "Rocket Launcher": {
+        "defindex": ["18", "205"],
+        "prices": {
+          "11": { "Tradable": { "Craftable": [ { "currency": "metal", "value": 3.66, "last_update": 1789000000 } ] } }
+        }
+      },
+      "Professional Killstreak Rocket Launcher": {
+        "defindex": [205],
+        "prices": {
+          "6": { "Tradable": { "Craftable": [ { "currency": "metal", "value": 25.11, "value_high": 27, "last_update": 1789000000 } ] } },
+          "11": { "Tradable": { "Craftable": [ { "currency": "keys", "value": 1.2, "last_update": 1789000000 } ] } }
+        }
+      },
+      "Festivized Rocket Launcher": {
+        "defindex": [205],
+        "prices": {
+          "11": { "Tradable": { "Craftable": [ { "currency": "metal", "value": 20, "last_update": 1789000000 } ] } }
+        }
+      },
+      "Australium Rocket Launcher": {
+        "defindex": [205],
+        "prices": {
+          "11": { "Tradable": { "Craftable": [ { "currency": "keys", "value": 40, "value_high": 42, "last_update": 1789000000, "australium": 1 } ] } }
+        }
+      },
+      "Mann Co. Supply Crate": {
+        "defindex": [5022, 5041, 5045],
+        "prices": {
+          "6": {
+            "Tradable": {
+              "Craftable": {
+                "1": { "currency": "metal", "value": 0.11, "last_update": 1789000000 },
+                "82": { "currency": "metal", "value": 1.11, "last_update": 1789000000 }
+              }
+            }
+          }
+        }
+      },
+      "Strangifier": {
+        "defindex": [6522],
+        "prices": { "6": { "Tradable": { "Craftable": { "46": { "currency": "metal", "value": 9, "last_update": 1789000000 } } } } }
+      },
+      "Collector's Chemistry Set": {
+        "defindex": [20007],
+        "prices": { "6": { "Tradable": { "Craftable": { "1086-14": { "currency": "keys", "value": 3, "last_update": 1789000000 } } } } }
+      },
+      "Professional Killstreak Kit Fabricator": {
+        "defindex": [20003],
+        "prices": { "6": { "Tradable": { "Craftable": { "6526-6-205": { "currency": "keys", "value": 2.5, "last_update": 1789000000 } } } } }
+      },
+      "Kit": {
+        "defindex": [6526],
+        "prices": {
+          "6": {
+            "Tradable": {
+              "Craftable": { "3-205": { "currency": "keys", "value": 3.1, "last_update": 1789000000 } },
+              "Non-Craftable": { "3-205": { "currency": "keys", "value": 2.9, "last_update": 1789000000 } }
+            }
+          }
+        }
+      },
+      "Taunt: The Bunnyhopper": {
+        "defindex": [30920],
+        "prices": {
+          "5": { "Tradable": { "Craftable": { "3010": { "currency": "keys", "value": 30, "value_high": 35, "last_update": 1789000000 } } } },
+          "6": { "Tradable": { "Craftable": [ { "currency": "metal", "value": 10.55, "last_update": 1789000000 } ] } }
+        }
+      },
+      "Strange Part: Headshot Kills": {
+        "defindex": [6011],
+        "prices": { "6": { "Tradable": { "Craftable": [ { "currency": "keys", "value": 1.05, "last_update": 1789000000 } ] } } }
+      },
+      "Bill's Hat": {
+        "defindex": [126],
+        "prices": {
+          "6": {
+            "Tradable": { "Craftable": [ { "currency": "metal", "value": 25, "last_update": 1789000000 } ] },
+            "Non-Tradable": { "Non-Craftable": [ { "currency": "metal", "value": 1, "last_update": 1789000000 } ] }
+          }
+        }
+      },
+      "Night Owl Sniper Rifle (Minimal Wear)": {
+        "defindex": [15000],
+        "prices": { "15": { "Tradable": { "Craftable": [ { "currency": "metal", "value": 5, "last_update": 1789000000 } ] } } }
+      },
+      "Broken Entry": {
+        "defindex": "not-an-array",
+        "prices": 42
+      },
+      "Weird Value": {
+        "defindex": [126],
+        "prices": { "6": { "Tradable": { "Craftable": [ { "currency": "metal", "value": "n/a" } ] } } }
+      }
+    }
+  }
+}

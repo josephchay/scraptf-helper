@@ -1,0 +1,46 @@
+{
+  "name": "tf2-flip-desk",
+  "productName": "TF2 Flip Desk",
+  "version": "0.1.0",
+  "description": "Local desktop profit monitor for TF2 trading. Compares prices you enter with live backpack.tf buy orders using only official APIs. Never contacts scrap.tf and never trades on your behalf.",
+  "private": true,
+  "license": "Apache-2.0",
+  "author": "Joseph",
+  "main": "dist/main.cjs",
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "build:renderer": "vite build --config vite.config.ts",
+    "dev:renderer": "vite --config vite.config.ts",
+    "start": "node scripts/build.mjs && electron .",
+    "electron": "electron .",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "dist": "node scripts/build.mjs && electron-builder --win --x64"
+  },
+  "dependencies": {
+    "parse5": "8.0.1",
+    "socket.io-client": "4.8.4",
+    "ws": "8.22.0",
+    "zod": "4.6.5"
+  },
+  "devDependencies": {
+    "@types/node": "24.19.0",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "@types/ws": "8.18.2",
+    "@vitejs/plugin-react": "6.1.1",
+    "electron": "44.5.0",
+    "electron-builder": "26.15.3",
+    "esbuild": "0.28.2",
+    "react": "19.3.0",
+    "react-dom": "19.3.0",
+    "typescript": "7.0.2",
+    "vite": "8.3.1",
+    "vitest": "5.0.2"
+  }
+}

@@ -1,0 +1,46 @@
+# electron-builder 26 config: Windows x64 NSIS installer.
+# The appId doubles as the AppUserModelID (src/main/paths.ts APP_USER_MODEL_ID);
+# it must never change after the first release or toasts and pinned shortcuts break.
+appId: io.github.tf2flipdesk.app
+productName: TF2 Flip Desk
+copyright: Copyright © 2026 Joseph
+
+directories:
+  output: release
+  buildResources: assets
+
+files:
+  - dist/**
+  - assets/**
+  - package.json
+  - "!dist/**/*.map"
+
+asar: true
+# No native modules: node:sqlite is built into Electron.
+npmRebuild: false
+
+win:
+  target:
+    - target: nsis
+      arch:
+        - x64
+  icon: assets/icon.png
+
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: TF2 Flip Desk
+  deleteAppDataOnUninstall: false
+
+# DESIGN_BRIEF §7.3 item 8. enableCookieEncryption is one-way, so it is on from the first release.
+electronFuses:
+  runAsNode: false
+  enableCookieEncryption: true
+  enableNodeOptionsEnvironmentVariable: false
+  enableNodeCliInspectArguments: false
+  enableEmbeddedAsarIntegrityValidation: true
+  onlyLoadAppFromAsar: true
+  grantFileProtocolExtraPrivileges: false

@@ -1,0 +1,730 @@
+{
+  "_meta": {
+    "source": "https://backpack.tf/api/swagger.json",
+    "fetchedAt": "2026-10-14T09:21:30.461Z",
+    "userAgent": "TF2FlipDesk/0.1.0 (+fixture-capture)",
+    "openapi": "3.0.0",
+    "notes": [
+      "Excerpt only: the paths and component schemas this app reads. The full spec has 36 paths.",
+      "GET /classifieds/listings/snapshot is NOT in the spec (DESIGN_BRIEF 2.2). Its response shape comes from client libraries; see snapshot-*.json fixtures.",
+      "Paths use security name \"token\", but components.securitySchemes only defines \"userToken\" (header X-Auth-Token) and \"apiKey\" (query key).",
+      "/users/info/v1 declares users as an array; the classic docs return an object keyed by steamid. Parse both.",
+      "/IGetCurrencies/v1 declares currencies as an array; classic docs use an object keyed metal/keys/hat. Parse both.",
+      "/agent/pulse is included only to document why it is never called (marks the account as a bot and bumps listings)."
+    ]
+  },
+  "info": {
+    "title": "backpack.tf public API",
+    "description": "This is the documentation for the public backpack.tf web APIs.\nSeveral different auth methods are available, which allow access to different APIs.\nCheck the developer portal for information on WebAPI keys and user tokens. If you are signed in to backpack.tf on your browser, you can test user token APIs here.",
+    "version": "various"
+  },
+  "servers": [
+    {
+      "url": "https://backpack.tf/api",
+      "description": "backpack.tf"
+    },
+    {
+      "url": "http://backpack.test:5002/api",
+      "description": "backpack.test:5002"
+    }
+  ],
+  "securitySchemes": {
+    "apiKey": {
+      "type": "apiKey",
+      "name": "key",
+      "in": "query"
+    },
+    "userToken": {
+      "type": "apiKey",
+      "name": "X-Auth-Token",
+      "in": "header"
+    }
+  },
+  "paths": {
+    "/users/info/v1": {
+      "get": {
+        "tags": [
+          "users"
+        ],
+        "summary": "Get user info",
+        "description": "Get user info. This will probably be replaced with a more fragmented set of APIs, since it returns way too much. These docs are not complete, so refer to classic docs.",
+        "externalDocs": {
+          "description": "Classic docs",
+          "url": "https://backpack.tf/api/docs/user_info"
+        },
+        "operationId": "21afe154c2db094e2359875d926efd39",
+        "parameters": [
+          {
+            "name": "steamids",
+            "in": "query",
+            "description": "Comma-delimited list of SteamIDs (;_;)",
+            "schema": {
+              "type": "string",
+              "example": "76561198012598620"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "users": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/v1User"
+                      }
+                    }
+                  },
+                  "type": "object"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "token": []
+          }
+        ]
+      }
+    },
+    "/IGetCurrencies/v1": {
+      "get": {
+        "tags": [
+          "webapi-economy"
+        ],
+        "summary": "Returns internal currency data for a given game",
+        "operationId": "e9cfcbbbebbce260f6a6ec9af3fca9b7",
+        "parameters": [
+          {
+            "name": "raw",
+            "in": "query",
+            "description": "\n    If set to 1, adds a value_raw to the priceindex objects which represents the value of the item\n    in the lowest currency without rounding. If a high value is set, the raw value will be an average\n    between the low and high value. Setting raw to 2 prevents this behaviour by adding a new field, value_raw_high.",
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "success": {
+                      "description": "1 if successful, 0 otherwise.",
+                      "type": "integer"
+                    },
+                    "message": {
+                      "description": "If success is 0, this contains the reason for failure.",
+                      "type": "string"
+                    },
+                    "name": {
+                      "description": "App name",
+                      "type": "string"
+                    },
+                    "url": {
+                      "description": "URL for the related backpack.tf app.",
+                      "type": "string"
+                    },
+                    "currencies": {
+                      "description": "An array of currency objects.",
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/currency"
+                      }
+                    }
+                  },
+                  "type": "object"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          }
+        ]
+      }
+    },
+    "/IGetPrices/v4": {
+      "get": {
+        "tags": [
+          "webapi-economy"
+        ],
+        "summary": "Get price schema",
+        "description": "Won't work for games that aren't TF2. The response from this API is cached globally for 900 seconds.",
+        "operationId": "1f3531f90e005bb62dce8d130ae06de8",
+        "parameters": [
+          {
+            "name": "raw",
+            "in": "query",
+            "description": "If set to 1, adds a value_raw to the priceindex objects which represents the\n    value of the item\n    in the lowest currency without rounding. If a high value is set, the raw value will be an average\n    between the\n    low and high value. Setting raw to 2 prevents this behaviour by adding a new field, value_high_raw.",
+            "schema": {
+              "type": "integer",
+              "example": 1
+            }
+          },
+          {
+            "name": "since",
+            "in": "query",
+            "description": "If set, only returns prices that have a last_update value greater than or\n    equal to this\n    UNIX time. Recommended for implementing delta updates,\n    as this will reduce the bandwidth requirements of your client.",
+            "schema": {
+              "type": "integer",
+              "example": 1999999999
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/v4PricesResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          }
+        ]
+      }
+    },
+    "/IGetUsers/v3": {
+      "get": {
+        "tags": [
+          "webapi-users"
+        ],
+        "summary": "Get user data",
+        "description": "get a list of users.",
+        "operationId": "800c12bc395d28d411e61a7aa5da1d9c",
+        "parameters": [
+          {
+            "name": "steamid",
+            "in": "query",
+            "description": "String-delimited list of SteamIDs to get information for (yes, I know, this API is old).",
+            "schema": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          {
+            "name": "steamids",
+            "in": "query",
+            "description": "Alias of the steamid parameter.",
+            "schema": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          }
+        ]
+      }
+    },
+    "/agent/pulse": {
+      "post": {
+        "tags": [
+          "agent"
+        ],
+        "summary": "(Re)-register a user agent",
+        "description": "Refresh the user's status as being under control of a user agent for another 30 minutes.\n\n    The user-agent header will be used to determine the name of this agent.\n    This value will be trimmed to 128 character.\n\n    Will bump this user's listings.\n    ",
+        "operationId": "3c5b4eb00478b3e5f9a74b8bc7c354a3",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/userAgentStatus"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "token": []
+          }
+        ]
+      }
+    }
+  },
+  "schemas": {
+    "currency": {
+      "properties": {
+        "name": {
+          "description": "Currency name.",
+          "type": "string"
+        },
+        "quality": {
+          "description": "Currency quality.",
+          "type": "string"
+        },
+        "priceindex": {
+          "$ref": "#/components/schemas/priceindex"
+        },
+        "single": {
+          "description": "Singular form of the noun used for the suffix of the currency.",
+          "type": "string"
+        },
+        "plural": {
+          "description": "Plural form of the noun used for the suffix of the currency.",
+          "type": "string"
+        },
+        "round": {
+          "description": "Number of decimal places the price should be rounded to.",
+          "type": "integer"
+        },
+        "craftable": {
+          "description": "Item craftability.",
+          "type": "string",
+          "enum": [
+            "Craftable",
+            "Non-Craftable"
+          ]
+        },
+        "defindex": {
+          "description": "defindex of the currency item",
+          "type": "integer"
+        },
+        "active": {
+          "description": "if 1, then this currency should be used when rounding up\n    the currencies of an item. For example, the hat currency will have this value set to\n    0 because we do not want to price items in multiples of hats.",
+          "type": "integer"
+        },
+        "price": {
+          "$ref": "#/components/schemas/v4PricesEntry"
+        }
+      },
+      "type": "object"
+    },
+    "v1User": {
+      "description": "user info doc",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "avatar": {
+          "type": "string"
+        },
+        "last_online": {
+          "type": "string"
+        },
+        "admin": {
+          "type": "string"
+        },
+        "donated": {
+          "type": "string"
+        },
+        "premium": {
+          "type": "string"
+        },
+        "premium_months_gifted": {
+          "type": "integer"
+        },
+        "integrations": {
+          "type": "string"
+        },
+        "bans": {
+          "type": "string"
+        },
+        "voting": {},
+        "inventory": {
+          "type": "string"
+        },
+        "trust": {}
+      },
+      "type": "object"
+    },
+    "v1UserTrust": {
+      "properties": {
+        "positive": {
+          "type": "integer"
+        },
+        "negative": {
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
+    "v1UserVoting": {},
+    "v4PricesEntry": {
+      "properties": {
+        "currency": {
+          "description": "Internal currency name for the price",
+          "type": "string"
+        },
+        "value": {
+          "description": "Value of the item, in the given currency",
+          "type": "number"
+        },
+        "value_high": {
+          "description": "Upper bound value for the item. Only set if the item has a price range.",
+          "type": "number"
+        },
+        "value_raw": {
+          "description": "Item's value in the lowest currency without rounding. If raw is set to 2, this is the lower value if a high value exists. Otherwise, this is the average between the high and low value. Requires `raw`.",
+          "type": "number"
+        },
+        "value_raw_high": {
+          "description": "",
+          "type": "number"
+        },
+        "last_update": {
+          "description": "",
+          "type": "integer"
+        },
+        "difference": {
+          "description": "",
+          "type": "number"
+        },
+        "australium": {
+          "description": "If set, item is an australium weapon.",
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
+    "v4PriceindexDict": {
+      "additionalProperties": {
+        "$ref": "#/components/schemas/v4PricesEntry"
+      }
+    },
+    "v4CraftableDict": {
+      "properties": {
+        "Craftable": {
+          "$ref": "#/components/schemas/v4PriceindexDict"
+        },
+        "Non-Craftable": {
+          "$ref": "#/components/schemas/v4PriceindexDict"
+        }
+      },
+      "type": "object"
+    },
+    "v4TradableDict": {
+      "properties": {
+        "Tradable": {
+          "$ref": "#/components/schemas/v4CraftableDict"
+        },
+        "Non-Tradable": {
+          "$ref": "#/components/schemas/v4CraftableDict"
+        }
+      },
+      "type": "object"
+    },
+    "v4PricesBaseItemDoc": {
+      "properties": {
+        "defindex": {
+          "description": "An array of known defindexes for this item. Items may have more than one used defindex due to Valve shenanigans.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "prices": {
+          "description": "A dictionary of prices keyed by the quality integer.",
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/components/schemas/v4TradableDict"
+          }
+        }
+      },
+      "type": "object"
+    },
+    "v4PricesResponse": {
+      "properties": {
+        "success": {
+          "$ref": "#/components/schemas/successBoolProp"
+        },
+        "message": {
+          "description": "If success is 0, contains the reason for failure.",
+          "type": "string"
+        },
+        "current_time": {
+          "description": "The server time when the response was created.",
+          "type": "integer"
+        },
+        "raw_usd_value": {
+          "description": "The USD value of the smallest currency (i.e. Refined Metal).",
+          "type": "integer"
+        },
+        "usd_currency": {
+          "description": "The name of the smallest currency as it appears in the priceindex objects.",
+          "type": "string"
+        },
+        "usd_currency_index": {
+          "description": "The definition index of the USD currency.",
+          "type": "integer"
+        },
+        "items": {
+          "description": "A dictionary of items keyed by the base item name.",
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/components/schemas/v4PricesBaseItemDoc"
+          }
+        }
+      },
+      "type": "object"
+    },
+    "priceindex": {
+      "description": "\nThe priceindex is an attribute that is applied to priced items that share the same\ndefinition index and quality. For most items, it is zero. Otherwise, the use varies by context:\n\nParticle effects: The priceindex will correspond to the ID of the particle as documented in the Valve Web API.\n\nCrates: The priceindex corresponds to the crate series.\n\nStrangifiers/Unusualifiers: The priceindex of a Strangifier/Unusualifier corresponds to the definition index of the\nitem it can be used on.\n\nChemistry Sets: The priceindex of a Chemistry Set is a hyphen-delimited string of two numbers; the\ndefinition index and the quality of the item. 1086-14 is the priceindex for a Collector's Festive\nWrangler.",
+      "type": "string",
+      "example": "0"
+    },
+    "craftableEnum": {
+      "description": "Craftability identifier.",
+      "type": "string",
+      "enum": [
+        "Craftable",
+        "Non-Craftable",
+        "1",
+        "0",
+        "true",
+        "false"
+      ],
+      "example": "Craftable"
+    },
+    "tradableEnum": {
+      "description": "Tradability identifier.",
+      "enum": [
+        "Tradable",
+        "Non-Tradable",
+        "1",
+        "0",
+        "true",
+        "false"
+      ],
+      "example": "Tradable",
+      "oneOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "integer"
+        },
+        {
+          "type": "boolean"
+        }
+      ]
+    },
+    "successBoolProp": {
+      "description": "A success bool prop will be found on older APIs before we learned to use status codes to determine response success. They remain as a reminder of our failure.",
+      "type": "integer",
+      "enum": [
+        "1",
+        "0"
+      ],
+      "example": 1
+    },
+    "listing": {
+      "properties": {
+        "id": {
+          "description": "Listing ID.",
+          "type": "string"
+        },
+        "appid": {
+          "description": "Steam appid.",
+          "type": "integer"
+        },
+        "bumpedAt": {
+          "description": "UNIX timestamp of listing bump.",
+          "type": "string"
+        },
+        "listedAt": {
+          "description": "UNIX timestamp of listing create.",
+          "type": "string"
+        },
+        "details": {
+          "description": "Listing details left by user.",
+          "type": "string"
+        },
+        "intent": {
+          "$ref": "#/components/schemas/listingIntent"
+        },
+        "steamid": {
+          "description": "Listing creator steamid.",
+          "type": "string"
+        },
+        "buyoutOnly": {
+          "description": "User only wants requests matching the buyout.",
+          "type": "boolean",
+          "nullable": "true"
+        },
+        "currencies": {
+          "$ref": "#/components/schemas/listingCurrencies"
+        },
+        "promoted": {
+          "description": "If this listing is promoted.",
+          "type": "boolean",
+          "nullable": "true"
+        },
+        "tradeOffersPreferred": {
+          "description": "User prefers trade offers.",
+          "type": "boolean",
+          "nullable": "true"
+        },
+        "count": {
+          "description": "When listing fold is occurring, similar listings by a user are collapsed into one.",
+          "type": "integer"
+        },
+        "item": {
+          "$ref": "#/components/schemas/itemDocument"
+        }
+      },
+      "type": "object"
+    },
+    "listingCurrencies": {
+      "description": "A key-value map of currency IDs to values.",
+      "example": {
+        "metal": 2.77,
+        "keys": 1
+      },
+      "additionalProperties": {
+        "type": "float",
+        "example": {
+          "metal": 2.77,
+          "keys": 1
+        }
+      }
+    },
+    "listingIntent": {
+      "description": "Listing intent.",
+      "type": "string",
+      "enum": [
+        "buy",
+        "sell"
+      ],
+      "example": "buy"
+    },
+    "itemDocument": {
+      "description": "The V2 item document, returned in listing responses and used as an input in various V2 APIs. If using in a request body, only certain fields are processed in order to validate the properties are genuine. This documentation only includes the fields supported for request inputs; the API will return other fields in the document, however we do not promise they won't be subject to change. The properties described here are highly likely to remain unchanged.",
+      "properties": {
+        "baseName": {
+          "description": "Base item name.",
+          "type": "string",
+          "example": "Team Captain"
+        },
+        "name": {
+          "description": "The 'full' item name, used as a SKU on backpack.tf (suggestions,, snapshots, etc.). This can include 'The' prefixes on non-special items. This field is ignored in request bodies.",
+          "type": "string",
+          "example": "The Team Captain"
+        },
+        "imageUrl": {
+          "description": "Image URL. This field is ignored in request bodies.",
+          "type": "string",
+          "example": "https://..."
+        },
+        "quantity": {
+          "description": "Item quantity. You can use this to specify how many items you would like to buy.",
+          "type": "integer"
+        },
+        "quality": {
+          "$ref": "#/components/schemas/entity"
+        },
+        "rarity": {
+          "$ref": "#/components/schemas/entity"
+        },
+        "paint": {
+          "$ref": "#/components/schemas/entity"
+        },
+        "particle": {
+          "$ref": "#/components/schemas/entity"
+        },
+        "elevatedQuality": {
+          "$ref": "#/components/schemas/entity"
+        }
+      },
+      "type": "object"
+    },
+    "entity": {
+      "description": "An item attribute that usually has an accompanying name, id, maybe a colour.",
+      "properties": {
+        "name": {
+          "description": "Property name.",
+          "type": "string",
+          "example": "Unique"
+        },
+        "id": {
+          "description": "Property identifier.",
+          "type": "integer",
+          "example": 6
+        },
+        "color": {
+          "description": "Hex colour value including the #.",
+          "type": "string",
+          "example": "#FF7000"
+        }
+      },
+      "type": "object"
+    },
+    "userAgentStatus": {
+      "description": "User agent status.",
+      "properties": {
+        "status": {
+          "description": "A string value representing the state of the agent.",
+          "type": "string",
+          "enum": [
+            "active",
+            "inactive"
+          ],
+          "example": "active"
+        },
+        "client": {
+          "description": "If status is active, the name of the client.",
+          "type": "string",
+          "example": "User Agent"
+        },
+        "expire_at": {
+          "description": "If status is active, the UNIX timestamp for client expiry.",
+          "type": "integer"
+        },
+        "current_time": {
+          "description": "If status is active, the UNIX timestamp of the server's current time.",
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
+    "responseError": {
+      "properties": {
+        "message": {
+          "description": "Verbose error message for humans.",
+          "type": "string",
+          "example": "Error message."
+        },
+        "reason": {
+          "description": "Error code for robots. Can be relied upon for some error handling.",
+          "type": "string",
+          "example": "errorMessage"
+        }
+      },
+      "type": "object"
+    }
+  }
+}

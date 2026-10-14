@@ -1,0 +1,325 @@
+import { useRef, useState } from 'react';
+import type { JournalEntry, JournalSide } from '../../shared/types';
+import { rpc, saveCsv } from '../api';
+import { ConfirmButton, Field, Segmented } from '../components/Controls';
+import { EmptyState, ErrorBanner, LoadingBlock } from '../components/Feedback';
+import { Icon } from '../components/Icon';
+import { ItemName, Money } from '../components/ItemName';
+import { ItemPicker, type ItemPickerHandle, type PickedItem } from '../components/ItemPicker';
+import { PriceInput, readPrice, type BareUnit } from '../components/PriceInput';
+import { errorMessage, fmtDateTime, fmtInt, fmtKeysMetal, fmtMoney, fromDateTimeLocal, toDateTimeLocal } from '../format';
+import { useApp } from '../hooks/appContext';
+import { useRpcQuery } from '../hooks/useRpc';
+
+const VENUES = ['scrap.tf', 'backpack.tf', 'marketplace.tf', 'Steam Community Market', 'Direct trade'];
+
+export function JournalPage() {
+  const { keyScrap, toast, openItem } = useApp();
+  const list = useRpcQuery('journal.list', { limit: 2000 });
+  const summary = useRpcQuery('journal.summary', undefined);
+
+  const after = () => {
+    void list.reload();
+    void summary.reload();
+  };
+
+  const remove = async (e: JournalEntry) => {
+    try {
+      await rpc('journal.delete', { id: e.id });
+      after();
+    } catch (err) {
+      toast(errorMessage(err), 'bad');
+    }
+  };
+
+  const exportCsv = async () => {
+    try {
+      const r = await saveCsv(() => rpc('journal.exportCsv'));
+      if (r.saved) toast(`Saved ${r.path ?? 'CSV'}`, 'good');
+    } catch (err) {
+      toast(`Export failed: ${errorMessage(err)}`, 'bad');
+    }
+  };
+
+  const s = summary.data;
+  const openCost = s?.open.reduce((t, p) => t + p.costScrap, 0) ?? 0;
+  const openQty = s?.open.reduce((t, p) => t + p.qty, 0) ?? 0;
+
+  return (
+    <div className="page journal-page">
+      <div className="stat-row">
+        <div className="stat card">
+          <div className="stat-label">Realised profit (FIFO)</div>
+          <div className="stat-value">{s ? <Money scrap={s.realizedProfitScrap} keyScrap={keyScrap} tone="profit" signed /> : '—'}</div>
+        </div>
+        <div className="stat card">
+          <div className="stat-label">Completed flips</div>
+          <div className="stat-value num">{s ? fmtInt(s.realizedTrades) : '—'}</div>
+        </div>
+        <div className="stat card">
+          <div className="stat-label">Holding</div>
+          <div className="stat-value">
+            {s ? (
+              <>
+                <span className="num">{fmtInt(openQty)}</span> <span className="muted small">items, cost</span> <Money scrap={openCost} keyScrap={keyScrap} />
+              </>
+            ) : (
+              '—'
+            )}
+          </div>
+        </div>
+        <div className="stat-actions">
+          <button type="button" className="btn small" onClick={() => void exportCsv()}>
+            <Icon name="download" size={14} /> Export CSV
+          </button>
+        </div>
+      </div>
+
+      <div className="split">
+        <section className="card form-card" aria-labelledby="journal-form-title">
+          <h2 id="journal-form-title">Log a trade</h2>
+          <p className="muted small">A manual record of what you bought and sold. Sells are matched to the oldest buy of the same item.</p>
+          <JournalForm onSaved={after} />
+        </section>
+
+        <section className="card table-card" aria-labelledby="journal-list-title">
+          <h2 id="journal-list-title">
+            Trades <span className="count-badge">{list.data?.length ?? 0}</span>
+          </h2>
+          {list.error ? <ErrorBanner message={list.error} onRetry={() => void list.reload()} /> : null}
+          {list.loading ? (
+            <LoadingBlock />
+          ) : !list.data?.length ? (
+            <EmptyState icon="journal" title="No trades logged" compact>
+              Log a buy when you buy on scrap.tf and a sell when a buyer takes it. Profit is worked out first-in, first-out.
+            </EmptyState>
+          ) : (
+            <div className="table-wrap tall">
+              <table className="table">
+                <thead>
+                  <tr>
+                    <th>When</th>
+                    <th>Side</th>
+                    <th>Item</th>
+                    <th>Venue</th>
+                    <th className="num">Price</th>
+                    <th className="actions-col">
+                      <span className="sr-only">Actions</span>
+                    </th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {list.data.map((e) => (
+                    <tr key={e.id}>
+                      <td className="date-cell small">{fmtDateTime(e.ts)}</td>
+                      <td>
+                        <span className={`pill tone-${e.side === 'buy' ? 'info' : 'good'}`}>{e.side === 'buy' ? 'Buy' : 'Sell'}</span>
+                      </td>
+                      <td>
+                        <button type="button" className="row-link" onClick={() => openItem(e.sku)}>
+                          <ItemName sku={e.sku} name={e.name} maxTags={2} />
+                        </button>
+                        {e.note ? <div className="muted small">{e.note}</div> : null}
+                      </td>
+                      <td>{e.venue}</td>
+                      <td className="num">
+                        <span className="money">{fmtKeysMetal(e.keys, e.scrap)}</span>
+                        {e.keys ? <div className="muted small">key at {fmtMoney(e.keyPriceScrap, null)}</div> : null}
+                      </td>
+                      <td className="actions-col">
+                        <ConfirmButton className="icon-btn" ariaLabel={`Delete trade ${e.id}`} title="Delete" confirmLabel="Delete?" onConfirm={() => void remove(e)}>
+                          <Icon name="trash" size={14} />
+                        </ConfirmButton>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </section>
+      </div>
+
+      {s && (s.bySku.length || s.open.length) ? (
+        <div className="split even">
+          <section className="card" aria-labelledby="by-item-title">
+            <h2 id="by-item-title">Profit by item</h2>
+            {s.bySku.length ? (
+              <table className="table">
+                <thead>
+                  <tr>
+                    <th>Item</th>
+                    <th className="num">Flips</th>
+                    <th className="num">Profit</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {[...s.bySku]
+                    .sort((a, b) => b.realizedProfitScrap - a.realizedProfitScrap)
+                    .map((r) => (
+                      <tr key={r.sku}>
+                        <td>
+                          <ItemName sku={r.sku} name={r.name} maxTags={2} />
+                        </td>
+                        <td className="num">{r.trades}</td>
+                        <td className="num">
+                          <Money scrap={r.realizedProfitScrap} keyScrap={keyScrap} tone="profit" signed />
+                        </td>
+                      </tr>
+                    ))}
+                </tbody>
+              </table>
+            ) : (
+              <p className="muted small">No completed flips yet.</p>
+            )}
+          </section>
+          <section className="card" aria-labelledby="open-title">
+            <h2 id="open-title">Still holding</h2>
+            {s.open.length ? (
+              <table className="table">
+                <thead>
+                  <tr>
+                    <th>Item</th>
+                    <th className="num">Qty</th>
+                    <th className="num">Cost</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {s.open.map((p) => (
+                    <tr key={p.sku}>
+                      <td>
+                        <button type="button" className="row-link" onClick={() => openItem(p.sku)}>
+                          <ItemName sku={p.sku} name={p.name} maxTags={2} />
+                        </button>
+                      </td>
+                      <td className="num">{p.qty}</td>
+                      <td className="num">
+                        <Money scrap={p.costScrap} keyScrap={keyScrap} />
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            ) : (
+              <p className="muted small">Nothing held.</p>
+            )}
+          </section>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function JournalForm({ onSaved }: { onSaved: () => void }) {
+  const { keyScrap, toast } = useApp();
+  const [side, setSide] = useState<JournalSide>('buy');
+  const [venue, setVenue] = useState('scrap.tf');
+  const [item, setItem] = useState<PickedItem | null>(null);
+  const [text, setText] = useState('');
+  const [unit, setUnit] = useState<BareUnit>('ref');
+  const [when, setWhen] = useState(() => toDateTimeLocal(Date.now()));
+  const [note, setNote] = useState('');
+  const [error, setError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const picker = useRef<ItemPickerHandle>(null);
+  const priceRef = useRef<HTMLInputElement>(null);
+
+  const submit = async () => {
+    setError(null);
+    const it = item ?? (await picker.current?.resolvePending()) ?? null;
+    if (!it) {
+      setError('Pick an item.');
+      return;
+    }
+    const parsed = readPrice(text, unit);
+    if (!parsed) {
+      setError('Enter the price, for example 1.33 or 2 keys 5.11.');
+      return;
+    }
+    if (!venue.trim()) {
+      setError('Enter where the trade happened.');
+      return;
+    }
+    setSaving(true);
+    try {
+      const e = await rpc('journal.add', {
+        side,
+        venue: venue.trim(),
+        sku: it.sku,
+        name: it.name,
+        keys: parsed.keys,
+        scrap: parsed.scrap,
+        ts: fromDateTimeLocal(when) ?? Date.now(),
+        note: note.trim() || null,
+      });
+      toast(`Logged ${e.side} of ${e.name}`, 'good');
+      setItem(null);
+      setText('');
+      setNote('');
+      setWhen(toDateTimeLocal(Date.now()));
+      onSaved();
+      picker.current?.focus();
+    } catch (err) {
+      setError(errorMessage(err));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <form
+      className="form-grid journal-form"
+      onSubmit={(e) => {
+        e.preventDefault();
+        void submit();
+      }}
+    >
+      <Field label="Side">
+        <Segmented
+          ariaLabel="Buy or sell"
+          value={side}
+          onChange={(v) => {
+            setSide(v);
+            if (v === 'sell' && venue === 'scrap.tf') setVenue('backpack.tf');
+            if (v === 'buy' && venue === 'backpack.tf') setVenue('scrap.tf');
+          }}
+          options={[
+            { value: 'buy', label: 'Bought' },
+            { value: 'sell', label: 'Sold' },
+          ]}
+        />
+      </Field>
+      <Field label="Item" htmlFor="jf-item">
+        <ItemPicker ref={picker} id="jf-item" value={item} onChange={setItem} onEnterPicked={() => priceRef.current?.focus()} />
+      </Field>
+      <Field label="Price" htmlFor="jf-price">
+        <PriceInput ref={priceRef} id="jf-price" text={text} onText={setText} unit={unit} onUnit={setUnit} keyScrap={keyScrap} />
+      </Field>
+      <Field label="Venue" htmlFor="jf-venue">
+          <input id="jf-venue" className="input" list="jf-venues" value={venue} maxLength={60} onChange={(e) => setVenue(e.target.value)} />
+          <datalist id="jf-venues">
+            {VENUES.map((v) => (
+              <option key={v} value={v} />
+            ))}
+          </datalist>
+        </Field>
+        <Field label="When" htmlFor="jf-when">
+          <input id="jf-when" className="input" type="datetime-local" value={when} onChange={(e) => setWhen(e.target.value)} />
+        </Field>
+      <Field label="Note (optional)" htmlFor="jf-note">
+        <input id="jf-note" className="input" value={note} maxLength={200} onChange={(e) => setNote(e.target.value)} />
+      </Field>
+      {error ? (
+        <div className="field-error" role="alert">
+          {error}
+        </div>
+      ) : null}
+      <div className="form-actions">
+        <button type="submit" className="btn primary" disabled={saving}>
+          <Icon name="plus" size={14} /> Log {side === 'buy' ? 'buy' : 'sell'}
+        </button>
+        <span className="muted small">Keys are valued at today&apos;s key price for FIFO.</span>
+      </div>
+    </form>
+  );
+}

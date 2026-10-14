@@ -1,0 +1,162 @@
+{
+  "378;11": {
+    "status": 200,
+    "name": "Strange Team Captain",
+    "sku": "378;11"
+  },
+  "378;6;uncraftable": {
+    "status": 200,
+    "name": "Non-Craftable Team Captain",
+    "sku": "378;6;uncraftable"
+  },
+  "378;5;u361": {
+    "status": 200,
+    "name": "Searing Stove Team Captain",
+    "sku": "378;5;u361"
+  },
+  "205;11": {
+    "status": 200,
+    "name": "Strange Rocket Launcher",
+    "sku": "205;11"
+  },
+  "205;6;kt-1": {
+    "status": 200,
+    "name": "Killstreak Rocket Launcher",
+    "sku": "205;6;kt-1"
+  },
+  "15000;15;w1;pk14": {
+    "status": 200,
+    "name": "Night Owl Sniper Rifle (Factory New)",
+    "sku": "15000;15;w1;pk14"
+  },
+  "15000;11;w3;pk14;kt-1;festive": {
+    "status": 200,
+    "name": "Strange Festivized Killstreak Night Owl Sniper Rifle (Field-Tested)",
+    "sku": "15000;11;w3;pk14;kt-1;festive"
+  },
+  "15000;15;w1;pk14;strange": {
+    "status": 200,
+    "name": "Strange Night Owl Sniper Rifle (Factory New)",
+    "sku": "15000;15;w1;pk14;strange"
+  },
+  "1104;11;w1;pk163;kt-3": {
+    "status": 200,
+    "name": "Strange Professional Killstreak Macabre Web Mk.II Air Strike (Factory New)",
+    "sku": "1104;11;w1;pk163;kt-3"
+  },
+  "16105;15;w1;pk105": {
+    "status": 200,
+    "name": "Masked Mender Mk.II War Paint (Factory New)",
+    "sku": "16105;15;w1;pk105"
+  },
+  "17200;11;w1;pk200": {
+    "status": 200,
+    "name": "Strange Bloom Buffed War Paint (Factory New)",
+    "sku": "17200;11;w1;pk200"
+  },
+  "5022;6;c1": {
+    "status": 200,
+    "name": "Mann Co. Supply Crate #1",
+    "sku": "5022;6;c1"
+  },
+  "5078;6;c46": {
+    "status": 200,
+    "name": "Scorched Crate #46",
+    "sku": "5078;6;c46"
+  },
+  "6527;6;kt-1;td-205": {
+    "status": 200,
+    "name": "Killstreak Rocket Launcher Kit",
+    "sku": "6527;6;kt-1;td-205"
+  },
+  "6526;6;kt-3;td-205": {
+    "status": 200,
+    "name": "Professional Killstreak Rocket Launcher Kit",
+    "sku": "6526;6;kt-3;td-205"
+  },
+  "20000;6;td-378;od-6522;oq-6": {
+    "status": 200,
+    "name": "Team Captain Strangifier Chemistry Set",
+    "sku": "20000;6;td-378;od-6522;oq-6"
+  },
+  "266;5": {
+    "status": 200,
+    "name": "Unusual Horseless Headless Horsemann's Headtaker",
+    "sku": "266;5"
+  },
+  "267;5": {
+    "status": 200,
+    "name": "Unusual Haunted Metal Scrap",
+    "sku": "267;5"
+  },
+  "30920;5;u3001": {
+    "status": 200,
+    "name": "Showstopper Taunt: The Bunnyhopper",
+    "sku": "30920;5;u3001"
+  },
+  "30920;6": {
+    "status": 200,
+    "name": "Taunt: The Bunnyhopper",
+    "sku": "30920;6"
+  },
+  "101;3": {
+    "status": 200,
+    "name": "Vintage Vintage Tyrolean",
+    "sku": "101;3"
+  },
+  "101;6": {
+    "status": 200,
+    "name": "Vintage Tyrolean",
+    "sku": "101;6"
+  },
+  "101;5;u8": {
+    "status": 200,
+    "name": "Haunted Ghosts Vintage Tyrolean",
+    "sku": "101;5;u8"
+  },
+  "160;3;n4": {
+    "status": 200,
+    "name": "Vintage Lugermorph #4",
+    "sku": "160;3;n4"
+  },
+  "832;1": {
+    "status": 200,
+    "name": "Genuine Huo-Long Heater",
+    "sku": "832;1"
+  },
+  "1013;6;uncraftable;kt-3": {
+    "status": 200,
+    "name": "Non-Craftable Professional Killstreak Ham Shank",
+    "sku": "1013;6;uncraftable;kt-3"
+  },
+  "103;11;uncraftable": {
+    "status": 200,
+    "name": "Non-Craftable Strange Camera Beard",
+    "sku": "103;11;uncraftable"
+  },
+  "5049;6": {
+    "status": 200,
+    "name": "Festive Winter Crate Key",
+    "sku": "5049;6"
+  },
+  "378;6;p12073019": {
+    "status": 200,
+    "name": "The Team Captain (Paint: Team Spirit)",
+    "sku": "378;6;p12073019"
+  },
+  "9258;5;td-30920": {
+    "status": 200,
+    "name": "Unusual Taunt: The Bunnyhopper Unusualifier",
+    "sku": "9258;5;td-30920"
+  },
+  "15013;15;w2;pk0": {
+    "status": 200,
+    "name": "Red Rock Roscoe Pistol (Minimal Wear)",
+    "sku": "15013;15;w2;pk0"
+  },
+  "20006;6;od-378;oq-14": {
+    "status": 200,
+    "name": "Collector's Team Captain Chemistry Set",
+    "sku": "20006;6;od-378;oq-14"
+  }
+}

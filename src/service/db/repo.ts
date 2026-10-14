@@ -1,0 +1,1453 @@
+// Repo implementation on node:sqlite. JSON TEXT columns hold nested objects,
+// booleans are INTEGER 0/1, and NULLs round-trip as null. JSON read back from
+// the database is validated defensively so a damaged row degrades to safe
+// defaults instead of crashing the service.
+
+import { statSync } from 'node:fs';
+import { z } from 'zod';
+import type {
+  BptfNameRow,
+  EffectRow,
+  PaintRow,
+  PaintkitRow,
+  Repo,
+  SchemaItemRow,
+} from '../contracts';
+import { CATEGORIES } from '../../shared/types';
+import type {
+  CommunityRow,
+  ConfidenceLevel,
+  GroupBy,
+  ImportBatch,
+  ImportPageKind,
+  InputKind,
+  Intent,
+  JournalEntry,
+  JournalSide,
+  KeyPriceQuote,
+  KeyPriceSource,
+  Listing,
+  OppQuery,
+  Opportunity,
+  OpportunityEvent,
+  OpportunityEventKind,
+  OpportunityStatus,
+  OrderSummary,
+  PriceRule,
+  PricedbRow,
+  PriceSource,
+  ProfitTier,
+  ReferencePrices,
+  RequestLogRow,
+  RuleFilter,
+  ScrapPrice,
+  SpecialAttrs,
+  UnixMs,
+} from '../../shared/types';
+import { chunk, escapeLike, placeholders } from './db';
+import type { SqlRow, SqlValue, SqliteDb } from './db';
+
+// ---------------------------------------------------------------------------
+// Value helpers
+// ---------------------------------------------------------------------------
+
+type Out = SqlRow[string] | undefined;
+
+const INTENTS: readonly Intent[] = ['buy', 'sell'];
+const ORIGINS: readonly Listing['origin'][] = ['ws', 'snapshot'];
+const PRICE_SOURCES: readonly PriceSource[] = ['user', 'import'];
+const KEY_SOURCES: readonly KeyPriceSource[] = ['bptf', 'pricedb', 'manual'];
+const INPUT_KINDS: readonly InputKind[] = ['user', 'import', 'rule'];
+const CONFIDENCE_LEVELS: readonly ConfidenceLevel[] = ['high', 'medium', 'low'];
+const PROFIT_TIERS: readonly ProfitTier[] = ['key', 'ref10', 'ref2', 'small', 'loss', 'none'];
+const STATUSES: readonly OpportunityStatus[] = ['profitable', 'below-threshold', 'unprofitable', 'no-buyers'];
+const EVENT_KINDS: readonly OpportunityEventKind[] = ['appeared', 'changed', 'gone', 'notified'];
+const JOURNAL_SIDES: readonly JournalSide[] = ['buy', 'sell'];
+const PAGE_KINDS: readonly ImportPageKind[] = ['buy', 'unusuals', 'items-list', 'unknown'];
+const EFFECT_TYPES: readonly EffectRow['type'][] = ['cosmetic', 'weapon', 'taunt', 'other'];
+
+const META_SCHEMA_FETCHED_AT = 'schema.fetchedAt';
+const META_SCHEMA_ETAG = 'schema.etag';
+
+const EVENTS_DEFAULT_LIMIT = 200;
+const EVENTS_MAX_LIMIT = 5000;
+const GENERIC_MAX_LIMIT = 100_000;
+
+function num(v: Out, fallback = 0): number {
+  if (typeof v === 'number') return v;
+  if (typeof v === 'bigint') return Number(v);
+  if (typeof v === 'string' && v.trim() !== '') {
+    const n = Number(v);
+    return Number.isFinite(n) ? n : fallback;
+  }
+  return fallback;
+}
+
+function numOrNull(v: Out): number | null {
+  if (v === null || v === undefined) return null;
+  const n = num(v, Number.NaN);
+  return Number.isFinite(n) ? n : null;
+}
+
+function str(v: Out, fallback = ''): string {
+  if (typeof v === 'string') return v;
+  if (typeof v === 'number' || typeof v === 'bigint') return String(v);
+  return fallback;
+}
+
+function strOrNull(v: Out): string | null {
+  return v === null || v === undefined ? null : str(v);
+}
+
+function bool(v: Out): boolean {
+  return num(v, 0) !== 0;
+}
+
+function boolOrNull(v: Out): boolean | null {
+  return v === null || v === undefined ? null : bool(v);
+}
+
+function oneOf<T extends string>(v: Out, allowed: readonly T[], fallback: T): T {
+  return typeof v === 'string' && (allowed as readonly string[]).includes(v) ? (v as T) : fallback;
+}
+
+function bindNum(v: unknown, fallback = 0): number {
+  return typeof v === 'number' && Number.isFinite(v) ? v : fallback;
+}
+
+function bindNumOrNull(v: unknown): number | null {
+  return typeof v === 'number' && Number.isFinite(v) ? v : null;
+}
+
+function bindStrOrNull(v: unknown): string | null {
+  return typeof v === 'string' ? v : null;
+}
+
+function bindBool(v: unknown): number {
+  return v ? 1 : 0;
+}
+
+function bindBoolOrNull(v: unknown): number | null {
+  return v === null || v === undefined ? null : v ? 1 : 0;
+}
+
+function requireFinite(field: string, v: unknown): number {
+  if (typeof v !== 'number' || !Number.isFinite(v)) throw new TypeError(`${field} must be a finite number`);
+  return v;
+}
+
+function requireText(field: string, v: unknown): string {
+  if (typeof v !== 'string' || v.trim() === '') throw new TypeError(`${field} must be a non-empty string`);
+  return v;
+}
+
+function requireId(field: string, v: unknown): number {
+  if (typeof v !== 'number' || !Number.isSafeInteger(v) || v <= 0) throw new TypeError(`${field} must be a positive integer`);
+  return v;
+}
+
+function clampLimit(v: unknown, fallback: number, max: number): number {
+  if (typeof v !== 'number' || !Number.isFinite(v)) return fallback;
+  return Math.min(max, Math.max(0, Math.floor(v)));
+}
+
+function parseJson(text: Out): unknown {
+  if (typeof text !== 'string' || text === '') return undefined;
+  try {
+    return JSON.parse(text) as unknown;
+  } catch {
+    return undefined;
+  }
+}
+
+function uniqueStrings(values: readonly unknown[] | undefined): string[] {
+  if (!Array.isArray(values)) return [];
+  return [...new Set(values.filter((v): v is string => typeof v === 'string'))];
+}
+
+/** INSERT ... ON CONFLICT(key) DO UPDATE for every non-key column. */
+function upsertSql(table: string, cols: readonly string[], keyCols: readonly string[]): string {
+  const q = (c: string) => `"${c}"`;
+  const updates = cols.filter((c) => !keyCols.includes(c)).map((c) => `${q(c)} = excluded.${q(c)}`);
+  return (
+    `INSERT INTO ${table} (${cols.map(q).join(', ')}) VALUES (${placeholders(cols.length)}) ` +
+    `ON CONFLICT(${keyCols.map(q).join(', ')}) DO UPDATE SET ${updates.join(', ')}`
+  );
+}
+
+// ---------------------------------------------------------------------------
+// JSON column schemas (loose: unknown keys written by newer builds survive)
+// ---------------------------------------------------------------------------
+
+const nullableNumber = z.number().nullable().catch(null);
+const stringArray = z.array(z.string()).catch(() => []);
+
+const specialSchema = z.looseObject({
+  paint: nullableNumber,
+  spells: stringArray,
+  parts: stringArray,
+  sheen: nullableNumber,
+  killstreaker: nullableNumber,
+  customName: z.boolean().catch(false),
+  customDesc: z.boolean().catch(false),
+});
+
+const orderSummarySchema = z.looseObject({
+  listingId: z.string(),
+  steamid: z.string(),
+  userName: z.string().nullable().catch(null),
+  keys: z.number().catch(0),
+  metalScrap: z.number().catch(0),
+  valueScrap: z.number().catch(0),
+  isBot: z.boolean().catch(false),
+  online: z.boolean().nullable().catch(null),
+  lastEventAt: z.number().catch(0),
+  bumpedAt: nullableNumber,
+  details: z.string().catch(''),
+  flags: stringArray,
+  eligible: z.boolean().catch(false),
+});
+
+const referencesSchema = z.looseObject({
+  pricedb: z
+    .looseObject({ buyScrap: nullableNumber, sellScrap: nullableNumber, time: nullableNumber, ageMs: nullableNumber })
+    .nullable()
+    .catch(null),
+  community: z
+    .looseObject({ valueScrap: nullableNumber, valueHighScrap: nullableNumber, lastUpdate: nullableNumber })
+    .nullable()
+    .catch(null),
+});
+
+const ruleFilterSchema = z.looseObject({
+  categories: z.array(z.string()).optional(),
+  qualities: z.array(z.number()).optional(),
+  craftable: z.boolean().nullable().optional(),
+  australium: z.boolean().nullable().optional(),
+  killstreak: z.array(z.number()).optional(),
+  hasEffect: z.boolean().nullable().optional(),
+  defindexes: z.array(z.number()).optional(),
+  nameContains: z.string().nullable().optional(),
+});
+
+function emptySpecial(): SpecialAttrs {
+  return { paint: null, spells: [], parts: [], sheen: null, killstreaker: null, customName: false, customDesc: false };
+}
+
+function isEmptySpecial(s: SpecialAttrs | null | undefined): boolean {
+  return (
+    !s ||
+    (s.paint == null &&
+      !(s.spells?.length > 0) &&
+      !(s.parts?.length > 0) &&
+      s.sheen == null &&
+      s.killstreaker == null &&
+      !s.customName &&
+      !s.customDesc)
+  );
+}
+
+function parseSpecial(text: Out): SpecialAttrs | null {
+  const r = specialSchema.safeParse(parseJson(text));
+  return r.success ? r.data : null;
+}
+
+function parseOrder(text: Out): OrderSummary | null {
+  if (text === null || text === undefined) return null;
+  const r = orderSummarySchema.safeParse(parseJson(text));
+  return r.success ? r.data : null;
+}
+
+function parseReferences(text: Out): ReferencePrices {
+  const r = referencesSchema.safeParse(parseJson(text));
+  return r.success ? r.data : { pricedb: null, community: null };
+}
+
+function parseStringArray(text: Out): string[] {
+  const r = stringArray.safeParse(parseJson(text));
+  return r.success ? r.data : [];
+}
+
+function parseRuleFilter(text: Out): RuleFilter | null {
+  const r = ruleFilterSchema.safeParse(parseJson(text));
+  if (!r.success) return null;
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(r.data)) if (v !== undefined) out[k] = v;
+  return out as RuleFilter;
+}
+
+// Listing notes sometimes contain a pasted Steam trade URL; another user's trade
+// token must never be persisted (design brief §7.3 #12).
+const TRADE_TOKEN_RE = /\btoken=[A-Za-z0-9_-]+/gi;
+
+export function scrubTradeTokens(text: unknown): string {
+  if (typeof text !== 'string') return '';
+  return text.replace(TRADE_TOKEN_RE, 'token=[removed]');
+}
+
+function jsonOrNull(v: unknown): string | null {
+  return v === null || v === undefined ? null : JSON.stringify(v);
+}
+
+// ---------------------------------------------------------------------------
+// Row mappers
+// ---------------------------------------------------------------------------
+
+const LISTING_COLS = [
+  'id',
+  'sku',
+  'base_sku',
+  'intent',
+  'steamid',
+  'user_name',
+  'keys',
+  'metal_scrap',
+  'is_bot',
+  'ua_client',
+  'ua_last_pulse',
+  'user_online',
+  'user_banned',
+  'is_marketplace',
+  'special',
+  'details',
+  'listed_at',
+  'bumped_at',
+  'last_event_at',
+  'origin',
+  'item_name',
+  'market_name',
+] as const;
+
+function listingParams(l: Listing): SqlValue[] {
+  return [
+    String(l.id),
+    String(l.sku),
+    String(l.baseSku),
+    String(l.intent),
+    String(l.steamid ?? ''),
+    bindStrOrNull(l.userName),
+    bindNum(l.keys),
+    bindNum(l.metalScrap),
+    bindBool(l.isBot),
+    bindStrOrNull(l.uaClient),
+    bindNumOrNull(l.uaLastPulse),
+    bindBoolOrNull(l.userOnline),
+    bindBool(l.userBanned),
+    bindBool(l.isMarketplace),
+    isEmptySpecial(l.special) ? null : JSON.stringify(l.special),
+    scrubTradeTokens(l.details),
+    bindNumOrNull(l.listedAt),
+    bindNumOrNull(l.bumpedAt),
+    bindNum(l.lastEventAt),
+    String(l.origin),
+    bindStrOrNull(l.itemName),
+    bindStrOrNull(l.marketName),
+  ];
+}
+
+function rowToListing(r: SqlRow): Listing {
+  return {
+    id: str(r['id']),
+    sku: str(r['sku']),
+    baseSku: str(r['base_sku']),
+    intent: oneOf(r['intent'], INTENTS, 'buy'),
+    steamid: str(r['steamid']),
+    userName: strOrNull(r['user_name']),
+    keys: num(r['keys']),
+    metalScrap: num(r['metal_scrap']),
+    isBot: bool(r['is_bot']),
+    uaClient: strOrNull(r['ua_client']),
+    uaLastPulse: numOrNull(r['ua_last_pulse']),
+    userOnline: boolOrNull(r['user_online']),
+    userBanned: bool(r['user_banned']),
+    isMarketplace: bool(r['is_marketplace']),
+    special: r['special'] === null || r['special'] === undefined ? emptySpecial() : (parseSpecial(r['special']) ?? emptySpecial()),
+    details: str(r['details']),
+    listedAt: numOrNull(r['listed_at']),
+    bumpedAt: numOrNull(r['bumped_at']),
+    lastEventAt: num(r['last_event_at']),
+    origin: oneOf(r['origin'], ORIGINS, 'ws'),
+    itemName: strOrNull(r['item_name']),
+    marketName: strOrNull(r['market_name']),
+  };
+}
+
+const OPP_COLS = [
+  'key',
+  'sku',
+  'name',
+  'category',
+  'input_ref',
+  'input_kind',
+  'cost_keys',
+  'cost_scrap_raw',
+  'cost_scrap',
+  'best_scrap',
+  'cons_scrap',
+  'instant_scrap',
+  'revenue_scrap',
+  'profit_scrap',
+  'margin',
+  'confidence',
+  'confidence_level',
+  'flags',
+  'reasons',
+  'buyer_count',
+  'best_order',
+  'cons_order',
+  'instant_order',
+  'refs',
+  'profit_tier',
+  'status',
+  'input_observed_at',
+  'first_seen_at',
+  'updated_at',
+] as const;
+
+function oppParams(o: Opportunity): SqlValue[] {
+  return [
+    String(o.key),
+    String(o.sku),
+    String(o.name ?? ''),
+    String(o.category),
+    String(o.inputRef ?? ''),
+    String(o.inputKind),
+    bindNum(o.costKeys),
+    bindNum(o.costScrapRaw),
+    bindNum(o.costScrap),
+    bindNumOrNull(o.bestScrap),
+    bindNumOrNull(o.consScrap),
+    bindNumOrNull(o.instantScrap),
+    bindNumOrNull(o.revenueScrap),
+    bindNumOrNull(o.profitScrap),
+    bindNumOrNull(o.margin),
+    bindNum(o.confidence),
+    String(o.confidenceLevel),
+    JSON.stringify(Array.isArray(o.flags) ? o.flags : []),
+    JSON.stringify(Array.isArray(o.reasons) ? o.reasons : []),
+    bindNum(o.buyerCount),
+    jsonOrNull(o.bestOrder),
+    jsonOrNull(o.consOrder),
+    jsonOrNull(o.instantOrder),
+    JSON.stringify(o.references ?? { pricedb: null, community: null }),
+    String(o.profitTier),
+    String(o.status),
+    bindNum(o.inputObservedAt),
+    bindNum(o.firstSeenAt),
+    bindNum(o.updatedAt),
+  ];
+}
+
+function rowToOpportunity(r: SqlRow): Opportunity {
+  return {
+    key: str(r['key']),
+    sku: str(r['sku']),
+    name: str(r['name']),
+    category: oneOf(r['category'], CATEGORIES, 'other'),
+    inputRef: str(r['input_ref']),
+    inputKind: oneOf(r['input_kind'], INPUT_KINDS, 'user'),
+    costKeys: num(r['cost_keys']),
+    costScrapRaw: num(r['cost_scrap_raw']),
+    costScrap: num(r['cost_scrap']),
+    bestScrap: numOrNull(r['best_scrap']),
+    consScrap: numOrNull(r['cons_scrap']),
+    instantScrap: numOrNull(r['instant_scrap']),
+    revenueScrap: numOrNull(r['revenue_scrap']),
+    profitScrap: numOrNull(r['profit_scrap']),
+    margin: numOrNull(r['margin']),
+    confidence: num(r['confidence']),
+    confidenceLevel: oneOf(r['confidence_level'], CONFIDENCE_LEVELS, 'low'),
+    flags: parseStringArray(r['flags']),
+    reasons: parseStringArray(r['reasons']),
+    buyerCount: num(r['buyer_count']),
+    bestOrder: parseOrder(r['best_order']),
+    consOrder: parseOrder(r['cons_order']),
+    instantOrder: parseOrder(r['instant_order']),
+    references: parseReferences(r['refs']),
+    profitTier: oneOf(r['profit_tier'], PROFIT_TIERS, 'none'),
+    status: oneOf(r['status'], STATUSES, 'no-buyers'),
+    inputObservedAt: num(r['input_observed_at']),
+    firstSeenAt: num(r['first_seen_at']),
+    updatedAt: num(r['updated_at']),
+  };
+}
+
+function rowToEvent(r: SqlRow): OpportunityEvent {
+  return {
+    id: num(r['id']),
+    key: str(r['key']),
+    sku: str(r['sku']),
+    name: str(r['name']),
+    category: oneOf(r['category'], CATEGORIES, 'other'),
+    kind: oneOf(r['kind'], EVENT_KINDS, 'changed'),
+    profitScrap: numOrNull(r['profit_scrap']),
+    costScrap: numOrNull(r['cost_scrap']),
+    revenueScrap: numOrNull(r['revenue_scrap']),
+    confidence: num(r['confidence']),
+    summary: str(r['summary']),
+    ts: num(r['ts']),
+  };
+}
+
+function rowToScrapPrice(r: SqlRow): ScrapPrice {
+  return {
+    id: num(r['id']),
+    sku: str(r['sku']),
+    name: str(r['name']),
+    costKeys: num(r['cost_keys']),
+    costScrap: num(r['cost_scrap']),
+    source: oneOf(r['source'], PRICE_SOURCES, 'user'),
+    observedAt: num(r['observed_at']),
+    note: strOrNull(r['note']),
+    importBatch: numOrNull(r['import_batch']),
+    special: r['special'] === null || r['special'] === undefined ? null : parseSpecial(r['special']),
+    assetId: strOrNull(r['asset_id']),
+    stock: numOrNull(r['stock']),
+  };
+}
+
+function rowToRule(r: SqlRow): PriceRule {
+  const filter = parseRuleFilter(r['filter_json']);
+  return {
+    id: num(r['id']),
+    name: str(r['name']),
+    filter: filter ?? {},
+    costKeys: num(r['cost_keys']),
+    costScrap: num(r['cost_scrap']),
+    observedAt: num(r['observed_at']),
+    // An unreadable filter would otherwise match every item; keep such a rule switched off.
+    enabled: filter !== null && bool(r['enabled']),
+  };
+}
+
+function rowToJournal(r: SqlRow): JournalEntry {
+  return {
+    id: num(r['id']),
+    ts: num(r['ts']),
+    side: oneOf(r['side'], JOURNAL_SIDES, 'buy'),
+    venue: str(r['venue']),
+    sku: str(r['sku']),
+    name: str(r['name']),
+    keys: num(r['keys']),
+    scrap: num(r['scrap']),
+    keyPriceScrap: num(r['key_price_scrap']),
+    note: strOrNull(r['note']),
+  };
+}
+
+function rowToBptfName(r: SqlRow): BptfNameRow {
+  return {
+    sku: str(r['sku']),
+    name: str(r['name']),
+    marketName: strOrNull(r['market_name']),
+    lastSeen: num(r['last_seen']),
+  };
+}
+
+function rowToPricedb(r: SqlRow): PricedbRow {
+  return {
+    sku: str(r['sku']),
+    name: str(r['name']),
+    buyKeys: num(r['buy_keys']),
+    buyScrap: num(r['buy_scrap']),
+    sellKeys: num(r['sell_keys']),
+    sellScrap: num(r['sell_scrap']),
+    time: num(r['time']),
+    fetchedAt: num(r['fetched_at']),
+  };
+}
+
+function rowToCommunity(r: SqlRow): CommunityRow {
+  return {
+    sku: str(r['sku']),
+    currency: str(r['currency']),
+    value: num(r['value']),
+    valueHigh: numOrNull(r['value_high']),
+    lastUpdate: numOrNull(r['last_update']),
+  };
+}
+
+function rowToKeyQuote(r: SqlRow): KeyPriceQuote {
+  return {
+    source: oneOf(r['source'], KEY_SOURCES, 'manual'),
+    buyScrap: numOrNull(r['buy_scrap']),
+    sellScrap: numOrNull(r['sell_scrap']),
+    observedAt: num(r['observed_at']),
+  };
+}
+
+function rowToSchemaItem(r: SqlRow): SchemaItemRow {
+  return {
+    defindex: num(r['defindex']),
+    name: str(r['name']),
+    itemName: str(r['item_name']),
+    properName: bool(r['proper_name']),
+    itemClass: str(r['item_class']),
+    slot: strOrNull(r['slot']),
+    craftClass: strOrNull(r['craft_class']),
+    usedByClasses: parseStringArray(r['used_by_classes']),
+    imageUrl: strOrNull(r['image_url']),
+  };
+}
+
+function rowToEffect(r: SqlRow): EffectRow {
+  return {
+    id: num(r['id']),
+    name: str(r['name']),
+    canonicalId: num(r['canonical_id']),
+    type: oneOf(r['type'], EFFECT_TYPES, 'other'),
+  };
+}
+
+function rowToPaint(r: SqlRow): PaintRow {
+  return { decimal: num(r['decimal']), hex: str(r['hex']), name: str(r['name']), bluHex: strOrNull(r['blu_hex']) };
+}
+
+function rowToPaintkit(r: SqlRow): PaintkitRow {
+  return { id: num(r['id']), name: str(r['name']) };
+}
+
+function rowToImportBatch(r: SqlRow): ImportBatch {
+  return {
+    id: num(r['id']),
+    fileName: str(r['file_name']),
+    pageKind: oneOf(r['page_kind'], PAGE_KINDS, 'unknown'),
+    fileMtime: num(r['file_mtime']),
+    importedAt: num(r['imported_at']),
+    itemCount: num(r['item_count']),
+  };
+}
+
+function rowToRequestLog(r: SqlRow): RequestLogRow {
+  return {
+    ts: num(r['ts']),
+    host: str(r['host']),
+    path: str(r['path']),
+    method: str(r['method']),
+    status: num(r['status']),
+    ms: num(r['ms']),
+    bytes: num(r['bytes']),
+    note: strOrNull(r['note']),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// SQL
+// ---------------------------------------------------------------------------
+
+const LISTING_UPSERT = upsertSql('listings', LISTING_COLS, ['id']);
+const OPP_UPSERT = upsertSql('opportunities', OPP_COLS, ['key']);
+
+// Buy orders best first (keys, then metal), sell listings cheapest first.
+const LISTING_ORDER =
+  "intent ASC, CASE WHEN intent = 'buy' THEN -keys ELSE keys END ASC, " +
+  "CASE WHEN intent = 'buy' THEN -metal_scrap ELSE metal_scrap END ASC, last_event_at DESC, id ASC";
+
+const OPP_SORT: Record<NonNullable<OppQuery['sort']>, { expr: string; nullable: string | null; defaultDir: 'asc' | 'desc' }> = {
+  profit: { expr: 'profit_scrap', nullable: 'profit_scrap', defaultDir: 'desc' },
+  margin: { expr: 'margin', nullable: 'margin', defaultDir: 'desc' },
+  confidence: { expr: 'confidence', nullable: 'confidence', defaultDir: 'desc' },
+  updated: { expr: 'updated_at', nullable: 'updated_at', defaultDir: 'desc' },
+  name: { expr: 'name COLLATE NOCASE', nullable: null, defaultDir: 'asc' },
+};
+
+/** Search tokens matched independently (AND), like the dashboard's own search; capped defensively. */
+const MAX_SEARCH_TOKENS = 20;
+
+interface SqlPart {
+  sql: string;
+  params: SqlValue[];
+}
+
+/** ' WHERE …' (or '') for an opportunity query's filters and search. */
+function oppWhere(q: OppQuery): SqlPart {
+  const where: string[] = [];
+  const params: SqlValue[] = [];
+
+  // An empty list means "no filter", matching how the dashboard sends unselected chips.
+  const inFilter = (col: string, values: readonly unknown[] | undefined): void => {
+    if (!Array.isArray(values) || values.length === 0) return;
+    const vals = uniqueStrings(values).slice(0, 500);
+    if (vals.length === 0) {
+      where.push('0');
+      return;
+    }
+    where.push(`${col} IN (${placeholders(vals.length)})`);
+    params.push(...vals);
+  };
+
+  inFilter('status', q.status);
+  inFilter('category', q.categories);
+  inFilter('profit_tier', q.tiers);
+  inFilter('input_kind', q.inputKinds);
+
+  if (typeof q.minConfidence === 'number' && Number.isFinite(q.minConfidence)) {
+    where.push('confidence >= ?');
+    params.push(q.minConfidence);
+  }
+
+  // Every whitespace-separated token must be in the name or the SKU ("strange rocket").
+  const tokens = typeof q.search === 'string' ? q.search.trim().split(/\s+/).filter(Boolean).slice(0, MAX_SEARCH_TOKENS) : [];
+  for (const t of tokens) {
+    const pattern = `%${escapeLike(t)}%`;
+    where.push("(name LIKE ? ESCAPE '\\' OR sku LIKE ? ESCAPE '\\')");
+    params.push(pattern, pattern);
+  }
+
+  return { sql: where.length ? ` WHERE ${where.join(' AND ')}` : '', params };
+}
+
+/** ORDER BY terms (no parameters) for an opportunity query's sort, ending in a unique key. */
+function oppOrder(q: OppQuery): string {
+  const sortKey = q.sort !== undefined && Object.hasOwn(OPP_SORT, q.sort) ? q.sort : 'profit';
+  const sort = OPP_SORT[sortKey];
+  const dir = q.dir === 'asc' || q.dir === 'desc' ? q.dir : sort.defaultDir;
+  const order: string[] = [];
+  if (sort.nullable) order.push(`(${sort.nullable} IS NULL) ASC`);
+  order.push(`${sort.expr} ${dir.toUpperCase()}`);
+  if (sortKey !== 'profit') order.push('(profit_scrap IS NULL) ASC', 'profit_scrap DESC');
+  if (sortKey !== 'name') order.push('name COLLATE NOCASE ASC');
+  order.push('"key" ASC');
+  return order.join(', ');
+}
+
+/** Group-by columns, normalised like rowToOpportunity so a damaged value groups under its fallback. */
+const OPP_GROUP: Record<GroupBy, { col: string; valid: readonly string[]; fallback: string }> = {
+  category: { col: 'category', valid: CATEGORIES, fallback: 'other' },
+  tier: { col: 'profit_tier', valid: PROFIT_TIERS, fallback: 'none' },
+  confidence: { col: 'confidence_level', valid: CONFIDENCE_LEVELS, fallback: 'low' },
+  input: { col: 'input_kind', valid: INPUT_KINDS, fallback: 'user' },
+};
+
+function oppGroupExpr(by: unknown): SqlPart | null {
+  if (typeof by !== 'string' || !Object.hasOwn(OPP_GROUP, by)) return null;
+  const g = OPP_GROUP[by as GroupBy];
+  return { sql: `(CASE WHEN ${g.col} IN (${placeholders(g.valid.length)}) THEN ${g.col} ELSE ? END)`, params: [...g.valid, g.fallback] };
+}
+
+function pageInt(v: unknown, fallback: number): number {
+  return typeof v === 'number' && Number.isFinite(v) ? Math.min(Number.MAX_SAFE_INTEGER, Math.max(0, Math.floor(v))) : fallback;
+}
+
+// ---------------------------------------------------------------------------
+// Repo
+// ---------------------------------------------------------------------------
+
+export function createRepo(db: SqliteDb): Repo {
+  const run = (sql: string, ...params: SqlValue[]): number => Number(db.prepare(sql).run(...params).changes);
+  const get = (sql: string, ...params: SqlValue[]): SqlRow | undefined => db.prepare(sql).get(...params);
+  const all = (sql: string, ...params: SqlValue[]): SqlRow[] => db.prepare(sql).all(...params);
+  const insertId = (sql: string, ...params: SqlValue[]): number => Number(db.prepare(sql).run(...params).lastInsertRowid);
+  const count = (table: string): number => num(get(`SELECT COUNT(*) AS n FROM ${table}`)?.['n']);
+
+  const getMeta = (key: string): string | null => strOrNull(get('SELECT value FROM meta WHERE key = ?', key)?.['value']);
+  const setMeta = (key: string, value: string): void => {
+    run('INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value', key, String(value));
+  };
+
+  const getScrapPrice = (id: number): ScrapPrice | null => {
+    const r = get('SELECT * FROM scrap_prices WHERE id = ?', id);
+    return r ? rowToScrapPrice(r) : null;
+  };
+
+  const getRule = (id: number): PriceRule | null => {
+    const r = get('SELECT * FROM price_rules WHERE id = ?', id);
+    return r ? rowToRule(r) : null;
+  };
+
+  const repo: Repo = {
+    path: db.path,
+
+    sizeBytes() {
+      if (!db.isMemory) {
+        try {
+          let total = statSync(db.path).size;
+          try {
+            total += statSync(`${db.path}-wal`).size;
+          } catch {
+            // No WAL file right now.
+          }
+          return total;
+        } catch {
+          // Fall through to the page count.
+        }
+      }
+      if (!db.isOpen()) return 0;
+      return db.pragmaNumber('page_count') * db.pragmaNumber('page_size');
+    },
+
+    close() {
+      db.close();
+    },
+
+    transaction<T>(fn: () => T): T {
+      return db.transaction(fn);
+    },
+
+    getMeta,
+    setMeta,
+
+    // ----- listings -----
+
+    upsertListings(rows) {
+      if (rows.length === 0) return;
+      db.transaction(() => {
+        const stmt = db.prepare(LISTING_UPSERT);
+        for (const l of rows) stmt.run(...listingParams(l));
+      });
+    },
+
+    deleteListings(ids) {
+      if (ids.length === 0) return;
+      db.transaction(() => {
+        const stmt = db.prepare('DELETE FROM listings WHERE id = ?');
+        for (const id of ids) stmt.run(String(id));
+      });
+    },
+
+    getListing(id) {
+      const r = get('SELECT * FROM listings WHERE id = ?', String(id));
+      return r ? rowToListing(r) : null;
+    },
+
+    listingsByBaseSku(baseSku, intent) {
+      const rows =
+        intent === undefined
+          ? all(`SELECT * FROM listings WHERE base_sku = ? ORDER BY ${LISTING_ORDER}`, baseSku)
+          : all(`SELECT * FROM listings WHERE base_sku = ? AND intent = ? ORDER BY ${LISTING_ORDER}`, baseSku, intent);
+      return rows.map(rowToListing);
+    },
+
+    buyListingsByBaseSkus(baseSkus) {
+      const unique = uniqueStrings(baseSkus);
+      const out = new Map<string, Listing[]>();
+      for (const s of unique) out.set(s, []);
+      for (const part of chunk(unique)) {
+        const rows = all(
+          `SELECT * FROM listings WHERE base_sku IN (${placeholders(part.length)}) AND intent = 'buy' ` +
+            'ORDER BY keys DESC, metal_scrap DESC, last_event_at DESC, id ASC',
+          ...part,
+        );
+        for (const r of rows) {
+          const l = rowToListing(r);
+          out.get(l.baseSku)?.push(l);
+        }
+      }
+      return out;
+    },
+
+    baseSkusWithBuyOrders() {
+      return all("SELECT DISTINCT base_sku FROM listings WHERE intent = 'buy' ORDER BY base_sku").map((r) => str(r['base_sku']));
+    },
+
+    deleteListingsNotIn(baseSku, intent, keepIds) {
+      return db.transaction(() => {
+        const keep = new Set(keepIds.map(String));
+        const del = db.prepare('DELETE FROM listings WHERE id = ?');
+        let deleted = 0;
+        for (const r of all('SELECT id FROM listings WHERE base_sku = ? AND intent = ?', baseSku, intent)) {
+          const id = str(r['id']);
+          if (!keep.has(id)) deleted += Number(del.run(id).changes);
+        }
+        return deleted;
+      });
+    },
+
+    purgeListingsOlderThan(ts) {
+      return run('DELETE FROM listings WHERE last_event_at < ?', bindNum(ts));
+    },
+
+    opportunityCounts() {
+      const r = get(
+        "SELECT COUNT(*) AS total, COALESCE(SUM(status = 'profitable'), 0) AS profitable, " +
+          "COALESCE(SUM(status = 'profitable' AND confidence_level = 'high'), 0) AS high FROM opportunities",
+      );
+      return { opportunities: num(r?.['total']), profitable: num(r?.['profitable']), highConfidence: num(r?.['high']) };
+    },
+
+    listingCounts() {
+      const r = get(
+        "SELECT COUNT(*) AS total, COALESCE(SUM(intent = 'buy'), 0) AS buy, COALESCE(SUM(intent = 'sell'), 0) AS sell FROM listings",
+      );
+      return { total: num(r?.['total']), buy: num(r?.['buy']), sell: num(r?.['sell']) };
+    },
+
+    // ----- backpack.tf names -----
+
+    upsertBptfNames(rows) {
+      if (rows.length === 0) return;
+      db.transaction(() => {
+        // Never let an older sighting overwrite a newer one; keep a known market name.
+        const stmt = db.prepare(
+          'INSERT INTO bptf_names (sku, name, market_name, last_seen) VALUES (?, ?, ?, ?) ' +
+            'ON CONFLICT(sku) DO UPDATE SET name = excluded.name, ' +
+            'market_name = COALESCE(excluded.market_name, bptf_names.market_name), last_seen = excluded.last_seen ' +
+            'WHERE excluded.last_seen >= bptf_names.last_seen',
+        );
+        for (const row of rows) {
+          if (typeof row.sku !== 'string' || !row.sku || typeof row.name !== 'string' || !row.name.trim()) continue;
+          stmt.run(row.sku, row.name, bindStrOrNull(row.marketName), bindNum(row.lastSeen));
+        }
+      });
+    },
+
+    getBptfName(sku) {
+      const r = get('SELECT * FROM bptf_names WHERE sku = ?', sku);
+      return r ? rowToBptfName(r) : null;
+    },
+
+    findSkuByBptfName(name) {
+      const n = typeof name === 'string' ? name.trim() : '';
+      if (!n) return null;
+      // Exact case first; the shortest SKU is the plain item (painted variants share the name).
+      const r = db
+        .prepare(
+          'SELECT sku FROM bptf_names WHERE name = :name COLLATE NOCASE ' +
+            'ORDER BY (name = :name) DESC, length(sku) ASC, last_seen DESC, sku ASC LIMIT 1',
+        )
+        .get({ name: n });
+      return r ? str(r['sku']) : null;
+    },
+
+    searchBptfNames(q, limit) {
+      const text = typeof q === 'string' ? q.trim() : '';
+      const lim = clampLimit(limit, 20, 1000);
+      if (!text || lim === 0) return [];
+      const esc = escapeLike(text);
+      const rows = db
+        .prepare(
+          'SELECT sku, name, market_name, last_seen, ' +
+            "CASE WHEN name LIKE :prefix ESCAPE '\\' THEN 0 " +
+            "WHEN market_name LIKE :prefix ESCAPE '\\' THEN 1 " +
+            "WHEN name LIKE :word ESCAPE '\\' THEN 2 ELSE 3 END AS rank " +
+            "FROM bptf_names WHERE name LIKE :sub ESCAPE '\\' OR market_name LIKE :sub ESCAPE '\\' " +
+            'ORDER BY rank ASC, length(name) ASC, name COLLATE NOCASE ASC, sku ASC LIMIT :limit',
+        )
+        .all({ prefix: `${esc}%`, word: `% ${esc}%`, sub: `%${esc}%`, limit: lim });
+      return rows.map(rowToBptfName);
+    },
+
+    // ----- PriceDB -----
+
+    upsertPricedb(rows) {
+      if (rows.length === 0) return;
+      db.transaction(() => {
+        const stmt = db.prepare(
+          upsertSql('pricedb_prices', ['sku', 'name', 'buy_keys', 'buy_scrap', 'sell_keys', 'sell_scrap', 'time', 'fetched_at'], ['sku']),
+        );
+        for (const p of rows) {
+          stmt.run(
+            String(p.sku),
+            String(p.name ?? ''),
+            bindNum(p.buyKeys),
+            bindNum(p.buyScrap),
+            bindNum(p.sellKeys),
+            bindNum(p.sellScrap),
+            bindNum(p.time),
+            bindNum(p.fetchedAt),
+          );
+        }
+      });
+    },
+
+    getPricedb(sku) {
+      const r = get('SELECT * FROM pricedb_prices WHERE sku = ?', sku);
+      return r ? rowToPricedb(r) : null;
+    },
+
+    pricedbCount() {
+      return count('pricedb_prices');
+    },
+
+    getSkuAlias(sku) {
+      return strOrNull(get('SELECT pricedb_sku FROM sku_aliases WHERE sku = ?', sku)?.['pricedb_sku']);
+    },
+
+    setSkuAlias(sku, pricedbSku) {
+      run(
+        'INSERT INTO sku_aliases (sku, pricedb_sku) VALUES (?, ?) ON CONFLICT(sku) DO UPDATE SET pricedb_sku = excluded.pricedb_sku',
+        sku,
+        pricedbSku,
+      );
+    },
+
+    // ----- community prices -----
+
+    upsertCommunity(rows) {
+      if (rows.length === 0) return;
+      db.transaction(() => {
+        const stmt = db.prepare(upsertSql('bptf_community', ['sku', 'currency', 'value', 'value_high', 'last_update'], ['sku']));
+        for (const c of rows) {
+          stmt.run(String(c.sku), String(c.currency ?? ''), bindNum(c.value), bindNumOrNull(c.valueHigh), bindNumOrNull(c.lastUpdate));
+        }
+      });
+    },
+
+    getCommunity(sku) {
+      const r = get('SELECT * FROM bptf_community WHERE sku = ?', sku);
+      return r ? rowToCommunity(r) : null;
+    },
+
+    // ----- key prices -----
+
+    upsertKeyQuote(q) {
+      run(
+        upsertSql('key_prices', ['source', 'buy_scrap', 'sell_scrap', 'observed_at'], ['source']),
+        String(q.source),
+        bindNumOrNull(q.buyScrap),
+        bindNumOrNull(q.sellScrap),
+        bindNum(q.observedAt),
+      );
+    },
+
+    keyQuotes() {
+      return all('SELECT * FROM key_prices ORDER BY observed_at DESC, source ASC').map(rowToKeyQuote);
+    },
+
+    // ----- scrap.tf prices -----
+
+    listScrapPrices(q) {
+      const text = typeof q === 'string' ? q.trim() : '';
+      if (!text) return all('SELECT * FROM scrap_prices ORDER BY observed_at DESC, id DESC').map(rowToScrapPrice);
+      const pattern = `%${escapeLike(text)}%`;
+      return all(
+        "SELECT * FROM scrap_prices WHERE name LIKE ? ESCAPE '\\' OR sku LIKE ? ESCAPE '\\' ORDER BY observed_at DESC, id DESC",
+        pattern,
+        pattern,
+      ).map(rowToScrapPrice);
+    },
+
+    getScrapPrice,
+
+    scrapPricesForSku(sku) {
+      return all('SELECT * FROM scrap_prices WHERE sku = ? ORDER BY observed_at DESC, id DESC', sku).map(rowToScrapPrice);
+    },
+
+    upsertScrapPrice(input) {
+      const sku = requireText('sku', input.sku);
+      const costScrap = requireFinite('costScrap', input.costScrap);
+      const observedAt = requireFinite('observedAt', input.observedAt);
+      if (!PRICE_SOURCES.includes(input.source)) throw new TypeError(`source must be one of ${PRICE_SOURCES.join(', ')}`);
+      if (input.costKeys !== undefined) requireFinite('costKeys', input.costKeys);
+
+      return db.transaction(() => {
+        const existing = input.id === undefined || input.id === null ? null : getScrapPrice(requireId('id', input.id));
+        if (input.id !== undefined && input.id !== null && !existing) throw new Error(`Scrap price ${input.id} not found`);
+
+        // On update, omitted optional fields keep their stored values.
+        const keep = <T,>(value: T | undefined, stored: T | undefined, fallback: T): T =>
+          value !== undefined ? value : existing ? (stored as T) : fallback;
+
+        const special = keep(input.special, existing?.special, null);
+        const params: SqlValue[] = [
+          sku,
+          String(input.name ?? ''),
+          bindNum(keep(input.costKeys, existing?.costKeys, 0)),
+          costScrap,
+          input.source,
+          observedAt,
+          bindStrOrNull(keep(input.note, existing?.note, null)),
+          bindNumOrNull(keep(input.importBatch, existing?.importBatch, null)),
+          special === null ? null : JSON.stringify(special),
+          bindStrOrNull(keep(input.assetId, existing?.assetId, null)),
+          bindNumOrNull(keep(input.stock, existing?.stock, null)),
+        ];
+
+        let id: number;
+        if (existing) {
+          id = existing.id;
+          run(
+            'UPDATE scrap_prices SET sku = ?, name = ?, cost_keys = ?, cost_scrap = ?, source = ?, observed_at = ?, note = ?, ' +
+              'import_batch = ?, special = ?, asset_id = ?, stock = ? WHERE id = ?',
+            ...params,
+            id,
+          );
+        } else {
+          id = insertId(
+            'INSERT INTO scrap_prices (sku, name, cost_keys, cost_scrap, source, observed_at, note, import_batch, special, asset_id, stock) ' +
+              'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+            ...params,
+          );
+        }
+        const stored = getScrapPrice(id);
+        if (!stored) throw new Error(`Scrap price ${id} vanished during upsert`);
+        return stored;
+      });
+    },
+
+    deleteScrapPrice(id) {
+      run('DELETE FROM scrap_prices WHERE id = ?', bindNum(id, -1));
+    },
+
+    // ----- price-sheet rules -----
+
+    listRules() {
+      return all('SELECT * FROM price_rules ORDER BY id ASC').map(rowToRule);
+    },
+
+    getRule,
+
+    upsertRule(input) {
+      const name = requireText('name', input.name);
+      const costScrap = requireFinite('costScrap', input.costScrap);
+      const observedAt = requireFinite('observedAt', input.observedAt);
+      if (input.costKeys !== undefined) requireFinite('costKeys', input.costKeys);
+      if (input.filter === null || typeof input.filter !== 'object' || Array.isArray(input.filter)) {
+        throw new TypeError('filter must be an object');
+      }
+
+      return db.transaction(() => {
+        const existing = input.id === undefined || input.id === null ? null : getRule(requireId('id', input.id));
+        if (input.id !== undefined && input.id !== null && !existing) throw new Error(`Price rule ${input.id} not found`);
+
+        const costKeys = input.costKeys ?? existing?.costKeys ?? 0;
+        const enabled = input.enabled ?? existing?.enabled ?? true;
+        const params: SqlValue[] = [name, JSON.stringify(input.filter), costKeys, costScrap, observedAt, bindBool(enabled)];
+
+        let id: number;
+        if (existing) {
+          id = existing.id;
+          run(
+            'UPDATE price_rules SET name = ?, filter_json = ?, cost_keys = ?, cost_scrap = ?, observed_at = ?, enabled = ? WHERE id = ?',
+            ...params,
+            id,
+          );
+        } else {
+          id = insertId(
+            'INSERT INTO price_rules (name, filter_json, cost_keys, cost_scrap, observed_at, enabled) VALUES (?, ?, ?, ?, ?, ?)',
+            ...params,
+          );
+        }
+        const stored = getRule(id);
+        if (!stored) throw new Error(`Price rule ${id} vanished during upsert`);
+        return stored;
+      });
+    },
+
+    deleteRule(id) {
+      run('DELETE FROM price_rules WHERE id = ?', bindNum(id, -1));
+    },
+
+    // ----- opportunities -----
+
+    upsertOpportunities(rows) {
+      if (rows.length === 0) return;
+      db.transaction(() => {
+        const stmt = db.prepare(OPP_UPSERT);
+        for (const o of rows) stmt.run(...oppParams(o));
+      });
+    },
+
+    deleteOpportunities(keys) {
+      if (keys.length === 0) return;
+      db.transaction(() => {
+        const stmt = db.prepare('DELETE FROM opportunities WHERE "key" = ?');
+        for (const k of keys) stmt.run(String(k));
+      });
+    },
+
+    getOpportunity(key) {
+      const r = get('SELECT * FROM opportunities WHERE "key" = ?', key);
+      return r ? rowToOpportunity(r) : null;
+    },
+
+    allOpportunities() {
+      return all('SELECT * FROM opportunities ORDER BY "key" ASC').map(rowToOpportunity);
+    },
+
+    opportunitiesForSku(sku) {
+      return all(
+        'SELECT * FROM opportunities WHERE sku = ? ORDER BY (profit_scrap IS NULL) ASC, profit_scrap DESC, "key" ASC',
+        sku,
+      ).map(rowToOpportunity);
+    },
+
+    queryOpportunities(q, page) {
+      const w = oppWhere(q);
+      const params: SqlValue[] = [...w.params];
+      let order = oppOrder(q);
+      const g = page?.group ?? null;
+      const group = g ? oppGroupExpr(g.by) : null;
+      if (g && group) {
+        // Rows of the first group in display order first; the requested sort applies inside each group.
+        const keys = uniqueStrings(g.order).slice(0, 100);
+        if (keys.length > 0) {
+          order = `(CASE ${group.sql} ${keys.map((_, i) => `WHEN ? THEN ${i}`).join(' ')} ELSE ${keys.length} END) ASC, ${order}`;
+          params.push(...group.params, ...keys);
+        }
+      }
+      let sql = `SELECT * FROM opportunities${w.sql} ORDER BY ${order}`;
+      if (page) {
+        sql += ' LIMIT ? OFFSET ?';
+        params.push(pageInt(page.limit, 0), pageInt(page.offset, 0));
+      }
+      return all(sql, ...params).map(rowToOpportunity);
+    },
+
+    countOpportunities(q) {
+      const w = oppWhere(q);
+      return num(get(`SELECT COUNT(*) AS n FROM opportunities${w.sql}`, ...w.params)?.['n']);
+    },
+
+    opportunityGroupStats(q, by) {
+      const group = oppGroupExpr(by);
+      if (!group) return [];
+      const w = oppWhere(q);
+      return all(
+        `SELECT ${group.sql} AS k, COUNT(*) AS n, SUM(COALESCE(profit_scrap, 0)) AS p FROM opportunities${w.sql} GROUP BY k`,
+        ...group.params,
+        ...w.params,
+      ).map((r) => ({ key: str(r['k']), count: num(r['n']), profitScrap: num(r['p']) }));
+    },
+
+    appendEvents(events) {
+      if (events.length === 0) return;
+      db.transaction(() => {
+        const stmt = db.prepare(
+          'INSERT INTO opportunity_events ("key", sku, name, category, kind, profit_scrap, cost_scrap, revenue_scrap, confidence, summary, ts) ' +
+            'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+        );
+        for (const e of events) {
+          stmt.run(
+            String(e.key),
+            String(e.sku),
+            String(e.name ?? ''),
+            String(e.category),
+            String(e.kind),
+            bindNumOrNull(e.profitScrap),
+            bindNumOrNull(e.costScrap),
+            bindNumOrNull(e.revenueScrap),
+            bindNum(e.confidence),
+            typeof e.summary === 'string' ? e.summary : '',
+            bindNum(e.ts),
+          );
+        }
+      });
+    },
+
+    listEvents(q) {
+      const where: string[] = [];
+      const params: SqlValue[] = [];
+      if (typeof q.beforeId === 'number' && Number.isFinite(q.beforeId)) {
+        where.push('id < ?');
+        params.push(q.beforeId);
+      }
+      // afterId pages forward (oldest first) from a cursor, e.g. the opportunity JSONL log.
+      const after = typeof q.afterId === 'number' && Number.isFinite(q.afterId);
+      if (after) {
+        where.push('id > ?');
+        params.push(q.afterId!);
+      }
+      if (typeof q.sku === 'string' && q.sku) {
+        where.push('sku = ?');
+        params.push(q.sku);
+      }
+      if (Array.isArray(q.kinds) && q.kinds.length > 0) {
+        const kinds = uniqueStrings(q.kinds).slice(0, 50);
+        if (kinds.length === 0) where.push('0');
+        else {
+          where.push(`kind IN (${placeholders(kinds.length)})`);
+          params.push(...kinds);
+        }
+      }
+      if (typeof q.sinceTs === 'number' && Number.isFinite(q.sinceTs)) {
+        where.push('ts >= ?');
+        params.push(q.sinceTs);
+      }
+      const limit = clampLimit(q.limit, EVENTS_DEFAULT_LIMIT, EVENTS_MAX_LIMIT);
+      const sql =
+        'SELECT * FROM opportunity_events' +
+        (where.length ? ` WHERE ${where.join(' AND ')}` : '') +
+        ` ORDER BY id ${after ? 'ASC' : 'DESC'} LIMIT ?`;
+      return all(sql, ...params, limit).map(rowToEvent);
+    },
+
+    purgeEventsOlderThan(ts) {
+      return run('DELETE FROM opportunity_events WHERE ts < ?', bindNum(ts));
+    },
+
+    // ----- journal -----
+
+    listJournal(limit) {
+      const lim = limit === undefined ? -1 : clampLimit(limit, -1, GENERIC_MAX_LIMIT);
+      return all('SELECT * FROM journal ORDER BY ts DESC, id DESC LIMIT ?', lim).map(rowToJournal);
+    },
+
+    addJournal(entry) {
+      if (!JOURNAL_SIDES.includes(entry.side)) throw new TypeError(`side must be one of ${JOURNAL_SIDES.join(', ')}`);
+      const ts = requireFinite('ts', entry.ts);
+      const sku = requireText('sku', entry.sku);
+      const scrap = requireFinite('scrap', entry.scrap);
+      const keys = entry.keys === undefined ? 0 : requireFinite('keys', entry.keys);
+      const id = insertId(
+        'INSERT INTO journal (ts, side, venue, sku, name, keys, scrap, key_price_scrap, note) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+        ts,
+        entry.side,
+        String(entry.venue ?? ''),
+        sku,
+        String(entry.name ?? ''),
+        keys,
+        scrap,
+        bindNum(entry.keyPriceScrap),
+        bindStrOrNull(entry.note),
+      );
+      const r = get('SELECT * FROM journal WHERE id = ?', id);
+      if (!r) throw new Error(`Journal entry ${id} vanished after insert`);
+      return rowToJournal(r);
+    },
+
+    deleteJournal(id) {
+      run('DELETE FROM journal WHERE id = ?', bindNum(id, -1));
+    },
+
+    // ----- item schema -----
+
+    replaceSchema(s) {
+      db.transaction(() => {
+        db.exec('DELETE FROM schema_items; DELETE FROM effects; DELETE FROM paints; DELETE FROM paintkits;');
+
+        const items = db.prepare(
+          'INSERT OR REPLACE INTO schema_items (defindex, name, item_name, proper_name, item_class, slot, craft_class, used_by_classes, image_url) ' +
+            'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+        );
+        for (const it of s.items) {
+          if (typeof it.defindex !== 'number' || !Number.isInteger(it.defindex)) continue;
+          items.run(
+            it.defindex,
+            String(it.name ?? ''),
+            String(it.itemName ?? ''),
+            bindBool(it.properName),
+            String(it.itemClass ?? ''),
+            bindStrOrNull(it.slot),
+            bindStrOrNull(it.craftClass),
+            JSON.stringify(Array.isArray(it.usedByClasses) ? it.usedByClasses : []),
+            bindStrOrNull(it.imageUrl),
+          );
+        }
+
+        const effects = db.prepare('INSERT OR REPLACE INTO effects (id, name, canonical_id, type) VALUES (?, ?, ?, ?)');
+        for (const e of s.effects) {
+          if (typeof e.id !== 'number' || !Number.isInteger(e.id)) continue;
+          effects.run(e.id, String(e.name ?? ''), bindNum(e.canonicalId, e.id), String(e.type));
+        }
+
+        const paints = db.prepare('INSERT OR REPLACE INTO paints (decimal, hex, name, blu_hex) VALUES (?, ?, ?, ?)');
+        for (const p of s.paints) {
+          if (typeof p.decimal !== 'number' || !Number.isInteger(p.decimal)) continue;
+          paints.run(p.decimal, String(p.hex ?? ''), String(p.name ?? ''), bindStrOrNull(p.bluHex));
+        }
+
+        const kits = db.prepare('INSERT OR REPLACE INTO paintkits (id, name) VALUES (?, ?)');
+        for (const k of s.paintkits) {
+          if (typeof k.id !== 'number' || !Number.isInteger(k.id)) continue;
+          kits.run(k.id, String(k.name ?? ''));
+        }
+
+        setMeta(META_SCHEMA_FETCHED_AT, String(bindNum(s.fetchedAt)));
+        if (typeof s.etag === 'string') setMeta(META_SCHEMA_ETAG, s.etag);
+        else run('DELETE FROM meta WHERE key = ?', META_SCHEMA_ETAG);
+      });
+    },
+
+    schemaItem(defindex) {
+      const r = get('SELECT * FROM schema_items WHERE defindex = ?', bindNum(defindex, -1));
+      return r ? rowToSchemaItem(r) : null;
+    },
+
+    allSchemaItems() {
+      return all('SELECT * FROM schema_items ORDER BY defindex ASC').map(rowToSchemaItem);
+    },
+
+    effects() {
+      return all('SELECT * FROM effects ORDER BY id ASC').map(rowToEffect);
+    },
+
+    paints() {
+      return all('SELECT * FROM paints ORDER BY name COLLATE NOCASE ASC, decimal ASC').map(rowToPaint);
+    },
+
+    paintkits() {
+      return all('SELECT * FROM paintkits ORDER BY id ASC').map(rowToPaintkit);
+    },
+
+    schemaInfo() {
+      const fetched = getMeta(META_SCHEMA_FETCHED_AT);
+      const loadedAt = fetched === null ? null : Number(fetched);
+      return {
+        items: count('schema_items'),
+        effects: count('effects'),
+        paintkits: count('paintkits'),
+        loadedAt: loadedAt !== null && Number.isFinite(loadedAt) ? loadedAt : null,
+        etag: getMeta(META_SCHEMA_ETAG),
+      };
+    },
+
+    // ----- saved-page imports -----
+
+    createImportBatch(b) {
+      return insertId(
+        'INSERT INTO import_batches (file_name, page_kind, file_mtime, imported_at, item_count) VALUES (?, ?, ?, ?, ?)',
+        String(b.fileName ?? ''),
+        String(b.pageKind),
+        bindNum(b.fileMtime),
+        bindNum(b.importedAt),
+        bindNum(b.itemCount),
+      );
+    },
+
+    listImportBatches(limit) {
+      const lim = clampLimit(limit, 50, GENERIC_MAX_LIMIT);
+      return all('SELECT * FROM import_batches ORDER BY imported_at DESC, id DESC LIMIT ?', lim).map(rowToImportBatch);
+    },
+
+    // ----- request log -----
+
+    appendRequestLog(row) {
+      run(
+        'INSERT INTO request_log (ts, host, path, method, status, ms, bytes, note) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+        bindNum(row.ts),
+        String(row.host ?? ''),
+        String(row.path ?? ''),
+        String(row.method ?? ''),
+        bindNum(row.status),
+        bindNum(row.ms),
+        bindNum(row.bytes),
+        bindStrOrNull(row.note),
+      );
+    },
+
+    recentRequests(limit) {
+      const lim = clampLimit(limit, 100, GENERIC_MAX_LIMIT);
+      return all('SELECT * FROM request_log ORDER BY id DESC LIMIT ?', lim).map(rowToRequestLog);
+    },
+
+    requestsSince(ts) {
+      return all('SELECT ts, host, path FROM request_log WHERE ts >= ? ORDER BY ts, id', bindNum(ts)).map((r) => ({
+        ts: num(r['ts']),
+        host: str(r['host']),
+        path: str(r['path']),
+      }));
+    },
+
+    purgeRequestLogOlderThan(ts) {
+      return run('DELETE FROM request_log WHERE ts < ?', bindNum(ts));
+    },
+
+    // ----- snapshot bookkeeping -----
+
+    setSnapshotAt(sku: string, ts: UnixMs) {
+      run(
+        'INSERT INTO snapshot_times (sku, last_at) VALUES (?, ?) ON CONFLICT(sku) DO UPDATE SET last_at = excluded.last_at',
+        sku,
+        bindNum(ts),
+      );
+    },
+
+    getSnapshotAt(sku) {
+      return numOrNull(get('SELECT last_at FROM snapshot_times WHERE sku = ?', sku)?.['last_at']);
+    },
+  };
+
+  return repo;
+}
+
