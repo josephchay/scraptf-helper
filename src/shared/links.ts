@@ -45,6 +45,9 @@ export function scraptfPageFor(category: Category): string {
   return Object.hasOwn(SCRAPTF_PAGES, category) ? SCRAPTF_PAGES[category] : SCRAPTF_PAGES.other;
 }
 
+/** Where backpack.tf shows both the access token ("Reveal") and the API key (registered there first). */
+export const BPTF_API_ACCESS_URL = 'https://next.backpack.tf/account/api-access';
+
 // ---------------------------------------------------------------------------
 // URL allowlist
 // ---------------------------------------------------------------------------

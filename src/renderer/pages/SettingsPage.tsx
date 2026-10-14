@@ -1,5 +1,6 @@
 import { useRef, useState, type ReactNode } from 'react';
 import { parsePrice } from '../../shared/currency';
+import { BPTF_API_ACCESS_URL } from '../../shared/links';
 import type { InputKind, SecretName, Settings } from '../../shared/types';
 import { rpc } from '../api';
 import { CheckGroup, CommitInput, Field, Segmented, Toggle } from '../components/Controls';
@@ -102,13 +103,21 @@ function AccessSection() {
       title="backpack.tf access"
       intro={
         <>
-          Your own credentials only. They are encrypted on this computer, never shown again after saving, never logged, and sent only to backpack.tf. Get them at{' '}
-          <ExternalLink url="https://backpack.tf/connections">backpack.tf/connections</ExternalLink>.
+          Your own credentials only. They are encrypted on this computer, never shown again after saving, never logged, and sent only to backpack.tf. Both are on{' '}
+          <ExternalLink url={BPTF_API_ACCESS_URL}>next.backpack.tf/account/api-access</ExternalLink>. They are two different values.
         </>
       }
     >
-      <SecretField name="bptfAccessToken" label="Access token" help="Used for snapshots (refreshing one item on demand) and user info." />
-      <SecretField name="bptfApiKey" label="API key" help="Used for community prices (every 2 h) and backpack.tf's key price (hourly)." />
+      <SecretField
+        name="bptfAccessToken"
+        label="Access token"
+        help={'Click "Reveal" under "Access Token". Used for snapshots (refreshing one item on demand) and user info.'}
+      />
+      <SecretField
+        name="bptfApiKey"
+        label="API key"
+        help={'Under "API Key", register a key first (any site URL, e.g. http://localhost, and a short comment), then copy it. Used for community prices (every 2 h) and backpack.tf\'s key price (hourly).'}
+      />
       <SecretField name="steamApiKey" label="Steam Web API key (optional)" help="Not needed. Only used if you turn on Steam features later. Check steamcommunity.com/dev/apikey for keys you don't recognise." />
     </Section>
   );

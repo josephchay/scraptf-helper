@@ -99,6 +99,21 @@ describe('secrets store', () => {
     expect(seen).toEqual([{ bptfApiKey: KEY }, {}]);
   });
 
+  it('refuses the same value as backpack.tf key and token, and says which one is wanted', () => {
+    const s = createSecretsStore({ file, safeStorage: fakeSafeStorage(), log: quietLog() });
+    s.set('bptfAccessToken', TOKEN);
+    expect(() => s.set('bptfApiKey', ` ${TOKEN} `)).toThrow(SecretValidationError);
+    expect(() => s.set('bptfApiKey', TOKEN)).toThrow(/access token, not the API key.*next\.backpack\.tf\/account\/api-access.*"API Key"/);
+    expect(s.status().bptfApiKey).toBe(false);
+
+    s.set('bptfApiKey', KEY);
+    expect(() => s.set('bptfAccessToken', KEY)).toThrow(/API key, not the access token.*"Reveal"/);
+    expect(s.get('bptfAccessToken')).toBe(TOKEN);
+    // The Steam key is unrelated, and re-saving the same token is still a no-op.
+    expect(() => s.set('steamApiKey', KEY)).not.toThrow();
+    expect(() => s.set('bptfAccessToken', TOKEN)).not.toThrow();
+  });
+
   it('returns copies so callers cannot mutate the store', () => {
     const s = createSecretsStore({ file, safeStorage: fakeSafeStorage(), log: quietLog() });
     s.set('bptfApiKey', KEY);

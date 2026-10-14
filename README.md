@@ -41,7 +41,9 @@ Closing the window keeps the app running in the tray. Use the tray menu to open 
 ## First run
 
 1. **Settings → Contact URL.** Add something that reaches you, such as your Steam profile URL. It goes into the User-Agent so API operators can contact you instead of blocking you.
-2. **Settings → backpack.tf.** Add your **access token** and **API key** from <https://backpack.tf/connections>.
+2. **Settings → backpack.tf.** Add your **access token** and **API key**. Both are on <https://next.backpack.tf/account/api-access>, and they are two different values:
+   - **Access token:** click *Reveal* under *Access Token*.
+   - **API key:** under *API Key*, register a key first (any site URL such as `http://localhost`, plus a short comment), then copy it. A 403 "This API key is not valid" almost always means the access token or a Steam Web API key was pasted here.
    - The live buy-order feed works without them.
    - The token enables on-demand and watched-item refreshes.
    - The key adds backpack.tf community prices and backpack.tf's key price.

@@ -6,6 +6,7 @@
 import { renameSync } from 'node:fs';
 import { z } from 'zod';
 import type { Logger } from '../service/contracts';
+import { BPTF_API_ACCESS_URL } from '../shared/links';
 import { SECRET_NAMES, type SecretName, type SecretsStatus } from '../shared/types';
 import { readFileRetrySync, writeFileAtomicSync } from './paths';
 
@@ -43,6 +44,13 @@ export class SecretValidationError extends Error {
 }
 
 export const MAX_SECRET_LENGTH = 512;
+
+type BptfCredential = 'bptfApiKey' | 'bptfAccessToken';
+const BPTF_TWIN: Partial<Record<SecretName, BptfCredential>> = { bptfApiKey: 'bptfAccessToken', bptfAccessToken: 'bptfApiKey' };
+const SAME_VALUE_MESSAGE: Record<BptfCredential, string> = {
+  bptfApiKey: `This is your access token, not the API key. On ${BPTF_API_ACCESS_URL}, register a key under "API Key" and paste that one here.`,
+  bptfAccessToken: `This is your API key, not the access token. On ${BPTF_API_ACCESS_URL}, click "Reveal" under "Access Token" and paste that one here.`,
+};
 export const secretNameSchema = z.enum(SECRET_NAMES as [SecretName, ...SecretName[]]);
 
 /** Trims and checks a secret; returns null for "delete". Keys and tokens are printable ASCII without spaces. */
@@ -221,6 +229,9 @@ export function createSecretsStore(opts: SecretsStoreOptions): SecretsStore {
       recover();
       if (v === null) return remove(name);
       if (plain[name] === v) return status();
+      // backpack.tf issues two different values on one page; pasting one into both fields is the usual mix-up.
+      const twin = BPTF_TWIN[name];
+      if (twin && plain[twin] === v) throw new SecretValidationError(SAME_VALUE_MESSAGE[name as BptfCredential]);
       if (!available()) throw new SecretsUnavailableError();
       let encoded: string;
       try {

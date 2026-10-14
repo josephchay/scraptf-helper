@@ -9,6 +9,7 @@ import type { BptfApi, HttpRequestOptions, HttpResponse, SchemaService, ServiceD
 import type { CommunityRow, ConnState, ConnectorHealth, KeyPriceQuote, Listing, SecretName, UnixMs, UnixSec } from '../../shared/types';
 import { baseSku, looksLikeSku } from '../../shared/sku';
 import { scrapToRef } from '../../shared/currency';
+import { BPTF_API_ACCESS_URL } from '../../shared/links';
 import { HttpStatusError, NetworkPausedError, RateLimitedError, scrubText } from '../net';
 import { createMapStats, listingFromSnapshot, parseIGetCurrencies, parseIGetPrices, type BptfMapStats } from './bptfItem';
 
@@ -37,6 +38,19 @@ export const META_SNAPSHOT_UNAVAILABLE = 'bptf.snapshotUnavailable';
 export type TokenMethod = 'header' | 'query';
 type Family = 'snapshot' | 'prices' | 'currencies' | 'users';
 type CredentialName = Extract<SecretName, 'bptfApiKey' | 'bptfAccessToken'>;
+
+/**
+ * What to do about a rejected credential. Only the value's shape is used, never the value:
+ * a 32-hex value is a Steam Web API key, the commonest wrong paste (backpack.tf keys are 24).
+ */
+export function credentialHint(name: CredentialName, value: string): string {
+  if (/^[0-9a-f]{32}$/i.test(value)) {
+    return `This looks like a Steam Web API key. backpack.tf's own ${name === 'bptfApiKey' ? 'API key' : 'access token'} is on ${BPTF_API_ACCESS_URL}.`;
+  }
+  return name === 'bptfApiKey'
+    ? `On ${BPTF_API_ACCESS_URL}, register a key under "API Key" (any site URL and a short comment) and copy that value, not the access token.`
+    : `On ${BPTF_API_ACCESS_URL}, click "Reveal" under "Access Token" and copy that value, not the API key.`;
+}
 
 /** The connector is off in Settings or the needed key/token is missing. */
 export class BptfNotConfiguredError extends Error {
@@ -305,7 +319,7 @@ export function createBptfApi(deps: ServiceDeps & { schema: SchemaService }): Bp
 
   const rejectCredential = (name: CredentialName, value: string, status: number, message: string): BptfCredentialError => {
     const what = name === 'bptfApiKey' ? 'API key' : 'access token';
-    const reason = `backpack.tf rejected the ${what} (HTTP ${status}${message ? `: ${clean(message)}` : ''}). Check it in Settings.`;
+    const reason = `backpack.tf rejected the ${what} (HTTP ${status}${message ? `: ${clean(message)}` : ''}). Check it in Settings. ${credentialHint(name, value)}`;
     rejected[name] = { fp: fingerprint(value), reason };
     log.warn(reason);
     return new BptfCredentialError(name, status, reason);

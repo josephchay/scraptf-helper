@@ -16,8 +16,10 @@ import {
   alternateTheName,
   banDetailsFromBans,
   createBptfApi,
+  credentialHint,
   isBannedFromBans,
 } from '../../src/service/connectors/bptfApi';
+import { BPTF_API_ACCESS_URL, isAllowedExternalUrl } from '../../src/shared/links';
 import { openRepo } from '../../src/service/db';
 import type { Repo } from '../../src/service/contracts';
 import { RateLimitedError } from '../../src/service/net';
@@ -571,7 +573,19 @@ describe('test()', () => {
     const bad = await h.api.test('bptfApiKey');
     expect(bad.ok).toBe(false);
     expect(bad.message).toMatch(/rejected the API key \(HTTP 403/);
+    // Says where the real key is, and that the token is a different value.
+    expect(bad.message).toMatch(/next\.backpack\.tf\/account\/api-access.*not the access token/);
     assertNoSecrets(h, [bad]);
+  });
+
+  it('recognises a Steam Web API key pasted as the backpack.tf key, by shape only', () => {
+    const steamLike = 'ABCDEF0123456789ABCDEF0123456789';
+    expect(credentialHint('bptfApiKey', steamLike)).toMatch(/looks like a Steam Web API key/);
+    expect(credentialHint('bptfApiKey', steamLike)).not.toContain(steamLike);
+    expect(credentialHint('bptfAccessToken', steamLike)).toMatch(/access token is on https:\/\/next\.backpack\.tf\/account\/api-access/);
+    expect(credentialHint('bptfApiKey', '5f0123456789abcdef012345')).toMatch(/register a key under "API Key"/);
+    expect(credentialHint('bptfAccessToken', '5f0123456789abcdef012345')).toMatch(/"Reveal" under "Access Token"/);
+    expect(isAllowedExternalUrl(BPTF_API_ACCESS_URL)).toBe(true);
   });
 
   it('does not queue behind the scheduled key-price call: answers from the last accepted call or gives the retry time', async () => {
