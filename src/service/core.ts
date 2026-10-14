@@ -27,8 +27,10 @@ import {
   createHttpClient,
   defaultBudgetFor,
   parseHostBlocks,
+  parsePauseState,
   registerSecret,
   unregisterSecret,
+  type NetPauseState,
 } from './net';
 import { createRpcHandlers, importSavedPage, type HandlerContext } from './rpcHandlers';
 import { buildJobs, createScheduler, SNAPSHOT_STALE_MS, type Scheduler } from './scheduler';
@@ -89,15 +91,24 @@ const WATCH_RETRY_MS = 60_000;
 export const META_WATCH_IMPORTING = 'import.watchImporting';
 /** Repo meta: hosts disabled after a challenge page, as JSON {host: reason}; cleared only by the user (R7). */
 export const META_BLOCKED_HOSTS = 'net.blockedHosts';
+/**
+ * Repo meta: budget pauses (429/503 Retry-After, backoff, RateLimit-Remaining)
+ * and 429 streaks, as JSON NetPauseState. Restored at start so a crash restart
+ * or relaunch keeps honouring the server's wait (R7); restored pauses are
+ * clamped to 24 h.
+ */
+export const META_NET_PAUSES = 'net.pauses';
 
 /** Host whose block disables each connector, for the Data health page's "Re-enable" button. */
 const CONNECTOR_HOSTS: Readonly<Record<string, string>> = {
+  'bptf-ws': 'ws.backpack.tf',
   'bptf-snapshot': 'api.backpack.tf',
   'bptf-prices': 'api.backpack.tf',
   'bptf-currencies': 'api.backpack.tf',
   'bptf-users': 'api.backpack.tf',
   schema: 'sku.pricedb.io',
   pricedb: 'pricedb.io',
+  'pricedb-socket': 'ws.pricedb.io',
   scm: 'steamcommunity.com',
 };
 
@@ -253,6 +264,13 @@ export function createServiceCore(opts: ServiceCoreOptions): ServiceCore {
   } catch (err) {
     log.warn(`could not read the disabled hosts: ${errorText(err)}`);
   }
+  // Retry-After pauses and 429 streaks survive restarts too (R7); see META_NET_PAUSES.
+  let savedPauses: NetPauseState | undefined;
+  try {
+    savedPauses = parsePauseState(repo.getMeta(META_NET_PAUSES));
+  } catch (err) {
+    log.warn(`could not read the request pauses: ${errorText(err)}`);
+  }
   const http = createHttpClient({
     clock,
     log,
@@ -264,6 +282,8 @@ export function createServiceCore(opts: ServiceCoreOptions): ServiceCore {
       hostBlocks = blocks;
       repo.setMeta(META_BLOCKED_HOSTS, JSON.stringify(blocks));
     },
+    ...(savedPauses ? { initialPauses: savedPauses } : {}),
+    onPausesChanged: (state) => repo.setMeta(META_NET_PAUSES, JSON.stringify(state)),
     // The log row is written when the exchange ends; remember slow-budget starts before sending.
     onBeforeSend: (start) => {
       if ((budgetById(start.budget)?.minIntervalMs ?? 0) < SLOW_BUDGET_MS) return;
@@ -515,8 +535,13 @@ export function createServiceCore(opts: ServiceCoreOptions): ServiceCore {
 
   // ----- PriceDB socket -----
   let pricedbSocketOn = false;
+  // A refused socket upgrade or a challenge on the REST host keeps the socket closed until net.unblock (R7).
   const wantPricedbSocket = (): boolean =>
-    !settings.networkPaused && settings.connectors.pricedb && settings.connectors.pricedbSocket;
+    !settings.networkPaused &&
+    settings.connectors.pricedb &&
+    settings.connectors.pricedbSocket &&
+    http.hostBlocked('ws.pricedb.io') === null &&
+    http.hostBlocked('pricedb.io') === null;
   const syncPricedbSocket = (): void => {
     const want = started && wantPricedbSocket();
     if (want && !pricedbSocketOn) {
@@ -768,6 +793,14 @@ export function createServiceCore(opts: ServiceCoreOptions): ServiceCore {
     },
     hostUnblocked: (host) => {
       for (const id of HOST_JOBS[host] ?? []) scheduler.kick(id);
+      if (host === 'ws.backpack.tf') {
+        socket.unblock();
+        syncFeed();
+      }
+      if (host === 'ws.pricedb.io' || host === 'pricedb.io') {
+        syncPricedbSocket();
+        pricedb.resumeSocket();
+      }
       checkStatus();
     },
   };
@@ -875,13 +908,15 @@ export function createServiceCore(opts: ServiceCoreOptions): ServiceCore {
     },
 
     updateSecrets(next) {
-      const had = { key: !!secrets.bptfApiKey, token: !!secrets.bptfAccessToken };
+      const prev = { key: secrets.bptfApiKey, token: secrets.bptfAccessToken };
       applySecrets(next);
-      if (!had.key && secrets.bptfApiKey) {
+      // A new or replaced credential (e.g. one that fixes a rejected key) is used at once
+      // instead of after the failed jobs' retry delay; the HTTP budgets still space the requests (R7).
+      if (secrets.bptfApiKey && secrets.bptfApiKey !== prev.key) {
         scheduler.kick('key-bptf');
         scheduler.kick('bptf-prices');
       }
-      if (!had.token && secrets.bptfAccessToken) scheduler.kick('snapshot-watched');
+      if (secrets.bptfAccessToken && secrets.bptfAccessToken !== prev.token) scheduler.kick('snapshot-watched');
       checkStatus();
     },
 

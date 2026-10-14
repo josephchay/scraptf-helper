@@ -138,6 +138,7 @@ export const noNetwork: HttpClient = {
   nextAllowedAt: () => 0,
   budgets: () => [],
   hostBlocked: () => null,
+  blockHost: () => undefined,
   unblockHost: () => undefined,
   userAgent: () => 'TF2FlipDesk/0.1.0 (+test)',
 };

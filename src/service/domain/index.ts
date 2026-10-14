@@ -13,6 +13,10 @@ export {
   evaluateOpportunity,
   explicitInput,
   notificationBody,
+  notificationSummaryTitle,
+  notificationTitle,
+  notifyKinds,
+  revenueOrderByValue,
   revenueOrderOf,
   ruleInput,
   runMaintenance,
@@ -46,20 +50,25 @@ export {
 } from './matcher';
 
 export {
+  DEFAULT_REFERENCE_MAX_AGE_MS,
   communityScrap,
   compareValued,
   computePrices,
+  hasReferenceValue,
   lookupReferences,
   median,
   outlierRefs,
+  pickRevenueOrder,
   referencePrices,
   refreshReferenceAge,
   toOrderSummary,
+  usableReferences,
   valueOrders,
   type ClassifiedOrder,
   type PriceRefs,
   type PriceResult,
   type RawReferences,
+  type UsableReferences,
   type ValuedOrder,
   type ValuedOrderLike,
 } from './pricing';
@@ -69,6 +78,7 @@ export {
   BOT_PULSE_MS,
   CONFIRMED_MS,
   FRESH_INPUT_MS,
+  SUSPECT_MIN_ORDERS,
   scoreConfidence,
   type ConfidenceInput,
   type ConfidenceResult,
@@ -80,6 +90,7 @@ export {
   HIGH_CONFIDENCE,
   INPUT_KIND_LABELS,
   INPUT_KIND_ORDER,
+  LOW_CAP,
   MEDIUM_CAP,
   MEDIUM_CONFIDENCE,
   REF10_SCRAP,
@@ -87,6 +98,7 @@ export {
   STATUS_ORDER,
   TIER_ORDER,
   confidenceLevel,
+  maxCostFor,
   minProfitFor,
   profitStatus,
   profitTier,
@@ -99,6 +111,7 @@ export {
   groupKeyOf,
   groupLabel,
   groupOrder,
+  itemRevenue,
   listOpportunities,
   previewRule,
   summarizeGroups,
@@ -108,3 +121,5 @@ export {
 export { journalSummary, journalValue } from './journal';
 
 export { CSV_BOM, csvCell, eventsCsv, journalCsv, opportunitiesCsv, toCsv, type CsvCell } from './csv';
+
+export { buildShoppingList, shoppingCsv } from './shopping';

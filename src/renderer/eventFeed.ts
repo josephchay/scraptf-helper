@@ -13,6 +13,15 @@ export function mergeEvents(a: readonly OpportunityEvent[], b: readonly Opportun
   return [...map.values()].sort((x, y) => y.id - x.id).slice(0, max);
 }
 
+/**
+ * How many older events "Load older" may request: what still fits under the
+ * cap. mergeEvents keeps the newest, so a page fetched into a full list would
+ * be dropped again at once. 0 means the list is full.
+ */
+export function olderPageLimit(kept: number, page: number, max = MAX_KEPT_EVENTS): number {
+  return Math.max(0, Math.min(page, max - kept));
+}
+
 export interface NewEvents {
   /** Every event newer than the known id, newest first (at most `maxKept`). */
   fresh: OpportunityEvent[];

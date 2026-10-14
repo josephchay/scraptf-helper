@@ -1,0 +1,144 @@
+/* Item drawer: buyer actions, price actions and copy buttons (F3, F8, F9). The menus are styled in item-menu.css. */
+
+/* ---------- header copy buttons ---------- */
+
+.drawer-copy {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 6px;
+  margin-left: -9px; /* ghost buttons line up with the SKU above */
+}
+
+.drawer-copy .btn.small {
+  height: 24px;
+}
+
+/* ---------- your scrap.tf prices ---------- */
+
+.price-lines .price-line {
+  align-items: center;
+  padding: 3px 0;
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.price-line-actions {
+  margin-left: auto;
+}
+
+.price-line-actions .btn.small {
+  height: 24px;
+}
+
+.drawer-price-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.drawer-price-title {
+  font-weight: 650;
+}
+
+.drawer-price-card > p {
+  margin: 0;
+}
+
+.drawer-price-form {
+  grid-template-columns: minmax(0, 1.6fr) minmax(0, 1fr);
+  align-items: start;
+  gap: 10px 12px;
+}
+
+.drawer-price-form > .field:has(select),
+.drawer-price-form > .drawer-ceiling,
+.drawer-price-form > .field-error,
+.drawer-price-form > .form-actions {
+  grid-column: 1 / -1;
+}
+
+.drawer-price-form > .form-actions {
+  gap: 10px;
+}
+
+.drawer-ceiling {
+  color: var(--text-muted);
+}
+
+.drawer-ceiling .money {
+  color: var(--text);
+  font-weight: 600;
+}
+
+@media (max-width: 720px) {
+  .drawer-price-form {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* ---------- order book buyer actions ---------- */
+
+.icon-btn.buyer-menu-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 1px;
+  padding: 0 5px;
+}
+
+.icon-btn.buyer-menu-btn[aria-expanded='true'] {
+  background: var(--surface-3);
+  color: var(--text);
+}
+
+/* The revenue order of an item worth a background check. */
+.table tr.bg-check-row td:first-child {
+  box-shadow: inset 3px 0 0 var(--warn);
+}
+
+.table tr.buyer-check-row td {
+  padding-top: 0;
+}
+
+.table tbody tr.buyer-check-row:hover td {
+  background: transparent;
+}
+
+.buyer-check {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+  padding: 5px 8px;
+  border-left: 3px solid var(--tone);
+  border-radius: var(--radius-sm);
+  background: var(--tone-weak);
+  font-size: 12px;
+}
+
+.buyer-check > .icon {
+  color: var(--tone);
+}
+
+.buyer-check-details {
+  font-weight: 600;
+}
+
+/* ---------- undo toast (block buyer) ---------- */
+
+/* Sticks to the bottom of the drawer's scroll area; the app's toasts have no actions. */
+.drawer-undo {
+  position: sticky;
+  bottom: 12px;
+  z-index: 4;
+  align-self: flex-end;
+  align-items: center;
+  max-width: min(460px, 100%);
+}
+
+.drawer-undo > .icon {
+  margin-top: 0;
+}

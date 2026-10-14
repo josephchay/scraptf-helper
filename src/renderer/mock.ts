@@ -8,6 +8,7 @@ import { DEFAULT_SETTINGS, mergeSettings } from '../shared/defaults';
 import { canonical, fromString, looksLikeSku } from '../shared/sku';
 import type {
   AppStatus,
+  BuyerCheck,
   ConnectorHealth,
   HealthReport,
   ImportBatch,
@@ -27,6 +28,8 @@ import type {
   SecretsStatus,
   Settings,
   SetupCode,
+  ShoppingListResult,
+  ShoppingQuery,
   UnixMs,
 } from '../shared/types';
 import { SECRET_NAMES } from '../shared/types';
@@ -41,6 +44,11 @@ import {
   makeBook,
   mockJournalSummary,
   mockLinks,
+  mockParseBulk,
+  mockRevenue,
+  mockRulesFromJson,
+  mockRulesToJson,
+  mockShoppingList,
   ruleMatches,
   seedJournal,
   seedPrices,
@@ -48,7 +56,7 @@ import {
   type MockBook,
   type MockInput,
 } from './mockData';
-import { filterOpportunities, sortOpportunities, summarizeGroups } from './oppModel';
+import { filterOpportunities, orderByGroup, sortOpportunities, summarizeGroups } from './oppModel';
 
 export interface MockOptions {
   seed?: number;
@@ -91,6 +99,22 @@ function csv(rows: unknown[][]): string {
 
 function stamp(now: UnixMs): string {
   return new Date(now).toISOString().slice(0, 16).replace(/[:T]/g, '-');
+}
+
+/** Sorted-key JSON, so the same filter in another key order compares equal (as in rpcHandlers.ts). */
+function stableJson(v: unknown): string {
+  if (Array.isArray(v)) return `[${v.map(stableJson).join(',')}]`;
+  if (v !== null && typeof v === 'object') {
+    const o = v as Record<string, unknown>;
+    const keys = Object.keys(o).filter((k) => o[k] !== undefined).sort();
+    return `{${keys.map((k) => `${JSON.stringify(k)}:${stableJson(o[k])}`).join(',')}}`;
+  }
+  return JSON.stringify(v) ?? 'null';
+}
+
+/** The service's rules-import identity: name, filter and price, not the date or the on/off switch. */
+function mockRuleKey(r: { name: string; filter: object; costKeys?: number; costScrap: number }): string {
+  return stableJson([r.name.trim(), r.filter, r.costKeys ?? 0, Math.round(r.costScrap)]);
 }
 
 export function createMockBridge(opts: MockOptions = {}): MockBridge {
@@ -145,6 +169,7 @@ export function createMockBridge(opts: MockOptions = {}): MockBridge {
   let events: OpportunityEvent[] = [];
   let eventSeq = 1;
   const notifiedAt = new Map<string, UnixMs>();
+  const buyerChecks = new Map<string, BuyerCheck>();
   const stashed = new Map<string, MockBook['buy']>();
   let lastEngineRunAt: UnixMs | null = null;
   let lastEngineMs: number | null = null;
@@ -217,7 +242,10 @@ export function createMockBridge(opts: MockOptions = {}): MockBridge {
       a.costScrap === b.costScrap &&
       a.confidence === b.confidence &&
       a.status === b.status &&
-      a.buyerCount === b.buyerCount
+      a.buyerCount === b.buyerCount &&
+      // Settings-only changes (thresholds, reference age) move these without touching the rest.
+      a.maxCostScrap === b.maxCostScrap &&
+      a.flags.join(' ') === b.flags.join(' ')
     );
   }
 
@@ -291,6 +319,8 @@ export function createMockBridge(opts: MockOptions = {}): MockBridge {
   function maybeNotify(o: Opportunity, t: UnixMs): void {
     const n = settings.notifications;
     if (!n.enabled || o.status !== 'profitable' || o.confidence < n.minConfidence || (o.profitScrap ?? 0) < n.minProfitScrap) return;
+    // F5/F6: suspect margins and input kinds the user muted never notify.
+    if (o.flags.includes('suspect-margin') || !n.inputKinds.includes(o.inputKind)) return;
     const last = notifiedAt.get(o.key);
     if (last !== undefined && t - last < n.dedupMs) return;
     notifiedAt.set(o.key, t);
@@ -317,7 +347,7 @@ export function createMockBridge(opts: MockOptions = {}): MockBridge {
     const all = [...opps.values()];
     const profitable = all.filter((o) => o.status === 'profitable');
     return {
-      version: '0.1.0',
+      version: '0.2.0',
       networkPaused: settings.networkPaused,
       feed: feedState(),
       keyPrice: keyPrice(),
@@ -483,6 +513,13 @@ export function createMockBridge(opts: MockOptions = {}): MockBridge {
     }
   }
 
+  // One-shot UI requests wait for a subscriber, as the preload holds them for a window still loading.
+  const held = new Map<PushEvent, unknown>();
+  function emitHeld<E extends PushEvent>(event: E, payload: PushContract[E]): void {
+    if ((listeners.get(event)?.size ?? 0) > 0) emit(event, payload);
+    else held.set(event, payload);
+  }
+
   /** Like the service: every price or rule write tells all windows. */
   function pricesChanged(): void {
     emit('prices.changed', { at: now() });
@@ -611,8 +648,10 @@ export function createMockBridge(opts: MockOptions = {}): MockBridge {
     return {
       sku,
       name: known.item.name,
+      bptfName: known.item.name,
       category: known.item.category,
       skuObject: fromString(sku),
+      revenue: mockRevenue(known, settings, keyPrice().valueScrap, t),
       buyOrders,
       sellListings: known.sell,
       references: known.references,
@@ -629,6 +668,42 @@ export function createMockBridge(opts: MockOptions = {}): MockBridge {
     };
   }
 
+  function shoppingList(q: ShoppingQuery): ShoppingListResult {
+    return mockShoppingList([...opps.values()], q, settings.profit.useOrder, keyPrice(), now());
+  }
+
+  /** Fake but deterministic ban lookup; needs the token and the network like the service, cached 1 h. */
+  function checkBuyer(steamid: string): BuyerCheck {
+    const t = now();
+    const id = typeof steamid === 'string' ? steamid.trim() : '';
+    if (!/^\d{17}$/.test(id)) throw new Error('Invalid parameters for buyer.check: steamid: expected a 17-digit SteamID64');
+    const fail = (error: string): BuyerCheck => ({ steamid: id, name: null, bptfBanned: null, banDetails: [], checkedAt: t, cached: false, error });
+    // As in the service: a cached answer costs no request, so it is served even while paused.
+    const hit = buyerChecks.get(id);
+    if (hit && t - hit.checkedAt < HOUR && t >= hit.checkedAt) return { ...hit, cached: true };
+    if (!secrets.bptfAccessToken) return fail('Add a backpack.tf access token in Settings');
+    if (!settings.connectors.bptfApi) return fail('The backpack.tf API is turned off in Settings.');
+    if (settings.networkPaused) return fail('The network is paused. Resume it from the top bar first.');
+    let order: MockBook['buy'][number] | undefined;
+    for (const b of books.values()) {
+      order = b.buy.find((o) => o.steamid === id) ?? b.sell.find((o) => o.steamid === id);
+      if (order) break;
+    }
+    const hash = [...id].reduce((h, c) => (h * 31 + c.charCodeAt(0)) >>> 0, 7);
+    const banned = order?.flags.includes('banned') === true || hash % 13 === 0;
+    const r: BuyerCheck = {
+      steamid: id,
+      name: order?.userName ?? null,
+      bptfBanned: banned,
+      banDetails: banned ? ['backpack.tf: all (mock)'] : [],
+      checkedAt: t,
+      cached: false,
+      error: null,
+    };
+    buyerChecks.set(id, r);
+    return r;
+  }
+
   function requireImportEnabled(): void {
     if (!settings.import.enabled) throw new Error('Import is turned off. Enable it on the Import page first.');
   }
@@ -636,7 +711,9 @@ export function createMockBridge(opts: MockOptions = {}): MockBridge {
   const handlers: Handlers = {
     'status.get': () => status(),
     'opps.list': (q) => {
-      const rows = sortOpportunities(filterOpportunities([...opps.values()], q ?? {}), q?.sort ?? 'profit', q?.dir ?? 'desc');
+      const sorted = sortOpportunities(filterOpportunities([...opps.values()], q ?? {}), q?.sort ?? 'profit', q?.dir ?? 'desc');
+      // Like the service: a grouped list is paged in group order, the sort applying inside each group.
+      const rows = q?.groupBy ? orderByGroup(sorted, q.groupBy) : sorted;
       const offset = Math.max(0, q?.offset ?? 0);
       const limit = Math.max(1, Math.min(5000, q?.limit ?? 500));
       return { rows: rows.slice(offset, offset + limit), total: rows.length, groups: summarizeGroups(rows, q?.groupBy ?? 'category'), keyPrice: keyPrice(), generatedAt: now() };
@@ -649,9 +726,18 @@ export function createMockBridge(opts: MockOptions = {}): MockBridge {
       if (q?.beforeId !== undefined) list = list.filter((e) => e.id < q.beforeId!);
       return [...list].sort((a, b) => b.id - a.id).slice(0, Math.max(1, Math.min(2000, q?.limit ?? 200)));
     },
-    'opps.exportCsv': ({ kind, query }) => {
+    'opps.exportCsv': ({ kind, query, shopping }) => {
       const t = now();
       const kp = keyPrice().valueScrap;
+      if (kind === 'shopping') {
+        const { limit: _limit, offset: _offset, ...filters } = shopping ?? {};
+        const rows: unknown[][] = [['sku', 'name', 'category', 'pay_up_to', 'revenue', 'buyer', 'confidence', 'known_cost', 'under_ceiling', 'bank_page']];
+        for (const r of shoppingList(filters).rows) {
+          const buyer = r.revenueOrder ? `${r.revenueOrder.userName ?? r.revenueOrder.steamid} (${r.revenueOrder.isBot ? 'bot' : 'human'})` : '';
+          rows.push([r.sku, r.name, r.category, formatScrap(r.maxCostScrap, kp), formatScrap(r.revenueScrap, kp), buyer, r.confidence, r.knownCostScrap === null ? '' : formatScrap(r.knownCostScrap, kp), r.underCeiling === null ? '' : String(r.underCeiling), r.bankPageUrl]);
+        }
+        return { csv: csv(rows), suggestedName: `flipdesk-shopping-${stamp(t)}.csv` };
+      }
       if (kind === 'events') {
         const rows: unknown[][] = [['id', 'time', 'kind', 'sku', 'name', 'category', 'profit_ref', 'confidence', 'summary']];
         for (const e of [...events].sort((a, b) => b.id - a.id)) rows.push([e.id, new Date(e.ts).toISOString(), e.kind, e.sku, e.name, e.category, e.profitScrap === null ? '' : (e.profitScrap / 9).toFixed(2), e.confidence, e.summary]);
@@ -664,7 +750,13 @@ export function createMockBridge(opts: MockOptions = {}): MockBridge {
       }
       return { csv: csv(rows), suggestedName: `flipdesk-opportunities-${stamp(t)}.csv` };
     },
-    'item.detail': ({ sku }) => detail(sku),
+    'shopping.list': (q) => shoppingList(q ?? {}),
+    'item.detail': ({ sku, history }) => {
+      const d = detail(sku);
+      // history: false is quick entry's local-only preview.
+      return d && history === false ? { ...d, history: [] } : d;
+    },
+    'buyer.check': ({ steamid }) => checkBuyer(steamid),
     'item.refresh': ({ sku }) => {
       const t = now();
       if (settings.networkPaused) return { queued: false, reason: 'Network is paused. Resume it from the top bar first.', etaMs: null };
@@ -731,6 +823,62 @@ export function createMockBridge(opts: MockOptions = {}): MockBridge {
       changedAndEmit();
       return { ok: true };
     },
+    'prices.parseBulk': ({ text, bareUnit }) => {
+      if (typeof text !== 'string') throw new Error('Invalid parameters for prices.parseBulk: text: expected a string');
+      return mockParseBulk(text, bareUnit ?? 'ref', resolve);
+    },
+    'prices.bulkUpsert': ({ rows }) => {
+      if (!Array.isArray(rows)) throw new Error('Invalid parameters for prices.bulkUpsert: rows: expected an array');
+      if (rows.length > 500) throw new Error('Invalid parameters for prices.bulkUpsert: rows: at most 500 rows');
+      // Validate everything first: one bad row writes nothing, like the service's transaction.
+      rows.forEach((r, i) => {
+        if (!r || typeof r.sku !== 'string' || !looksLikeSku(r.sku.trim())) throw new Error(`Row ${i + 1}: not a SKU (pick an item first)`);
+        if (!Number.isFinite(r.costScrap) || r.costScrap < 0) throw new Error(`Row ${i + 1}: price must be zero or more`);
+        if (r.costKeys !== undefined && (!Number.isFinite(r.costKeys) || r.costKeys < 0)) throw new Error(`Row ${i + 1}: keys must be zero or more`);
+        if (r.id !== undefined && !prices.some((p) => p.id === r.id)) throw new Error(`Row ${i + 1}: price #${r.id} does not exist`);
+      });
+      let added = 0;
+      let updated = 0;
+      const t = now();
+      for (const r of rows) {
+        const sku = canonical(r.sku.trim());
+        const existing = r.id !== undefined ? prices.find((p) => p.id === r.id) : undefined;
+        const row: ScrapPrice = {
+          id: existing?.id ?? priceSeq++,
+          sku,
+          name: r.name?.trim() || itemName(sku),
+          costKeys: r.costKeys ?? 0,
+          costScrap: Math.round(r.costScrap),
+          source: 'user',
+          observedAt: r.observedAt ?? t,
+          note: r.note === undefined ? (existing?.note ?? null) : r.note,
+          importBatch: existing?.importBatch ?? null,
+          special: r.special === undefined ? (existing?.special ?? null) : r.special,
+          assetId: existing?.assetId ?? null,
+          stock: existing?.stock ?? null,
+        };
+        if (existing) {
+          prices = prices.map((p) => (p.id === row.id ? row : p));
+          updated++;
+        } else {
+          prices = [...prices, row];
+          added++;
+        }
+      }
+      if (rows.length > 0) {
+        pricesChanged();
+        changedAndEmit();
+      }
+      return { added, updated };
+    },
+    'prices.exportCsv': () => {
+      const kp = keyPrice().valueScrap;
+      const rows: unknown[][] = [['id', 'sku', 'name', 'cost_keys', 'cost_metal', 'cost', 'source', 'observed_at', 'note']];
+      for (const p of [...prices].sort((a, b) => a.name.localeCompare(b.name) || a.id - b.id)) {
+        rows.push([p.id, p.sku, p.name, p.costKeys, formatScrap(p.costScrap), formatScrap(Math.round(p.costKeys * kp) + p.costScrap, kp), p.source, new Date(p.observedAt).toISOString(), p.note ?? '']);
+      }
+      return { csv: csv(rows), suggestedName: `flipdesk-prices-${stamp(now())}.csv` };
+    },
     'rules.list': () => [...rules].sort((a, b) => a.id - b.id),
     'rules.upsert': (input) => {
       if (!input?.name?.trim()) throw new Error('A rule needs a name.');
@@ -759,6 +907,32 @@ export function createMockBridge(opts: MockOptions = {}): MockBridge {
     'rules.preview': (input) => {
       const matching = allSearchable().filter((item) => ruleMatches(input.filter ?? {}, item));
       return { matchingSkus: matching.length * 37, sample: matching.slice(0, 8).map((m) => ({ sku: m.sku, name: m.name })) };
+    },
+    'rules.exportJson': () => ({ json: mockRulesToJson([...rules].sort((a, b) => a.id - b.id), now()), suggestedName: `flipdesk-rules-${stamp(now())}.json` }),
+    'rules.importJson': ({ json }) => {
+      if (typeof json !== 'string') throw new Error('Invalid parameters for rules.importJson: json: expected a string');
+      const parsed = mockRulesFromJson(json);
+      const t = now();
+      const skipped = [...parsed.skipped];
+      // Adds only; existing rules are kept. Like the service, restoring a backup twice adds nothing.
+      const existing = new Set(rules.map(mockRuleKey));
+      const seen = new Set<string>();
+      let added = 0;
+      for (const r of parsed.rules) {
+        const key = mockRuleKey(r);
+        if (existing.has(key) || seen.has(key)) {
+          if (skipped.length < 400) skipped.push(`"${r.name.slice(0, 60)}": ${existing.has(key) ? 'already in your rules' : 'repeated in this backup'}`);
+          continue;
+        }
+        seen.add(key);
+        rules = [...rules, { id: ruleSeq++, name: r.name, filter: r.filter, costKeys: r.costKeys ?? 0, costScrap: r.costScrap, observedAt: Math.min(r.observedAt ?? t, t), enabled: r.enabled ?? true }];
+        added++;
+      }
+      if (added > 0) {
+        pricesChanged();
+        changedAndEmit();
+      }
+      return { added, skipped };
     },
     'journal.list': (p) => [...journal].sort((a, b) => b.ts - a.ts || b.id - a.id).slice(0, Math.max(1, p?.limit ?? 500)),
     'journal.add': (input) => {
@@ -811,15 +985,24 @@ export function createMockBridge(opts: MockOptions = {}): MockBridge {
       return { evaluated: opps.size, ms: lastEngineMs ?? 1 };
     },
     'app.info': (): AppInfo => ({
-      version: '0.1.0',
+      version: '0.2.0',
       dataDir: 'C:\\Users\\you\\AppData\\Roaming\\TF2 Flip Desk',
       logDir: 'C:\\Users\\you\\AppData\\Roaming\\TF2 Flip Desk\\logs',
       platform: 'browser (mock)',
       electron: 'n/a',
       node: 'n/a',
     }),
-    'app.showQuickEntry': () => {
+    // The mock has no separate service process to restart.
+    'app.serviceState': () => ({ state: 'ready', detail: null, nextAttemptAt: null }),
+    'app.showQuickEntry': (p) => {
       if (typeof location !== 'undefined') location.hash = '#/quick';
+      // Like main: the quick-entry page gets the SKU once it listens.
+      // Lower-cased first, as main's ipc.ts does, so 'U17'-style effect letters keep the effect.
+      const sku = p && typeof p === 'object' && typeof p.sku === 'string' ? p.sku.trim().toLowerCase() : '';
+      if (sku) {
+        if (!looksLikeSku(sku)) throw new Error('Invalid parameters for app.showQuickEntry: sku: not a SKU');
+        emitHeld('ui.quickPrefill', { sku: canonical(sku) });
+      }
       return { ok: true };
     },
     'app.hideWindow': () => {
@@ -927,6 +1110,11 @@ export function createMockBridge(opts: MockOptions = {}): MockBridge {
       }
       const fn = listener as (p: unknown) => void;
       set.add(fn);
+      if (held.has(event)) {
+        const payload = held.get(event);
+        held.delete(event);
+        queueMicrotask(() => fn(structuredClone(payload)));
+      }
       ensureTimer();
       return () => {
         set.delete(fn);

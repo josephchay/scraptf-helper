@@ -18,7 +18,18 @@ import type { HostBudget, RequestLogRow, UnixMs } from '../../shared/types';
 import { BUDGETS, DEFAULT_HOST_CONCURRENCY, HOST_CONCURRENCY, defaultBudgetFor, type NetBudgetSpec } from './budgets';
 import { ForbiddenHostError, HostBlockedError, HttpStatusError, HttpTimeoutError, NetworkPausedError } from './errors';
 import { checkUrl, isBackpackHost, normalizeHost } from './policy';
-import { BudgetScheduler, ConcurrencyGate, MAX_PAUSE_MS, MIN_PAUSE_MS, realTimers, type Permit, type TimerApi } from './ratelimit';
+import {
+  BudgetScheduler,
+  CONSECUTIVE_429_LIMIT,
+  ConcurrencyGate,
+  LONG_PAUSE_MS,
+  MAX_PAUSE_MS,
+  MIN_PAUSE_MS,
+  realTimers,
+  type PersistedBudgetState,
+  type Permit,
+  type TimerApi,
+} from './ratelimit';
 import { DEFAULT_SECRET_HEADERS, globalSecrets, redactUrl, scrubText, type SecretRegistry } from './redact';
 
 export const DEFAULT_TIMEOUT_MS = 20_000;
@@ -80,12 +91,27 @@ export interface CreateHttpClientOptions {
    * keep counting a request the process died during (seedHistory).
    */
   onBeforeSend?: (start: { budget: string } & Pick<RequestLogRow, 'ts' | 'host' | 'path'>) => void;
+  /**
+   * Budget pauses (Retry-After, backoff, consecutive 429s) and 429 streaks from
+   * an earlier run, as saved from onPausesChanged. Without them a crash restart
+   * or relaunch would send again before the server's wait is over (R7).
+   */
+  initialPauses?: NetPauseState;
+  /** Called with the current pauses and streaks whenever they change, so the caller can persist them. */
+  onPausesChanged?: (state: NetPauseState) => void;
+}
+
+/** Pause state worth keeping across restarts: per budget, plus the consecutive 429s per host. */
+export interface NetPauseState {
+  budgets: Record<string, PersistedBudgetState>;
+  hosts429: Record<string, number>;
 }
 
 /** Longest block reason kept from storage. */
 const MAX_BLOCK_REASON = 500;
 /** At most this many stored host blocks are loaded (the allowlist has about a dozen hosts). */
 const MAX_STORED_BLOCKS = 64;
+const HOST_NAME_RE = /^[a-z0-9-]+(?:\.[a-z0-9-]+)*$/;
 
 /** Keeps the well-formed {host: reason} entries of a stored block map, with normalised host names. */
 function cleanHostBlocks(value: unknown): Record<string, string> {
@@ -93,11 +119,59 @@ function cleanHostBlocks(value: unknown): Record<string, string> {
   const out: Record<string, string> = {};
   for (const [h, reason] of Object.entries(value as Record<string, unknown>).slice(0, MAX_STORED_BLOCKS)) {
     const host = normalizeHost(h);
-    if (!/^[a-z0-9-]+(?:\.[a-z0-9-]+)*$/.test(host)) continue;
+    if (!HOST_NAME_RE.test(host)) continue;
     if (typeof reason !== 'string' || reason.trim() === '') continue;
     out[host] = reason.slice(0, MAX_BLOCK_REASON);
   }
   return out;
+}
+
+/** Longest pause reason kept from storage; budgets and hosts loaded at most. */
+const MAX_PAUSE_REASON = 200;
+const MAX_STORED_PAUSES = 64;
+
+const storedBudgetPause = z.looseObject({
+  until: z.number().catch(0),
+  reason: z.string().nullable().catch(null),
+  n429: z.number().catch(0),
+  nBackoff: z.number().catch(0),
+});
+const storedPauses = z.looseObject({
+  budgets: z.record(z.string(), z.unknown()).catch({}),
+  hosts429: z.record(z.string(), z.unknown()).catch({}),
+});
+
+/** Keeps the well-formed entries of a stored pause state; clamping to now happens on restore. */
+function cleanPauseState(value: unknown): NetPauseState {
+  const out: NetPauseState = { budgets: {}, hosts429: {} };
+  const parsed = storedPauses.safeParse(value);
+  if (!parsed.success) return out;
+  for (const [id, raw] of Object.entries(parsed.data.budgets).slice(0, MAX_STORED_PAUSES)) {
+    const p = storedBudgetPause.safeParse(raw);
+    if (!p.success || id.length > 100) continue;
+    out.budgets[id] = {
+      until: p.data.until,
+      reason: p.data.reason === null ? null : p.data.reason.slice(0, MAX_PAUSE_REASON),
+      n429: p.data.n429,
+      nBackoff: p.data.nBackoff,
+    };
+  }
+  for (const [h, n] of Object.entries(parsed.data.hosts429).slice(0, MAX_STORED_PAUSES)) {
+    const host = normalizeHost(h);
+    if (!HOST_NAME_RE.test(host) || typeof n !== 'number' || !Number.isFinite(n) || n < 1) continue;
+    out.hosts429[host] = Math.min(Math.floor(n), CONSECUTIVE_429_LIMIT);
+  }
+  return out;
+}
+
+/** Reads pause state saved as JSON (see NetPauseState). Anything malformed gives no pauses. */
+export function parsePauseState(raw: string | null | undefined): NetPauseState {
+  if (typeof raw !== 'string' || raw.trim() === '') return { budgets: {}, hosts429: {} };
+  try {
+    return cleanPauseState(JSON.parse(raw));
+  } catch {
+    return { budgets: {}, hosts429: {} };
+  }
 }
 
 /**
@@ -433,6 +507,53 @@ export function createHttpClient(opts: CreateHttpClientOptions): SeedableHttpCli
     }
   };
 
+  /**
+   * 429s in a row per host, across all of its budgets (brief §2.0: "after 3
+   * consecutive 429s, pause that host for 1 h"). The per-budget counters alone
+   * would let 429s spread over five bp.tf budgets reach about ten in a row.
+   */
+  const host429 = new Map<string, number>();
+
+  const pauseState = (): NetPauseState => {
+    const now = clock.now();
+    const budgets: Record<string, PersistedBudgetState> = {};
+    for (const s of schedulers.values()) {
+      const st = s.persistedState(now);
+      if (st.until > 0 || st.n429 > 0 || st.nBackoff > 0) budgets[s.spec.id] = st;
+    }
+    return { budgets, hosts429: Object.fromEntries(host429) };
+  };
+
+  // Pauses from an earlier run hold from the first request on (R7).
+  const savedPauses = cleanPauseState(opts.initialPauses);
+  {
+    const now = clock.now();
+    for (const [id, st] of Object.entries(savedPauses.budgets)) schedulers.get(id)?.restore(st, now);
+    for (const [host, n] of Object.entries(savedPauses.hosts429)) host429.set(host, n);
+    for (const s of schedulers.values()) {
+      const until = s.pausedUntil(now);
+      if (until !== null) safeLog('info', `${s.spec.id} stays paused until ${new Date(until).toISOString()} (from an earlier session)`);
+    }
+  }
+  // Compared with what was stored, not with the restored state: a pause that restore()
+  // clamped to 24 h is written back, or every restart would clamp it afresh from its own now.
+  let lastPauseJson = JSON.stringify(savedPauses);
+
+  /** Saves the pause state when it differs from the last saved one. */
+  const pausesChanged = (): void => {
+    if (!opts.onPausesChanged) return;
+    try {
+      const state = pauseState();
+      const json = JSON.stringify(state);
+      if (json === lastPauseJson) return;
+      opts.onPausesChanged(state);
+      lastPauseJson = json; // after the save, so a failed one is tried again next time
+    } catch (err) {
+      safeLog('warn', `saving the request pauses failed: ${errorMessage(err)}`);
+    }
+  };
+  pausesChanged();
+
   const schedulerFor = (budgetId: string | undefined, target: URL): BudgetScheduler => {
     if (budgetId) {
       const s = schedulers.get(budgetId);
@@ -734,6 +855,7 @@ export function createHttpClient(opts: CreateHttpClientOptions): SeedableHttpCli
         }
 
         const now = clock.now();
+        const budgetHost = normalizeHost(spec.host);
         if (status === 429 || status === 503) {
           if (parsedForHints === null && text.trim().startsWith('{')) {
             try {
@@ -744,20 +866,25 @@ export function createHttpClient(opts: CreateHttpClientOptions): SeedableHttpCli
           }
           const hinted = retryDelayFromResponse(resHeaders, parsedForHints, text, now);
           const result = status === 429 ? scheduler.record429(hinted, now) : scheduler.recordUnavailable(hinted, now);
-          if (result.longPause) {
-            pauseHost(normalizeHost(spec.host), result.until, `${result.consecutive429} consecutive 429 responses`);
-          }
+          // A 503 neither counts toward nor ends a host's 429 streak, like the per-budget counter.
+          const hostStreak = status === 429 ? (host429.get(budgetHost) ?? 0) + 1 : 0;
+          if (status === 429) host429.set(budgetHost, hostStreak);
+          const longPause = result.longPause || hostStreak >= CONSECUTIVE_429_LIMIT;
+          const streak = Math.max(result.consecutive429, hostStreak);
+          const until = longPause ? Math.max(result.until, now + LONG_PAUSE_MS) : result.until;
+          if (longPause) pauseHost(budgetHost, until, `${streak} consecutive 429 responses`);
           const why = hinted !== null ? 'server-requested' : 'backoff';
           notes.push(
-            result.longPause
-              ? `HTTP 429 x${result.consecutive429}: ${spec.host} paused ${formatDuration(result.pauseMs)}`
+            longPause
+              ? `HTTP 429 x${streak}: ${spec.host} paused ${formatDuration(until - now)}`
               : `HTTP ${status}: ${spec.id} paused ${formatDuration(result.pauseMs)} (${why})`,
           );
-          safeLog('warn', `HTTP ${status} from ${hopHost}; ${spec.id} paused ${formatDuration(result.pauseMs)} (${why})`, {
-            consecutive429: result.consecutive429,
+          safeLog('warn', `HTTP ${status} from ${hopHost}; ${spec.id} paused ${formatDuration(until - now)} (${why})`, {
+            consecutive429: streak,
           });
         } else {
           scheduler.recordSuccess();
+          host429.delete(budgetHost);
         }
 
         if (typeof spec.minRemaining === 'number') {
@@ -768,6 +895,7 @@ export function createHttpClient(opts: CreateHttpClientOptions): SeedableHttpCli
             notes.push(`RateLimit-Remaining ${rl.remaining}: paused ${formatDuration(waitMs)}`);
           }
         }
+        pausesChanged();
 
         finish(notes.length > 0 ? notes.join('; ') : null);
         safeLog('debug', `${method} ${hopHost}${row.path} -> ${status} (${row.ms} ms, ${row.bytes} B)`);
@@ -839,6 +967,15 @@ export function createHttpClient(opts: CreateHttpClientOptions): SeedableHttpCli
     },
     hostBlocked(h: string): string | null {
       return blocked.get(normalizeHost(String(h ?? ''))) ?? null;
+    },
+    blockHost(h: string, reason: string): void {
+      const host = normalizeHost(String(h ?? '').trim());
+      const why = String(reason ?? '').trim().slice(0, MAX_BLOCK_REASON) || 'disabled after a refused connection';
+      if (!HOST_NAME_RE.test(host)) return;
+      if (blocked.get(host) === why) return;
+      blocked.set(host, why);
+      safeLog('warn', `${host} disabled: ${why}`);
+      blocksChanged();
     },
     unblockHost(h: string): void {
       const host = normalizeHost(String(h ?? ''));

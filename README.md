@@ -1,6 +1,6 @@
 # TF2 Flip Desk
 
-A Windows desktop app that runs in the background and tells you which TF2 items are worth flipping. It compares the scrap.tf prices you give it with live backpack.tf buy orders. It groups the profitable items, keeps a running log of them, and gives you one-click links to backpack.tf, marketplace.tf, Steam Community Market, STN and PriceDB.
+A Windows desktop app that runs in the background and tells you which TF2 items are worth flipping. It compares the scrap.tf prices you give it with live backpack.tf buy orders. It groups the profitable items, keeps a running log of them, and gives you one-click links to backpack.tf, marketplace.tf, Steam Community Market, STN and PriceDB. For every item it tracks, it also shows the most you can pay on scrap.tf and still make your profit, so you know what to look for before you start browsing.
 
 It replaces two userscripts:
 - **tf2-scraptf-profit-helper** (VeBeshka): profit badges on scrap.tf.
@@ -24,7 +24,7 @@ No tool can promise it is "undetectable". scrap.tf, backpack.tf and marketplace.
 
 ## Install and run
 
-**Installer:** run `release\TF2 Flip Desk Setup 0.1.0.exe`. It is unsigned, so Windows SmartScreen will warn you on first launch.
+**Installer:** run `release\TF2 Flip Desk Setup 0.2.0.exe` (built by `npm run dist`). It is unsigned, so Windows SmartScreen will warn you on first launch.
 
 **From source** (Node 24+):
 
@@ -50,19 +50,34 @@ Closing the window keeps the app running in the tray. Use the tray menu to open 
 
 ## Daily workflow
 
-1. **Browse scrap.tf yourself**, as you normally would.
+1. **Open the Shopping list, then browse scrap.tf yourself**, as you normally would. For every item the app tracks, the list shows **Pay up to**: the highest scrap.tf price that still clears your profit thresholds against live backpack.tf buy orders. Anything priced at or under it is a flip. Items are grouped by scrap.tf bank page; a group's link opens that page in your browser. You can also export the list as CSV.
 2. **Tell the app the price** of anything interesting, in any of these ways:
-   - **Quick entry** (`Ctrl+Alt+F` from anywhere). Type the item name or SKU and the price, e.g. `1.33`, `14 scrap`, `2 keys 5.11`, or `1,5 keys`. It shows the best clean buy order and the profit straight away.
+   - **Quick entry** (`Ctrl+Alt+F` from anywhere). Type the item name or SKU and the price, e.g. `1.33`, `14 scrap`, `2 keys 5.11`, or `1,5 keys`. As soon as you pick the item it shows who buys it, for how much, and its Pay up to; while you type the price it shows profit, margin and status. `Enter` saves; `Shift+Enter` only checks.
+   - **Price sheet → Paste a list.** One item per line (`Team Captain, 1 key 5 ref`, a SKU, or a backpack.tf item link, then the price). You get a preview, then save up to 500 lines at once.
    - **Price sheet → Rules.** Category estimates such as "unique craftable hats ≈ 1.33 ref". The app then lists every item whose backpack.tf buy orders beat that, as *candidates to check on scrap.tf*.
    - **Import** (off by default; you turn it on after reading the ToS note). Save a scrap.tf page with `Ctrl+S` as "Webpage, HTML only" and import it. You can also pick a watch folder so saved pages are picked up automatically. The file is parsed locally; nothing is fetched.
 3. **The app keeps checking.** It re-evaluates every price against live backpack.tf buy orders as they change, about 65 updates per second. For each item it:
    - drops attribute-specific, banned, blocklisted and marketplace.tf orders;
    - flags outliers;
-   - computes conservative, best and instant revenue;
+   - computes conservative, best and instant revenue, and the Pay up to ceiling;
    - scores confidence from 0 to 100, with the reasons shown.
-4. **Opportunities** groups the results by category, profit tier, confidence or input source. **Live log** shows every *appeared / changed / gone* event. High-confidence finds trigger a desktop notification.
+4. **Opportunities** groups the results by category, profit tier, confidence or input source. **Live log** shows every *appeared / changed / gone* event. High-confidence finds trigger a desktop notification. Right-click any row (or press `Shift+F10`) to copy the item's name, SKU or backpack.tf name, record a price in quick entry, or open its links.
 5. **Click an item** to see its full buy-order book, PriceDB and community references, price history and the link menu. Then do the trade yourself.
+   - Each buyer has an actions menu: open their backpack.tf or Steam profile, copy their SteamID64, **Block buyer** (with Undo), or **Check bans** on backpack.tf.
+   - Under *Your scrap.tf prices*, mark a price **Seen now**, delete it, or add or update one. For a rule candidate the form reads *Found it on scrap.tf? Record the real price*.
 6. **Journal** (optional): record what you actually bought and sold to get FIFO realised profit.
+
+## New in 0.2
+
+- **Shopping list and Pay up to.** A ceiling for every tracked item, as a page, a column in Opportunities, a line in quick entry and on each input in the item drawer, and a CSV export.
+- **Quick-entry preview.** Live revenue, buyer, ceiling and profit while you type, a Check only mode, copy buttons and links. The drawer and the row menu open quick entry with the item already picked.
+- **Buyer actions.** Open a buyer's profiles, copy their SteamID64, block them, or check backpack.tf bans. The ban check runs only when you click it. It needs your access token, and an answer is reused for an hour.
+- **Bulk paste.** Paste a list of items and prices. Anything that looks like page content (`<` or a `scrap.tf/` link) is refused; use Import for saved pages.
+- **Backups.** Price sheet → **Export CSV**: paste its `sku` and `cost` columns back into Paste a list to restore. Rules → **Export rules** / **Import rules** (JSON): import adds rules and never deletes any; rules you already have are skipped.
+- **Notification controls.** Settings → Notifications: choose what to notify for (typed prices, imported pages, rule candidates) and turn off the sound. Rule-candidate toasts read *Candidate: …* and say how much to pay up to.
+- **Guards.** Settings → Profit thresholds:
+  - **Ignore reference prices older than** (default 30 days). PriceDB prices older than this are not used, and the row is flagged *Old reference*. backpack.tf community prices are set by hand and change rarely, so they always get at least a year.
+  - **Suspect margin above** (default 200 %, 0 turns it off). A huge margin with fewer than 3 buyers and no usable reference is usually the wrong variant or unit. Such a row is flagged *Suspect margin*, capped at Low confidence, and never notified.
 
 ## Where your data lives
 
@@ -95,7 +110,7 @@ npm run dev:renderer
 npm run dist
 ```
 
-- `npm test` runs about 2,100 vitest tests, including the compliance tests: network policy, static scans for forbidden calls, and secret redaction.
+- `npm test` runs about 2,500 vitest tests, including the compliance tests: network policy, static scans for forbidden calls, and secret redaction.
 - `npm run dev:renderer` serves the dashboard in a browser with mock data, at http://127.0.0.1:5199.
 - `npm run dist` builds the NSIS installer into `release/`.
 - **Smoke test** against the real app and live feeds (development builds):

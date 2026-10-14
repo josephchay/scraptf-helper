@@ -402,6 +402,7 @@ const OPP_COLS = [
   'input_observed_at',
   'first_seen_at',
   'updated_at',
+  'max_cost_scrap',
 ] as const;
 
 function oppParams(o: Opportunity): SqlValue[] {
@@ -435,6 +436,7 @@ function oppParams(o: Opportunity): SqlValue[] {
     bindNum(o.inputObservedAt),
     bindNum(o.firstSeenAt),
     bindNum(o.updatedAt),
+    bindNumOrNull(o.maxCostScrap),
   ];
 }
 
@@ -455,6 +457,8 @@ function rowToOpportunity(r: SqlRow): Opportunity {
     revenueScrap: numOrNull(r['revenue_scrap']),
     profitScrap: numOrNull(r['profit_scrap']),
     margin: numOrNull(r['margin']),
+    // Migration V2; NULL for rows written before it, until the engine re-evaluates them.
+    maxCostScrap: numOrNull(r['max_cost_scrap']),
     confidence: num(r['confidence']),
     confidenceLevel: oneOf(r['confidence_level'], CONFIDENCE_LEVELS, 'low'),
     flags: parseStringArray(r['flags']),

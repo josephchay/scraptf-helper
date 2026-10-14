@@ -73,6 +73,7 @@ export function makeOpp(over: Partial<Opportunity> = {}): Opportunity {
     revenueScrap: 380,
     profitScrap: 80,
     margin: 0.21,
+    maxCostScrap: null,
     confidence: 70,
     confidenceLevel: 'medium',
     flags: [],

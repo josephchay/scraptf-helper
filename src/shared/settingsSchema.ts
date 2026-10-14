@@ -68,6 +68,8 @@ const profitSchema = z.object({
   useOrder: z.enum(['conservative', 'best', 'instant']),
   inputStaleMs: z.number().int().min(0).max(365 * DAY_MS),
   notesKeywords: z.array(keyword).max(200),
+  referenceMaxAgeMs: z.number().int().min(0).max(365 * DAY_MS),
+  suspectMargin: z.number().min(0).max(1000),
 });
 
 const liveFeedSchema = z.object({
@@ -97,11 +99,15 @@ const importSchema = z.object({
   permission: permissionSchema.nullable(),
 });
 
+const inputKind = z.enum(['user', 'import', 'rule']);
+
 const notificationsSchema = z.object({
   enabled: bool,
   minConfidence: z.number().min(0).max(100),
   minProfitScrap: scrap,
   dedupMs: z.number().int().min(0).max(30 * DAY_MS),
+  inputKinds: z.array(inputKind).max(3),
+  silent: bool,
 });
 
 const appSchema = z.object({
@@ -177,6 +183,7 @@ function lenientArray<T>(el: z.ZodType<T>, max: number) {
 
 const LENIENT_LEAVES: Record<string, z.ZodType> = {
   'profit.notesKeywords': lenientArray(keyword, 200),
+  'notifications.inputKinds': lenientArray(inputKind, 3),
   blocklist: lenientArray(steamId64, 10_000),
 };
 

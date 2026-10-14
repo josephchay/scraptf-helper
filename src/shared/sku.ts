@@ -149,3 +149,33 @@ export function baseSku(sku: string | SkuObject): string {
 export function looksLikeSku(text: string): boolean {
   return /^\d+;\d+(;[a-z0-9-]+)*$/i.test(text.trim());
 }
+
+/** A token as fromString reads it: the first '-' is dropped ("kt-3" = "kt3") and "untradeable" is "untradable". */
+function tokenKey(part: string): string {
+  const t = part.replace('-', '');
+  return t === 'untradeable' ? 'untradable' : t;
+}
+
+/**
+ * Strict check for SKUs a user typed: lower case, and every token after the
+ * defindex and quality is one fromString reads, once, and canonical() keeps
+ * (in any order, with or without the hyphen). fromString silently ignores
+ * anything else ("KT-3", "UNCRAFTABLE", "uncratable", a second effect), which
+ * would turn the text into a different item. Callers lower-case user input first.
+ */
+export function isValidSku(text: string): boolean {
+  if (typeof text !== 'string') return false;
+  const t = text.trim();
+  if (!/^\d+;\d+(;[a-z0-9-]+)*$/.test(t)) return false;
+  const canon = canonical(t);
+  // Fast path for stored SKUs (always canonical; the engine checks every price on every
+  // run): only a negative value ("kt--3") is left to refuse.
+  if (canon === t) return !t.includes('--');
+  const typed = t.split(';');
+  const kept = canon.split(';');
+  if (typed.length !== kept.length || typed[0] !== kept[0] || typed[1] !== kept[1]) return false;
+  const a = typed.slice(2).map(tokenKey).sort();
+  const b = kept.slice(2).map(tokenKey).sort();
+  // A '-' left after the first one is a negative value ("kt--3"), never a real item.
+  return a.every((k, i) => k === b[i] && !k.includes('-'));
+}

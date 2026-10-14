@@ -37,6 +37,10 @@ export const DEFAULT_SETTINGS: Settings = {
     useOrder: 'conservative',
     inputStaleMs: 2 * 60 * 60 * 1000,
     notesKeywords: [...DEFAULT_NOTES_KEYWORDS],
+    // Brief §8: about a third of PriceDB SKUs are older than 30 days; older references are ignored.
+    referenceMaxAgeMs: 30 * 24 * 60 * 60 * 1000,
+    // 200% with few buyers and no usable reference is usually the wrong variant or unit.
+    suspectMargin: 2,
   },
   // Brief §2.1 says 12 GB, but the cap counts decompressed payload (~13 GB on a
   // measured day), so 12 GB would pause the feed most evenings. See the
@@ -44,7 +48,14 @@ export const DEFAULT_SETTINGS: Settings = {
   liveFeed: { enabled: true, dailyCapBytes: 25_000_000_000, keepSellListings: 'watched' },
   connectors: { bptfApi: true, pricedb: true, pricedbSocket: true, scm: false },
   import: { enabled: false, acknowledgedAt: null, watchFolder: null, permission: null },
-  notifications: { enabled: true, minConfidence: 45, minProfitScrap: 18, dedupMs: 30 * 60 * 1000 },
+  notifications: {
+    enabled: true,
+    minConfidence: 45,
+    minProfitScrap: 18,
+    dedupMs: 30 * 60 * 1000,
+    inputKinds: ['user', 'import', 'rule'],
+    silent: false,
+  },
   app: { startAtLogin: false, startHidden: false, closeToTray: true, quickEntryHotkey: 'CommandOrControl+Alt+F' },
   networkPaused: false,
   blocklist: [],

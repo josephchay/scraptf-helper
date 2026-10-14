@@ -240,6 +240,7 @@ describe('service host: messages from the service', () => {
     expect(h.log.warn).toHaveBeenCalledTimes(3);
     expect(SERVICE_PUSH_EVENTS).toEqual(expect.arrayContaining(['opps.changed', 'status.changed', 'import.done', 'notify']));
     for (const e of MAIN_ONLY_PUSH_EVENTS) expect(SERVICE_PUSH_EVENTS).not.toContain(e);
+    expect(MAIN_ONLY_PUSH_EVENTS).toContain('ui.quickPrefill');
     expect([...SERVICE_PUSH_EVENTS, ...MAIN_ONLY_PUSH_EVENTS].sort()).toEqual([...PUSH_EVENTS].sort());
   });
 
@@ -388,9 +389,9 @@ describe('service host: crashes and restarts', () => {
     }
     expect(delays).toEqual([1000, 1000, 1000, 1000, 900_000, 900_000, 900_000]);
     expect(h.log.warn).toHaveBeenCalledWith(expect.stringMatching(/restarting in 900 s \(5 unexpected exits in the last hour\)/));
-    expect(serviceStatePush({ ...h.host.status(), state: 'restarting', nextRestartAt: Date.now() + 900_000 }, Date.now())?.detail).toMatch(
-      /Next attempt in 900 s/,
-    );
+    // The banner gets the restart time and counts down itself; a "900 s" text would stay frozen for 15 min.
+    const restartAt = Date.now() + 900_000;
+    expect(serviceStatePush({ ...h.host.status(), state: 'restarting', nextRestartAt: restartAt }, Date.now())?.nextAttemptAt).toBe(restartAt);
   });
 
   it('leaves the crash-loop delay once the exits are more than an hour apart', async () => {
@@ -632,13 +633,16 @@ describe('main log', () => {
 describe('serviceStatePush', () => {
   const base: ServiceHostStatus = { state: 'ready', pid: 1, restarts: 0, lastExitCode: null, nextRestartAt: null, lastError: null, readyAt: 1 };
   it('maps host states to the dashboard banner states', () => {
-    expect(serviceStatePush({ ...base, state: 'starting' }, 0)).toEqual({ state: 'starting', detail: null });
-    expect(serviceStatePush(base, 0)).toEqual({ state: 'ready', detail: null });
+    expect(serviceStatePush({ ...base, state: 'starting' }, 0)).toEqual({ state: 'starting', detail: null, nextAttemptAt: null });
+    expect(serviceStatePush(base, 0)).toEqual({ state: 'ready', detail: null, nextAttemptAt: null });
     expect(serviceStatePush({ ...base, state: 'restarting', nextRestartAt: 4_000, lastError: 'fatal error: crash' }, 1_000)).toEqual({
       state: 'restarting',
-      detail: 'Next attempt in 3 s. fatal error: crash',
+      detail: 'fatal error: crash',
+      nextAttemptAt: 4_000,
     });
-    expect(serviceStatePush({ ...base, state: 'stopped' }, 0)).toEqual({ state: 'stopped', detail: null });
+    expect(serviceStatePush({ ...base, state: 'restarting', nextRestartAt: 900_000 }, 1_000)).toEqual({ state: 'restarting', detail: null, nextAttemptAt: 900_000 });
+    expect(serviceStatePush({ ...base, state: 'restarting', nextRestartAt: 500 }, 1_000)?.nextAttemptAt).toBeNull();
+    expect(serviceStatePush({ ...base, state: 'stopped' }, 0)).toEqual({ state: 'stopped', detail: null, nextAttemptAt: null });
     expect(serviceStatePush({ ...base, state: 'idle' }, 0)).toBeNull();
     expect(serviceStatePush({ ...base, state: 'stopping' }, 0)).toBeNull();
   });

@@ -155,6 +155,18 @@ export interface BudgetState {
   nextAllowedAt: UnixMs;
 }
 
+/** The part of a budget's state that must survive a restart (R7): the pause and the 429/backoff streaks. */
+export interface PersistedBudgetState {
+  /** 0 when not paused. */
+  until: UnixMs;
+  reason: string | null;
+  n429: number;
+  nBackoff: number;
+}
+
+/** Restored streak counters are capped: past this the backoff is at its maximum anyway. */
+const MAX_RESTORED_STREAK = 100;
+
 export interface SchedulerDeps {
   clock: Clock;
   timers?: TimerApi;
@@ -318,6 +330,31 @@ export class BudgetScheduler {
   recordSuccess(): void {
     this.n429 = 0;
     this.nBackoff = 0;
+  }
+
+  /** Pause and streaks to save, so a restart does not forget a server-requested wait. */
+  persistedState(now: UnixMs = this.clock.now()): PersistedBudgetState {
+    const paused = this.pausedUntilTs > now;
+    return {
+      until: paused ? this.pausedUntilTs : 0,
+      reason: paused ? this.pauseWhy : null,
+      n429: this.n429,
+      nBackoff: this.nBackoff,
+    };
+  }
+
+  /**
+   * Restores state saved by an earlier process. A pause is clamped to
+   * MAX_PAUSE_MS from now, so a corrupt value or a clock that moved back
+   * cannot stop the budget for longer than any server could ask for.
+   */
+  restore(saved: PersistedBudgetState, now: UnixMs = this.clock.now()): void {
+    const streak = (n: number): number => (Number.isFinite(n) && n > 0 ? Math.min(Math.floor(n), MAX_RESTORED_STREAK) : 0);
+    this.n429 = Math.max(this.n429, streak(saved.n429));
+    this.nBackoff = Math.max(this.nBackoff, streak(saved.nBackoff));
+    if (Number.isFinite(saved.until) && saved.until > now) {
+      this.pause(Math.min(saved.until, now + MAX_PAUSE_MS), saved.reason ?? 'paused before the last restart');
+    }
   }
 
   acquire(opts: AcquireOptions = {}): Promise<Permit> {

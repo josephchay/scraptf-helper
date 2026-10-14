@@ -174,8 +174,31 @@ export function foldText(text: string): string {
   return text.normalize('NFKD').replace(/\p{M}+/gu, '').toLowerCase();
 }
 
+// No '-' in the class: it is literal outside a character class, and under the 'u'
+// flag "\-" is an invalid escape, so "pre-fest" would throw on every engine run.
 function escapeRegExp(s: string): string {
-  return s.replace(/[.*+?^${}()|[\]\\/-]/g, '\\$&');
+  return s.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&');
+}
+
+function keywordRegExp(parts: readonly string[]): RegExp | null {
+  return parts.length === 0 ? null : new RegExp(`(?<![\\p{L}\\p{N}_])(?:${parts.join('|')})(?![\\p{L}\\p{N}_])`, 'u');
+}
+
+/** One bad keyword must not break every match: it is skipped, the rest still compile. */
+function safeKeywordRegExp(parts: readonly string[]): RegExp | null {
+  try {
+    return keywordRegExp(parts);
+  } catch {
+    const ok = parts.filter((p) => {
+      try {
+        keywordRegExp([p]);
+        return true;
+      } catch {
+        return false;
+      }
+    });
+    return keywordRegExp(ok);
+  }
 }
 
 const keywordCache = new Map<string, RegExp | null>();
@@ -204,7 +227,7 @@ export function compileKeywords(keywords: readonly string[]): RegExp | null {
     ),
   ].sort((a, b) => b.length - a.length);
 
-  const re = parts.length === 0 ? null : new RegExp(`(?<![\\p{L}\\p{N}_])(?:${parts.join('|')})(?![\\p{L}\\p{N}_])`, 'u');
+  const re = safeKeywordRegExp(parts);
   if (keywordCache.size >= KEYWORD_CACHE_MAX) keywordCache.clear();
   keywordCache.set(cacheKey, re);
   keywordsByArray.set(keywords, re);

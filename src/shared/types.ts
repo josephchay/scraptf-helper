@@ -345,9 +345,20 @@ export interface Opportunity {
   revenueScrap: Scrap | null;
   profitScrap: Scrap | null;
   margin: number | null;
+  /**
+   * "Pay up to": the highest scrap.tf cost that would still be 'profitable' against
+   * revenueScrap with the current settings.profit (maxCostFor in src/shared/ceiling.ts).
+   * Null when there is no revenue or no cost qualifies.
+   */
+  maxCostScrap: Scrap | null;
   confidence: number;
   confidenceLevel: ConfidenceLevel;
-  /** e.g. 'outlier-best', 'has-extras', 'notes-flag', 'unusual-risk', 'stale-input', 'no-reference', 'rule-estimate', 'unverified-orders' */
+  /**
+   * e.g. 'outlier-best', 'all-outliers', 'has-extras', 'notes-flag', 'unusual-risk', 'stale-input',
+   * 'no-reference', 'rule-estimate', 'unverified-orders', 'background-check',
+   * 'stale-reference' (a PriceDB or community price older than profit.referenceMaxAgeMs was ignored),
+   * 'suspect-margin' (margin over profit.suspectMargin with few buyers and no usable reference; never notified)
+   */
   flags: string[];
   /** Human-readable explanations of the confidence score. */
   reasons: string[];
@@ -409,6 +420,60 @@ export interface OppListResult {
   rows: Opportunity[];
   total: number;
   groups: GroupSummary[];
+  keyPrice: KeyPriceState | null;
+  generatedAt: UnixMs;
+}
+
+// ---------------------------------------------------------------------------
+// Shopping list ("pay up to" ceilings to browse scrap.tf against by hand)
+// ---------------------------------------------------------------------------
+
+export interface ShoppingQuery {
+  categories?: Category[];
+  search?: string;
+  /** Only rows whose ceiling is at least this much. */
+  minCeilingScrap?: Scrap;
+  /** Only rows whose revenue order is a bot's. */
+  onlyBotBuyers?: boolean;
+  /** Omitted: every row (the CSV export relies on this). */
+  limit?: number;
+  offset?: number;
+}
+
+export interface ShoppingRow {
+  sku: string;
+  name: string;
+  category: Category;
+  /** scraptfPageFor(category): the static scrap.tf bank page, opened by the user in their browser (never fetched). */
+  bankPageUrl: string;
+  /** > 0 only. */
+  maxCostScrap: Scrap;
+  revenueScrap: Scrap;
+  revenueOrder: OrderSummary | null;
+  confidence: number;
+  confidenceLevel: ConfidenceLevel;
+  buyerCount: number;
+  /**
+   * A typed/imported scrap.tf cost for this SKU: the chosen row's own when it is typed or imported,
+   * otherwise the newest one. Null if only rules match. Painted, spelled and plain copies share a
+   * SKU, so this cost is only ever compared with its own row's ceiling (knownMaxCostScrap).
+   */
+  knownCostScrap: Scrap | null;
+  /** The ceiling of the row knownCostScrap comes from; equals maxCostScrap when that row is the chosen one. */
+  knownMaxCostScrap: Scrap | null;
+  /** knownCostScrap <= knownMaxCostScrap (false when that row has no ceiling); null when knownCostScrap is null. */
+  underCeiling: boolean | null;
+  inputKinds: InputKind[];
+  flags: string[];
+  updatedAt: UnixMs;
+}
+
+export interface ShoppingListResult {
+  rows: ShoppingRow[];
+  /** Matching rows before paging. */
+  total: number;
+  /** Non-empty categories in CATEGORIES order, counted over every match. */
+  groups: { category: Category; label: string; count: number; bankPageUrl: string }[];
   keyPrice: KeyPriceState | null;
   generatedAt: UnixMs;
 }
@@ -475,11 +540,29 @@ export interface HistoryPoint {
   sellScrap: Scrap | null;
 }
 
+/** Revenue for one item from its eligible buy book, priced like the engine does (item.detail). */
+export interface ItemRevenue {
+  bestScrap: Scrap | null;
+  consScrap: Scrap | null;
+  instantScrap: Scrap | null;
+  useOrder: ProfitSettings['useOrder'];
+  /** The one used for profit, per useOrder. */
+  revenueScrap: Scrap | null;
+  order: OrderSummary | null;
+  /** maxCostFor(revenueScrap, settings.profit) */
+  maxCostScrap: Scrap | null;
+  eligibleCount: number;
+}
+
 export interface ItemDetail {
   sku: string;
   name: string;
+  /** backpack.tf full name (LinkContext.fullName), for "Copy backpack.tf name". */
+  bptfName: string;
   category: Category;
   skuObject: SkuObject;
+  /** No eligible orders gives null prices and eligibleCount 0; null only when it could not be computed. */
+  revenue: ItemRevenue | null;
   /** Buy orders, best first, each marked eligible or not with reasons. */
   buyOrders: OrderSummary[];
   /** Sell listings (only stored for watched SKUs unless configured otherwise). */
@@ -491,6 +574,38 @@ export interface ItemDetail {
   links: LinkSpec[];
   snapshot: { lastAt: UnixMs | null; available: boolean; nextAllowedAt: UnixMs | null };
   keyPrice: KeyPriceState | null;
+}
+
+/** backpack.tf ban lookup for one buyer ('buyer.check'; on click only, cached 1 h). */
+export interface BuyerCheck {
+  steamid: string;
+  name: string | null;
+  /** null when unknown (error, or no lookup made). */
+  bptfBanned: boolean | null;
+  /** Human-readable ban lines, e.g. "backpack.tf: all", "SteamRep: scammer". */
+  banDetails: string[];
+  checkedAt: UnixMs;
+  /** True when served from the in-memory cache. */
+  cached: boolean;
+  /** Why the lookup failed (e.g. 'Add a backpack.tf access token in Settings'); null on success. */
+  error: string | null;
+}
+
+// ---------------------------------------------------------------------------
+// Price sheet bulk paste
+// ---------------------------------------------------------------------------
+
+/** One parsed line of a bulk paste ('prices.parseBulk'); a preview, nothing is written. */
+export interface BulkPriceRow {
+  /** 1-based line number in the pasted text. */
+  line: number;
+  raw: string;
+  sku: string | null;
+  name: string | null;
+  costKeys: number;
+  costScrap: Scrap;
+  /** Why the line cannot be saved; null when it can. */
+  error: string | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -674,6 +789,10 @@ export interface ProfitSettings {
   /** Scrap.tf prices older than this are treated as stale. */
   inputStaleMs: number;
   notesKeywords: string[];
+  /** PriceDB (ageMs) and community (lastUpdate) references older than this are ignored ('stale-reference'). */
+  referenceMaxAgeMs: number;
+  /** Margin (2 = 200%) above which a row with few buyers and no usable reference is 'suspect-margin'; 0 turns the guard off. */
+  suspectMargin: number;
 }
 
 export interface PermissionRecord {
@@ -705,7 +824,16 @@ export interface Settings {
     watchFolder: string | null;
     permission: PermissionRecord | null;
   };
-  notifications: { enabled: boolean; minConfidence: number; minProfitScrap: Scrap; dedupMs: number };
+  notifications: {
+    enabled: boolean;
+    minConfidence: number;
+    minProfitScrap: Scrap;
+    dedupMs: number;
+    /** Input kinds that may notify; rows of other kinds are never toasted. */
+    inputKinds: InputKind[];
+    /** Passed to Electron's Notification({ silent }) by main. */
+    silent: boolean;
+  };
   app: { startAtLogin: boolean; startHidden: boolean; closeToTray: boolean; quickEntryHotkey: string };
   networkPaused: boolean;
   /** Steam IDs whose buy orders are never used. */

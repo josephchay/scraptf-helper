@@ -2,17 +2,30 @@ import { describe, expect, it } from 'vitest';
 import { isValidContactUrl } from '../../src/renderer/format';
 import {
   CONTACT_ERROR,
+  daysTextToMs,
   HOTKEY_HINT_ERROR,
+  inputKindsHint,
   MIN_MARGIN_PCT,
   MIN_PROFIT_PCT_OF_COST,
+  msToDaysText,
+  NOTIFY_INPUT_KINDS,
   numberValidator,
+  pctTextToRatio,
+  ratioToPctText,
+  REFERENCE_MAX_AGE_DAYS,
+  referenceAgeHint,
+  setInputKind,
+  SUSPECT_MARGIN_PCT,
+  suspectMarginHint,
   userAgentPreview,
   validateContactUrl,
   validateHotkey,
 } from '../../src/renderer/settingsFields';
+import { usableReferences } from '../../src/service/domain/pricing';
 import { buildUserAgent } from '../../src/service/net/http';
 import { DEFAULT_SETTINGS } from '../../src/shared/defaults';
 import { applySettingsPatch, isValidAccelerator } from '../../src/shared/settingsSchema';
+import type { InputKind } from '../../src/shared/types';
 
 /** True when main would accept the patch (the settings store applies exactly this). */
 function mainAccepts(patch: Parameters<typeof applySettingsPatch>[1]): boolean {
@@ -39,9 +52,112 @@ describe('profit percentage fields agree with the settings schema', () => {
     expect(mainAccepts({ profit: { minMargin: 1.5 } })).toBe(false);
   });
 
+  it('rejects a cleared field instead of saving 0 (Number("") is 0)', () => {
+    for (const v of [numberValidator(0, 100), numberValidator(MIN_MARGIN_PCT.min, MIN_MARGIN_PCT.max), numberValidator(0, 100000)]) {
+      expect(v('')).toBe('Enter a number.');
+      expect(v('   ')).toBe('Enter a number.');
+    }
+    // Same answer whatever the minimum is.
+    expect(numberValidator(0.1, 100)('')).toBe('Enter a number.');
+    expect(numberValidator(0, 100, true)('')).toBeNull();
+    expect(numberValidator(0, 100, true)('  ')).toBeNull();
+  });
+
+  it('accepts plain decimals only, not the other forms Number() reads', () => {
+    const v = numberValidator(0, 100000);
+    for (const ok of ['0', '8', '8.5', '.5', '5.', ' 12 ', '+3']) expect(v(ok), ok).toBeNull();
+    for (const bad of ['0x10', '1e3', 'Infinity', '1,5', '1 2', '-']) expect(v(bad), bad).toBe('Enter a number.');
+  });
+
   it('keeps the "% of cost" field inside the schema range', () => {
     expect(mainAccepts({ profit: { minProfitPctOfCost: MIN_PROFIT_PCT_OF_COST.max / 100 } })).toBe(true);
     expect(mainAccepts({ profit: { minProfitPctOfCost: MIN_PROFIT_PCT_OF_COST.min / 100 } })).toBe(true);
+  });
+});
+
+describe('reference age and suspect margin fields (F4, F5)', () => {
+  const DAY = 86_400_000;
+
+  it('shows referenceMaxAgeMs in days and saves integer milliseconds main accepts', () => {
+    const v = numberValidator(REFERENCE_MAX_AGE_DAYS.min, REFERENCE_MAX_AGE_DAYS.max);
+    expect(msToDaysText(DEFAULT_SETTINGS.profit.referenceMaxAgeMs)).toBe('30');
+    expect(msToDaysText(36 * 3_600_000)).toBe('1.5');
+    for (const ok of ['0', '1', '30', '0.5', '365']) {
+      expect(v(ok), ok).toBeNull();
+      const ms = daysTextToMs(ok);
+      expect(Number.isInteger(ms), ok).toBe(true);
+      expect(mainAccepts({ profit: { referenceMaxAgeMs: ms } }), ok).toBe(true);
+    }
+    expect(daysTextToMs('30')).toBe(30 * DAY);
+    expect(daysTextToMs('1.333333')).toBe(Math.round(1.333333 * DAY));
+    for (const bad of ['366', '-1', '1e2', 'abc']) expect(v(bad), bad).not.toBeNull();
+    expect(mainAccepts({ profit: { referenceMaxAgeMs: daysTextToMs('366') } })).toBe(false);
+  });
+
+  it('shows suspectMargin as a percentage, with 0 turning the guard off', () => {
+    const v = numberValidator(SUSPECT_MARGIN_PCT.min, SUSPECT_MARGIN_PCT.max);
+    expect(ratioToPctText(DEFAULT_SETTINGS.profit.suspectMargin)).toBe('200');
+    expect(pctTextToRatio('200')).toBe(2);
+    expect(pctTextToRatio('0')).toBe(0);
+    for (const ok of ['0', '150', '200', '33.33', '100000']) {
+      expect(v(ok), ok).toBeNull();
+      expect(mainAccepts({ profit: { suspectMargin: pctTextToRatio(ok) } }), ok).toBe(true);
+    }
+    expect(v('100001')).toBe('Between 0 and 100000.');
+    expect(mainAccepts({ profit: { suspectMargin: pctTextToRatio('100001') } })).toBe(false);
+    expect(ratioToPctText(pctTextToRatio('33.33'))).toBe('33.33');
+    expect(suspectMarginHint(0)).toMatch(/^Off\./);
+    expect(suspectMarginHint(2)).toMatch(/0 turns the check off/);
+  });
+
+  it('never commits 0 from a cleared field (0 would ignore every reference or turn the guard off)', () => {
+    for (const v of [numberValidator(REFERENCE_MAX_AGE_DAYS.min, REFERENCE_MAX_AGE_DAYS.max), numberValidator(SUSPECT_MARGIN_PCT.min, SUSPECT_MARGIN_PCT.max)]) {
+      expect(v('')).toBe('Enter a number.');
+      expect(v('  ')).toBe('Enter a number.');
+    }
+    expect(referenceAgeHint(0)).toMatch(/every PriceDB price with a known age is ignored/);
+    expect(referenceAgeHint(30 * DAY)).toMatch(/at least a year/);
+    expect(referenceAgeHint(30 * DAY)).not.toMatch(/ignored\.$/);
+  });
+
+  it('the 0-days hint matches what the engine does with references', () => {
+    const now = Date.UTC(2026, 9, 15);
+    const dated = { pricedb: { buyScrap: 100, sellScrap: 120, time: null, ageMs: 60_000 }, community: { valueScrap: 110, valueHighScrap: null, lastUpdate: now / 1000 - 60 } };
+    // At 0 PriceDB is dropped; a minute-old community price keeps its one-year floor.
+    expect(usableReferences(dated, daysTextToMs('0'), now).references).toEqual({ pricedb: null, community: dated.community });
+    // A price of unknown age is kept, hence "with a known age".
+    const undated = { pricedb: { buyScrap: 100, sellScrap: 120, time: null, ageMs: null }, community: null };
+    expect(usableReferences(undated, daysTextToMs('0'), now).references.pricedb).not.toBeNull();
+    expect(usableReferences(dated, daysTextToMs('30'), now).stale).toEqual([]);
+  });
+});
+
+describe('notification controls (F6)', () => {
+  it('ticks and unticks input kinds in a stable order without duplicates', () => {
+    expect(NOTIFY_INPUT_KINDS.map((o) => o.value)).toEqual(DEFAULT_SETTINGS.notifications.inputKinds);
+    expect(setInputKind(['user', 'import', 'rule'], 'rule', false)).toEqual(['user', 'import']);
+    expect(setInputKind(['import'], 'user', true)).toEqual(['user', 'import']);
+    expect(setInputKind(['rule', 'user'], 'import', true)).toEqual(['user', 'import', 'rule']);
+    expect(setInputKind(['user', 'user'] as InputKind[], 'user', true)).toEqual(['user']);
+    expect(setInputKind(['user'], 'user', false)).toEqual([]);
+  });
+
+  it('every combination is one main accepts, including none', () => {
+    const kinds: InputKind[] = ['user', 'import', 'rule'];
+    for (let mask = 0; mask < 8; mask++) {
+      let cur: InputKind[] = [];
+      kinds.forEach((k, i) => {
+        cur = setInputKind(cur, k, (mask & (1 << i)) !== 0);
+      });
+      expect(mainAccepts({ notifications: { inputKinds: cur } }), cur.join(',')).toBe(true);
+    }
+    expect(inputKindsHint([])).toMatch(/no desktop notifications/);
+    expect(inputKindsHint(['user'])).not.toMatch(/no desktop notifications/);
+  });
+
+  it('saves the silent switch', () => {
+    expect(mainAccepts({ notifications: { silent: true } })).toBe(true);
+    expect(applySettingsPatch(DEFAULT_SETTINGS, { notifications: { silent: true } }).notifications.silent).toBe(true);
   });
 });
 

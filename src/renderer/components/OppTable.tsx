@@ -1,8 +1,22 @@
-import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type KeyboardEvent } from 'react';
+import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type KeyboardEvent, type MouseEvent } from 'react';
 import type { Opportunity, Scrap } from '../../shared/types';
-import { INPUT_KIND_LABELS, STATUS_LABELS, fmtAge, fmtDateTime, fmtKeysDecimal, fmtKeysMetal, fmtMoney, fmtPct, fmtRefOnly } from '../format';
-import { REVENUE_ORDER_TITLES, indexOfRow, moveCursor, revenueOrderOf, type DisplayRow, type SortDir, type SortKey, type UseOrder } from '../oppModel';
+import { INPUT_KIND_LABELS, STATUS_LABELS, fmtAge, fmtDateTime, fmtInt, fmtKeysDecimal, fmtKeysMetal, fmtMoney, fmtPct, fmtRefOnly } from '../format';
+import {
+  REVENUE_ORDER_TITLES,
+  indexOfRow,
+  isMenuKeyEcho,
+  menuAnchorRect,
+  moveCursor,
+  nextGroupPageSize,
+  payUpToTitle,
+  revenueOrderOf,
+  type DisplayRow,
+  type SortDir,
+  type SortKey,
+  type UseOrder,
+} from '../oppModel';
 import { Icon } from './Icon';
+import { isContextMenuKey, menuPointForRect } from './ItemMenu';
 import { ItemName, Money } from './ItemName';
 import { ConfidenceBadge, OnlineDot } from './Pills';
 import { Tip } from './Tip';
@@ -21,9 +35,14 @@ interface Props {
   onSelect: (id: string | null) => void;
   onOpen: (o: Opportunity) => void;
   onToggleGroup: (key: string) => void;
+  /** "Load more" under a group whose count exceeds its loaded rows. */
+  onLoadMore?: (key: string) => void;
+  loadingMore?: ReadonlySet<string>;
   sort: SortKey;
   dir: SortDir;
   onSort: (k: SortKey) => void;
+  /** Right-click, Shift+F10 or the ContextMenu key on an opportunity row (the F9 item menu). */
+  onContextMenu?: (o: Opportunity, at: { x: number; y: number }) => void;
 }
 
 const SORTABLE: { key: SortKey; label: string; cls: string; title: string }[] = [
@@ -47,8 +66,27 @@ function SortHeader({ k, sort, dir, onSort }: { k: SortKey; sort: SortKey; dir: 
   );
 }
 
+const NO_KEYS: ReadonlySet<string> = new Set();
+
 /** Virtualised, grouped opportunities grid with keyboard navigation (j/k, arrows, Enter). */
-export function OppTable({ rows, keyScrap, now, staleMs, density, useOrder, selectedId, onSelect, onOpen, onToggleGroup, sort, dir, onSort }: Props) {
+export function OppTable({
+  rows,
+  keyScrap,
+  now,
+  staleMs,
+  density,
+  useOrder,
+  selectedId,
+  onSelect,
+  onOpen,
+  onToggleGroup,
+  onLoadMore,
+  loadingMore = NO_KEYS,
+  sort,
+  dir,
+  onSort,
+  onContextMenu,
+}: Props) {
   const scroller = useRef<HTMLDivElement>(null);
   const header = useRef<HTMLDivElement>(null);
   // Only the first visible row is state, so scrolling within a row costs no render.
@@ -57,6 +95,7 @@ export function OppTable({ rows, keyScrap, now, staleMs, density, useOrder, sele
   const [headH, setHeadH] = useState(34);
   const raf = useRef(0);
   const keyboardMove = useRef(false);
+  const menuKeyAt = useRef(0);
   const rowH = ROW_HEIGHT[density];
 
   useLayoutEffect(() => {
@@ -102,11 +141,30 @@ export function OppTable({ rows, keyScrap, now, staleMs, density, useOrder, sele
   const end = Math.min(rows.length, firstRow + Math.ceil(viewH / rowH) + overscan);
   const pageSize = Math.max(1, Math.floor((viewH - headH) / rowH) - 1);
 
+  // Opened from the keyboard: anchored to the cursor's row.
+  const menuForRow = useCallback(
+    (idx: number): boolean => {
+      const row = rows[idx];
+      if (row?.type !== 'opp' || !onContextMenu) return false;
+      const box = document.getElementById(`opprow-${idx}`)?.getBoundingClientRect();
+      onContextMenu(row.opp, menuPointForRect(menuAnchorRect(box, scroller.current?.getBoundingClientRect(), headH)));
+      return true;
+    },
+    [rows, onContextMenu, headH],
+  );
+
   const onKey = useCallback(
     (e: KeyboardEvent<HTMLDivElement>) => {
       if (e.target !== e.currentTarget || e.ctrlKey || e.metaKey || e.altKey) return;
       const idx = indexOfRow(rows, selectedId);
       const row = idx >= 0 ? rows[idx] : undefined;
+      if (isContextMenuKey(e)) {
+        if (menuForRow(idx)) {
+          e.preventDefault();
+          menuKeyAt.current = Date.now();
+        }
+        return;
+      }
       const go = (n: number) => {
         e.preventDefault();
         keyboardMove.current = true;
@@ -138,7 +196,9 @@ export function OppTable({ rows, keyScrap, now, staleMs, density, useOrder, sele
           if (!row) return;
           e.preventDefault();
           if (row.type === 'group') onToggleGroup(row.group.key);
-          else onOpen(row.opp);
+          else if (row.type === 'more') {
+            if (!row.capped && !loadingMore.has(row.groupKey)) onLoadMore?.(row.groupKey);
+          } else onOpen(row.opp);
           break;
         case 'ArrowLeft':
           if (!row) return;
@@ -158,8 +218,16 @@ export function OppTable({ rows, keyScrap, now, staleMs, density, useOrder, sele
           break;
       }
     },
-    [rows, selectedId, onSelect, onOpen, onToggleGroup, pageSize],
+    [rows, selectedId, onSelect, onOpen, onToggleGroup, onLoadMore, loadingMore, pageSize, menuForRow],
   );
+
+  // A keyboard-generated contextmenu lands on the focused grid itself; rows handle the mouse.
+  const onGridMenu = (e: MouseEvent<HTMLDivElement>) => {
+    if (e.target !== e.currentTarget || !onContextMenu) return;
+    e.preventDefault();
+    if (isMenuKeyEcho(menuKeyAt.current, Date.now())) return;
+    menuForRow(indexOfRow(rows, selectedId));
+  };
 
   return (
     <div
@@ -168,10 +236,11 @@ export function OppTable({ rows, keyScrap, now, staleMs, density, useOrder, sele
       onScroll={onScroll}
       tabIndex={0}
       role="grid"
-      aria-label="Opportunities. Use j and k or the arrow keys to move, Enter to open."
+      aria-label="Opportunities. Use j and k or the arrow keys to move, Enter to open, Shift+F10 for item actions."
       aria-rowcount={rows.length + 1}
       aria-activedescendant={selectedIndex >= 0 ? `opprow-${selectedIndex}` : undefined}
       onKeyDown={onKey}
+      onContextMenu={onGridMenu}
       onFocus={() => {
         if (selectedIndex < 0 && rows.length) onSelect(rows[0]!.id);
       }}
@@ -180,6 +249,9 @@ export function OppTable({ rows, keyScrap, now, staleMs, density, useOrder, sele
         <SortHeader k="name" sort={sort} dir={dir} onSort={onSort} />
         <div role="columnheader" className="c-cost num">
           Cost
+        </div>
+        <div role="columnheader" className="c-pay num" title="Pay up to: the highest scrap.tf price that still clears your profit thresholds against this revenue">
+          Pay up to
         </div>
         <div role="columnheader" className="c-rev num" title={REVENUE_ORDER_TITLES[useOrder]}>
           Revenue
@@ -203,8 +275,23 @@ export function OppTable({ rows, keyScrap, now, staleMs, density, useOrder, sele
           const index = start + i;
           return r.type === 'group' ? (
             <GroupRow key={r.id} row={r} index={index} rowH={rowH} selected={r.id === selectedId} keyScrap={keyScrap} onSelect={onSelect} onToggle={onToggleGroup} />
+          ) : r.type === 'more' ? (
+            <MoreRow key={r.id} row={r} index={index} rowH={rowH} selected={r.id === selectedId} loading={loadingMore.has(r.groupKey)} onSelect={onSelect} onLoadMore={onLoadMore} />
           ) : (
-            <OppRow key={r.id} opp={r.opp} index={index} rowH={rowH} selected={r.id === selectedId} keyScrap={keyScrap} now={now} staleMs={staleMs} useOrder={useOrder} onSelect={onSelect} onOpen={onOpen} />
+            <OppRow
+              key={r.id}
+              opp={r.opp}
+              index={index}
+              rowH={rowH}
+              selected={r.id === selectedId}
+              keyScrap={keyScrap}
+              now={now}
+              staleMs={staleMs}
+              useOrder={useOrder}
+              onSelect={onSelect}
+              onOpen={onOpen}
+              onMenu={onContextMenu}
+            />
           );
         })}
       </div>
@@ -258,6 +345,53 @@ const GroupRow = memo(function GroupRow({
   );
 });
 
+const MoreRow = memo(function MoreRow({
+  row,
+  index,
+  rowH,
+  selected,
+  loading,
+  onSelect,
+  onLoadMore,
+}: {
+  row: Extract<DisplayRow, { type: 'more' }>;
+  index: number;
+  rowH: number;
+  selected: boolean;
+  loading: boolean;
+  onSelect: (id: string) => void;
+  onLoadMore?: (key: string) => void;
+}) {
+  const g = row.group;
+  const shown = `Showing ${fmtInt(g.rows.length)} of ${fmtInt(g.count)}`;
+  return (
+    <div id={`opprow-${index}`} role="row" aria-selected={selected} className={`opp-row opp-more${selected ? ' selected' : ''}`} style={rowStyle(index, rowH)} onClick={() => onSelect(row.id)}>
+      <div role="gridcell" className="more-cell">
+        {row.capped ? (
+          <span className="muted small">{shown}, the most one group shows. Narrow the filters, or Export CSV for every row.</span>
+        ) : (
+          <>
+            <span className="muted small">{shown}</span>
+            <button
+              type="button"
+              className="btn ghost small"
+              tabIndex={-1}
+              disabled={loading || !onLoadMore}
+              onClick={(e) => {
+                e.stopPropagation();
+                onSelect(row.id);
+                onLoadMore?.(g.key);
+              }}
+            >
+              {loading ? 'Loading…' : `Load ${fmtInt(nextGroupPageSize(g))} more`}
+            </button>
+          </>
+        )}
+      </div>
+    </div>
+  );
+});
+
 function rowStyle(index: number, rowH: number): CSSProperties {
   return { transform: `translateY(${index * rowH}px)`, height: rowH };
 }
@@ -280,6 +414,7 @@ const OppRow = memo(function OppRow({
   useOrder,
   onSelect,
   onOpen,
+  onMenu,
 }: {
   opp: Opportunity;
   index: number;
@@ -291,6 +426,7 @@ const OppRow = memo(function OppRow({
   useOrder: UseOrder;
   onSelect: (id: string) => void;
   onOpen: (o: Opportunity) => void;
+  onMenu?: (o: Opportunity, at: { x: number; y: number }) => void;
 }) {
   const inputAge = now - o.inputObservedAt;
   const stale = o.inputKind !== 'rule' && inputAge > staleMs;
@@ -308,6 +444,16 @@ const OppRow = memo(function OppRow({
         onSelect(o.key);
         onOpen(o);
       }}
+      onContextMenu={
+        onMenu
+          ? (e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              onSelect(o.key);
+              onMenu(o, { x: e.clientX, y: e.clientY });
+            }
+          : undefined
+      }
     >
       <div role="gridcell" className="c-item">
         <span className={`status-dot tone-${STATUS_TONE[o.status]}`} title={STATUS_LABELS[o.status]} aria-label={STATUS_LABELS[o.status]} role="img" />
@@ -320,6 +466,9 @@ const OppRow = memo(function OppRow({
       </div>
       <div role="gridcell" className="c-cost num">
         <Money scrap={o.costScrap} keyScrap={keyScrap} title={o.costKeys ? `Entered as ${fmtKeysMetal(o.costKeys, o.costScrapRaw)} (${fmtRefOnly(o.costScrap)} at the current key price)` : undefined} />
+      </div>
+      <div role="gridcell" className="c-pay num">
+        <Money scrap={o.maxCostScrap} keyScrap={keyScrap} title={payUpToTitle(o, keyScrap)} />
       </div>
       <div role="gridcell" className="c-rev num">
         <Tip

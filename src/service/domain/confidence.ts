@@ -3,8 +3,9 @@
 
 import type { ConfidenceLevel, InputKind, ProfitSettings, ReferencePrices, Scrap, UnixMs } from '../../shared/types';
 import { UNVERIFIED_AFTER_MS } from './matcher';
+import { hasReferenceValue, usableReferences } from './pricing';
 import type { ValuedOrderLike } from './pricing';
-import { MEDIUM_CAP, confidenceLevel } from './tiers';
+import { LOW_CAP, MEDIUM_CAP, confidenceLevel } from './tiers';
 
 export const BASE_SCORE = 50;
 /** Bot considered active when its userAgent pulsed within this window. */
@@ -13,21 +14,30 @@ export const BOT_PULSE_MS = 30 * 60 * 1000;
 export const CONFIRMED_MS = 2 * 60 * 60 * 1000;
 /** scrap.tf price counts as fresh within this window. */
 export const FRESH_INPUT_MS = 15 * 60 * 1000;
+/** With this many eligible orders the median outlier rule can sanity-check the price, so the suspect-margin guard stays off. */
+export const SUSPECT_MIN_ORDERS = 3;
 const DEFAULT_INPUT_STALE_MS = 2 * 60 * 60 * 1000;
+const DEFAULT_SUSPECT_MARGIN = 2;
 
 export interface ConfidenceInput {
   /** The order the profit is based on (the conservative order by default). */
   order: (ValuedOrderLike & { flags?: readonly string[] }) | null;
   /** All eligible orders, for the "distinct buyers within 10%" check. */
   eligible: readonly ValuedOrderLike[];
+  /** As stored on the opportunity; stale ones are ignored here (profit.referenceMaxAgeMs). */
   references: ReferencePrices;
   inputKind: InputKind;
   inputObservedAt: UnixMs;
   isUnusual: boolean;
   revenueScrap: Scrap | null;
+  /**
+   * profit / cost (Infinity for a free item with a positive profit), for the
+   * suspect-margin guard; omitted or null skips the guard.
+   */
+  margin?: number | null;
   keyScrap: Scrap;
   now: UnixMs;
-  profit: Pick<ProfitSettings, 'inputStaleMs' | 'unusualRiskKeys'>;
+  profit: Pick<ProfitSettings, 'inputStaleMs' | 'unusualRiskKeys' | 'referenceMaxAgeMs' | 'suspectMargin'>;
 }
 
 export interface ConfidenceResult {
@@ -60,9 +70,15 @@ export function scoreConfidence(input: ConfidenceInput): ConfidenceResult {
     if (!flags.includes(f)) flags.push(f);
   };
 
+  // F4: stale references count as absent for the adjustments below and for the suspect-margin guard.
+  const usable = usableReferences(input.references, input.profit.referenceMaxAgeMs, now);
+  const refs = usable.references;
+  if (usable.stale.length > 0) flag('stale-reference');
+
   let unverified = false;
   if (order === null) {
     reasons.push('No usable buy order');
+    reasons.push(...usable.stale);
   } else {
     const l = order.listing;
     const pulse = typeof l.uaLastPulse === 'number' && Number.isFinite(l.uaLastPulse) ? l.uaLastPulse * 1000 : null;
@@ -84,10 +100,11 @@ export function scoreConfidence(input: ConfidenceInput): ConfidenceResult {
     }
     if (near.size >= 2) add(10, `${near.size} buyers within 10% of this price`);
 
-    const pdbBuy = positive(input.references.pricedb?.buyScrap);
-    const comm = positive(input.references.community?.valueScrap);
+    const pdbBuy = positive(refs.pricedb?.buyScrap);
+    const comm = positive(refs.community?.valueScrap);
+    reasons.push(...usable.stale);
     if (pdbBuy === null && comm === null) {
-      add(-10, 'No PriceDB or community price to compare with');
+      add(-10, usable.stale.length > 0 ? 'No recent PriceDB or community price to compare with' : 'No PriceDB or community price to compare with');
       flag('no-reference');
     } else {
       const over = [pdbBuy !== null && v > 1.5 * pdbBuy ? 'PriceDB buy price' : null, comm !== null && v > 1.5 * comm ? 'backpack.tf community price' : null].filter(
@@ -141,7 +158,30 @@ export function scoreConfidence(input: ConfidenceInput): ConfidenceResult {
     score = MEDIUM_CAP;
     reasons.push('Capped at Medium: the order is unverified');
   }
+
+  // F5: with few orders and no usable reference nothing checks the price, and a huge
+  // margin is then most likely a unit or variant mix-up. Kept visible, never notified.
+  const suspect = suspectMarginOf(input.profit.suspectMargin);
+  const margin = input.margin;
+  if (
+    suspect > 0 &&
+    typeof margin === 'number' &&
+    !Number.isNaN(margin) &&
+    margin > suspect &&
+    input.eligible.length < SUSPECT_MIN_ORDERS &&
+    !hasReferenceValue(refs)
+  ) {
+    flag('suspect-margin');
+    score = Math.min(score, LOW_CAP);
+    reasons.push(`Margin over ${Math.round(suspect * 100)}% with no reference and few buyers. Check the variant and units`);
+  }
   return { score, level: confidenceLevel(score), reasons, flags };
+}
+
+/** 0 turns the guard off; a missing or broken value uses the default (200%). */
+function suspectMarginOf(v: number | undefined): number {
+  if (typeof v !== 'number' || !Number.isFinite(v) || v < 0) return DEFAULT_SUSPECT_MARGIN;
+  return v;
 }
 
 function positive(v: number | null | undefined): number | null {

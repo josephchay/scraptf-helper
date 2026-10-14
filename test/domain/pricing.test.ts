@@ -1,14 +1,19 @@
 import { describe, expect, it } from 'vitest';
 import type { CommunityRow, Listing, PricedbRow } from '../../src/shared/types';
 import {
+  COMMUNITY_MIN_MAX_AGE_MS,
+  DEFAULT_REFERENCE_MAX_AGE_MS,
   communityScrap,
   computePrices,
+  hasReferenceValue,
   lookupReferences,
   median,
   outlierRefs,
+  pickRevenueOrder,
   referencePrices,
   refreshReferenceAge,
   toOrderSummary,
+  usableReferences,
   valueOrders,
 } from '../../src/service/domain/pricing';
 import { confidenceLevel, minProfitFor, profitStatus, profitTier } from '../../src/service/domain/tiers';
@@ -247,5 +252,60 @@ describe('tiers and thresholds (brief §5.6)', () => {
     expect(confidenceLevel(45)).toBe('medium');
     expect(confidenceLevel(44)).toBe('low');
     expect(confidenceLevel(0)).toBe('low');
+  });
+});
+
+describe('reference age gate (F4) and the revenue pick', () => {
+  const DAY = 24 * HOUR;
+
+  it('drops PriceDB and community prices older than the limit, with a reason each', () => {
+    const refs = {
+      pricedb: { buyScrap: 15, sellScrap: 18, time: 1, ageMs: 31 * DAY },
+      community: { valueScrap: 20, valueHighScrap: 25, lastUpdate: Math.floor((T0 - 400 * DAY) / 1000) },
+    };
+    const r = usableReferences(refs, 30 * DAY, T0);
+    expect(r.references).toEqual({ pricedb: null, community: null });
+    expect(r.stale).toEqual(['PriceDB price is 31 days old, ignored', 'Community price is 400 days old, ignored']);
+    expect(outlierRefs(r.references)).toEqual({ pricedbSellScrap: null, communityHighScrap: null });
+    expect(hasReferenceValue(r.references)).toBe(false);
+
+    const kept = usableReferences(refs, 450 * DAY, T0);
+    expect(kept.references).toBe(refs);
+    expect(kept.stale).toEqual([]);
+  });
+
+  it('gives community prices at least a year whatever the PriceDB limit', () => {
+    const at = (days: number) => ({ pricedb: null, community: { valueScrap: 20, valueHighScrap: null, lastUpdate: Math.floor((T0 - days * DAY) / 1000) } });
+    expect(COMMUNITY_MIN_MAX_AGE_MS).toBe(365 * DAY);
+    expect(usableReferences(at(200), 30 * DAY, T0).stale).toEqual([]);
+    expect(usableReferences(at(366), 30 * DAY, T0).stale).toEqual(['Community price is 366 days old, ignored']);
+    expect(usableReferences(at(366), 400 * DAY, T0).stale).toEqual([]);
+  });
+
+  it('keeps references of unknown or exact age, and uses 30 days when the setting is broken', () => {
+    const refs = { pricedb: { buyScrap: 15, sellScrap: 18, time: null, ageMs: null }, community: { valueScrap: 20, valueHighScrap: null, lastUpdate: null } };
+    expect(usableReferences(refs, 0, T0).references).toBe(refs);
+    const exact = { pricedb: { buyScrap: 15, sellScrap: 18, time: null, ageMs: 30 * DAY }, community: null };
+    expect(usableReferences(exact, 30 * DAY, T0).stale).toEqual([]);
+    expect(usableReferences(exact, 30 * DAY - 1, T0).stale).toHaveLength(1);
+    expect(DEFAULT_REFERENCE_MAX_AGE_MS).toBe(P.referenceMaxAgeMs);
+    for (const broken of [Number.NaN, -1, undefined]) {
+      expect(usableReferences({ ...exact, pricedb: { ...exact.pricedb, ageMs: 31 * DAY } }, broken, T0).stale).toHaveLength(1);
+      expect(usableReferences(exact, broken, T0).stale).toHaveLength(0);
+    }
+  });
+
+  it('counts any positive PriceDB or community value as a reference', () => {
+    expect(hasReferenceValue({ pricedb: null, community: null })).toBe(false);
+    expect(hasReferenceValue({ pricedb: { buyScrap: null, sellScrap: 0, time: null, ageMs: null }, community: null })).toBe(false);
+    expect(hasReferenceValue({ pricedb: { buyScrap: null, sellScrap: 5, time: null, ageMs: null }, community: null })).toBe(true);
+    expect(hasReferenceValue({ pricedb: null, community: { valueScrap: null, valueHighScrap: 9, lastUpdate: null } })).toBe(true);
+  });
+
+  it('picks the revenue order per useOrder', () => {
+    const prices = { best: 'b', conservative: 'c', instant: 'i' };
+    expect(pickRevenueOrder(prices, 'best')).toBe('b');
+    expect(pickRevenueOrder(prices, 'conservative')).toBe('c');
+    expect(pickRevenueOrder(prices, 'instant')).toBe('i');
   });
 });

@@ -28,7 +28,13 @@ export interface WindowManagerOptions {
   /** The dashboard window was really closed (not hidden to the tray). */
   onDashboardClosed(): void;
   log: Logger;
+  /** Clock for the crash-reload cap (tests). */
+  now?: () => number;
 }
+
+/** Automatic reloads of a crashed dashboard renderer per window of time, so a crash loop cannot spin. */
+export const MAX_CRASH_RELOADS = 3;
+export const CRASH_RELOAD_WINDOW_MS = 60_000;
 
 export interface WindowManager {
   /** Shows (creating if needed) and focuses the dashboard. */
@@ -37,7 +43,8 @@ export interface WindowManager {
   ensureDashboard(show: boolean): BrowserWindow;
   dashboard(): BrowserWindow | null;
   toggleQuickEntry(): void;
-  showQuickEntry(): void;
+  /** With a SKU, pushes 'ui.quickPrefill' to the quick-entry page once it has loaded (the latest SKU wins). */
+  showQuickEntry(prefillSku?: string): void;
   hideQuickEntry(): void;
   broadcast<E extends PushEvent>(event: E, payload: PushContract[E]): void;
   /** Delivers to the dashboard after its page has finished loading. */
@@ -120,10 +127,45 @@ export function createWindowManager(opts: WindowManagerOptions): WindowManager {
   let dashboardPainted = false;
   let dashboardWantShow = false;
   let dashboardQueue: [PushEvent, unknown][] = [];
+  // Renderer died and the reload cap stopped the automatic reload; the next show reloads it.
+  let dashboardCrashed = false;
+  let crashReloads: number[] = [];
   let quickWin: BrowserWindow | null = null;
+  // A prefill asked for before the quick-entry page finished loading is sent on 'did-finish-load'.
+  let quickLoaded = false;
+  let quickPrefill: string | null = null;
+  const now = opts.now ?? Date.now;
 
   function live(win: BrowserWindow | null): win is BrowserWindow {
     return win !== null && !win.isDestroyed();
+  }
+
+  function reloadDashboard(win: BrowserWindow): void {
+    dashboardCrashed = false;
+    dashboardLoaded = false;
+    win.loadURL(DASHBOARD_URL).catch((err: unknown) => log.error('dashboard failed to reload', err));
+  }
+
+  function onDashboardGone(win: BrowserWindow, reason: string): void {
+    // While quitting the renderer may be torn down on purpose; reloading would only slow the exit.
+    if (reason === 'clean-exit' || opts.isQuitting() || dashboardWin !== win || win.isDestroyed()) return;
+    // Electron keeps the window: without a reload it stays blank and pushes go to a dead page.
+    // Not destroyed instead, because 'closed' quits the app when close-to-tray is off.
+    dashboardLoaded = false;
+    if (!dashboardPainted) {
+      // ready-to-show may never come for the dead page; show the (dark) window while it reloads.
+      dashboardPainted = true;
+      if (dashboardWantShow) win.show();
+    }
+    const t = now();
+    crashReloads = crashReloads.filter((at) => t - at < CRASH_RELOAD_WINDOW_MS);
+    if (crashReloads.length >= MAX_CRASH_RELOADS) {
+      dashboardCrashed = true;
+      log.error('dashboard renderer keeps crashing; it reloads when the dashboard is shown again');
+      return;
+    }
+    crashReloads.push(t);
+    reloadDashboard(win);
   }
 
   function send(win: BrowserWindow | null, event: PushEvent, payload: unknown): void {
@@ -137,6 +179,8 @@ export function createWindowManager(opts: WindowManagerOptions): WindowManager {
 
   function ensureDashboard(show: boolean): BrowserWindow {
     if (live(dashboardWin)) {
+      // A user asking for the window is not a crash loop, so this ignores the reload cap.
+      if (show && dashboardCrashed) reloadDashboard(dashboardWin);
       if (show) reveal(dashboardWin);
       return dashboardWin;
     }
@@ -156,6 +200,7 @@ export function createWindowManager(opts: WindowManagerOptions): WindowManager {
     dashboardLoaded = false;
     dashboardPainted = false;
     dashboardWantShow = show;
+    dashboardCrashed = false;
 
     win.once('ready-to-show', () => {
       if (dashboardWin !== win) return;
@@ -191,6 +236,7 @@ export function createWindowManager(opts: WindowManagerOptions): WindowManager {
     });
     win.webContents.on('render-process-gone', (_e, details) => {
       log.error(`dashboard renderer gone: ${details.reason}`, { exitCode: details.exitCode });
+      onDashboardGone(win, details.reason);
     });
     win.webContents.on('preload-error', (_e, _path, error) => {
       log.error('dashboard preload error', { message: error.message });
@@ -214,7 +260,8 @@ export function createWindowManager(opts: WindowManagerOptions): WindowManager {
     if (live(quickWin)) return { win: quickWin, fresh: false };
     const win = new BrowserWindow({
       width: 460,
-      height: 380,
+      // Room for the live preview (sells for, pay up to, profit, links) below the form.
+      height: 420,
       show: false,
       frame: false,
       resizable: false,
@@ -239,27 +286,53 @@ export function createWindowManager(opts: WindowManagerOptions): WindowManager {
       }
     });
     win.on('closed', () => {
-      if (quickWin === win) quickWin = null;
+      if (quickWin === win) {
+        quickWin = null;
+        quickLoaded = false;
+        quickPrefill = null;
+      }
+    });
+    win.webContents.on('did-start-navigation', (event) => {
+      if (quickWin === win && event.isMainFrame && !event.isSameDocument) quickLoaded = false;
+    });
+    win.webContents.on('did-finish-load', () => {
+      if (quickWin !== win) return;
+      quickLoaded = true;
+      const sku = quickPrefill;
+      quickPrefill = null;
+      if (sku !== null) send(win, 'ui.quickPrefill', { sku });
     });
     win.webContents.on('render-process-gone', (_e, details) => {
       log.error(`quick-entry renderer gone: ${details.reason}`, { exitCode: details.exitCode });
+      if (details.reason === 'clean-exit' || opts.isQuitting()) return;
+      // A dead page can be neither used nor hidden with Esc. The next show builds a fresh
+      // window (only on a user's hotkey or click, so a crash loop cannot spin).
+      if (quickWin === win) {
+        quickWin = null;
+        quickLoaded = false;
+        quickPrefill = null;
+      }
+      setImmediate(() => {
+        if (!win.isDestroyed()) win.destroy();
+      });
     });
-    win.loadURL(QUICK_ENTRY_URL).catch((err: unknown) => log.error('quick entry failed to load', err));
     quickWin = win;
+    quickLoaded = false;
+    win.loadURL(QUICK_ENTRY_URL).catch((err: unknown) => log.error('quick entry failed to load', err));
     return { win, fresh: true };
   }
 
   function centreOnCursorDisplay(win: BrowserWindow): void {
     try {
       const area = screen.getDisplayNearestPoint(screen.getCursorScreenPoint()).workArea;
-      const [w = 460, h = 380] = win.getSize();
+      const [w = 460, h = 420] = win.getSize();
       win.setPosition(Math.round(area.x + (area.width - w) / 2), Math.round(area.y + (area.height - h) / 2));
     } catch {
       win.center();
     }
   }
 
-  function showQuickEntry(): void {
+  function showQuickEntry(prefillSku?: string): void {
     const { win, fresh } = ensureQuick();
     centreOnCursorDisplay(win);
     const reveal = () => {
@@ -269,6 +342,10 @@ export function createWindowManager(opts: WindowManagerOptions): WindowManager {
     };
     if (fresh) win.once('ready-to-show', reveal);
     else reveal();
+    const sku = typeof prefillSku === 'string' && prefillSku !== '' ? prefillSku : null;
+    // The latest show wins: a plain show (hotkey) drops a prefill still waiting for the page.
+    if (!quickLoaded) quickPrefill = sku;
+    else if (sku !== null) send(win, 'ui.quickPrefill', { sku });
   }
 
   function hideQuickEntry(): void {

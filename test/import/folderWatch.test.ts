@@ -136,6 +136,49 @@ describe('createFolderWatcher', () => {
     expect(fw.folders).toEqual([dir]);
   });
 
+  it('initial scan delivers pages oldest first, one at a time, whatever their names', async () => {
+    // Name order is the reverse of save order, and the oldest page is the largest (slowest to read).
+    const files = [
+      { name: 'Buy Hats - Scrap.TF (2).html', age: 30_000, body: PAGE },
+      { name: 'Buy Hats - Scrap.TF (1).html', age: 60_000, body: PAGE.repeat(50) },
+      { name: 'Buy Hats - Scrap.TF.html', age: 120_000, body: PAGE.repeat(2000) },
+    ];
+    for (const f of files) {
+      await writeFile(join(dir, f.name), f.body);
+      const t = new Date(Date.now() - f.age);
+      await utimes(join(dir, f.name), t, t);
+    }
+    const fw = fakeWatch();
+    const { delivered } = start({ factory: fw.factory, debounceMs: 10, since: Date.now() - 600_000 });
+    await vi.waitFor(() => expect(delivered).toHaveLength(3), { timeout: 3000, interval: 20 });
+    expect(delivered.map((d) => d.path)).toEqual([...files].reverse().map((f) => join(dir, f.name)));
+  });
+
+  it('delivers pages saved in one burst in the order their events arrived, even when the first is slower to read', async () => {
+    const fw = fakeWatch();
+    const { delivered } = start({ factory: fw.factory, debounceMs: 10 });
+    await writeFile(join(dir, 'b-older.html'), PAGE.repeat(2000));
+    await writeFile(join(dir, 'a-newer.html'), PAGE);
+    fw.emit('b-older.html');
+    fw.emit('a-newer.html');
+    await vi.waitFor(() => expect(delivered).toHaveLength(2), { timeout: 3000, interval: 20 });
+    expect(delivered.map((d) => d.path)).toEqual([join(dir, 'b-older.html'), join(dir, 'a-newer.html')]);
+  });
+
+  it('a scan (event without a file name) keeps debouncing a page that is still being written', async () => {
+    const fw = fakeWatch();
+    const { delivered } = start({ factory: fw.factory, debounceMs: 400, since: Date.now() - 600_000 });
+    const file = join(dir, 'hats.html');
+    for (let i = 1; i <= 6; i++) {
+      await writeFile(file, `${PAGE}<!-- part ${i} -->`);
+      fw.emit(null); // some platforms omit the name; every such event rescans the folder
+      await settle(100);
+    }
+    await vi.waitFor(() => expect(delivered).toHaveLength(1), { timeout: 3000, interval: 20 });
+    await settle(600);
+    expect(delivered.map((d) => d.html)).toEqual([`${PAGE}<!-- part 6 -->`]);
+  });
+
   it('by default ignores files that existed before it started', async () => {
     await writeFile(join(dir, 'hats.html'), PAGE);
     const past = new Date(Date.now() - 10_000);

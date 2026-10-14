@@ -39,6 +39,7 @@ function makeDeps(overrides: Partial<MainRpcDeps> = {}) {
     showQuickEntry: vi.fn(),
     openItemInDashboard: vi.fn(),
     appInfo: vi.fn(() => ({ version: '0.1.0', dataDir: 'd', logDir: 'l', platform: 'win32', electron: '44', node: '24' })),
+    serviceState: vi.fn((): ReturnType<MainRpcDeps['serviceState']> => null),
     isAllowedExternalUrl: vi.fn((url: string) => url.startsWith('https://backpack.tf/')),
     openExternal: vi.fn(async () => undefined),
     dialogs: {
@@ -131,6 +132,15 @@ describe('main methods', () => {
     const c = ctx();
     await expect(route(c, 'app.hideWindow', { ignored: true })).resolves.toEqual({ ok: true });
     expect(c.hideWindow).toHaveBeenCalledTimes(1);
+  });
+
+  it('app.serviceState answers from main without asking the (possibly restarting) service', async () => {
+    const restarting = { state: 'restarting' as const, detail: 'fatal error', nextAttemptAt: 1_900_000 };
+    const { deps } = makeDeps({ serviceState: vi.fn(() => restarting) });
+    const route = createRpcRouter(deps);
+    await expect(route(ctx(), 'app.serviceState', undefined)).resolves.toEqual(restarting);
+    expect(deps.service.callRaw).not.toHaveBeenCalled();
+    expect(isKnownMethod('app.serviceState')).toBe(true);
   });
 
   it('app.openItem shows the dashboard with a validated SKU', async () => {
@@ -422,5 +432,36 @@ describe('senderUrlOf', () => {
     expect(senderUrlOf({ senderFrame: { url: 'app://app/', parent: null } } as never)).toBe('app://app/');
     expect(senderUrlOf({ senderFrame: { url: 'app://app/', parent: {} } } as never)).toBeNull();
     expect(senderUrlOf({ senderFrame: null } as never)).toBeNull();
+  });
+});
+
+describe('v0.2 main contracts', () => {
+  it('app.showQuickEntry takes an optional SKU, validated like the service before it reaches a window', async () => {
+    const { deps } = makeDeps();
+    const route = createRpcRouter(deps);
+    await expect(route(ctx(), 'app.showQuickEntry', undefined)).resolves.toEqual({ ok: true });
+    await expect(route(ctx(), 'app.showQuickEntry', {})).resolves.toEqual({ ok: true });
+    await expect(route(ctx(), 'app.showQuickEntry', { sku: ' 378;5;U13 ' })).resolves.toEqual({ ok: true });
+    expect(deps.showQuickEntry.mock.calls).toEqual([[], [], ['378;5;u13']]);
+    await expect(route(ctx(), 'app.showQuickEntry', { sku: 'javascript:alert(1)' })).rejects.toThrow(/Invalid parameters for app\.showQuickEntry/);
+    await expect(route(ctx(), 'app.showQuickEntry', { sku: '378;6;uncratable' })).rejects.toThrow(/Invalid parameters/);
+    await expect(route(ctx(), 'app.showQuickEntry', { sku: '' })).rejects.toThrow(/Invalid parameters/);
+    expect(deps.showQuickEntry).toHaveBeenCalledTimes(3);
+  });
+
+  it('saves a .json backup as .json or .txt only, and keeps CSV exports CSV', async () => {
+    const { deps } = makeDeps();
+    const route = createRpcRouter(deps);
+    const r = await route(ctx(), 'file.saveText', { suggestedName: 'flipdesk-rules-2026-10-15.json', text: '{"rules":[]}' });
+    expect(deps.dialogs.saveFile).toHaveBeenCalledWith({ id: 1 }, 'flipdesk-rules-2026-10-15.json');
+    expect(r).toEqual({ saved: true, path: 'C:\\out\\flipdesk-rules-2026-10-15.json' });
+
+    deps.dialogs.saveFile.mockResolvedValueOnce('C:\\out\\rules.bat');
+    await expect(route(ctx(), 'file.saveText', { suggestedName: 'rules.json', text: '{}' })).rejects.toThrow(/\.json or \.txt/);
+    deps.dialogs.saveFile.mockResolvedValueOnce('C:\\out\\rules.csv');
+    await expect(route(ctx(), 'file.saveText', { suggestedName: 'rules.json', text: '{}' })).rejects.toThrow(/\.json or \.txt/);
+    deps.dialogs.saveFile.mockResolvedValueOnce('C:\\out\\export.json');
+    await expect(route(ctx(), 'file.saveText', { suggestedName: 'x.csv', text: 'a' })).rejects.toThrow(/\.csv or \.txt/);
+    expect(deps.files.writeText).toHaveBeenCalledTimes(1);
   });
 });

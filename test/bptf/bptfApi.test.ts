@@ -11,7 +11,10 @@ import {
   SNAPSHOT_REPROBE_MS,
   SNAPSHOT_URL,
   USERS_URL,
+  USERS_USER_MAX_WAIT_MS,
+  USERS_USER_TIMEOUT_MS,
   alternateTheName,
+  banDetailsFromBans,
   createBptfApi,
   isBannedFromBans,
 } from '../../src/service/connectors/bptfApi';
@@ -435,13 +438,22 @@ describe('users/info', () => {
     const sizes = h.http.calls.map((c) => new URL(c.fullUrl).searchParams.get('steamids')!.split(',').length);
     expect(sizes).toEqual([100, 100, 32]);
     expect(h.http.calls.every((c) => c.opts.budget === 'bptf-users')).toBe(true);
-    expect(r.get('76561198000000001')).toEqual({ banned: false, name: 'Clean Buyer' });
+    // Background by default; only the drawer's click asks for priority 'user'.
+    expect(h.http.calls.every((c) => c.opts.priority === 'background' && c.opts.maxWaitMs === undefined && c.opts.timeoutMs === undefined)).toBe(true);
+    expect(r.get('76561198000000001')).toEqual({ banned: false, name: 'Clean Buyer', banDetails: [] });
     expect(r.get('76561198000000002')?.banned).toBe(true);
     expect(r.get('76561198000000003')?.banned).toBe(true);
     expect(r.get('76561198000000004')?.banned).toBe(true);
     expect(r.get('76561198000000005')?.banned).toBe(false);
     expect(r.get('76561198000000006')?.banned).toBe(false);
-    expect(r.get('76561198000000007')).toEqual({ banned: false, name: 'Array User' });
+    expect(r.get('76561198000000007')).toEqual({ banned: false, name: 'Array User', banDetails: [] });
+    expect(r.get('76561198000000002')?.banDetails).toEqual(['backpack.tf: banned from the site (permanent, Scamming)']);
+    expect(r.get('76561198000000003')?.banDetails).toEqual(['SteamRep: marked as a scammer']);
+    expect(r.get('76561198000000004')?.banDetails).toEqual(['Steam: trade banned']);
+    // Shown for context, not counted as a ban.
+    expect(r.get('76561198000000005')?.banDetails).toEqual(['Steam: VAC ban (does not block trading)']);
+    expect(r.get('76561198000000006')?.banDetails).toEqual(['SteamRep: caution (not a ban)']);
+    expect(r.get('76561198000000008')?.banDetails).toEqual(['backpack.tf: banned from the site (until 2027-01-15)']);
     expect(r.get('76561198000000008')?.banned).toBe(true);
     readOnly(h);
     assertNoSecrets(h);
@@ -461,6 +473,64 @@ describe('users/info', () => {
     expect(isBannedFromBans({ steamrep_scammer: 1 })).toBe(true);
     expect(isBannedFromBans({ steamrep_scammer: 0, valve: { vac: 1 } })).toBe(false);
     expect(isBannedFromBans({ valve: { economy: 1 } })).toBe(true);
+  });
+
+  it('sends a user click ahead of background work and waits at most 15 s for the slot', async () => {
+    const h = harness({ handler: (c) => (c.url === USERS_URL ? jsonResponse(200, users.objectForm) : jsonResponse(404, null)) });
+    const r = await h.api.usersInfo(['76561198000000002'], { priority: 'user' });
+    expect(h.http.calls).toHaveLength(1);
+    expect(h.http.calls[0]!.opts).toMatchObject({ budget: 'bptf-users', priority: 'user', maxWaitMs: USERS_USER_MAX_WAIT_MS, timeoutMs: USERS_USER_TIMEOUT_MS });
+    // Slot wait plus answer fits inside main's 30 s RPC timeout.
+    expect(USERS_USER_MAX_WAIT_MS + USERS_USER_TIMEOUT_MS).toBeLessThan(30_000);
+    expect(r.get('76561198000000002')).toMatchObject({ banned: true, name: 'Site Banned' });
+    readOnly(h);
+    assertNoSecrets(h);
+  });
+
+  it('turns a 429 into RateLimitedError and still needs the token and the API switch', async () => {
+    const h = harness({ handler: () => jsonResponse(429, { message: 'slow down' }) });
+    h.http.next.set('bptf-users', T0 + 30_000);
+    await expect(h.api.usersInfo(['76561198000000002'], { priority: 'user' })).rejects.toBeInstanceOf(RateLimitedError);
+    const noToken = harness({ secrets: { bptfApiKey: KEY } });
+    await expect(noToken.api.usersInfo(['76561198000000002'], { priority: 'user' })).rejects.toBeInstanceOf(BptfNotConfiguredError);
+    const off = harness({ settings: { connectors: { bptfApi: false } } });
+    await expect(off.api.usersInfo(['76561198000000002'], { priority: 'user' })).rejects.toBeInstanceOf(BptfNotConfiguredError);
+    expect(noToken.http.calls).toHaveLength(0);
+    expect(off.http.calls).toHaveLength(0);
+  });
+
+  it('banDetailsFromBans lists counted bans first, then context, as plain short lines', () => {
+    expect(banDetailsFromBans(undefined)).toEqual([]);
+    expect(banDetailsFromBans({})).toEqual([]);
+    expect(banDetailsFromBans([])).toEqual([]);
+    expect(banDetailsFromBans({ steamrep_scammer: 0, valve: { vac: 0, economy: 0 } })).toEqual([]);
+    expect(
+      banDetailsFromBans({
+        suggestions: { end: -1 },
+        steamrep_caution: 1,
+        valve: { economy: 1, community: 1, vac: 1 },
+        marketplace: true,
+        all: { end: 1800000000, reason: 'Scam\n\u0007attempt   reported' },
+        steamrep_scammer: '1',
+      }),
+    ).toEqual([
+      'backpack.tf: banned from the site (until 2027-01-15, Scam attempt reported)',
+      'SteamRep: marked as a scammer',
+      'marketplace.tf: banned',
+      'Steam: trade banned',
+      'SteamRep: caution (not a ban)',
+      'Steam: community ban',
+      'Steam: VAC ban (does not block trading)',
+      'backpack.tf: suggestions ban (permanent)',
+    ]);
+    expect(banDetailsFromBans([{ type: 'classifieds', reason: 'x'.repeat(500) }, 'junk'])).toEqual([
+      `backpack.tf: classifieds ban (${'x'.repeat(120)})`,
+      'backpack.tf: banned',
+    ]);
+    // Keys that are not plain words are not echoed back.
+    expect(banDetailsFromBans({ '<b>evil</b>': 1 })).toEqual([]);
+    const many = Object.fromEntries(Array.from({ length: 30 }, (_, i) => [`ban_${String.fromCharCode(97 + (i % 26))}${'z'.repeat(1 + Math.floor(i / 26))}`, 1]));
+    expect(banDetailsFromBans(many)).toHaveLength(12);
   });
 });
 

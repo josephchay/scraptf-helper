@@ -216,3 +216,83 @@ describe('scoreConfidence (brief §5.7 table)', () => {
     expect(r.reasons[0]).toBe('No usable buy order');
   });
 });
+
+describe('scoreConfidence: stale references (F4) and suspect margins (F5)', () => {
+  const DAY = 24 * HOUR;
+  const pdb = (buyScrap: number, ageMs: number | null): ReferencePrices => ({ pricedb: { buyScrap, sellScrap: null, time: null, ageMs }, community: null });
+
+  it('ignores a PriceDB price older than referenceMaxAgeMs, with the flag and the reason', () => {
+    // 130 vs 110 would agree (+10); 400 days old it is ignored instead.
+    expect(delta({ references: pdb(110, 29 * DAY) })).toBe(10);
+    const r = scoreConfidence(base({ references: pdb(110, 400 * DAY) }));
+    expect(r.score).toBe(40);
+    expect(r.flags).toEqual(['stale-reference', 'no-reference']);
+    expect(r.reasons).toContain('PriceDB price is 400 days old, ignored');
+    expect(r.reasons).toContain('-10 No recent PriceDB or community price to compare with');
+    // A far-off old price no longer costs 20 either.
+    expect(delta({ references: pdb(50, 400 * DAY) })).toBe(-10);
+    expect(delta({ references: pdb(50, 400 * DAY), profit: { ...P, referenceMaxAgeMs: 500 * DAY } })).toBe(-20);
+  });
+
+  it('gates the community price on lastUpdate and keeps a fresh one', () => {
+    const comm = (ageDays: number): ReferencePrices => ({
+      pricedb: null,
+      community: { valueScrap: 125, valueHighScrap: null, lastUpdate: Math.floor((T0 - ageDays * DAY) / 1000) },
+    });
+    expect(delta({ references: comm(2) })).toBe(10);
+    // Community prices get at least a year (COMMUNITY_MIN_MAX_AGE_MS), not the 30-day PriceDB limit.
+    expect(delta({ references: comm(200) })).toBe(10);
+    const r = scoreConfidence(base({ references: comm(400) }));
+    expect(r.score).toBe(40);
+    expect(r.reasons).toContain('Community price is 400 days old, ignored');
+    expect(r.flags).toContain('stale-reference');
+  });
+
+  it('keeps one usable reference when the other is stale', () => {
+    const refs: ReferencePrices = {
+      pricedb: { buyScrap: 50, sellScrap: null, time: null, ageMs: 90 * DAY },
+      community: { valueScrap: 125, valueHighScrap: null, lastUpdate: Math.floor(T0 / 1000) },
+    };
+    const r = scoreConfidence(base({ references: refs }));
+    expect(r.score).toBe(60);
+    expect(r.flags).toEqual(['stale-reference']);
+  });
+
+  it('reports a stale reference even without an order', () => {
+    const r = scoreConfidence(base({ order: null, eligible: [], revenueScrap: null, references: pdb(100, 400 * DAY) }));
+    expect(r.flags).toContain('stale-reference');
+    expect(r.reasons.slice(0, 2)).toEqual(['No usable buy order', 'PriceDB price is 400 days old, ignored']);
+  });
+
+  it('caps a suspect margin at Low (44) and explains it last', () => {
+    const o = order(450, { isBot: true, uaLastPulse: Math.floor(T0 / 1000), userOnline: true, lastEventAt: T0 });
+    const input = base({ order: o, eligible: [o], references: { pricedb: null, community: null }, revenueScrap: 450, margin: 29 });
+    const r = scoreConfidence(input);
+    expect(r.score).toBe(44);
+    expect(r.level).toBe('low');
+    expect(r.flags).toContain('suspect-margin');
+    expect(r.reasons.at(-1)).toBe('Margin over 200% with no reference and few buyers. Check the variant and units');
+    // An already low score stays where it is, still flagged.
+    const low = scoreConfidence({ ...input, inputObservedAt: T0 - 10 * HOUR, isUnusual: true, revenueScrap: 20 * K });
+    expect(low.flags).toContain('suspect-margin');
+    expect(low.score).toBeLessThan(44);
+    // The setting names the threshold in the reason.
+    expect(scoreConfidence({ ...input, profit: { ...P, suspectMargin: 5.5 } }).reasons.at(-1)).toMatch(/^Margin over 550% /);
+  });
+
+  it('skips the guard when the margin is omitted, at or under the setting, or the guard is off', () => {
+    const noRefs = { references: { pricedb: null, community: null } };
+    const flagged = (over: Partial<ConfidenceInput>) => scoreConfidence(base({ ...noRefs, ...over })).flags.includes('suspect-margin');
+    expect(flagged({})).toBe(false);
+    expect(flagged({ margin: null })).toBe(false);
+    expect(flagged({ margin: 2 })).toBe(false);
+    expect(flagged({ margin: 2.01 })).toBe(true);
+    expect(flagged({ margin: Number.POSITIVE_INFINITY })).toBe(true);
+    expect(flagged({ margin: 30, profit: { ...P, suspectMargin: 0 } })).toBe(false);
+    // A broken setting falls back to 200%.
+    expect(flagged({ margin: 3, profit: { ...P, suspectMargin: Number.NaN } })).toBe(true);
+    expect(flagged({ margin: 3, eligible: [order(130), order(129), order(128)] })).toBe(false);
+    expect(flagged({ margin: 3, references: { pricedb: { buyScrap: null, sellScrap: 200, time: null, ageMs: null }, community: null } })).toBe(false);
+    expect(flagged({ margin: 3, references: pdb(100, 400 * DAY) })).toBe(true);
+  });
+});

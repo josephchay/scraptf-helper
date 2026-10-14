@@ -84,7 +84,11 @@ export function createFolderWatcher(opts: FolderWatcherOptions): FolderWatcher {
   /** path -> mtime of the last version delivered (or rejected), for path+mtime dedupe. */
   const handled = new Map<string, number>();
   const lockRetries = new Map<string, number>();
-  const inFlight = new Set<string>();
+  /**
+   * Files are read and delivered one at a time, in the order their debounce timers fire, so a
+   * page saved later is also imported later (parallel reads finish in any order).
+   */
+  let queue: Promise<void> = Promise.resolve();
   let stopped = false;
   let watcher: WatchHandle | null = null;
   let lastErr: string | null = null;
@@ -96,7 +100,9 @@ export function createFolderWatcher(opts: FolderWatcherOptions): FolderWatcher {
     if (prev !== undefined) clearTimeout(prev);
     const t = setTimeout(() => {
       timers.delete(full);
-      void processFile(full, fileName);
+      queue = queue
+        .then(() => processFile(full, fileName))
+        .catch((err: unknown) => log.error(`Could not read ${full}: ${errText(err)}`));
     }, debounceMs);
     // Never keep the process alive just for a pending import.
     (t as { unref?: () => void }).unref?.();
@@ -114,13 +120,9 @@ export function createFolderWatcher(opts: FolderWatcherOptions): FolderWatcher {
     }
   };
 
+  /** Runs only through `queue`, so never twice at once. */
   const processFile = async (full: string, fileName: string): Promise<void> => {
     if (stopped) return;
-    if (inFlight.has(full)) {
-      schedule(fileName);
-      return;
-    }
-    inFlight.add(full);
     try {
       const st = await fsp.stat(full);
       if (stopped || !st.isFile()) return;
@@ -157,23 +159,26 @@ export function createFolderWatcher(opts: FolderWatcherOptions): FolderWatcher {
       } else {
         log.error(`Could not read ${full}: ${errText(err)}`);
       }
-    } finally {
-      inFlight.delete(full);
     }
   };
 
   const scan = async (threshold: UnixMs): Promise<void> => {
     const entries = await fsp.readdir(folder, { withFileTypes: true });
+    const due: { name: string; mtimeMs: number }[] = [];
     for (const e of entries) {
       if (stopped) return;
       if (!e.isFile() || !isImportCandidate(e.name)) continue;
       try {
         const st = await fsp.stat(join(folder, e.name));
-        if (st.mtimeMs >= threshold) schedule(e.name);
+        if (st.mtimeMs >= threshold) due.push({ name: e.name, mtimeMs: st.mtimeMs });
       } catch (err) {
         if (errCode(err) !== 'ENOENT') log.warn(`Could not inspect ${join(folder, e.name)}: ${errText(err)}`);
       }
     }
+    // Oldest first, so a page saved later is also imported later (readdir lists by name). Timers
+    // with the same delay fire in the order they were set, and the queue keeps that order.
+    due.sort((a, b) => a.mtimeMs - b.mtimeMs || (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+    for (const f of due) schedule(f.name);
   };
 
   const runScan = (): void => {

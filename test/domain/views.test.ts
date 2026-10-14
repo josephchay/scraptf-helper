@@ -37,6 +37,7 @@ function opp(over: Partial<Opportunity> & { sku: string }): Opportunity {
     revenueScrap: 150,
     profitScrap: 50,
     margin: 0.5,
+    maxCostScrap: null,
     confidence: 60,
     confidenceLevel: 'medium',
     flags: [],
@@ -213,6 +214,15 @@ describe('buildItemDetail', () => {
     expect(buildItemDetail(args(repo, '99999;6'))).toBeNull();
   });
 
+  it('returns null for a SKU with tokens fromString would drop, instead of showing another item', () => {
+    const repo = newRepo();
+    repo.upsertListings([makeListing({ id: 'tc', steamid: 'A', metalScrap: 100 })]);
+    expect(buildItemDetail(args(repo, '378;6'))).not.toBeNull();
+    expect(buildItemDetail(args(repo, '378;6;UNCRAFTABLE'))).toBeNull();
+    expect(buildItemDetail(args(repo, '378;6;uncratable'))).toBeNull();
+    expect(buildItemDetail(args(repo, '378;6;uncraftable'))).not.toBeNull(); // a known item, no orders yet
+  });
+
   it('classifies every buy order against the latest price and lists sells cheapest first', () => {
     const repo = newRepo();
     repo.upsertListings([
@@ -282,6 +292,95 @@ describe('buildItemDetail', () => {
     expect(painted.buyOrders.find((o) => o.listingId === 'generic')!.flags).toEqual(['has-extras']);
   });
 
+  it('prices the eligible book like the engine, with the pay-up-to ceiling (F2)', () => {
+    const repo = newRepo();
+    repo.upsertListings([
+      makeListing({ id: 'whale', steamid: 'W', metalScrap: 400 }),
+      makeListing({ id: 'human', steamid: 'H', metalScrap: 150 }),
+      makeListing({ id: 'bot', steamid: 'B', metalScrap: 140, isBot: true }),
+      makeListing({ id: 'low', steamid: 'L', metalScrap: 130 }),
+      makeListing({ id: 'blocked', steamid: 'BLOCKED', metalScrap: 160 }),
+    ]);
+    const d = buildItemDetail(args(repo, '378;6'))!;
+    expect(d.revenue).toEqual({
+      bestScrap: 400,
+      consScrap: 150,
+      instantScrap: 140,
+      useOrder: 'conservative',
+      revenueScrap: 150,
+      order: expect.objectContaining({ listingId: 'human', isBot: false, eligible: true }),
+      maxCostScrap: 138,
+      eligibleCount: 4,
+    });
+
+    const best = buildItemDetail({ ...args(repo, '378;6'), settings: testSettings({ profit: { useOrder: 'best' } }) })!;
+    expect(best.revenue).toMatchObject({ useOrder: 'best', revenueScrap: 400, order: { listingId: 'whale', flags: ['outlier'] } });
+    const instant = buildItemDetail({ ...args(repo, '378;6'), settings: testSettings({ profit: { useOrder: 'instant', frictionScrap: 10 } }) })!;
+    // 140 - 10 friction - 120 = 10 scrap, an 8.3% margin; 121 would fall under 8%.
+    expect(instant.revenue).toMatchObject({ revenueScrap: 140, maxCostScrap: 120 });
+  });
+
+  it('reports an empty revenue when nothing is eligible', () => {
+    const repo = newRepo();
+    repo.upsertListings([makeListing({ id: 'banned', steamid: 'X', metalScrap: 100, userBanned: true })]);
+    expect(buildItemDetail(args(repo, '378;6'))!.revenue).toEqual({
+      bestScrap: null,
+      consScrap: null,
+      instantScrap: null,
+      useOrder: 'conservative',
+      revenueScrap: null,
+      order: null,
+      maxCostScrap: null,
+      eligibleCount: 0,
+    });
+  });
+
+  it('counts generic any-effect orders in the revenue of an effect unusual', () => {
+    const repo = newRepo();
+    repo.upsertListings([
+      makeListing({ id: 'u13', steamid: 'A', sku: '378;5;u13', baseSku: '378;5;u13', keys: 30, metalScrap: 0 }),
+      makeListing({ id: 'any', steamid: 'B', sku: '378;5', baseSku: '378;5', keys: 32, metalScrap: 0, isBot: true }),
+    ]);
+    const d = buildItemDetail(args(repo, '378;5;u13'))!;
+    expect(d.revenue).toMatchObject({ eligibleCount: 2, consScrap: 32 * K, instantScrap: 32 * K, order: { listingId: 'any' } });
+  });
+
+  it('ignores a stale PriceDB price for outliers, like the engine (F4)', () => {
+    const repo = newRepo();
+    repo.upsertListings([
+      makeListing({ id: 'a', steamid: 'A', metalScrap: 40 }),
+      makeListing({ id: 'b', steamid: 'B', metalScrap: 38 }),
+      makeListing({ id: 'c', steamid: 'C', metalScrap: 36 }),
+    ]);
+    const old = Math.floor((T0 - 400 * 24 * HOUR) / 1000);
+    repo.upsertPricedb([{ sku: '378;6', name: 'Team Captain', buyKeys: 0, buyScrap: 15, sellKeys: 0, sellScrap: 18, time: old, fetchedAt: T0 }]);
+    const d = buildItemDetail(args(repo, '378;6'))!;
+    expect(d.buyOrders.every((o) => !o.flags.includes('outlier'))).toBe(true);
+    expect(d.revenue).toMatchObject({ consScrap: 40, revenueScrap: 40 });
+    // The drawer still shows the old price (faded by the UI).
+    expect(d.references.pricedb).toMatchObject({ sellScrap: 18 });
+
+    const strict = buildItemDetail({ ...args(repo, '378;6'), settings: testSettings({ profit: { referenceMaxAgeMs: 500 * 24 * HOUR } }) })!;
+    expect(strict.buyOrders.every((o) => o.flags.includes('outlier'))).toBe(true);
+    expect(strict.revenue).toMatchObject({ consScrap: null, bestScrap: 40, revenueScrap: null, maxCostScrap: null, eligibleCount: 3 });
+  });
+
+  it('gives the backpack.tf name without the paint suffix for a painted SKU', () => {
+    const repo = newRepo();
+    repo.upsertListings([makeListing({ id: 'generic', steamid: 'G', metalScrap: 100 })]);
+    const schema = createStubSchema({ nameOf: (sku) => (sku.includes(';p') ? 'Team Captain (Paint: Pink as Hell)' : 'Team Captain') });
+    const painted = buildItemDetail({ ...args(repo, `378;6;p${PINK}`), schema })!;
+    expect(painted.name).toBe('Team Captain (Paint: Pink as Hell)');
+    expect(painted.bptfName).toBe('Team Captain');
+    const plain = buildItemDetail({ ...args(repo, '378;6'), schema })!;
+    expect(plain.bptfName).toBe('Team Captain');
+
+    // Without a schema name the painted name is the best there is.
+    const blind = createStubSchema({ nameOf: (sku) => sku });
+    repo.upsertScrapPrice({ sku: `378;6;p${PINK}`, name: 'Pink Captain', costScrap: 80, source: 'user', observedAt: T0 });
+    expect(buildItemDetail({ ...args(repo, `378;6;p${PINK}`), schema: blind })!.bptfName).toBe('Pink Captain');
+  });
+
   it('includes opportunities for the SKU and survives a throwing schema', () => {
     const repo = newRepo();
     repo.upsertOpportunities([opp({ sku: '205;11;kt-3', name: 'Strange Rocket Launcher' })]);
@@ -295,6 +394,7 @@ describe('buildItemDetail', () => {
     const d = buildItemDetail({ ...args(repo, '205;11;kt-3'), schema, keyPrice: null })!;
     expect(d.opportunities).toHaveLength(1);
     expect(d.name).toBe('205;11;kt-3');
+    expect(d.bptfName).toBe('205;11;kt-3');
     expect(d.category).toBe('killstreaks');
     expect(d.keyPrice).toBeNull();
   });

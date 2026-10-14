@@ -237,7 +237,16 @@ CREATE TABLE IF NOT EXISTS snapshot_times (
 );
 `;
 
-export const MIGRATIONS: readonly Migration[] = Object.freeze([{ version: 1, name: 'initial schema', sql: V1_INITIAL }]);
+// Feature F1: the "pay up to" ceiling per opportunity. Existing rows read NULL until the
+// engine's start-up sweep re-evaluates them (the new value differs, so every row is rewritten).
+const V2_MAX_COST = `
+ALTER TABLE opportunities ADD COLUMN max_cost_scrap INTEGER;
+`;
+
+export const MIGRATIONS: readonly Migration[] = Object.freeze([
+  { version: 1, name: 'initial schema', sql: V1_INITIAL },
+  { version: 2, name: 'opportunity pay-up-to ceiling', sql: V2_MAX_COST },
+]);
 
 export const SCHEMA_VERSION: number = MIGRATIONS.reduce((max, m) => Math.max(max, m.version), 0);
 

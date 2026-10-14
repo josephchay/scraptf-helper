@@ -119,6 +119,12 @@ export interface HttpClient {
   budgets(): HostBudget[];
   /** Reason string while a host is disabled (challenge page, revoked key), else null. */
   hostBlocked(host: string): string | null;
+  /**
+   * Disables a host until the user re-enables it (unblockHost via net.unblock),
+   * across restarts. For connections that do not go through request(), such as
+   * a websocket upgrade refused with a challenge or 401/403 (R7).
+   */
+  blockHost(host: string, reason: string): void;
   unblockHost(host: string): void;
   userAgent(): string;
 }
@@ -377,9 +383,13 @@ export interface BptfSocket {
   /**
    * Starts (or resumes) the feed. A block (client limit, refused upgrade) survives
    * stop() + start() unless the live feed was turned off in Settings in between.
+   * A refused upgrade is also stored as a ws.backpack.tf host block, so it
+   * survives restarts until the user re-enables the feed.
    */
   start(): void;
   stop(): void;
+  /** The user re-enabled ws.backpack.tf (net.unblock): clears the block and connects again if started. */
+  unblock(): void;
   health(): ConnectorHealth;
   stats(): { eventsToday: number; bytesToday: number; lastFrameAt: UnixMs | null; parseFailures: number };
 }
@@ -397,7 +407,17 @@ export interface BptfApi {
   prices(since?: UnixSec | null): Promise<{ rows: CommunityRow[]; currentTime: UnixSec }>;
   /** IGetCurrencies v1 key price (needs API key). */
   currencies(): Promise<KeyPriceQuote | null>;
-  usersInfo(steamids: string[]): Promise<Map<string, { banned: boolean; name: string | null }>>;
+  /**
+   * users/info v1 on the 'bptf-users' budget (needs the access token). `priority: 'user'`
+   * for the drawer's on-click ban check ('buyer.check'): served before background work,
+   * waiting at most 15 s for the budget slot and 12 s for the answer. `banDetails` lists the bans found as plain
+   * lines (banDetailsFromBans), counted ones first, e.g. "backpack.tf: banned from the
+   * site (permanent, Scamming)"; empty for a clean user. Optional only for test fakes.
+   */
+  usersInfo(
+    steamids: string[],
+    opts?: { priority?: 'user' | 'background' },
+  ): Promise<Map<string, { banned: boolean; name: string | null; banDetails?: string[] }>>;
   test(name: Extract<SecretName, 'bptfApiKey' | 'bptfAccessToken'>): Promise<{ ok: boolean; message: string }>;
   snapshotAvailable(): boolean;
   health(): ConnectorHealth[];
@@ -418,6 +438,8 @@ export interface PriceDb {
   keyQuote(): Promise<KeyPriceQuote | null>;
   startSocket(onPrice: (row: PricedbRow) => void): void;
   stopSocket(): void;
+  /** The user re-enabled a PriceDB host (net.unblock): a started socket that is blocked tries again now. */
+  resumeSocket(): void;
   health(): ConnectorHealth[];
 }
 

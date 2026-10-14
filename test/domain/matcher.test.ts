@@ -243,6 +243,23 @@ describe('notes keywords', () => {
     expect(notesMatch('anything', ['   '])).toBe(false);
   });
 
+  it('accepts keywords with hyphens and every regex syntax character (u flag)', () => {
+    expect(() => compileKeywords(['no-dupes'])).not.toThrow();
+    expect(notesMatch('pre-fest only', ['paint', 'pre-fest'])).toBe(true);
+    expect(notesMatch('prefest only', ['pre-fest'])).toBe(false);
+    expect(notesMatch('looking for KT-3 kits', ['kt-3'])).toBe(true);
+    expect(notesMatch('non-craftable ok', ['non-craftable'])).toBe(true);
+    const odd = ['a-b', 'c/d', 'e.f', 'g*h', 'i+j', 'k?l', 'm^n', 'o$p', 'q{r}', 's(t)', 'u|v', 'w[x]', 'y\\z'];
+    expect(() => compileKeywords(odd)).not.toThrow();
+    for (const k of odd) expect(notesMatch(`has ${k} here`, odd), k).toBe(true);
+  });
+
+  it('classifies orders with notes when a keyword has a hyphen', () => {
+    const c = classifyOrder(makeListing({ details: 'no-dupes please' }), { baseSku: '378;6', special: special(), anyEffectBase: null }, ctx({ notesKeywords: ['paint', 'no-dupes'] }));
+    expect(c.flags).toContain('notes-flag');
+    expect(classifyOrder(makeListing({ details: 'hi' }), { baseSku: '378;6', special: special() }, ctx({ notesKeywords: ['pre-fest'] })).eligible).toBe(true);
+  });
+
   it('caches compiled keyword sets', () => {
     expect(compileKeywords(['foo', 'bar'])).toBe(compileKeywords(['foo', 'bar']));
     expect(compileKeywords([])).toBeNull();

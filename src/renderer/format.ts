@@ -120,6 +120,20 @@ export function fmtCountdown(untilTs: UnixMs | null | undefined, now: UnixMs): s
   return `${Math.floor(s / 3600)} h ${String(Math.floor((s % 3600) / 60)).padStart(2, '0')} min`;
 }
 
+/**
+ * Detail text of the "service restarting" banner. Main sends the restart time once,
+ * so the countdown is computed here on every tick rather than frozen in the push.
+ */
+export function serviceBannerDetail(p: { state: string; detail: string | null; nextAttemptAt?: UnixMs | null }, now: UnixMs): string | null {
+  const parts: string[] = [];
+  const at = p.nextAttemptAt;
+  if (p.state === 'restarting' && typeof at === 'number' && Number.isFinite(at)) {
+    parts.push(at - now >= 1000 ? `Next attempt in ${fmtCountdown(at, now)}.` : 'Trying again now.');
+  }
+  if (p.detail) parts.push(p.detail);
+  return parts.length ? parts.join(' ') : null;
+}
+
 /** Elapsed processing time: "140 ms", "1.4 s". */
 export function fmtDuration(ms: number | null | undefined): string {
   if (ms === null || ms === undefined || !Number.isFinite(ms)) return DASH;
@@ -449,6 +463,16 @@ const FLAGS: Record<string, FlagInfo> = {
   'unusual-risk': { label: 'Unusual risk', help: 'Unusual worth over the risk threshold. Steam warns about price-manipulated unusuals and reversed trades: get a background check.', tone: 'bad' },
   'stale-input': { label: 'Stale price', help: 'Your scrap.tf price is old. Check the current price on scrap.tf before acting.', tone: 'warn' },
   'no-reference': { label: 'No reference', help: 'No PriceDB or backpack.tf community price to sanity-check the orders.', tone: 'warn' },
+  'stale-reference': {
+    label: 'Old reference',
+    help: 'The PriceDB or community price is older than your limit (Settings), so it was ignored for outliers and confidence.',
+    tone: 'warn',
+  },
+  'suspect-margin': {
+    label: 'Suspect margin',
+    help: 'Very high margin with few buyers and no usable reference. Check the variant (quality, effect, killstreak) and the units. Never notified.',
+    tone: 'bad',
+  },
   'rule-estimate': { label: 'Rule estimate', help: 'Cost comes from a price-sheet rule, not a price you saw for this item. Check scrap.tf stock and price by hand.', tone: 'info' },
   'unverified-orders': { label: 'Unverified orders', help: 'The orders used have not been confirmed recently.', tone: 'warn' },
 };

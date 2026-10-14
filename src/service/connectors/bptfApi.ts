@@ -27,6 +27,10 @@ export const PRICES_TIMEOUT_MS = 180_000;
 export const TOKEN_TEST_ITEM = 'Mann Co. Supply Crate Key';
 /** Settings tests fail fast with a rate-limit message instead of waiting the default 60 s for a slot. */
 export const TEST_MAX_WAIT_MS = 15_000;
+/** Same for the drawer's on-click ban check (users/info with priority 'user'). */
+export const USERS_USER_MAX_WAIT_MS = 15_000;
+/** The click's answer timeout: slot wait plus answer stays under main's 30 s RPC timeout. */
+export const USERS_USER_TIMEOUT_MS = 12_000;
 export const META_TOKEN_METHOD = 'bptf.tokenMethod';
 export const META_SNAPSHOT_UNAVAILABLE = 'bptf.snapshotUnavailable';
 
@@ -115,6 +119,64 @@ export function isBannedFromBans(bans: unknown): boolean {
   if (truthy(bans['all']) || truthy(bans['steamrep_scammer']) || truthy(bans['marketplace'])) return true;
   const valve = bans['valve'];
   return isRecord(valve) && truthy(valve['economy']);
+}
+
+/** The bans isBannedFromBans counts, in that order. */
+const COUNTED_BANS: readonly [string, string][] = [
+  ['all', 'backpack.tf: banned from the site'],
+  ['steamrep_scammer', 'SteamRep: marked as a scammer'],
+  ['marketplace', 'marketplace.tf: banned'],
+];
+const VALVE_NOTES: readonly [string, string][] = [
+  ['community', 'Steam: community ban'],
+  ['vac', 'Steam: VAC ban (does not block trading)'],
+  ['game', 'Steam: game ban (does not block trading)'],
+];
+const MAX_BAN_LINES = 12;
+
+/** " (permanent, Scamming)" from a bp.tf ban object `{end, reason}`; "" when it has neither. */
+function banSuffix(v: unknown): string {
+  if (!isRecord(v)) return '';
+  const parts: string[] = [];
+  const end = v['end'];
+  if (end === -1 || end === '-1') parts.push('permanent');
+  else {
+    const sec = toSec(end);
+    if (sec !== null) parts.push(`until ${new Date(sec * 1000).toISOString().slice(0, 10)}`);
+  }
+  // Other users' text from the API: one short plain line.
+  const reason = typeof v['reason'] === 'string' ? v['reason'].replace(/[\u0000-\u001f\u007f]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 120) : '';
+  if (reason) parts.push(reason);
+  return parts.length > 0 ? ` (${parts.join(', ')})` : '';
+}
+
+/**
+ * Human-readable lines for every ban in a bp.tf user `bans` value: the ones
+ * isBannedFromBans counts first, then context that does not count (SteamRep
+ * caution, VAC, other backpack.tf feature bans). Empty for a clean user.
+ */
+export function banDetailsFromBans(bans: unknown): string[] {
+  const out: string[] = [];
+  if (Array.isArray(bans)) {
+    for (const b of bans) {
+      const type = isRecord(b) && typeof b['type'] === 'string' && /^[a-z_ ]{1,30}$/i.test(b['type']) ? b['type'].replace(/_/g, ' ') : '';
+      out.push(`backpack.tf: ${type ? `${type} ban` : 'banned'}${banSuffix(b)}`);
+    }
+    return out.slice(0, MAX_BAN_LINES);
+  }
+  if (!isRecord(bans)) return out;
+  for (const [key, label] of COUNTED_BANS) if (truthy(bans[key])) out.push(label + banSuffix(bans[key]));
+  const valve = isRecord(bans['valve']) ? bans['valve'] : null;
+  if (valve && truthy(valve['economy'])) out.push('Steam: trade banned');
+  if (truthy(bans['steamrep_caution'])) out.push('SteamRep: caution (not a ban)');
+  if (valve) for (const [key, label] of VALVE_NOTES) if (truthy(valve[key])) out.push(label);
+  const known = new Set(['all', 'steamrep_scammer', 'steamrep_caution', 'marketplace', 'valve']);
+  for (const [key, v] of Object.entries(bans)) {
+    // Feature bans such as "classifieds" or "suggestions": shown, not counted.
+    if (known.has(key) || !/^[a-z_]{1,30}$/i.test(key) || !truthy(v)) continue;
+    out.push(`backpack.tf: ${key.replace(/_/g, ' ')} ban${banSuffix(v)}`);
+  }
+  return out.slice(0, MAX_BAN_LINES);
 }
 
 /** "The Team Captain" <-> "Team Captain"; null when the name is too short to flip. */
@@ -298,7 +360,7 @@ export function createBptfApi(deps: ServiceDeps & { schema: SchemaService }): Bp
   const tokenRequest = async (
     url: string,
     query: Record<string, string | number>,
-    opts: { budget: string; priority: 'user' | 'background'; methods?: TokenMethod[]; maxWaitMs?: number },
+    opts: { budget: string; priority: 'user' | 'background'; methods?: TokenMethod[]; maxWaitMs?: number; timeoutMs?: number },
   ): Promise<{ res: HttpResponse; method: TokenMethod }> => {
     const token = requireCredential('bptfAccessToken');
     const remembered = tokenMethod();
@@ -308,6 +370,7 @@ export function createBptfApi(deps: ServiceDeps & { schema: SchemaService }): Bp
     for (const m of methods) {
       const ropts: HttpRequestOptions = { budget: opts.budget, priority: opts.priority };
       if (opts.maxWaitMs !== undefined) ropts.maxWaitMs = opts.maxWaitMs;
+      if (opts.timeoutMs !== undefined) ropts.timeoutMs = opts.timeoutMs;
       if (m === 'header') {
         ropts.query = query;
         ropts.headers = { 'X-Auth-Token': token };
@@ -515,14 +578,28 @@ export function createBptfApi(deps: ServiceDeps & { schema: SchemaService }): Bp
       });
     },
 
-    async usersInfo(steamids: string[]): Promise<Map<string, { banned: boolean; name: string | null }>> {
+    async usersInfo(
+      steamids: string[],
+      opts: { priority?: 'user' | 'background' } = {},
+    ): Promise<Map<string, { banned: boolean; name: string | null; banDetails: string[] }>> {
       return tracked('users', async () => {
         ensureEnabled();
-        const out = new Map<string, { banned: boolean; name: string | null }>();
+        const priority = opts.priority === 'user' ? 'user' : 'background';
+        const out = new Map<string, { banned: boolean; name: string | null; banDetails: string[] }>();
         const ids = [...new Set(steamids.map((s) => String(s).trim()).filter((s) => /^\d{17}$/.test(s)))];
         for (let i = 0; i < ids.length; i += USERS_BATCH_SIZE) {
           const chunk = ids.slice(i, i + USERS_BATCH_SIZE);
-          const { res } = await tokenRequest(USERS_URL, { steamids: chunk.join(',') }, { budget: 'bptf-users', priority: 'background' });
+          // A click waits at most USERS_USER_MAX_WAIT_MS for the 10 s budget slot, then says when to retry,
+          // and stops waiting for the answer early enough to report it inside main's RPC timeout.
+          const { res } = await tokenRequest(
+            USERS_URL,
+            { steamids: chunk.join(',') },
+            {
+              budget: 'bptf-users',
+              priority,
+              ...(priority === 'user' ? { maxWaitMs: USERS_USER_MAX_WAIT_MS, timeoutMs: USERS_USER_TIMEOUT_MS } : {}),
+            },
+          );
           if (res.status === 429) throw new RateLimitedError('bptf-users', http.nextAllowedAt('bptf-users'));
           if (!res.ok) throw new HttpStatusError(res.status, USERS_URL, clean(responseMessage(res)) || null);
           const users = isRecord(res.data) ? res.data['users'] : undefined;
@@ -536,7 +613,7 @@ export function createBptfApi(deps: ServiceDeps & { schema: SchemaService }): Bp
             if (!u.success) continue;
             const steamid = u.data.steamid !== undefined ? String(u.data.steamid) : sid;
             if (!/^\d{17}$/.test(steamid)) continue;
-            out.set(steamid, { banned: isBannedFromBans(u.data.bans), name: u.data.name ?? null });
+            out.set(steamid, { banned: isBannedFromBans(u.data.bans), name: u.data.name ?? null, banDetails: banDetailsFromBans(u.data.bans) });
           }
         }
         return out;

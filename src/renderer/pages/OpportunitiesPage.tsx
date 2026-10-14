@@ -1,33 +1,40 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { GroupBy, Opportunity } from '../../shared/types';
+import type { GroupBy, OppListResult, OppQuery, Opportunity } from '../../shared/types';
 import { CATEGORIES, CATEGORY_LABELS, PROFIT_TIER_LABELS } from '../../shared/types';
 import { rpc, saveCsv } from '../api';
 import { CheckList, Popover, Segmented } from '../components/Controls';
 import { Banner, EmptyState, ErrorBanner, LoadingBlock } from '../components/Feedback';
 import { Icon } from '../components/Icon';
+import { useItemMenu } from '../components/ItemMenu';
 import { Money } from '../components/ItemName';
 import { OppTable } from '../components/OppTable';
 import { SetupChecklist } from '../components/SetupChecklist';
 import { INPUT_KIND_LABELS, STATUS_LABELS, errorMessage, fmtInt } from '../format';
 import { useApp } from '../hooks/appContext';
 import { usePersistentState } from '../hooks/usePersistentState';
-import { usePush, useRpcQuery, useThrottled } from '../hooks/useRpc';
-import { useDebounced, useDocumentVisible, useNow } from '../hooks/useTimers';
+import { useRpcQuery, useThrottled, useVisiblePush } from '../hooks/useRpc';
+import { useDebounced, useNow } from '../hooks/useTimers';
 import {
   DEFAULT_FILTERS,
   GROUP_BY_LABELS,
+  GROUP_PAGE,
   INPUT_ORDER,
   STATUS_ORDER,
   TIER_ORDER,
   activeFilterCount,
   defaultDir,
+  emptyListReason,
   exportQuery,
   filtersToQuery,
   isSearchShortcut,
   flattenGroups,
+  groupKeyOf,
   groupOpportunities,
+  groupPageQuery,
+  mergeLoadedRows,
   sanitizeFilters,
   sortOpportunities,
+  type EmptyListReason,
   type OppFilters,
   type SortDir,
   type SortKey,
@@ -65,6 +72,81 @@ function sanitizeCollapsed(v: unknown): Record<string, string[]> {
   return out;
 }
 
+const NO_COUNTS: Readonly<Record<string, number>> = Object.freeze({});
+const NO_ROWS: Readonly<Record<string, Opportunity[]>> = Object.freeze({});
+
+/**
+ * "Load more" under a group the first page could not fill. `want` is how many
+ * extra rows the user asked for per group under this query; they are refetched
+ * whenever the first page reloads, so they stay as current as the rest.
+ */
+function useGroupPages(data: OppListResult | undefined, query: OppQuery, groupBy: GroupBy, toast: (text: string, tone?: 'bad') => void) {
+  const queryKey = JSON.stringify(query);
+  const [want, setWant] = useState<{ query: string; by: Readonly<Record<string, number>> }>({ query: queryKey, by: NO_COUNTS });
+  const [got, setGot] = useState<{ query: string; by: Readonly<Record<string, number>>; rows: Readonly<Record<string, Opportunity[]>> }>({
+    query: queryKey,
+    by: NO_COUNTS,
+    rows: NO_ROWS,
+  });
+  // A new query (filters, sort, grouping) starts from its first page again.
+  useEffect(() => {
+    setWant((w) => (w.query === queryKey ? w : { query: queryKey, by: NO_COUNTS }));
+  }, [queryKey]);
+  const wanted = want.query === queryKey ? want.by : NO_COUNTS;
+  const loaded = got.query === queryKey ? got : null;
+  const loadedRef = useRef(loaded);
+  loadedRef.current = loaded;
+
+  useEffect(() => {
+    const keys = Object.keys(wanted);
+    if (!data || keys.length === 0) return;
+    const firstPage = groupOpportunities(data.rows, groupBy, data.groups);
+    let alive = true;
+    Promise.all(
+      keys.map(async (key): Promise<[string, Opportunity[]]> => {
+        const q = groupPageQuery(query, groupBy, key, firstPage, wanted[key] ?? 0);
+        if (!q) return [key, []];
+        const r = await rpc('opps.list', q);
+        return [key, r.rows.filter((o) => groupKeyOf(o, groupBy) === key)];
+      }),
+    )
+      .then((pairs) => {
+        if (alive) setGot({ query: queryKey, by: wanted, rows: Object.fromEntries(pairs) });
+      })
+      .catch((e: unknown) => {
+        if (!alive) return;
+        const done = loadedRef.current?.by ?? NO_COUNTS;
+        // A failed refresh keeps the rows shown; a failed "Load more" says so and re-arms the button.
+        if (keys.some((k) => (wanted[k] ?? 0) > (done[k] ?? 0))) {
+          toast(`Could not load more opportunities: ${errorMessage(e)}`, 'bad');
+          setWant({ query: queryKey, by: done });
+        }
+      });
+    return () => {
+      alive = false;
+    };
+    // query and groupBy are part of queryKey, which `wanted` follows.
+  }, [data, wanted]);
+
+  const loading = useMemo(() => new Set(Object.keys(wanted).filter((k) => (wanted[k] ?? 0) > (loaded?.by[k] ?? 0))), [wanted, loaded]);
+  const loadMore = useCallback(
+    (key: string) =>
+      setWant((w) => {
+        const by = w.query === queryKey ? w.by : NO_COUNTS;
+        return { query: queryKey, by: { ...by, [key]: (by[key] ?? 0) + GROUP_PAGE } };
+      }),
+    [queryKey],
+  );
+  // Only groups asked for under this query (rows of an earlier visit to it are not refreshed).
+  const rows = useMemo(() => {
+    if (!loaded) return NO_ROWS;
+    const out: Record<string, Opportunity[]> = {};
+    for (const k of Object.keys(wanted)) if (loaded.rows[k]) out[k] = loaded.rows[k];
+    return out;
+  }, [loaded, wanted]);
+  return { rows, loading, loadMore };
+}
+
 export function OpportunitiesPage() {
   const { keyScrap: statusKey, settings, status, secrets, openItem, navigate, toast, updateSettings, itemSku } = useApp();
   const [filters, setFilters] = usePersistentState<OppFilters>('opps.filters', { ...DEFAULT_FILTERS, status: [...DEFAULT_FILTERS.status] }, sanitizeFilters);
@@ -84,22 +166,13 @@ export function OpportunitiesPage() {
   const reload = useThrottled(() => void list.reload(), 1500);
   // Closed to the tray the page stays mounted: skip reloads while hidden and
   // catch up once when it is shown again.
-  const visible = useDocumentVisible();
-  const missedPush = useRef(false);
-  usePush('opps.changed', () => {
-    if (document.visibilityState === 'hidden') missedPush.current = true;
-    else reload();
-  });
-  useEffect(() => {
-    if (visible && missedPush.current) {
-      missedPush.current = false;
-      reload();
-    }
-  }, [visible, reload]);
+  useVisiblePush('opps.changed', reload);
+  const more = useGroupPages(list.data, query, groupBy, toast);
 
   const keyScrap = list.data?.keyPrice?.valueScrap ?? statusKey;
   const collapsed = useMemo(() => new Set(collapsedBy[groupBy] ?? []), [collapsedBy, groupBy]);
-  const sorted = useMemo(() => sortOpportunities(list.data?.rows ?? [], sort.sort, sort.dir), [list.data, sort]);
+  const loadedRows = useMemo(() => mergeLoadedRows(list.data?.rows ?? [], more.rows), [list.data, more.rows]);
+  const sorted = useMemo(() => sortOpportunities(loadedRows, sort.sort, sort.dir), [loadedRows, sort]);
   const groups = useMemo(() => groupOpportunities(sorted, groupBy, list.data?.groups), [sorted, groupBy, list.data]);
   const rows = useMemo(() => flattenGroups(groups, collapsed), [groups, collapsed]);
   const filterCount = activeFilterCount(filters);
@@ -136,6 +209,12 @@ export function OpportunitiesPage() {
 
   const onOpen = useCallback((o: Opportunity) => openItem(o.sku), [openItem]);
 
+  // F9 item menu. Through a ref, so the memoised rows keep a stable handler.
+  const menu = useItemMenu();
+  const openMenuRef = useRef(menu.open);
+  openMenuRef.current = menu.open;
+  const onRowMenu = useCallback((o: Opportunity, at: { x: number; y: number }) => openMenuRef.current({ sku: o.sku, name: o.name }, at), []);
+
   // "/" focuses the search box from anywhere on the page, but not from inside the item drawer.
   const drawerOpen = useRef(false);
   drawerOpen.current = itemSku !== null;
@@ -164,7 +243,7 @@ export function OpportunitiesPage() {
   };
 
   const total = list.data?.total ?? 0;
-  const loaded = list.data?.rows.length ?? 0;
+  const loaded = list.data ? loadedRows.length : 0;
   const feedOff = settings ? !settings.liveFeed.enabled : status?.feed === 'off';
   const paused = status?.networkPaused ?? false;
   // Refreshing an item needs the access token; the API key alone does not help.
@@ -264,7 +343,15 @@ export function OpportunitiesPage() {
         {list.loading && !list.data ? (
           <LoadingBlock label="Loading opportunities…" />
         ) : total === 0 && list.data ? (
-          <NoResults filterCount={filterCount} feedOff={feedOff} paused={paused} noToken={noToken} onReset={resetFilters} onAllStatuses={() => set('status', [])} />
+          <NoResults
+            reason={emptyListReason(filters, status?.counts.opportunities)}
+            hiddenCount={status?.counts.opportunities ?? 0}
+            feedOff={feedOff}
+            paused={paused}
+            noToken={noToken}
+            onReset={resetFilters}
+            onAllStatuses={() => set('status', [])}
+          />
         ) : (
           <OppTable
             rows={rows}
@@ -277,32 +364,39 @@ export function OpportunitiesPage() {
             onSelect={setSelectedId}
             onOpen={onOpen}
             onToggleGroup={toggleGroup}
+            onLoadMore={more.loadMore}
+            loadingMore={more.loading}
             sort={sort.sort}
             dir={sort.dir}
             onSort={onSort}
+            onContextMenu={onRowMenu}
           />
         )}
       </div>
       <p className="hint-line muted small">
-        Keyboard: <kbd>j</kbd>/<kbd>k</kbd> or arrows to move, <kbd>Enter</kbd> to open, <kbd>←</kbd>/<kbd>→</kbd> to fold groups, <kbd>/</kbd> to search. Profit uses the{' '}
+        Keyboard: <kbd>j</kbd>/<kbd>k</kbd> or arrows to move, <kbd>Enter</kbd> to open, <kbd>←</kbd>/<kbd>→</kbd> to fold groups, <kbd>Shift</kbd>+<kbd>F10</kbd> or right-click for item actions, <kbd>/</kbd> to search. Profit uses the{' '}
         {settings?.profit.useOrder ?? 'conservative'} order.{' '}
         <button type="button" className="link-btn" onClick={() => navigate('settings')}>
           Change thresholds
         </button>
       </p>
+      {menu.element}
     </div>
   );
 }
 
 function NoResults({
-  filterCount,
+  reason,
+  hiddenCount,
   feedOff,
   paused,
   noToken,
   onReset,
   onAllStatuses,
 }: {
-  filterCount: number;
+  reason: EmptyListReason;
+  /** Opportunities in the database; with `reason` 'status-hidden' all of them are hidden by the status filter. */
+  hiddenCount: number;
   feedOff: boolean;
   paused: boolean;
   noToken: boolean;
@@ -313,7 +407,7 @@ function NoResults({
   const [counts, setCounts] = useState<{ prices: number; rules: number } | null>(null);
   const [tick, setTick] = useState(0);
   const bump = useThrottled(() => setTick((t) => t + 1), 3000);
-  usePush('opps.changed', bump);
+  useVisiblePush('opps.changed', bump);
 
   useEffect(() => {
     let alive = true;
@@ -369,7 +463,28 @@ function NoResults({
       </EmptyState>
     );
   }
-  if (filterCount > 0) {
+  if (reason === 'status-hidden') {
+    return (
+      <EmptyState
+        icon="filter"
+        title="Nothing is profitable right now"
+        actions={
+          <>
+            <button type="button" className="btn" onClick={onAllStatuses}>
+              Show every status
+            </button>
+            <button type="button" className="btn ghost" onClick={() => navigate('settings')}>
+              Change thresholds
+            </button>
+          </>
+        }
+      >
+        By default only profitable items are listed. {fmtInt(hiddenCount)} {hiddenCount === 1 ? 'opportunity is' : 'opportunities are'} below your thresholds,
+        unprofitable or without buyers, and hidden.
+      </EmptyState>
+    );
+  }
+  if (reason === 'filters') {
     return (
       <EmptyState
         icon="filter"

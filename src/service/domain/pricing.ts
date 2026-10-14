@@ -2,6 +2,7 @@
 // §5.5), plus reference prices valued with the current key price.
 
 import { refToScrap, valueScrap } from '../../shared/currency';
+import { COMMUNITY_MIN_MAX_AGE_MS, communityMaxAgeMs } from '../../shared/referenceAge';
 import { toLegacy } from '../../shared/sku';
 import type {
   CommunityRow,
@@ -16,7 +17,7 @@ import type {
 import type { Repo } from '../contracts';
 import type { OrderClass } from './matcher';
 
-export { minProfitFor, profitStatus, profitTier } from './tiers';
+export { maxCostFor, minProfitFor, profitStatus, profitTier } from './tiers';
 
 export interface ClassifiedOrder extends OrderClass {
   listing: Listing;
@@ -126,6 +127,13 @@ export function computePrices<T extends ValuedOrderLike>(
   return { best: sorted[0] ?? null, conservative, instant, outlierIds, ref };
 }
 
+/** The order profit is based on, per settings.profit.useOrder. Shared by the engine and item.detail so both agree. */
+export function pickRevenueOrder<T>(prices: Pick<PriceResult<T>, 'best' | 'conservative' | 'instant'>, useOrder: ProfitSettings['useOrder']): T | null {
+  if (useOrder === 'best') return prices.best;
+  if (useOrder === 'instant') return prices.instant;
+  return prices.conservative;
+}
+
 // ---------------------------------------------------------------------------
 // Order summaries
 // ---------------------------------------------------------------------------
@@ -215,7 +223,55 @@ export function referencePrices(raw: RawReferences, keyScrap: Scrap, now: UnixMs
   return { pricedb, community };
 }
 
-/** The reference values the outlier rules use. A single community price is its own high. */
+const DAY_MS = 24 * 60 * 60 * 1000;
+/** Matches DEFAULT_SETTINGS.profit.referenceMaxAgeMs; used when the setting is missing or broken. */
+export const DEFAULT_REFERENCE_MAX_AGE_MS = 30 * DAY_MS;
+// Lives in src/shared so the item drawer marks a community price ignored exactly when this gate drops it.
+export { COMMUNITY_MIN_MAX_AGE_MS };
+
+export interface UsableReferences {
+  /** The references with every stale one replaced by null. The same object when nothing is stale. */
+  references: ReferencePrices;
+  /** One reason per ignored reference, e.g. "PriceDB price is 400 days old, ignored". */
+  stale: string[];
+}
+
+/**
+ * Feature F4. A PriceDB price (ageMs) older than `maxAgeMs`, or a community price
+ * (lastUpdate) older than max(maxAgeMs, COMMUNITY_MIN_MAX_AGE_MS), counts as absent:
+ * about a third of PriceDB SKUs are months old (brief §2.7), and an old price would
+ * mark every current order an outlier. An unknown age counts as current, as before.
+ */
+export function usableReferences(refs: ReferencePrices, maxAgeMs: number | undefined, now: UnixMs): UsableReferences {
+  const limit = typeof maxAgeMs === 'number' && Number.isFinite(maxAgeMs) && maxAgeMs >= 0 ? maxAgeMs : DEFAULT_REFERENCE_MAX_AGE_MS;
+  const stale: string[] = [];
+  let pricedb = refs.pricedb;
+  const pAge = pricedb?.ageMs;
+  if (pricedb && typeof pAge === 'number' && Number.isFinite(pAge) && pAge > limit) {
+    stale.push(`PriceDB price is ${Math.floor(pAge / DAY_MS)} days old, ignored`);
+    pricedb = null;
+  }
+  let community = refs.community;
+  const last = community?.lastUpdate;
+  const cAge = typeof last === 'number' && Number.isFinite(last) && last > 0 ? now - last * 1000 : null;
+  if (community && cAge !== null && cAge > communityMaxAgeMs(limit)) {
+    stale.push(`Community price is ${Math.floor(cAge / DAY_MS)} days old, ignored`);
+    community = null;
+  }
+  return { references: stale.length === 0 ? refs : { pricedb, community }, stale };
+}
+
+/** True when some reference value can sanity-check an order (any PriceDB or community price). */
+export function hasReferenceValue(refs: ReferencePrices): boolean {
+  return (
+    positive(refs.pricedb?.buyScrap) !== null ||
+    positive(refs.pricedb?.sellScrap) !== null ||
+    positive(refs.community?.valueScrap) !== null ||
+    positive(refs.community?.valueHighScrap) !== null
+  );
+}
+
+/** The reference values the outlier rules use. A single community price is its own high. Pass usableReferences(...).references. */
 export function outlierRefs(refs: ReferencePrices): PriceRefs {
   return {
     pricedbSellScrap: refs.pricedb?.sellScrap ?? null,

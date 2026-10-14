@@ -12,6 +12,7 @@ import {
   canonical,
   fromObject,
   fromString,
+  isValidSku,
   looksLikeSku,
   normalizeSkuObject,
   toLegacy,
@@ -298,6 +299,8 @@ describe('fromString', () => {
       expect(fromString(legacy)).toEqual(o);
       expect(canonical(legacy)).toBe(v3);
       expect(looksLikeSku(v3)).toBe(true);
+      expect(isValidSku(v3), v3).toBe(true);
+      expect(isValidSku(legacy), legacy).toBe(true);
     }
   });
 });
@@ -348,5 +351,66 @@ describe('helpers', () => {
     ['', false],
   ])('looksLikeSku(%j) is %s', (text, expected) => {
     expect(looksLikeSku(text)).toBe(expected);
+  });
+});
+
+describe('isValidSku (strict check for typed SKUs)', () => {
+  it.each([
+    '5021;6',
+    '  5021;6  ',
+    '378;5;u13;strange',
+    '378;5;strange;u13',
+    '205;11;kt-3;australium',
+    '205;11;kt3;australium',
+    '378;6;uncraftable',
+    '378;6;untradeable',
+    '378;6;untradable;p16738740',
+    '20003;6;kt-3;td-205;od-6526;oq-6',
+    '20003;6;kt3;td205;od6526;oq6',
+    '15000;15;u701;w1;pk14',
+    '15000;15;pk0',
+    '5734;6;c82',
+    '200;6;n100;uncraftable',
+    '1178;15;w1;pk390;kt-3;festive',
+  ])('accepts %j', (text) => {
+    expect(isValidSku(text)).toBe(true);
+  });
+
+  it.each([
+    // fromString matches tokens case-sensitively and would drop these.
+    ['378;6;UNCRAFTABLE', '378;6'],
+    ['205;11;KT-3', '205;11'],
+    ['378;5;U13', '378;5'],
+    ['15000;15;W1;PK14', '15000;15'],
+    // Unknown or misspelt tokens.
+    ['378;6;uncratable', '378;6'],
+    ['378;6;foo', '378;6'],
+    // Repeated fields: the last one wins upstream.
+    ['378;5;u13;u14', '378;5;u14'],
+    // Values canonical() drops or rewrites.
+    ['378;5;u0', '378;5'],
+    ['205;11;kt-0', '205;11'],
+    ['378;5;u013', '378;5;u13'],
+    ['0378;6', '378;6'],
+    ['205;11;kt--3', '205;11;kt--3'],
+    ['20003;6;td--205', '20003;6;td--205'],
+  ])('rejects %j (fromString reads it as %j)', (text, readAs) => {
+    expect(canonical(text)).toBe(readAs);
+    expect(looksLikeSku(text)).toBe(true);
+    expect(isValidSku(text)).toBe(false);
+  });
+
+  it.each(['5021', '5021;6;', 'Team Captain', '378;5;u 13', '', '378;5;u13;p#ff0000'])('rejects non-SKU text %j', (text) => {
+    expect(isValidSku(text)).toBe(false);
+  });
+
+  it('accepts the lower-cased form of an upper-case SKU', () => {
+    expect(isValidSku('378;6;UNCRAFTABLE'.toLowerCase())).toBe(true);
+    expect(canonical('205;11;KT-3'.toLowerCase())).toBe('205;11;kt-3');
+  });
+
+  it('leaves fromString a faithful port: unknown and upper-case tokens are still ignored', () => {
+    expect(fromString('378;6;UNCRAFTABLE')).toEqual(sku({ defindex: 378, quality: 6 }));
+    expect(fromString('378;6;uncratable')).toEqual(sku({ defindex: 378, quality: 6 }));
   });
 });

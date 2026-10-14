@@ -1,0 +1,130 @@
+/* Price sheet: bulk paste and backup (F7). */
+
+.sheet-tools {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.bulk-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.bulk-card .section-head {
+  margin-bottom: 0;
+}
+
+.bulk-card > p {
+  margin: 0;
+}
+
+.bulk-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.bulk-text {
+  width: 100%;
+  min-height: 120px;
+  font-size: 12.5px;
+  white-space: pre;
+  overflow-wrap: normal;
+}
+
+.bulk-preview {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+
+.bulk-summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 16px;
+}
+
+.bulk-table-wrap {
+  max-height: min(50vh, 420px);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm);
+}
+
+.bulk-raw {
+  max-width: 280px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-muted);
+}
+
+.table tr.bulk-bad td {
+  background: var(--bad-weak);
+}
+
+.table tbody tr.bulk-bad:hover td {
+  background: color-mix(in srgb, var(--bad-weak) 60%, var(--row-hover));
+}
+
+.prices-page .table-card > .section-head {
+  flex-wrap: wrap;
+}
+
+.prices-page .form-card > .section-head {
+  margin-bottom: 2px;
+}
+
+/* Rules backup (RulesPanel). */
+
+.rules-panel > .section-actions {
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.section-actions-spacer {
+  flex: 1;
+}
+
+.import-skipped .section-head {
+  margin-bottom: 4px;
+}
+
+.skipped-list {
+  margin: 0;
+  padding-left: 18px;
+  max-height: 180px;
+  overflow: auto;
+}
+
+.skipped-list li {
+  overflow-wrap: anywhere;
+}
+
+/* CheckGroup (Controls.tsx), e.g. Settings > Notifications > Notify for: rows hug their text. */
+
+.check-group {
+  align-items: flex-start;
+}
+
+.check-group .check-row {
+  white-space: normal;
+}
+
+@media (max-width: 760px) {
+  .sheet-tools {
+    justify-content: flex-start;
+  }
+
+  .bulk-raw {
+    max-width: 160px;
+  }
+}

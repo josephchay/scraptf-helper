@@ -12,11 +12,15 @@ import type { ConnState, ConnectorHealth, HistoryPoint, KeyPriceQuote, PricedbRo
 import { KEY_SKU } from '../../shared/types';
 import type { HttpRequestOptions, HttpResponse, PriceDb, ServiceDeps } from '../contracts';
 import {
+  CONSECUTIVE_429_LIMIT,
   HostBlockedError,
   HttpStatusError,
+  LONG_PAUSE_MS,
+  MAX_PAUSE_MS,
   NetworkPausedError,
   RateLimitedError,
   assertAllowed,
+  backoffMs,
   parseRateLimit,
   realTimers,
   type TimerApi,
@@ -26,6 +30,21 @@ export const PRICEDB_API = 'https://pricedb.io/api';
 export const PRICEDB_SOCKET_URL = 'https://ws.pricedb.io';
 /** The URL the network policy approves for the socket.io websocket upgrade. */
 export const PRICEDB_SOCKET_POLICY_URL = 'wss://ws.pricedb.io/socket.io/';
+/** Hosts whose block (HTTP layer, persisted) keeps the socket closed: its own, and the REST host's challenge. */
+export const PRICEDB_SOCKET_HOST = 'ws.pricedb.io';
+export const PRICEDB_REST_HOST = 'pricedb.io';
+/**
+ * Shortest wait after the server answers the upgrade with another HTTP status
+ * (429, 503, 502...). socket.io does not expose the headers, so Retry-After and
+ * an HTML 503 cannot be told apart from a plain outage: the wait is the brief's
+ * no-header rule (§2.0), 60 s doubling to 15 min, and 1 h after three 429s in a row.
+ */
+export const UPGRADE_REFUSED_MIN_DELAY_MS = 60_000;
+/**
+ * Repo meta: the wait after a refused upgrade, as JSON {until, why, n429, rejections},
+ * so a crash restart, relaunch or network pause/resume does not reconnect early (R7).
+ */
+export const META_SOCKET_RETRY = 'pricedb.socketRetry';
 export const BULK_CHUNK = 100;
 /** /autob/items is CDN-cached for 4 h (max-age=14400); fetching sooner returns the same data. */
 export const LOAD_ALL_MIN_INTERVAL_MS = 4 * 60 * 60 * 1000;
@@ -187,6 +206,40 @@ export interface PriceDbOptions {
 
 function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
+}
+
+/**
+ * HTTP status of a refused websocket upgrade, from socket.io's connect_error:
+ * a TransportError whose `description` is the ws ErrorEvent carrying
+ * "Unexpected server response: 403". Null for any other failure.
+ */
+export function upgradeRefusedStatus(err: unknown): number | null {
+  const e = err as { message?: unknown; description?: { message?: unknown; error?: { message?: unknown } } } | null;
+  const texts = [e?.description?.message, e?.description?.error?.message, e?.message];
+  for (const t of texts) {
+    if (typeof t !== 'string') continue;
+    const m = /Unexpected server response: (\d{3})\b/.exec(t);
+    if (m) return Number(m[1]);
+  }
+  return null;
+}
+
+const savedSocketRetrySchema = z.looseObject({
+  until: z.number().catch(0),
+  why: z.string().catch(''),
+  n429: z.number().catch(0),
+  rejections: z.number().catch(0),
+});
+
+/** Streak counters read back from storage; past this the delays are at their maximum anyway. */
+const MAX_RESTORED_STREAK = 100;
+
+function restoredStreak(n: number): number {
+  return Number.isFinite(n) && n > 0 ? Math.min(Math.floor(n), MAX_RESTORED_STREAK) : 0;
+}
+
+function formatDelay(ms: number): string {
+  return ms < 120_000 ? `${Math.round(ms / 1000)} s` : `${Math.round(ms / 60_000)} min`;
 }
 
 function safeCanonical(sku: string): string | null {
@@ -589,6 +642,66 @@ export function createPriceDb(deps: ServiceDeps, options: PriceDbOptions = {}): 
   let lastEventAt: UnixMs | null = null;
   let events = 0;
   let socketParseFailures = 0;
+  /**
+   * The upgrade was refused with 401/403 in this process (R7: never retried
+   * automatically). `stored`: the HTTP layer holds the matching ws.pricedb.io
+   * block, so it survives restarts and the user's net.unblock also clears this.
+   */
+  let sockRefused: { reason: string; stored: boolean } | null = null;
+  /** Other refused upgrades in a row, and how many of them were 429; reset when a connection opens. */
+  let rejections = 0;
+  let consecutive429 = 0;
+  /** No connection attempt before this time (backoff after a refused upgrade; outlives stop/start and restarts). */
+  let retryNotBefore: UnixMs = 0;
+  let retryWhy = '';
+  /** META_SOCKET_RETRY holds a wait or streak that a successful connection must clear. */
+  let retrySaved = false;
+
+  const saveRetry = (): void => {
+    try {
+      repo.setMeta(META_SOCKET_RETRY, JSON.stringify({ until: retryNotBefore, why: retryWhy, n429: consecutive429, rejections }));
+      retrySaved = true;
+    } catch (err) {
+      log.warn(`PriceDB socket: could not save the reconnect wait: ${errorMessage(err)}`);
+    }
+  };
+
+  const clearSavedRetry = (): void => {
+    if (!retrySaved) return;
+    try {
+      repo.setMeta(META_SOCKET_RETRY, '');
+      retrySaved = false;
+    } catch {
+      // the next successful connection tries again
+    }
+  };
+
+  // A refused upgrade's wait or 429 streak from an earlier run still holds.
+  try {
+    const raw = repo.getMeta(META_SOCKET_RETRY);
+    const saved = raw ? savedSocketRetrySchema.safeParse(JSON.parse(raw)) : null;
+    if (saved?.success) {
+      retrySaved = true;
+      const now = clock.now();
+      consecutive429 = restoredStreak(saved.data.n429);
+      rejections = restoredStreak(saved.data.rejections);
+      if (Number.isFinite(saved.data.until) && saved.data.until > now) {
+        // Clamped like any server-requested pause, so a corrupt value cannot stop the socket for good.
+        retryNotBefore = Math.min(saved.data.until, now + MAX_PAUSE_MS);
+        retryWhy = saved.data.why.slice(0, 300) || 'PriceDB refused the live-updates connection';
+        // Stored clamped, or each restart would clamp it again from its own start time.
+        if (retryNotBefore < saved.data.until) saveRetry();
+      }
+    }
+  } catch {
+    // unreadable: nothing to restore
+  }
+
+  /** Why the socket may not connect (a refusal or a challenge on either PriceDB host), or null. */
+  const socketBlockReason = (): string | null => {
+    if (sockRefused?.stored && http.hostBlocked(PRICEDB_SOCKET_HOST) === null) sockRefused = null;
+    return sockRefused?.reason ?? http.hostBlocked(PRICEDB_SOCKET_HOST) ?? http.hostBlocked(PRICEDB_REST_HOST) ?? restRefused;
+  };
 
   const clearTimer = (h: unknown): null => {
     if (h !== null) timers.clearTimeout(h);
@@ -670,7 +783,41 @@ export function createPriceDb(deps: ServiceDeps, options: PriceDbOptions = {}): 
     generation++;
     dispose();
     sockLastErrorAt = clock.now();
-    sockLastError = errorMessage(err);
+    const refused = upgradeRefusedStatus(err);
+    const why = refused !== null ? `PriceDB refused the live-updates connection (HTTP ${refused})` : errorMessage(err);
+    sockLastError = why;
+    if (refused === 401 || refused === 403) {
+      // A refusal or challenge (socket.io hides cf-mitigated, so every 401/403 counts) is never retried (R7).
+      const reason =
+        `PriceDB refused the live-updates connection (HTTP ${refused}). ` +
+        'Check pricedb.io in a browser, then re-enable ws.pricedb.io on the Data health page.';
+      let stored = false;
+      try {
+        http.blockHost(PRICEDB_SOCKET_HOST, reason);
+        stored = http.hostBlocked(PRICEDB_SOCKET_HOST) !== null;
+      } catch (e) {
+        log.warn(`PriceDB socket: could not store the block: ${errorMessage(e)}`);
+      }
+      sockRefused = { reason, stored };
+      log.warn(`PriceDB socket disabled: ${reason}`);
+      connect(); // reports 'blocked'; from now on it only re-reads the block
+      return;
+    }
+    if (refused !== null) {
+      // Any other HTTP answer to the upgrade (429, 503...) is the server asking us to slow down (R7, §2.0).
+      // A 503 neither counts toward nor ends the 429 streak, as in the HTTP layer.
+      rejections++;
+      if (refused === 429) consecutive429++;
+      let delay = Math.max(UPGRADE_REFUSED_MIN_DELAY_MS, backoffMs(rejections));
+      if (consecutive429 >= CONSECUTIVE_429_LIMIT) delay = Math.max(delay, LONG_PAUSE_MS);
+      retryNotBefore = clock.now() + delay;
+      retryWhy = why;
+      saveRetry();
+      sockState = 'backoff';
+      log.warn(`PriceDB socket: ${why}; next attempt in ${formatDelay(delay)}`);
+      scheduleConnect(delay);
+      return;
+    }
     if (stableFor >= STABLE_CONNECTION_MS) failures = 0;
     failures = kicked ? Math.max(failures + 1, RECONNECT_DELAYS_MS.length + 1) : failures + 1;
     const delay = failures <= RECONNECT_DELAYS_MS.length ? RECONNECT_DELAYS_MS[failures - 1]! : RECONNECT_SLOW_MS;
@@ -684,7 +831,7 @@ export function createPriceDb(deps: ServiceDeps, options: PriceDbOptions = {}): 
     watchTimer = timers.setTimeout(() => {
       watchTimer = null;
       if (gen !== generation || !started) return;
-      if (http.isPaused() || !socketEnabled()) {
+      if (http.isPaused() || !socketEnabled() || socketBlockReason() !== null) {
         generation++;
         dispose();
         connect();
@@ -707,6 +854,21 @@ export function createPriceDb(deps: ServiceDeps, options: PriceDbOptions = {}): 
     if (http.isPaused()) {
       sockState = 'paused';
       scheduleConnect(SOCKET_CHECK_MS);
+      return;
+    }
+    const blockedWhy = socketBlockReason();
+    if (blockedWhy !== null) {
+      sockState = 'blocked';
+      sockDisabledReason = blockedWhy;
+      // Re-reads the block only (no request), so the user's re-enable is picked up.
+      scheduleConnect(SOCKET_CHECK_MS);
+      return;
+    }
+    // A stop/start (network pause and resume) or a restart clears the timer; the server's wait still holds.
+    const waitMs = retryNotBefore - clock.now();
+    if (waitMs > 0) {
+      sockState = 'backoff';
+      scheduleConnect(waitMs);
       return;
     }
     try {
@@ -734,11 +896,17 @@ export function createPriceDb(deps: ServiceDeps, options: PriceDbOptions = {}): 
     sock = s;
     s.on('connect', () => {
       if (gen !== generation) return;
-      // The backoff resets only once the connection proved stable (onFailure).
+      // The backoff resets only once the connection proved stable (onFailure);
+      // an accepted upgrade ends the refusal streak at once, as on the bp.tf feed.
       sockState = 'live';
       sockLastOkAt = clock.now();
       connectedAt = sockLastOkAt;
       sockDisabledReason = null;
+      rejections = 0;
+      consecutive429 = 0;
+      retryNotBefore = 0;
+      retryWhy = '';
+      clearSavedRetry();
       watchTimer = clearTimer(watchTimer);
       watch(gen);
     });
@@ -770,6 +938,11 @@ export function createPriceDb(deps: ServiceDeps, options: PriceDbOptions = {}): 
     nextRetryAt = null;
     dispose();
     sockState = 'off';
+  };
+
+  const resumeSocket = (): void => {
+    if (!started || sockState !== 'blocked') return;
+    connect();
   };
 
   // ----- health -----
@@ -818,9 +991,16 @@ export function createPriceDb(deps: ServiceDeps, options: PriceDbOptions = {}): 
     const now = clock.now();
     let detail: string;
     let state = sockState;
+    let disabledReason = sockDisabledReason;
+    // A block shows even while core keeps the socket stopped because of it.
+    const blockedWhy = socketEnabled() && (!started || state !== 'live') ? socketBlockReason() : null;
     if (!socketEnabled()) {
       state = 'off';
       detail = 'Disabled in Settings';
+    } else if (blockedWhy !== null) {
+      state = 'blocked';
+      detail = blockedWhy;
+      disabledReason = blockedWhy;
     } else if (!started) {
       state = 'off';
       detail = 'Not started';
@@ -831,14 +1011,17 @@ export function createPriceDb(deps: ServiceDeps, options: PriceDbOptions = {}): 
           ? `Connected since ${since}; no price events yet (PriceDB only pushes changes, silence is normal)`
           : `Connected since ${since}; ${events} price updates, last ${lastEventAt ? new Date(lastEventAt).toISOString() : 'never'}`;
     } else if (state === 'backoff') {
-      const secs = nextRetryAt ? Math.max(0, Math.round((nextRetryAt - now) / 1000)) : 0;
-      detail = `Reconnecting in ${secs} s (failure ${failures})`;
+      const waitMs = nextRetryAt ? Math.max(0, nextRetryAt - now) : 0;
+      detail =
+        retryNotBefore > now
+          ? `${retryWhy}; reconnecting in ${formatDelay(retryNotBefore - now)}`
+          : `Reconnecting in ${Math.round(waitMs / 1000)} s (failure ${failures})`;
     } else if (state === 'paused') {
       detail = 'Network paused';
     } else if (state === 'connecting') {
       detail = 'Connecting';
     } else if (state === 'blocked') {
-      detail = 'Blocked by network policy';
+      detail = sockDisabledReason ?? 'Blocked by network policy';
     } else {
       detail = 'Idle';
     }
@@ -851,7 +1034,7 @@ export function createPriceDb(deps: ServiceDeps, options: PriceDbOptions = {}): 
       lastOkAt: sockLastOkAt,
       lastErrorAt: sockLastErrorAt,
       lastError: sockLastError,
-      disabledReason: sockDisabledReason,
+      disabledReason,
     };
   };
 
@@ -863,6 +1046,7 @@ export function createPriceDb(deps: ServiceDeps, options: PriceDbOptions = {}): 
     keyQuote,
     startSocket,
     stopSocket,
+    resumeSocket,
     health: () => [restHealth(), socketHealth()],
   };
 }

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import type { PushContract, PushEvent, RpcMethod, RpcParams, RpcResult } from '../../shared/rpc';
 import { call, on } from '../api';
 import { errorMessage } from '../format';
+import { useDocumentVisible } from './useTimers';
 
 export interface RpcQuery<T> {
   data: T | undefined;
@@ -76,6 +77,52 @@ export function usePush<E extends PushEvent>(event: E, fn: (payload: PushContrac
     if (!enabled) return;
     return on(event, (p) => ref.current(p));
   }, [event, enabled]);
+}
+
+export interface HiddenPushGate {
+  /** A push arrived; true when it should be handled now. */
+  push(visible: boolean): boolean;
+  /** The window was shown; true once if pushes were held while it was hidden. */
+  shown(): boolean;
+}
+
+/** While hidden, pushes collapse into one catch-up for when the window is shown again. */
+export function createHiddenPushGate(): HiddenPushGate {
+  let missed = false;
+  return {
+    push(visible) {
+      if (visible) return true;
+      missed = true;
+      return false;
+    },
+    shown() {
+      const run = missed;
+      missed = false;
+      return run;
+    },
+  };
+}
+
+/**
+ * usePush for pushes that trigger RPC work (reloads, item.detail). A window closed
+ * to the tray, or quick entry hidden with Esc, stays mounted and would otherwise
+ * keep doing that work, and fetching, for nobody; it catches up once when shown.
+ */
+export function useVisiblePush(event: PushEvent, fn: () => void, enabled = true): void {
+  const visible = useDocumentVisible();
+  const [gate] = useState(createHiddenPushGate);
+  const ref = useRef(fn);
+  ref.current = fn;
+  usePush(
+    event,
+    () => {
+      if (gate.push(document.visibilityState !== 'hidden')) ref.current();
+    },
+    enabled,
+  );
+  useEffect(() => {
+    if (visible && enabled && gate.shown()) ref.current();
+  }, [visible, enabled, gate]);
 }
 
 /**

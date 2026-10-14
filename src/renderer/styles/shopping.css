@@ -1,0 +1,72 @@
+/* Shopping list page (F1). The opportunities table's Pay up to column budget is in layout.css. */
+
+/* ---------- shopping list ---------- */
+
+.shopping-page {
+  height: 100%;
+}
+
+/* Reuses the opportunities grid (.opp-scroll, .opp-row, .opp-group) with its own tracks:
+   Item / Pay up to / Sells for / Confidence / Your price / Updated. */
+.shop-scroll {
+  --shop-cols: minmax(220px, 1fr) 112px 250px 116px 120px 56px;
+}
+
+.shop-scroll .opp-row {
+  grid-template-columns: var(--shop-cols);
+}
+
+@container (max-width: 970px) {
+  .shop-scroll .opp-row {
+    --shop-cols: minmax(160px, 1fr) 108px 210px 108px 112px 52px;
+  }
+}
+
+.s-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.s-pay .money {
+  font-weight: 650;
+}
+
+.s-sells {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.s-sells > .money {
+  flex-shrink: 0;
+}
+
+.s-sells .buyer-type {
+  flex-shrink: 0;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.s-sells .buyer-name {
+  min-width: 0;
+  font-size: 12px;
+}
+
+.s-yours {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 4px;
+}
+
+.s-yours > .icon {
+  flex-shrink: 0;
+}
+
+.opp-group .shop-bank {
+  margin-left: auto;
+  font-size: 12px;
+  font-weight: 550;
+  white-space: nowrap;
+}

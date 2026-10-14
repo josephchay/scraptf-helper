@@ -198,6 +198,13 @@
   padding: 0 20px;
 }
 
+/* The restart banner above "Can't reach the background service" (no top bar to sit under). */
+.fatal > .service-banner {
+  margin-bottom: 12px;
+  border: 1px solid color-mix(in srgb, var(--tone) 35%, transparent);
+  border-radius: var(--radius-sm);
+}
+
 .split {
   display: grid;
   grid-template-columns: minmax(300px, 380px) minmax(0, 1fr);
@@ -296,7 +303,7 @@
 }
 
 .opp-scroll {
-  --opp-cols: minmax(200px, 1fr) 112px 112px 120px 60px 116px 48px 72px 62px 56px;
+  --opp-cols: minmax(180px, 1fr) 108px 104px 108px 116px 58px 112px 48px 72px 62px 56px;
   position: relative;
   flex: 1;
   min-height: 0;
@@ -398,6 +405,19 @@
   text-overflow: ellipsis;
 }
 
+/* "Load more" under a group the first page could not fill. */
+.opp-more {
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.opp-more > .more-cell {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+}
+
 .group-total {
   margin-left: auto;
   font-weight: 600;
@@ -431,10 +451,12 @@
   font-weight: 650;
 }
 
-/* Column budget: full needs ~1072px, mid ~922px, narrow ~776px. */
-@container (max-width: 1080px) {
+/* Column budget, including the Pay up to track after Cost: full needs ~1148px, mid ~976px and
+   narrow ~850px, each with ~10px to spare for the scrollbar. So a 1440px window gets the full
+   layout, 1280px keeps Bot/Human, and the 960px minimum window gets narrow. */
+@container (max-width: 1160px) {
   .opp-row {
-    --opp-cols: minmax(180px, 1fr) 112px 112px 120px 60px 116px 72px 56px;
+    --opp-cols: minmax(160px, 1fr) 104px 104px 104px 112px 56px 108px 72px 52px;
   }
   .opp-row > .c-buyers,
   .opp-row > .c-input {
@@ -442,9 +464,9 @@
   }
 }
 
-@container (max-width: 930px) {
+@container (max-width: 990px) {
   .opp-row {
-    --opp-cols: minmax(160px, 1fr) 104px 104px 116px 54px 104px 50px;
+    --opp-cols: minmax(144px, 1fr) 100px 96px 100px 112px 54px 100px 50px;
   }
   .opp-row > .c-buyers,
   .opp-row > .c-input,

@@ -3,6 +3,7 @@ import type { GroupSummary, Opportunity } from '../../src/shared/types';
 import { DEFAULT_SETTINGS } from '../../src/shared/defaults';
 import {
   DEFAULT_FILTERS,
+  MENU_KEY_DEDUPE_MS,
   activeFilterCount,
   compareOpps,
   defaultDir,
@@ -13,9 +14,13 @@ import {
   groupLabel,
   groupOpportunities,
   indexOfRow,
+  isMenuKeyEcho,
   matchesSearch,
   minProfitFor,
+  maxCostFor,
+  menuAnchorRect,
   moveCursor,
+  payUpToTitle,
   sanitizeFilters,
   sortOpportunities,
   statusFor,
@@ -41,6 +46,7 @@ function opp(over: Partial<Opportunity> & { key: string }): Opportunity {
     revenueScrap: 120,
     profitScrap: 20,
     margin: 0.2,
+    maxCostScrap: null,
     confidence: 60,
     confidenceLevel: 'medium',
     flags: [],
@@ -216,5 +222,54 @@ describe('tiers and status', () => {
     expect(statusFor(80, 1000, p)).toBe('profitable');
     expect(statusFor(60, 1000, { ...p, minMargin: 0.1 })).toBe('below-threshold');
     expect(statusFor(10, 0, p)).toBe('profitable');
+  });
+});
+
+describe('pay up to and the row menu', () => {
+  const p = DEFAULT_SETTINGS.profit;
+
+  it('explains a missing ceiling by its cause', () => {
+    expect(payUpToTitle({ maxCostScrap: null, costScrap: 100, revenueScrap: null, inputKind: 'user' }, KEY)).toMatch(/No eligible buy orders/);
+    expect(payUpToTitle({ maxCostScrap: null, costScrap: 100, revenueScrap: 5, inputKind: 'user' }, KEY)).toMatch(/No scrap\.tf price clears/);
+  });
+
+  it('places the row price under, at or over the ceiling', () => {
+    const max = maxCostFor(200, p)!;
+    expect(max).toBeGreaterThan(0);
+    const under = payUpToTitle({ maxCostScrap: max, costScrap: max - 9, revenueScrap: 200, inputKind: 'user' }, KEY);
+    expect(under).toContain('Pay up to');
+    expect(under).toContain('Your price is 1.00 ref under it.');
+    expect(payUpToTitle({ maxCostScrap: max, costScrap: max, revenueScrap: 200, inputKind: 'import' }, KEY)).toContain('exactly at it');
+    expect(payUpToTitle({ maxCostScrap: max, costScrap: max + 3, revenueScrap: 200, inputKind: 'user' }, KEY)).toContain('Your price is 0.33 ref over it.');
+    // A rule cost is an estimate, so no under/over verdict.
+    const rule = payUpToTitle({ maxCostScrap: max, costScrap: max - 9, revenueScrap: 200, inputKind: 'rule' }, KEY);
+    expect(rule).toMatch(/rule estimate/);
+    expect(rule).not.toMatch(/under it|over it/);
+  });
+
+  it('formats keys in the ceiling when a key price is known', () => {
+    expect(payUpToTitle({ maxCostScrap: KEY + 9, costScrap: 0, revenueScrap: 2 * KEY, inputKind: 'user' }, KEY)).toContain('Pay up to 1 key 1.00 ref');
+  });
+
+  it('treats a contextmenu right after a keyboard open as its echo', () => {
+    expect(isMenuKeyEcho(1000, 1000)).toBe(true);
+    expect(isMenuKeyEcho(1000, 1000 + MENU_KEY_DEDUPE_MS - 1)).toBe(true);
+    expect(isMenuKeyEcho(1000, 1000 + MENU_KEY_DEDUPE_MS)).toBe(false);
+    // Never opened from the keyboard, or a clock that went backwards.
+    expect(isMenuKeyEcho(0, 5_000_000)).toBe(false);
+    expect(isMenuKeyEcho(2000, 1000)).toBe(false);
+  });
+
+  it('anchors a keyboard menu to the cursor row, or under the header when it is not rendered', () => {
+    const row = { left: 70, top: 400, width: 860, height: 38, right: 930, bottom: 438 };
+    expect(menuAnchorRect(row, { left: 60, top: 300, width: 880 }, 34)).toEqual({ left: 70, top: 400, width: 860, height: 38 });
+    expect(menuAnchorRect(null, { left: 60, top: 300, width: 880 }, 34)).toEqual({ left: 60, top: 334, width: 880, height: 0 });
+    expect(menuAnchorRect(undefined, undefined, 34)).toEqual({ left: 0, top: 34, width: 0, height: 0 });
+  });
+
+  it('moves a cursor over any list of rows with ids', () => {
+    const list = [{ id: 'group:hats' }, { id: 'sku:1;6' }, { id: 'sku:2;6' }];
+    expect(indexOfRow(list, 'sku:2;6')).toBe(2);
+    expect(moveCursor(list, 1, 5)).toBe(2);
   });
 });

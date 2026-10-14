@@ -16,8 +16,9 @@ import type {
   ProfitTier,
   Scrap,
 } from '../shared/types';
+import { profitStatus } from '../shared/ceiling';
 import { CATEGORIES, CATEGORY_LABELS, PROFIT_TIER_LABELS } from '../shared/types';
-import { CONFIDENCE_LABELS, INPUT_KIND_LABELS } from './format';
+import { CONFIDENCE_LABELS, INPUT_KIND_LABELS, fmtMoney } from './format';
 
 export type SortKey = NonNullable<OppQuery['sort']>;
 export type SortDir = NonNullable<OppQuery['dir']>;
@@ -71,6 +72,19 @@ export function sanitizeFilters(v: unknown): OppFilters {
     inputKinds: pick(o['inputKinds'], INPUT_ORDER),
     status: Array.isArray(o['status']) ? pick(o['status'], STATUS_ORDER) : [...DEFAULT_FILTERS.status],
   };
+}
+
+export type EmptyListReason = 'filters' | 'status-hidden' | 'nothing-yet';
+
+/**
+ * Why an empty Opportunities list is empty. The default status filter
+ * (profitable only) is not an "active" filter, yet with opportunities in the
+ * database it is what hides them all, so the empty state has to say so.
+ */
+export function emptyListReason(f: OppFilters, opportunitiesInDb: number | null | undefined): EmptyListReason {
+  if (activeFilterCount(f) > 0) return 'filters';
+  if (f.status.length > 0 && (opportunitiesInDb ?? 0) > 0) return 'status-hidden';
+  return 'nothing-yet';
 }
 
 export function activeFilterCount(f: OppFilters): number {
@@ -321,9 +335,73 @@ export function groupOpportunities(rows: readonly Opportunity[], by: GroupBy, se
   return out.sort((a, b) => orderIndex(by, a.key) - orderIndex(by, b.key) || a.key.localeCompare(b.key));
 }
 
+/** Rows ordered by group display order first, keeping their order inside each group (how the service pages a grouped list). */
+export function orderByGroup(rows: readonly Opportunity[], by: GroupBy): Opportunity[] {
+  return [...rows].sort((a, b) => orderIndex(by, groupKeyOf(a, by)) - orderIndex(by, groupKeyOf(b, by)));
+}
+
+/** Most rows one group shows: the service's limit for one request. Past it, the CSV export has every row. */
+export const MAX_GROUP_ROWS = 5000;
+
+/** Rows one "Load more" adds to a group. */
+export const GROUP_PAGE = 500;
+
+/** Rows the next "Load more" really adds: a page, or less near the end of the group or MAX_GROUP_ROWS. */
+export function nextGroupPageSize(g: Pick<OppGroup, 'count' | 'rows'>): number {
+  return Math.max(0, Math.min(GROUP_PAGE, g.count - g.rows.length, MAX_GROUP_ROWS - g.rows.length));
+}
+
+/**
+ * The 'opps.list' request for `want` rows of one group past those the first
+ * page holds. A grouped list is ordered by group first, so with more matches
+ * than one page the first groups use it all and later groups load nothing.
+ * Category, tier and input narrow the query to the group; confidence levels
+ * have no query filter, so that grouping skips the earlier groups' rows instead.
+ * Null when there is nothing (more) to load.
+ */
+export function groupPageQuery(base: OppQuery, by: GroupBy, key: string, firstPage: readonly OppGroup[], want: number): OppQuery | null {
+  const i = firstPage.findIndex((g) => g.key === key);
+  const g = firstPage[i];
+  if (!g || !groupOrder(by).includes(key)) return null;
+  const limit = Math.min(Math.floor(want), MAX_GROUP_ROWS - g.rows.length, g.count - g.rows.length);
+  if (!(limit > 0)) return null;
+  const q: OppQuery = { ...base, limit, offset: g.rows.length };
+  switch (by) {
+    case 'category':
+      q.categories = [key as Category];
+      break;
+    case 'tier':
+      q.tiers = [key as ProfitTier];
+      break;
+    case 'input':
+      q.inputKinds = [key as InputKind];
+      break;
+    case 'confidence':
+      q.offset = firstPage.slice(0, i).reduce((n, x) => n + x.count, 0) + g.rows.length;
+      break;
+  }
+  return q;
+}
+
+/** The first page plus rows loaded per group; a row in both keeps the first page's (newer) copy. */
+export function mergeLoadedRows(first: readonly Opportunity[], extra: Readonly<Record<string, readonly Opportunity[]>>): Opportunity[] {
+  const seen = new Set(first.map((o) => o.key));
+  const out = [...first];
+  for (const rows of Object.values(extra)) {
+    for (const o of rows) {
+      if (seen.has(o.key)) continue;
+      seen.add(o.key);
+      out.push(o);
+    }
+  }
+  return out;
+}
+
 export type DisplayRow =
   | { type: 'group'; id: string; group: OppGroup; collapsed: boolean }
-  | { type: 'opp'; id: string; opp: Opportunity; groupKey: string };
+  | { type: 'opp'; id: string; opp: Opportunity; groupKey: string }
+  /** After a group whose count exceeds its loaded rows: "Load more", or a note once MAX_GROUP_ROWS are shown. */
+  | { type: 'more'; id: string; group: OppGroup; groupKey: string; capped: boolean };
 
 /** Flattens groups into the rows the virtual table renders. */
 export function flattenGroups(groups: readonly OppGroup[], collapsed: ReadonlySet<string>): DisplayRow[] {
@@ -333,21 +411,63 @@ export function flattenGroups(groups: readonly OppGroup[], collapsed: ReadonlySe
     out.push({ type: 'group', id: `group:${g.key}`, group: g, collapsed: isCollapsed });
     if (isCollapsed) continue;
     for (const o of g.rows) out.push({ type: 'opp', id: o.key, opp: o, groupKey: g.key });
+    if (g.rows.length < g.count) out.push({ type: 'more', id: `more:${g.key}`, group: g, groupKey: g.key, capped: g.rows.length >= MAX_GROUP_ROWS });
   }
   return out;
 }
 
-/** Index of the row with this id, or -1. */
-export function indexOfRow(rows: readonly DisplayRow[], id: string | null): number {
+/** Index of the row with this id, or -1. Any list of rows with ids (the Shopping list uses it too). */
+export function indexOfRow(rows: readonly { id: string }[], id: string | null): number {
   if (id === null) return -1;
   return rows.findIndex((r) => r.id === id);
 }
 
 /** Moves a keyboard cursor by delta, clamped to the list. */
-export function moveCursor(rows: readonly DisplayRow[], current: number, delta: number): number {
+export function moveCursor(rows: readonly unknown[], current: number, delta: number): number {
   if (!rows.length) return -1;
   if (current < 0) return delta >= 0 ? 0 : rows.length - 1;
   return Math.max(0, Math.min(rows.length - 1, current + delta));
+}
+
+// ---------------------------------------------------------------------------
+// "Pay up to" cell and the row context menu (F1, F9)
+// ---------------------------------------------------------------------------
+
+/** Tooltip for an opportunity's Pay up to cell: the ceiling, and where this row's own price sits against it. */
+export function payUpToTitle(o: Pick<Opportunity, 'maxCostScrap' | 'costScrap' | 'revenueScrap' | 'inputKind'>, keyScrap: Scrap | null): string {
+  if (o.maxCostScrap === null) {
+    return o.revenueScrap === null ? 'No eligible buy orders, so there is no ceiling.' : 'No scrap.tf price clears your thresholds against this revenue.';
+  }
+  const head = `Pay up to ${fmtMoney(o.maxCostScrap, keyScrap)} on scrap.tf: the highest price that still clears your thresholds.`;
+  if (o.inputKind === 'rule') return `${head} This cost is a rule estimate; check the real price on scrap.tf.`;
+  const d = o.maxCostScrap - o.costScrap;
+  if (d === 0) return `${head} Your price is exactly at it.`;
+  return d > 0 ? `${head} Your price is ${fmtMoney(d, keyScrap)} under it.` : `${head} Your price is ${fmtMoney(-d, keyScrap)} over it.`;
+}
+
+/**
+ * On Windows Chromium also sends a contextmenu event for Shift+F10 or the menu
+ * key (on key up), after the keydown already opened the item menu: within this
+ * window such an event on the grid is the same request and is ignored.
+ */
+export const MENU_KEY_DEDUPE_MS = 1000;
+
+/** True when a contextmenu event on a grid repeats a keyboard open made at `keyOpenedAt`. */
+export function isMenuKeyEcho(keyOpenedAt: number, now: number): boolean {
+  return now - keyOpenedAt >= 0 && now - keyOpenedAt < MENU_KEY_DEDUPE_MS;
+}
+
+/**
+ * The box a keyboard-opened menu anchors to: the cursor row, or (when that row
+ * is scrolled out of the rendered window) the top of the table under its header.
+ */
+export function menuAnchorRect(
+  row: { left: number; top: number; width: number; height: number } | null | undefined,
+  table: { left: number; top: number; width: number } | null | undefined,
+  headerHeight: number,
+): { left: number; top: number; width: number; height: number } {
+  if (row) return { left: row.left, top: row.top, width: row.width, height: row.height };
+  return { left: table?.left ?? 0, top: (table?.top ?? 0) + headerHeight, width: table?.width ?? 0, height: 0 };
 }
 
 // ---------------------------------------------------------------------------
@@ -364,19 +484,13 @@ export function tierForProfit(profit: Scrap | null, keyScrap: Scrap): ProfitTier
   return 'small';
 }
 
-/** Minimum profit: max(minProfitScrap, ceil(pct x cost)). */
-export function minProfitFor(costScrap: Scrap, p: Pick<ProfitSettings, 'minProfitScrap' | 'minProfitPctOfCost'>): Scrap {
-  return Math.max(p.minProfitScrap, Math.ceil(Math.max(0, costScrap) * p.minProfitPctOfCost));
-}
+// The engine's own rules (src/shared/ceiling.ts), so hints and the mock never disagree with the service.
+export { maxCostFor, minProfitFor } from '../shared/ceiling';
 
 export function statusFor(
   profit: Scrap | null,
   costScrap: Scrap,
   p: Pick<ProfitSettings, 'minProfitScrap' | 'minProfitPctOfCost' | 'minMargin'>,
 ): OpportunityStatus {
-  if (profit === null) return 'no-buyers';
-  if (profit <= 0) return 'unprofitable';
-  const margin = costScrap > 0 ? profit / costScrap : Infinity;
-  if (profit < minProfitFor(costScrap, p) || margin < p.minMargin) return 'below-threshold';
-  return 'profitable';
+  return profitStatus(profit, costScrap, p);
 }

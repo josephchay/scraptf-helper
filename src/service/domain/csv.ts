@@ -4,7 +4,8 @@
 // numbers so they stay numeric.
 
 import { formatScrap, scrapToRef } from '../../shared/currency';
-import type { JournalEntry, Opportunity, OpportunityEvent, OrderSummary, Scrap, UnixMs } from '../../shared/types';
+import type { JournalEntry, Opportunity, OpportunityEvent, Scrap, UnixMs } from '../../shared/types';
+import { revenueOrderByValue } from './engine';
 import { journalValue } from './journal';
 
 export type CsvCell = string | number | boolean | null | undefined;
@@ -37,11 +38,6 @@ function iso(ts: UnixMs | null | undefined): string {
   return Number.isNaN(d.getTime()) ? '' : d.toISOString();
 }
 
-function revenueOrder(o: Opportunity): OrderSummary | null {
-  if (o.revenueScrap === null) return null;
-  return [o.consOrder, o.bestOrder, o.instantOrder].find((x) => x !== null && x.valueScrap === o.revenueScrap) ?? null;
-}
-
 export function opportunitiesCsv(rows: readonly Opportunity[], keyScrap: Scrap): string {
   const out: CsvCell[][] = [
     [
@@ -64,6 +60,9 @@ export function opportunitiesCsv(rows: readonly Opportunity[], keyScrap: Scrap):
       'profit_ref',
       'profit',
       'margin_pct',
+      // F1: the highest scrap.tf price that still clears the thresholds, as a number and as scrap.tf shows it.
+      'pay_up_to_ref',
+      'pay_up_to',
       'buyers',
       'buyer',
       'flags',
@@ -75,7 +74,8 @@ export function opportunitiesCsv(rows: readonly Opportunity[], keyScrap: Scrap):
   ];
   const keyRef = ref(keyScrap);
   for (const o of rows) {
-    const order = revenueOrder(o);
+    const order = revenueOrderByValue(o);
+    const ceiling = typeof o.maxCostScrap === 'number' && Number.isFinite(o.maxCostScrap) ? o.maxCostScrap : null;
     out.push([
       o.sku,
       o.name,
@@ -96,6 +96,8 @@ export function opportunitiesCsv(rows: readonly Opportunity[], keyScrap: Scrap):
       ref(o.profitScrap),
       o.profitScrap === null ? '' : formatScrap(o.profitScrap, keyScrap),
       o.margin === null || !Number.isFinite(o.margin) ? null : Math.round(o.margin * 10_000) / 100,
+      ref(ceiling),
+      ceiling === null ? '' : formatScrap(ceiling, keyScrap),
       o.buyerCount,
       order ? (order.isBot ? 'bot' : 'human') : '',
       o.flags.join(' '),

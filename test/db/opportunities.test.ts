@@ -60,6 +60,17 @@ describe('opportunities', () => {
     expect(repo.getOpportunity('missing')).toBeNull();
   });
 
+  it('round-trips the pay-up-to ceiling, including null (F1)', () => {
+    const a = makeOpp({ inputRef: 'price:1', maxCostScrap: 1234 });
+    const b = makeOpp({ inputRef: 'price:2', maxCostScrap: null });
+    repo.upsertOpportunities([a, b]);
+    expect(repo.getOpportunity(a.key)!.maxCostScrap).toBe(1234);
+    expect(repo.getOpportunity(b.key)!.maxCostScrap).toBeNull();
+    repo.upsertOpportunities([{ ...a, maxCostScrap: 99 }, { ...b, maxCostScrap: Number.NaN }]);
+    expect(repo.allOpportunities().map((o) => o.maxCostScrap)).toEqual([99, null]);
+    expect(repo.queryOpportunities({})[0]!.maxCostScrap).not.toBeUndefined();
+  });
+
   it('upsert replaces by key and delete removes', () => {
     const a = makeOpp({ inputRef: 'price:1' });
     const b = makeOpp({ inputRef: 'price:2' });

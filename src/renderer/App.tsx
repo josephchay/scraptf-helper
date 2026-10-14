@@ -1,13 +1,15 @@
 import { useEffect, useState, useSyncExternalStore } from 'react';
+import type { PushContract } from '../shared/rpc';
 import { rpc, windowKind } from './api';
 import { ErrorBanner, LoadingBlock, ToastStack } from './components/Feedback';
 import { Icon, type IconName } from './components/Icon';
 import { StatePill } from './components/Pills';
 import { Tip } from './components/Tip';
-import { CONN_STATE_LABELS, KEY_SOURCE_LABELS, accelLabel, fmtAge, fmtInt, fmtRefOnly, keyPriceSummary } from './format';
+import { CONN_STATE_LABELS, KEY_SOURCE_LABELS, accelLabel, fmtAge, fmtInt, fmtRefOnly, keyPriceSummary, serviceBannerDetail } from './format';
 import { AppProvider, useApp } from './hooks/appContext';
 import { usePush, useThrottled } from './hooks/useRpc';
 import { useNow } from './hooks/useTimers';
+import { serviceNotReady } from './serviceStateModel';
 import { AboutPage } from './pages/AboutPage';
 import { HealthPage } from './pages/HealthPage';
 import { ImportPage } from './pages/ImportPage';
@@ -17,12 +19,14 @@ import { LogPage } from './pages/LogPage';
 import { OpportunitiesPage } from './pages/OpportunitiesPage';
 import { PricesPage } from './pages/PricesPage';
 import { QuickEntry } from './pages/QuickEntry';
+import { ShoppingPage } from './pages/ShoppingPage';
 import { SettingsPage } from './pages/SettingsPage';
 
-type RouteId = 'opportunities' | 'log' | 'prices' | 'import' | 'journal' | 'health' | 'settings' | 'about';
+type RouteId = 'opportunities' | 'shopping' | 'log' | 'prices' | 'import' | 'journal' | 'health' | 'settings' | 'about';
 
 const NAV: { id: RouteId; label: string; icon: IconName }[] = [
   { id: 'opportunities', label: 'Opportunities', icon: 'opps' },
+  { id: 'shopping', label: 'Shopping list', icon: 'cart' },
   { id: 'log', label: 'Live log', icon: 'log' },
   { id: 'prices', label: 'Price sheet', icon: 'tag' },
   { id: 'import', label: 'Import', icon: 'import' },
@@ -34,6 +38,7 @@ const NAV: { id: RouteId; label: string; icon: IconName }[] = [
 
 const TITLES: Record<RouteId, string> = {
   opportunities: 'Opportunities',
+  shopping: 'Shopping list',
   log: 'Live log',
   prices: 'Price sheet',
   import: 'Import saved pages',
@@ -69,17 +74,24 @@ const SERVICE_STATE_TEXT: Record<string, string> = {
 /** Slim strip under the top bar while the service process is not ready. */
 function ServiceBanner() {
   const { serviceState } = useApp();
-  if (!serviceState || serviceState.state === 'ready') return null;
+  if (!serviceNotReady(serviceState)) return null;
   const text = SERVICE_STATE_TEXT[serviceState.state] ?? `Background service: ${serviceState.state}`;
   return (
     <div className={`service-banner tone-${serviceState.state === 'starting' ? 'info' : 'warn'}`} role="status">
       <Icon name={serviceState.state === 'starting' ? 'info' : 'warning'} size={14} />
       <span>
         {text}
-        {serviceState.detail ? <span className="muted"> {serviceState.detail}</span> : null}
+        <ServiceDetail key={`${serviceState.state}:${serviceState.nextAttemptAt ?? ''}`} state={serviceState} />
       </span>
     </div>
   );
+}
+
+/** Mounted only while the banner shows, and ticks only while a restart is pending. */
+function ServiceDetail({ state }: { state: PushContract['service.state'] }) {
+  const now = useNow(state.state === 'restarting' && state.nextAttemptAt !== null ? 1000 : 0);
+  const detail = serviceBannerDetail(state, now);
+  return detail ? <span className="muted"> {detail}</span> : null;
 }
 
 function Dashboard() {
@@ -116,6 +128,8 @@ function Dashboard() {
   if (!status && bridgeError) {
     return (
       <div className="fatal">
+        {/* During a known restart (status.get timed out waiting for it) the banner says why, with its countdown. */}
+        <ServiceBanner />
         <ErrorBanner message={`Can't reach the background service: ${bridgeError}`} onRetry={refreshStatus} />
       </div>
     );
@@ -178,6 +192,8 @@ function RouteView({ route }: { route: RouteId }) {
   switch (route) {
     case 'opportunities':
       return <OpportunitiesPage />;
+    case 'shopping':
+      return <ShoppingPage />;
     case 'log':
       return <LogPage />;
     case 'prices':

@@ -7,6 +7,8 @@
 
 import type {
   AppStatus,
+  BulkPriceRow,
+  BuyerCheck,
   DeepPartial,
   EventQuery,
   HealthReport,
@@ -29,6 +31,8 @@ import type {
   SecretName,
   SecretsStatus,
   Settings,
+  ShoppingListResult,
+  ShoppingQuery,
 } from './types';
 
 export interface AppInfo {
@@ -45,9 +49,24 @@ export interface RpcContract {
   'status.get': { params: void; result: AppStatus };
   'opps.list': { params: OppQuery; result: OppListResult };
   'opps.events': { params: EventQuery; result: OpportunityEvent[] };
-  /** `query` filters and sorts the opportunities export like 'opps.list' (paging ignored); omitted, every row. */
-  'opps.exportCsv': { params: { kind: 'opportunities' | 'events'; query?: OppQuery }; result: { csv: string; suggestedName: string } };
-  'item.detail': { params: { sku: string }; result: ItemDetail | null };
+  /**
+   * `query` filters and sorts the opportunities export like 'opps.list' (paging ignored); omitted, every row.
+   * kind 'shopping' exports the shopping list filtered by `shopping` (paging ignored).
+   */
+  'opps.exportCsv': {
+    params: { kind: 'opportunities' | 'events' | 'shopping'; query?: OppQuery; shopping?: ShoppingQuery };
+    result: { csv: string; suggestedName: string };
+  };
+  /** One row per SKU with a "pay up to" ceiling, to browse scrap.tf against by hand. */
+  'shopping.list': { params: ShoppingQuery; result: ShoppingListResult };
+  /**
+   * `history: false` skips the PriceDB history fetch (local only, fast); default true.
+   * `target: 'plain'` classifies the book against a clean copy of `sku` (the row quick
+   * entry saves) instead of the newest stored copy's extras (the drawer, default).
+   */
+  'item.detail': { params: { sku: string; history?: boolean; target?: 'newest' | 'plain' }; result: ItemDetail | null };
+  /** backpack.tf ban lookup for one buyer; on click only, cached 1 h, needs the access token. */
+  'buyer.check': { params: { steamid: string }; result: BuyerCheck };
   /** Queue a backpack.tf snapshot refresh for one item (rate limited, user initiated). */
   'item.refresh': { params: { sku: string }; result: { queued: boolean; reason: string | null; etaMs: number | null } };
   'item.search': { params: { q: string; limit?: number }; result: ItemSuggestion[] };
@@ -58,10 +77,18 @@ export interface RpcContract {
   'prices.list': { params: { q?: string }; result: ScrapPrice[] };
   'prices.upsert': { params: ScrapPriceInput; result: ScrapPrice };
   'prices.delete': { params: { id: number }; result: { ok: true } };
+  /** Preview of a bulk paste; writes nothing. Pasted page content is refused as a whole (R10). */
+  'prices.parseBulk': { params: { text: string; bareUnit?: 'ref' | 'scrap' | 'keys' }; result: { rows: BulkPriceRow[]; rejected: number } };
+  /** At most 500 rows, written as source 'user' in one transaction with one 'prices.changed' push. A row with `id` updates that price. */
+  'prices.bulkUpsert': { params: { rows: ScrapPriceInput[] }; result: { added: number; updated: number } };
+  'prices.exportCsv': { params: void; result: { csv: string; suggestedName: string } };
   'rules.list': { params: void; result: PriceRule[] };
   'rules.upsert': { params: PriceRuleInput; result: PriceRule };
   'rules.delete': { params: { id: number }; result: { ok: true } };
   'rules.preview': { params: PriceRuleInput; result: { matchingSkus: number; sample: { sku: string; name: string }[] } };
+  'rules.exportJson': { params: void; result: { json: string; suggestedName: string } };
+  /** Adds every valid rule (existing rules are kept); invalid ones are skipped with a reason each. */
+  'rules.importJson': { params: { json: string }; result: { added: number; skipped: string[] } };
   'journal.list': { params: { limit?: number }; result: JournalEntry[] };
   'journal.add': { params: JournalInput; result: JournalEntry };
   'journal.delete': { params: { id: number }; result: { ok: true } };
@@ -78,7 +105,13 @@ export interface RpcContract {
 
   // ----- main process -----
   'app.info': { params: void; result: AppInfo };
-  'app.showQuickEntry': { params: void; result: { ok: true } };
+  /**
+   * The current 'service.state' (null while idle or stopping). A page that loads after the
+   * push was sent (a reload after a renderer crash, a first open from the tray) asks for it.
+   */
+  'app.serviceState': { params: void; result: PushContract['service.state'] | null };
+  /** With a SKU, main pushes 'ui.quickPrefill' to the quick-entry window once it has loaded. */
+  'app.showQuickEntry': { params: { sku?: string } | void; result: { ok: true } };
   'app.hideWindow': { params: void; result: { ok: true } };
   /** Shows the dashboard and asks it to open an item (push 'ui.openItem'); used by the quick-entry window. */
   'app.openItem': { params: { sku: string }; result: { ok: true } };
@@ -92,7 +125,7 @@ export interface RpcContract {
   /** Shows an open-file dialog, reads the chosen saved page and forwards it to 'import.html'. */
   'import.pickFile': { params: void; result: ImportResult | null };
   'import.pickWatchFolder': { params: void; result: { folder: string | null } };
-  /** Shows a save dialog and writes text (CSV export). */
+  /** Shows a save dialog and writes text: CSV export, or JSON when suggestedName ends in .json. */
   'file.saveText': { params: { suggestedName: string; text: string }; result: { saved: boolean; path: string | null } };
 }
 
@@ -103,6 +136,7 @@ export type RpcResult<M extends RpcMethod> = RpcContract[M]['result'];
 /** Methods implemented by the Electron main process; all others go to the service. */
 export const MAIN_METHODS: readonly RpcMethod[] = [
   'app.info',
+  'app.serviceState',
   'app.showQuickEntry',
   'app.hideWindow',
   'app.openItem',
@@ -121,7 +155,9 @@ export const SERVICE_METHODS: readonly RpcMethod[] = [
   'opps.list',
   'opps.events',
   'opps.exportCsv',
+  'shopping.list',
   'item.detail',
+  'buyer.check',
   'item.refresh',
   'item.search',
   'item.resolve',
@@ -130,10 +166,15 @@ export const SERVICE_METHODS: readonly RpcMethod[] = [
   'prices.list',
   'prices.upsert',
   'prices.delete',
+  'prices.parseBulk',
+  'prices.bulkUpsert',
+  'prices.exportCsv',
   'rules.list',
   'rules.upsert',
   'rules.delete',
   'rules.preview',
+  'rules.exportJson',
+  'rules.importJson',
   'journal.list',
   'journal.add',
   'journal.delete',
@@ -159,8 +200,14 @@ export interface PushContract {
   'settings.changed': Settings;
   /** Main asks the dashboard to open an item (notification click, quick entry). */
   'ui.openItem': { sku: string };
-  /** State of the background service process, sent by main. */
-  'service.state': { state: 'starting' | 'ready' | 'restarting' | 'stopped'; detail: string | null };
+  /** Main asks the quick-entry window to pick this item and focus the price ('app.showQuickEntry' with a SKU). */
+  'ui.quickPrefill': { sku: string };
+  /**
+   * State of the background service process, sent by main. `nextAttemptAt` (Unix ms) is when a
+   * restarting service is tried again: an absolute time, so the banner can count down without
+   * another push.
+   */
+  'service.state': { state: 'starting' | 'ready' | 'restarting' | 'stopped'; detail: string | null; nextAttemptAt: number | null };
 }
 
 export type PushEvent = keyof PushContract;
@@ -173,6 +220,7 @@ export const PUSH_EVENTS: readonly PushEvent[] = [
   'notify',
   'settings.changed',
   'ui.openItem',
+  'ui.quickPrefill',
   'service.state',
 ];
 

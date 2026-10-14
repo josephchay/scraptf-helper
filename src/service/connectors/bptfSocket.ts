@@ -7,16 +7,24 @@
 // A refused upgrade is handled like an HTTP answer (R7, §2.0): a Cloudflare
 // challenge, 401/403 or an HTML 503 stops the feed the same way; 429/503 honour
 // Retry-After (at least 60 s, 1 h after three 429s in a row); any other non-101
-// answer backs off 60 s, doubling to 15 min.
+// answer backs off 60 s, doubling to 15 min. Both outlive the process: the stop
+// is a ws.backpack.tf host block (net.blockedHosts, cleared by net.unblock or
+// the live-feed toggle) and the wait is repo meta META_FEED_RETRY, so a crash
+// restart or relaunch does not reconnect early. The client-limit stop stays
+// in memory: restarting the app is one of its documented resets.
 
 import WebSocket from 'ws';
 import { z } from 'zod';
 import type { BptfNameRow, BptfSocket, FeedBatch, HandshakeRejection, SchemaService, ServiceDeps, WebSocketLike } from '../contracts';
 import type { ConnState, ConnectorHealth, Listing, UnixMs } from '../../shared/types';
-import { CONSECUTIVE_429_LIMIT, LONG_PAUSE_MS, assertAllowed, backoffMs, parseRetryAfter, scrubText } from '../net';
+import { CONSECUTIVE_429_LIMIT, LONG_PAUSE_MS, MAX_PAUSE_MS, assertAllowed, backoffMs, parseRetryAfter, scrubText } from '../net';
 import { createMapStats, mapWsPayload, type BptfMapStats } from './bptfItem';
 
 export const BPTF_WS_URL = 'wss://ws.backpack.tf/events';
+/** Host of the feed, as stored in the HTTP layer's persisted host blocks. */
+export const BPTF_WS_HOST = 'ws.backpack.tf';
+/** Repo meta: the server's wait after a refused upgrade, as JSON {until, why, n429, rejections}. */
+export const META_FEED_RETRY = 'bptf.feedRetry';
 export const FLUSH_INTERVAL_MS = 1_000;
 export const BACKOFF_INITIAL_MS = 1_000;
 export const BACKOFF_MAX_MS = 60_000;
@@ -115,6 +123,20 @@ const deletePayloadSchema = z.looseObject({
 
 const DELETE = Symbol('delete');
 
+const savedRetrySchema = z.looseObject({
+  until: z.number().catch(0),
+  why: z.string().catch(''),
+  n429: z.number().catch(0),
+  rejections: z.number().catch(0),
+});
+
+/** Streak counters read back from storage; past this the delays are at their maximum anyway. */
+const MAX_RESTORED_STREAK = 100;
+
+function restoredStreak(n: number): number {
+  return Number.isFinite(n) && n > 0 ? Math.min(Math.floor(n), MAX_RESTORED_STREAK) : 0;
+}
+
 function localDayKey(ms: UnixMs): string {
   const d = new Date(ms);
   return `${d.getFullYear()}-${d.getMonth() + 1}-${d.getDate()}`;
@@ -201,6 +223,70 @@ export function createBptfSocket(deps: BptfSocketDeps): BptfSocket & { detail():
     lastErrorAt = clock.now();
     lastError = scrubText(msg).slice(0, 300);
   };
+
+  // ----- refusal state that outlives the process (R7) -----
+
+  /** META_FEED_RETRY holds a wait or streak that a successful connection must clear. */
+  let retrySaved = false;
+
+  const saveRetry = (): void => {
+    try {
+      deps.repo.setMeta(META_FEED_RETRY, JSON.stringify({ until: retryNotBefore, why: retryWhy, n429: consecutive429, rejections }));
+      retrySaved = true;
+    } catch (err) {
+      log.warn(`bp.tf feed: could not save the reconnect wait: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  };
+
+  const clearSavedRetry = (): void => {
+    if (!retrySaved) return;
+    try {
+      deps.repo.setMeta(META_FEED_RETRY, '');
+      retrySaved = false;
+    } catch {
+      // the next successful connection tries again
+    }
+  };
+
+  /** Clears the stored ws.backpack.tf block after the user re-enabled the feed. */
+  const clearHostBlock = (): void => {
+    try {
+      if (deps.http.hostBlocked(BPTF_WS_HOST) !== null) deps.http.unblockHost(BPTF_WS_HOST);
+    } catch (err) {
+      log.warn(`bp.tf feed: could not clear the stored block: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  };
+
+  // A refused upgrade or a server-requested wait from an earlier run still holds.
+  try {
+    const raw = deps.repo.getMeta(META_FEED_RETRY);
+    const saved = raw ? savedRetrySchema.safeParse(JSON.parse(raw)) : null;
+    if (saved?.success) {
+      retrySaved = true;
+      const now = clock.now();
+      consecutive429 = restoredStreak(saved.data.n429);
+      rejections = restoredStreak(saved.data.rejections);
+      if (Number.isFinite(saved.data.until) && saved.data.until > now) {
+        // Clamped like any server-requested pause, so a corrupt value cannot stop the feed for good.
+        retryNotBefore = Math.min(saved.data.until, now + MAX_PAUSE_MS);
+        retryWhy = saved.data.why.slice(0, 300) || 'backpack.tf refused the live feed connection';
+        // Stored clamped, or each restart would clamp it again from its own start time.
+        if (retryNotBefore < saved.data.until) saveRetry();
+      }
+    }
+  } catch {
+    // unreadable: nothing to restore
+  }
+  try {
+    const stored = deps.http.hostBlocked(BPTF_WS_HOST);
+    if (stored !== null) {
+      blocked = true;
+      disabledReason = stored;
+      setState('blocked', stored);
+    }
+  } catch {
+    // no stored block
+  }
 
   // ----- gate -----
 
@@ -314,7 +400,8 @@ export function createBptfSocket(deps: BptfSocketDeps): BptfSocket & { detail():
     }, delay);
   };
 
-  const block = (reason: string): void => {
+  /** `persist`: also store a ws.backpack.tf host block, so restarts do not retry either. */
+  const block = (reason: string, persist = false): void => {
     blocked = true;
     feedTurnedOff = false;
     disabledReason = reason;
@@ -323,6 +410,12 @@ export function createBptfSocket(deps: BptfSocketDeps): BptfSocket & { detail():
     closeSocket(true, 'blocked');
     setState('blocked', reason);
     log.warn(`bp.tf feed stopped: ${reason}`);
+    if (!persist) return;
+    try {
+      deps.http.blockHost(BPTF_WS_HOST, reason);
+    } catch (err) {
+      log.warn(`bp.tf feed: could not store the block: ${err instanceof Error ? err.message : String(err)}`);
+    }
   };
 
   /** The server answered the upgrade with something other than 101 (R7, §2.0 Errors). */
@@ -333,11 +426,13 @@ export function createBptfSocket(deps: BptfSocketDeps): BptfSocket & { detail():
     const challenged = /challenge/i.test(String(r?.cfMitigated ?? ''));
     const html = /html/i.test(String(r?.contentType ?? ''));
     if (challenged || status === 401 || status === 403 || (status === 503 && html)) {
-      // Never retried automatically: stays off until the user turns the live feed off and on.
+      // Never retried automatically, not even after a restart: stays off until the user
+      // turns the live feed off and on, or re-enables ws.backpack.tf on the Data health page.
       const what = challenged ? ', Cloudflare challenge' : html ? ', HTML page' : '';
       block(
         `backpack.tf refused the live feed connection (HTTP ${status}${what}). ` +
           'Check backpack.tf in a browser, then turn the live feed off and on again in Settings.',
+        true,
       );
       return;
     }
@@ -351,6 +446,7 @@ export function createBptfSocket(deps: BptfSocketDeps): BptfSocket & { detail():
     log.warn(`bp.tf feed: ${why}; next attempt in ${formatDelay(delay)}`);
     retryNotBefore = now + delay;
     retryWhy = why;
+    saveRetry();
     closeSocket(true, 'rejected');
     scheduleReconnect(why, delay);
   };
@@ -468,6 +564,12 @@ export function createBptfSocket(deps: BptfSocketDeps): BptfSocket & { detail():
       setState(g.state, g.detail);
       return;
     }
+    // A stored refusal (this run or an earlier one) holds until the user re-enables the host.
+    const stored = deps.http.hostBlocked(BPTF_WS_HOST);
+    if (stored !== null) {
+      block(stored);
+      return;
+    }
     // A pause / resume or stop() + start() clears the reconnect timer; the server's wait still holds.
     const waitMs = retryNotBefore - clock.now();
     if (waitMs > 0) {
@@ -517,6 +619,7 @@ export function createBptfSocket(deps: BptfSocketDeps): BptfSocket & { detail():
       lastActivityAt = openedAt;
       rejections = 0;
       consecutive429 = 0;
+      clearSavedRetry();
       setState('live', 'Connected; waiting for events');
       log.info('bp.tf feed connected');
     });
@@ -586,6 +689,7 @@ export function createBptfSocket(deps: BptfSocketDeps): BptfSocket & { detail():
       if (blocked && feedTurnedOff) {
         blocked = false;
         disabledReason = null;
+        clearHostBlock();
         log.info('bp.tf feed re-enabled by the user');
       }
       feedTurnedOff = false;
@@ -612,6 +716,18 @@ export function createBptfSocket(deps: BptfSocketDeps): BptfSocket & { detail():
       flush();
       closeSocket(false, 'stopped');
       if (!blocked) setState('off', 'Stopped');
+    },
+
+    unblock(): void {
+      clearHostBlock();
+      if (!blocked) return;
+      blocked = false;
+      disabledReason = null;
+      attempts = 0;
+      log.info('bp.tf feed re-enabled by the user');
+      // The server's Retry-After (retryNotBefore) still holds; connect() honours it.
+      if (started) connect();
+      else setState('off', 'Stopped');
     },
 
     health(): ConnectorHealth {

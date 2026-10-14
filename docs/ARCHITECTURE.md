@@ -37,17 +37,20 @@ Wire protocol and the RPC method list: `src/shared/rpc.ts`. Domain types: `src/s
 |---|---|
 | `src/shared/types.ts`, `rpc.ts`, `sku.ts`, `currency.ts`, `defaults.ts` | foundation; change only through integration |
 | `src/shared/links.ts`, `categories.ts` | link generator (rebuild of scrap.tf-item-information), category classifier |
+| `src/shared/ceiling.ts` | profit status and the "pay up to" ceiling, shared by the engine, the dashboard and the mock so all three classify alike |
+| `src/shared/referenceAge.ts` | the reference age gate's community floor (`communityMaxAgeMs`), shared the same way so the drawer marks a reference "ignored" exactly when the engine drops it |
 | `src/shared/settingsSchema.ts` | zod schema for `Settings` (owned by main) |
 | `src/service/net/*` | `policy.ts`, `budgets.ts`, `http.ts`, `redact.ts`, `ratelimit.ts`, `errors.ts` |
 | `src/service/db/*` | `openRepo(path)` implementing `Repo` with `node:sqlite` |
 | `src/service/connectors/schema.ts`, `schemaNames.ts` | `createSchemaService` (sku.pricedb.io), names and resolver |
 | `src/service/connectors/pricedb.ts`, `steamMarket.ts` | PriceDB REST and socket; optional SCM priceoverview |
 | `src/service/connectors/bptfSocket.ts`, `bptfApi.ts`, `bptfItem.ts` | backpack.tf websocket, snapshot/IGetPrices/IGetCurrencies, item → SKU mapping |
-| `src/service/domain/*` | matcher, pricing, confidence, key price, engine, views (list/group/detail), journal, CSV |
+| `src/service/domain/*` | matcher, pricing, confidence, key price, engine, views (list/group/detail), shopping list, journal, CSV |
+| `src/service/priceSheetIo.ts`, `buyerCheck.ts`, `rpcSchemas.ts` | bulk paste and backups (pure); `buyer.check` lookups; zod schemas shared by more than one handler |
 | `src/service/import/*` | saved scrap.tf page parser (parse5, no script execution), folder watcher |
 | `src/service/core.ts`, `scheduler.ts`, `rpcHandlers.ts`, `entry.ts`, `logger.ts` | wiring and periodic jobs (integration) |
 | `src/main/*` | Electron main, preload, windows, tray, settings store, secrets, service host |
-| `src/renderer/*` | dashboard UI; `api.ts` uses `window.flipdesk` or, in a plain browser, `mock.ts` |
+| `src/renderer/*` | dashboard UI; `api.ts` uses `window.flipdesk` or, in a plain browser, `mock.ts`. Page logic lives in pure, unit-tested `*Model.ts` files |
 | `test/<area>/*.test.ts`, `test/fixtures/<area>/*` | vitest tests and fixtures per area |
 
 ## Agreed module entry points
@@ -89,6 +92,25 @@ isAllowedExternalUrl(url: string): boolean
 categorize(obj: SkuObject, item: { itemClass: string; slot: string | null; craftClass: string | null; itemName?: string } | null): Category
 ```
 
+v0.2 additions (imported by `rpcHandlers.ts`, the engine and the dashboard):
+
+```ts
+// shared/ceiling.ts
+maxCostFor(revenueScrap: Scrap | null, p: Pick<ProfitSettings, 'minProfitScrap' | 'minProfitPctOfCost' | 'minMargin' | 'frictionScrap'>): Scrap | null
+profitStatus(profitScrap, costScrap, p): OpportunityStatus;  minProfitFor(costScrap, p): Scrap
+// service/domain
+buildShoppingList(rows: readonly Opportunity[], q: ShoppingQuery, keyPrice, now): ShoppingListResult
+shoppingCsv(rows: readonly ShoppingRow[], keyScrap): string
+itemRevenue(prices, eligibleCount, settings): ItemRevenue        // views.ts, same pick as the engine
+usableReferences(refs, maxAgeMs, now): { references; stale }      // pricing.ts, the F4 age gate
+// service
+parseBulkPrices(text, bareUnit, resolve): { rows; rejected; refusal }   // priceSheetIo.ts
+pricesCsv(prices, keyScrap), rulesToJson(rules), rulesFromJson(json): { rules; skipped }
+createBuyerChecker(deps): { check(steamid): Promise<BuyerCheck> }       // never rejects; errors go in `error`
+// renderer
+useItemMenu(): { open(target: ItemMenuTarget, at: { x: number; y: number }): void; element: ReactNode }
+```
+
 ## Integration (src/service/core.ts and friends)
 
 ```ts
@@ -115,22 +137,68 @@ importSavedPage(ctx, { html, fileName, mtimeMs })         // shared by 'import.h
   service died importing (repo meta `import.watchImporting`) is skipped once at the next start.
 - Generic "any effect" unusual buy orders (`<defindex>;5` without `u`) are eligible exits for every effect of
   that item, flagged `any-effect`.
-- Main pushes `service.state` (starting/ready/restarting/stopped) and `ui.openItem` (notification click, or the
-  quick-entry window's `app.openItem`). The service pushes `opps.changed`, `status.changed`, `import.done`, `prices.changed` (any price or rule write, so
+- Main pushes `service.state` (starting/ready/restarting/stopped), `ui.openItem` (notification click, or the
+  quick-entry window's `app.openItem`) and `ui.quickPrefill` (`app.showQuickEntry` with a SKU; held until the
+  quick-entry page has loaded, and by the preload until it subscribes). The service pushes `opps.changed`, `status.changed`, `import.done`, `prices.changed` (any price or rule write, so
   every window's price sheet refreshes) and `notify`.
+- Only `ui.openItem` is queued across a dashboard (re)load; other pushes reach loaded pages only. `service.state` is sent
+  once per change, so a page that loads later (a reload after a renderer crash, a first open from the tray during a
+  restart wait) asks main for it with `app.serviceState` on mount. While the service is not ready, the dashboard shows
+  the restart banner and its countdown even when `status.get` times out.
 - `npx electron . --smoke-test=<report.json> [--smoke-wait=<s>]`: with a wait, the app runs live for that long and
   fails unless the feed is live with listings, the schema loaded and a key price arrived. Packaged builds ignore
   `--dev`, `--smoke-test` and `--smoke-wait` unless `FLIPDESK_DIAGNOSTICS=1` is set.
 - One copy per machine: besides Electron's per-userData lock, main holds the named pipe
   `\\.\pipe\io.github.tf2flipdesk.app.instance`, so another `--user-data-dir` or Windows account cannot open a
   second backpack.tf feed from the same IP (a smoke test then fails with that reason).
-- Main drops service pushes it owns (`settings.changed`, `ui.openItem`, `service.state`) and any `status.changed`
+- `file.saveText` writes CSV exports as .csv/.txt and a JSON backup (suggested name ending in .json, e.g. the rules
+  export) as .json/.txt; no other file type, whatever the caller suggests or the user picks.
+- Main drops service pushes it owns (`settings.changed`, `ui.openItem`, `ui.quickPrefill`, `service.state`) and any `status.changed`
   that fails its shape check. The service runs with main's environment minus proxy variables (R5); if Node's
   env-proxy support is on anyway, the service keeps the network paused.
 - A service that exits unexpectedly 5 times within an hour is restarted at most every 15 min. Request budgets are
   restored at service start from the request log plus the saved start of the last slow-budget request
   (`net.lastSent.<budget>` meta, written before sending), so restarts never reset them. The IGetCurrencies and
   IGetPrices jobs also keep the previous process's cadence (the last backpack.tf key quote, `bptf.pricesFetchedAt`).
+- Schema V2 adds `opportunities.max_cost_scrap`, the row's "pay up to" ceiling: `maxCostFor(revenueScrap, settings.profit)`,
+  the highest integer cost that is still 'profitable'. Rows from 0.1 read NULL until the engine's start-up sweep
+  rewrites them. The engine fingerprint covers all of `settings.profit`, so any threshold change recomputes every ceiling.
+- `shopping.list` and `opps.exportCsv {kind:'shopping'}` are built from the stored opportunities: one row per SKU with a
+  ceiling above 0 and buyers; when a SKU has several inputs, the one with the highest confidence wins. The known cost is
+  that row's own when it is typed or imported, else the newest typed/imported one, and `underCeiling` compares it only
+  with its own row's ceiling (`knownMaxCostScrap`): painted, spelled and plain copies share a SKU. The scrap.tf bank-page
+  URLs are only passed to `links.open` (the user's browser), never fetched (R1).
+- `item.detail {history:false}` skips the PriceDB history request, so quick entry's live preview is local only.
+  `ItemDetail.revenue` uses the engine's pricing over the same book (including generic any-effect orders), with the same
+  reference gate, so the drawer, quick entry and the opportunity row agree. The drawer classifies the book against the
+  newest stored copy's extras; quick entry asks with `target:'plain'`, a clean copy of the SKU (paint from the SKU
+  only), because that is the row its `prices.upsert` creates.
+- Reference age (`profit.referenceMaxAgeMs`, default 30 days): a PriceDB price whose `ageMs` is older, or a community price
+  whose `lastUpdate` is older than max(that, 365 days), counts as absent for the outlier rule and for confidence, and the row
+  is flagged `stale-reference`. Community prices are hand-set and stay right for months, hence the one-year floor.
+  Suspect margin (`profit.suspectMargin`, default 2, 0 = off): a margin above it with fewer than 3 eligible orders and no
+  usable reference is flagged `suspect-margin`, capped at Low (44) and never notified.
+- Notifications skip input kinds missing from `notifications.inputKinds`. Rule candidates are titled `Candidate: <name>`,
+  others `Profit: <name>`, and the body adds the ceiling when there is one. Main's `notify.ts` checks and clips the payload and passes `notifications.silent`.
+- `buyer.check` runs only on a click. It sends one users/info request on the `bptf-users` budget at user priority: it waits at
+  most 15 s for a slot and then times out after 12 s, inside main's 30 s RPC timeout. It needs the access token and the
+  backpack.tf API switch, and it refuses while the network is paused or the host is blocked. Successful answers are cached
+  in memory for 1 h (at most 500), and served even while paused. Failures are not cached.
+- `prices.parseBulk` writes and fetches nothing. A paste containing `<` or `scrap.tf/` is refused as a whole, so it cannot
+  route around the opt-in saved-page import (R10). So is a paste over 500 lines or 100 KB, and any item line before the
+  schema has loaded (the error says it is still loading). A row carries a `sku` only when it can be saved: fuzzy names, incomplete SKUs and zero prices are
+  errors. A repeated item stays saveable, and the dashboard keeps the last line. `prices.bulkUpsert` writes at most 500 rows
+  as whole typed prices (source 'user') in one transaction, with one `prices.changed` push.
+- Backups: in `prices.exportCsv` the `sku` column includes the paint and `cost` uses the `parsePrice` format, so those two
+  columns paste back. `rules.exportJson` writes `{ format: 'tf2-flip-desk-rules', version: 1, exportedAt, rules }`.
+  `rules.importJson` validates each rule with `ruleInputSchema`. It skips rules that are already stored or repeated (same
+  name, filter and price), each with a reason. It never deletes, and it caps a future `observedAt` at now.
+- Server waits survive restarts too (R7): budget pauses and 429 streaks are repo meta `net.pauses`, and the
+  websockets' waits after a refused upgrade (with their 429 streaks) are `bptf.feedRetry` and `pricedb.socketRetry`.
+  socket.io hides the PriceDB upgrade's headers, so a 429/503 there backs off 60 s doubling to 15 min, and 1 h after
+  three 429s in a row. A restored wait is clamped to 24 h and the
+  clamped value is written back, so frequent restarts cannot stretch it. Challenge or refusal stops of the
+  websockets (`ws.backpack.tf`, `ws.pricedb.io`) are host blocks in `net.blockedHosts`, cleared only by the user.
 
 ## Conventions
 
@@ -149,3 +217,4 @@ importSavedPage(ctx, { html, fileName, mtimeMs })         // shared by 'import.h
 4. The dashboard can run in a plain browser against mock data (`npm run dev:renderer`), for UI development only.
 5. The live feed's default daily data cap is 25 GB, not the brief's 12 GB (§2.1, Appendix A). The cap counts decompressed websocket payload bytes, measured at about 13 GB on a busy day (far less on the wire with permessage-deflate), so a 12 GB default would pause the feed most evenings. Users on capped or metered connections can lower it in Settings > Live feed.
 6. `pauseOnMetered` (Appendix A) is not implemented in v1: the app does not detect metered Windows connections. The daily cap and the Pause-network switch are the controls.
+7. Opportunity thresholds are global in v1, as in the brief's Appendix A config: one minimum profit (`profit.minProfitScrap`, `minProfitPctOfCost`), one minimum margin (`profit.minMargin`) and one set of notification thresholds (`notifications.minConfidence`, `minProfitScrap`, `dedupMs`) apply to every category. §5.6's "all configurable per category" is not implemented. Per-category overrides would be merged in `evaluateOpportunity` by the opportunity's category and included in the engine fingerprint (through `settings.profit`).

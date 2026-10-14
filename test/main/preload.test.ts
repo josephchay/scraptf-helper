@@ -141,3 +141,28 @@ describe('preload helpers', () => {
     expect(mod.unwrapEnvelope({ ok: true, result: null })).toBeNull();
   });
 });
+
+describe('held one-shot pushes', () => {
+  it('delivers a ui.quickPrefill that arrived before the quick-entry page subscribed, once', async () => {
+    const { bridge } = await load(['x', `${WINDOW_KIND_ARG}quick-entry`]);
+    electron.pushListener!({}, 'ui.quickPrefill', { sku: '378;6' });
+    electron.pushListener!({}, 'ui.quickPrefill', { sku: '5021;6' });
+    const first = vi.fn();
+    bridge.on('ui.quickPrefill', first);
+    await Promise.resolve();
+    expect(first.mock.calls).toEqual([[{ sku: '5021;6' }]]);
+    const second = vi.fn();
+    bridge.on('ui.quickPrefill', second);
+    await Promise.resolve();
+    expect(second).not.toHaveBeenCalled();
+  });
+
+  it('does not hold ordinary pushes for late subscribers', async () => {
+    const { bridge } = await load();
+    electron.pushListener!({}, 'opps.changed', { appeared: 1 });
+    const l = vi.fn();
+    bridge.on('opps.changed', l);
+    await Promise.resolve();
+    expect(l).not.toHaveBeenCalled();
+  });
+});

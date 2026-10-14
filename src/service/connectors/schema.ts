@@ -6,7 +6,7 @@
 
 import { z } from 'zod';
 import { categorize } from '../../shared/categories';
-import { baseSku, canonical, fromObject, fromString, looksLikeSku } from '../../shared/sku';
+import { baseSku, canonical, fromObject, fromString, isValidSku, looksLikeSku } from '../../shared/sku';
 import type { Category, ConnState, ConnectorHealth, ItemSuggestion, ResolvedItem, SkuObject, UnixMs } from '../../shared/types';
 import { KILLSTREAK_NAMES, QUALITY_NAMES } from '../../shared/types';
 import type {
@@ -694,14 +694,20 @@ export function createSchemaService(deps: ServiceDeps): SchemaService {
       .trim();
     if (!t || t.length > 400) return null;
 
+    // SKUs are lower case, and fromString ignores tokens it does not know: text with
+    // one ("378;6;uncratable") is not a SKU, rather than silently another item.
     if (looksLikeSku(t)) {
-      const obj = fromString(t);
+      const sku = t.toLowerCase();
+      if (!isValidSku(sku)) return null;
+      const obj = fromString(sku);
       return resolved(obj, 'sku', skuWarnings(obj));
     }
 
     const url = parseItemUrl(t);
     if (url?.kind === 'sku') {
-      const obj = fromString(url.sku);
+      const sku = url.sku.toLowerCase();
+      if (!isValidSku(sku)) return null;
+      const obj = fromString(sku);
       return resolved(obj, 'sku', skuWarnings(obj));
     }
     if (url?.kind === 'name') {

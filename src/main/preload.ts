@@ -28,14 +28,16 @@ export function cleanIpcError(err: unknown): Error {
 type Listener = (payload: unknown) => void;
 const listeners = new Map<string, Set<Listener>>();
 
-/** An 'ui.openItem' that arrived before the dashboard subscribed (window just created). */
-let pendingOpenItem: { payload: unknown } | null = null;
+/** One-shot UI requests from main that may arrive before the page subscribed (window just created). */
+const HELD_EVENTS: ReadonlySet<string> = new Set(['ui.openItem', 'ui.quickPrefill']);
+/** The latest held request per event, delivered to the first listener. */
+const pending = new Map<string, { payload: unknown }>();
 
 ipcRenderer.on('push', (_event, name: unknown, payload: unknown) => {
   if (typeof name !== 'string') return;
   const set = listeners.get(name);
   if (!set || set.size === 0) {
-    if (name === 'ui.openItem') pendingOpenItem = { payload };
+    if (HELD_EVENTS.has(name)) pending.set(name, { payload });
     return;
   }
   for (const fn of [...set]) {
@@ -80,14 +82,14 @@ const on = (event: unknown, listener: unknown): (() => void) => {
     listeners.set(event, set);
   }
   set.add(fn);
-  if (event === 'ui.openItem' && pendingOpenItem) {
-    const { payload } = pendingOpenItem;
-    pendingOpenItem = null;
+  const held = pending.get(event);
+  if (held) {
+    pending.delete(event);
     queueMicrotask(() => {
       try {
-        fn(payload);
+        fn(held.payload);
       } catch (err) {
-        console.error('flipdesk listener for ui.openItem failed', err);
+        console.error(`flipdesk listener for ${event} failed`, err);
       }
     });
   }

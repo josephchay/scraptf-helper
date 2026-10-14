@@ -5,13 +5,14 @@ import { rpc, saveCsv } from '../api';
 import { ChipGroup } from '../components/Controls';
 import { EmptyState, ErrorBanner, LoadingBlock } from '../components/Feedback';
 import { Icon } from '../components/Icon';
+import { useItemMenu } from '../components/ItemMenu';
 import { ItemName, Money } from '../components/ItemName';
-import { EVENT_KIND_LABELS, confidenceLevelOf, errorMessage, fmtAgo, fmtDateTime, fmtTime } from '../format';
+import { EVENT_KIND_LABELS, confidenceLevelOf, errorMessage, fmtAgo, fmtDateTime, fmtInt, fmtTime } from '../format';
 import { useApp } from '../hooks/appContext';
 import { usePersistentState } from '../hooks/usePersistentState';
-import { usePush, useThrottled } from '../hooks/useRpc';
+import { useThrottled, useVisiblePush } from '../hooks/useRpc';
 import { useNow } from '../hooks/useTimers';
-import { fetchEventsAfter, mergeEvents } from '../eventFeed';
+import { MAX_KEPT_EVENTS, fetchEventsAfter, mergeEvents, olderPageLimit } from '../eventFeed';
 
 const PAGE = 300;
 const KINDS: readonly OpportunityEventKind[] = ['appeared', 'changed', 'gone', 'notified'];
@@ -41,6 +42,7 @@ export function LogPage() {
   const holdingRef = useRef(holding);
   holdingRef.current = holding;
   const now = useNow(5000);
+  const menu = useItemMenu();
   const kindsParam = kinds.length ? kinds : undefined;
   const kindsKey = kinds.join(',');
 
@@ -94,7 +96,8 @@ export function LogPage() {
   }, [kindsKey]);
 
   const throttledFetch = useThrottled(() => void fetchNew(), 1000);
-  usePush('opps.changed', throttledFetch);
+  // Hidden in the tray, one catch-up when shown replaces a page request per second.
+  useVisiblePush('opps.changed', throttledFetch);
 
   const flushPending = () => {
     setEvents((ev) => mergeEvents(ev, pending));
@@ -110,14 +113,15 @@ export function LogPage() {
     }
   }, [holding, pending]);
 
+  const olderLimit = olderPageLimit(events.length, PAGE);
   const loadOlder = async () => {
     const oldest = events[events.length - 1];
-    if (!oldest) return;
+    if (!oldest || olderLimit === 0) return;
     setLoadingOlder(true);
     try {
-      const list = await rpc('opps.events', { limit: PAGE, kinds: kindsParam, beforeId: oldest.id });
+      const list = await rpc('opps.events', { limit: olderLimit, kinds: kindsParam, beforeId: oldest.id });
       setEvents((ev) => mergeEvents(ev, list));
-      setHasMore(list.length >= PAGE);
+      setHasMore(list.length >= olderLimit);
       setVisible((v) => v + PAGE);
     } catch (e) {
       toast(`Could not load older events: ${errorMessage(e)}`, 'bad');
@@ -206,7 +210,16 @@ export function LogPage() {
             </thead>
             <tbody>
               {shown.map((e) => (
-                <tr key={e.id} className={`kind-${e.kind}`}>
+                <tr
+                  key={e.id}
+                  className={`kind-${e.kind}`}
+                  onContextMenu={(ev) => {
+                    // Right-click, or Shift+F10 / the ContextMenu key on the focused item button
+                    // (the menu places a keyboard event's 0,0 next to that button).
+                    ev.preventDefault();
+                    menu.open({ sku: e.sku, name: e.name }, { x: ev.clientX, y: ev.clientY });
+                  }}
+                >
                   <td className="c-time num" title={`${fmtDateTime(e.ts)} (${fmtAgo(e.ts, now)})`}>
                     {fmtTime(e.ts)}
                   </td>
@@ -238,6 +251,11 @@ export function LogPage() {
               <button type="button" className="btn small" onClick={() => setVisible((v) => v + 200)}>
                 Show more
               </button>
+            ) : olderLimit === 0 ? (
+              <span className="muted small">
+                The live log keeps the newest {fmtInt(MAX_KEPT_EVENTS)} events. Older ones are in the daily opportunities-YYYY-MM-DD.jsonl files in the logs folder (Settings, This
+                installation).
+              </span>
             ) : (
               <button type="button" className="btn small" disabled={loadingOlder} onClick={() => void loadOlder()}>
                 {loadingOlder ? 'Loading…' : 'Load older events'}
@@ -247,8 +265,10 @@ export function LogPage() {
         ) : null}
       </div>
       <p className="hint-line muted small">
-        {holding ? (paused ? 'Paused: new events are held until you resume.' : 'Scrolled down: new events are held so the list does not jump.') : 'Live: new events appear at the top.'}
+        {holding ? (paused ? 'Paused: new events are held until you resume.' : 'Scrolled down: new events are held so the list does not jump.') : 'Live: new events appear at the top.'} Right-click
+        an event, or press <kbd>Shift</kbd>+<kbd>F10</kbd> on its item, for item actions.
       </p>
+      {menu.element}
     </div>
   );
 }

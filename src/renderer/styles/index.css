@@ -2,3 +2,8 @@
 @import './base.css';
 @import './components.css';
 @import './layout.css';
+@import './quick-extra.css';
+@import './drawer-extra.css';
+@import './shopping.css';
+@import './prices-extra.css';
+@import './item-menu.css';

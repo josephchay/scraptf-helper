@@ -6,11 +6,9 @@ import { z } from 'zod';
 import { buildLinks } from '../shared/links';
 import type { PushContract, PushEvent } from '../shared/rpc';
 import { SERVICE_METHODS } from '../shared/rpc';
-import { baseSku as toBaseSku, canonical, fromObject, fromString, looksLikeSku } from '../shared/sku';
+import { baseSku as toBaseSku, canonical, fromObject, fromString, isValidSku, looksLikeSku } from '../shared/sku';
 import {
-  CATEGORIES,
   EMPTY_SPECIAL,
-  type Category,
   SECRET_NAMES,
   type AppStatus,
   type HealthReport,
@@ -33,8 +31,12 @@ import {
   opportunitiesCsv,
   previewRule,
 } from './domain';
+import { buildShoppingList, shoppingCsv } from './domain/shopping';
+import { createBuyerChecker } from './buyerCheck';
 import { isImportableItem, MAX_IMPORT_BYTES, parseScrapTfHtml } from './import';
 import { allowedHosts, normalizeHost } from './net';
+import { MAX_BULK_LINES, parseBulkPrices, pricesCsv, rulesFromJson, rulesToJson } from './priceSheetIo';
+import { categoryEnum, finite, id, nonNeg, ruleInputSchema } from './rpcSchemas';
 
 export interface HandlerContext {
   clock: Clock;
@@ -71,21 +73,20 @@ const USER_SNAPSHOT_MAX_WAIT_MS = 60_000;
 // Param schemas
 // ---------------------------------------------------------------------------
 
-const finite = z.number().refine(Number.isFinite, 'must be a finite number');
-const nonNeg = finite.refine((n) => n >= 0, 'must be zero or more');
-const id = z.number().int().positive();
 const skuText = z
   .string()
   .trim()
   .min(1, 'an item is required')
   .max(300)
-  .refine(looksLikeSku, 'not a SKU (pick an item first)');
+  // SKUs are lower case; isValidSku rejects tokens fromString would silently drop
+  // ("uncratable"), which would otherwise save the price under another item.
+  .toLowerCase()
+  .refine(isValidSku, 'not a SKU (pick an item first)');
 const limit = (max: number) => z.number().int().min(1).max(max).optional();
 
 const statusEnum = z.enum(['profitable', 'below-threshold', 'unprofitable', 'no-buyers']);
 const tierEnum = z.enum(['key', 'ref10', 'ref2', 'small', 'loss', 'none']);
 const inputKindEnum = z.enum(['user', 'import', 'rule']);
-const categoryEnum = z.enum(CATEGORIES as unknown as [Category, ...Category[]]);
 
 const oppQuery = z
   .object({
@@ -138,26 +139,28 @@ const priceInput = z.object({
   stock: z.number().int().min(0).nullable().optional(),
 });
 
-const ruleFilter = z.object({
-  categories: z.array(categoryEnum).max(20).optional(),
-  qualities: z.array(z.number().int()).max(30).optional(),
-  craftable: z.boolean().nullable().optional(),
-  australium: z.boolean().nullable().optional(),
-  killstreak: z.array(z.number().int().min(0).max(3)).max(4).optional(),
-  hasEffect: z.boolean().nullable().optional(),
-  defindexes: z.array(z.number().int().min(0)).max(500).optional(),
-  nameContains: z.string().max(200).nullable().optional(),
-});
+const ruleInput = ruleInputSchema;
 
-const ruleInput = z.object({
-  id: id.optional(),
-  name: z.string().trim().min(1, 'a rule needs a name').max(120),
-  filter: ruleFilter,
-  costKeys: nonNeg.optional(),
-  costScrap: nonNeg,
-  observedAt: finite.optional(),
-  enabled: z.boolean().optional(),
-});
+const shoppingQuery = z
+  .object({
+    categories: z.array(categoryEnum).max(20).optional(),
+    search: z.string().max(200).optional(),
+    minCeilingScrap: nonNeg.optional(),
+    onlyBotBuyers: z.boolean().optional(),
+    limit: z.number().int().min(1).max(5000).optional(),
+    offset: z.number().int().min(0).optional(),
+  })
+  .optional();
+
+const steamId64 = z.string().trim().regex(/^\d{17}$/, 'expected a 17-digit SteamID64');
+
+/** Bulk paste preview: the helper enforces the 100 KB / 500-line limits with a friendly refusal; this only bounds memory. */
+const MAX_BULK_TEXT_CHARS = 1_000_000;
+/** Same size cap as a rules backup the dashboard would reasonably hold. */
+const MAX_RULES_JSON_CHARS = 5_000_000;
+/** Skip reasons returned by 'rules.importJson' (rulesFromJson already caps its own). */
+const MAX_RULE_SKIP_LINES = 400;
+export const SCHEMA_LOADING_MESSAGE = 'The item list is still loading, so names cannot be matched yet. Preview again in a moment.';
 
 const journalInput = z.object({
   ts: finite.optional(),
@@ -193,6 +196,22 @@ function withoutUndefined<T extends object>(o: T): T {
   return out;
 }
 
+/** Sorted-key JSON: the same filter written in another key order compares equal. */
+function stableJson(v: unknown): string {
+  if (Array.isArray(v)) return `[${v.map(stableJson).join(',')}]`;
+  if (v !== null && typeof v === 'object') {
+    const o = v as Record<string, unknown>;
+    const keys = Object.keys(o).filter((k) => o[k] !== undefined).sort();
+    return `{${keys.map((k) => `${JSON.stringify(k)}:${stableJson(o[k])}`).join(',')}}`;
+  }
+  return JSON.stringify(v) ?? 'null';
+}
+
+/** What makes two rules the same for an import: name, filter and price (not the date or the on/off switch). */
+function ruleKey(r: { name: string; filter: object; costKeys?: number; costScrap: number }): string {
+  return stableJson([r.name.trim(), r.filter, r.costKeys ?? 0, Math.round(r.costScrap)]);
+}
+
 function dateStamp(ms: UnixMs): string {
   const d = new Date(ms);
   const pad = (n: number) => String(n).padStart(2, '0');
@@ -222,6 +241,8 @@ function specialKey(s: SpecialAttrs): string {
  * Parses a page the user saved from scrap.tf and stores its prices as source
  * 'import'. Per SKU and set of extras the cheapest card wins, and it replaces
  * the earlier imported price for that SKU instead of adding duplicates.
+ * Items with none in stock are not stored. Prices from a page saved later than
+ * this one are never replaced or removed.
  * Refused unless the user enabled import and acknowledged the ToS note (R10).
  */
 export function importSavedPage(ctx: HandlerContext, p: { html: string; fileName: string; mtimeMs: number }): ImportResult {
@@ -234,16 +255,27 @@ export function importSavedPage(ctx: HandlerContext, p: { html: string; fileName
   const mtime = Number.isFinite(p.mtimeMs) && p.mtimeMs > 0 ? Math.min(Math.round(p.mtimeMs), now) : now;
   const parsed = parseScrapTfHtml(p.html, ctx.schema);
   const skipped: ImportResult['skipped'] = [];
+  type Item = (typeof parsed.items)[number];
 
   // Cheapest card per (base SKU, extras).
-  const best = new Map<string, { sku: string; item: (typeof parsed.items)[number]; costScrap: number }>();
+  const best = new Map<string, { sku: string; item: Item; costScrap: number }>();
+  /** Base SKUs the page shows with none in stock: earlier imported copies of them are gone. */
+  const soldOut = new Set<string>();
   const keyScrap = ctx.engine.keyPrice().valueScrap;
   for (const item of parsed.items) {
-    if (!isImportableItem(item) || !item.sku || !looksLikeSku(item.sku)) {
-      skipped.push({ reason: item.warnings[0] ?? (item.sku ? 'no price' : 'item not recognised'), title: item.title || item.name });
+    const title = item.title || item.name;
+    const sku = item.sku !== null && looksLikeSku(item.sku) ? item.sku : null;
+    // "0/5" on the /items list (priced or "Sold out"): the price to buy cannot be paid right now.
+    if (sku !== null && item.stock === 0) {
+      skipped.push({ reason: 'out of stock on scrap.tf', title });
+      soldOut.add(splitSku(sku).base);
       continue;
     }
-    const { base, paint } = splitSku(item.sku);
+    if (sku === null || !isImportableItem(item)) {
+      skipped.push({ reason: item.warnings[0] ?? (item.sku ? 'no price' : 'item not recognised'), title });
+      continue;
+    }
+    const { base, paint } = splitSku(sku);
     const special: SpecialAttrs = { ...item.special, paint: item.special.paint ?? paint };
     const key = `${base}|${specialKey(special)}`;
     const total = Math.round(item.costKeys * keyScrap) + item.costScrap;
@@ -256,20 +288,43 @@ export function importSavedPage(ctx: HandlerContext, p: { html: string; fileName
     }
   }
 
+  // The /items list shows plain copies only, so it cannot speak for painted, spelled or named
+  // copies imported from bank pages. Rows whose extras were never recorded (null) count as plain.
+  const plainKey = specialKey(emptySpecial());
+  const extrasKey = (sp: ScrapPrice): string => (sp.special === null ? plainKey : specialKey(sp.special));
+  const replaceable = (sp: ScrapPrice): boolean => sp.source === 'import' && (parsed.pageKind !== 'items-list' || extrasKey(sp) === plainKey);
+  // Catch-up scans and old pages copied into the watch folder can arrive after a newer page.
+  const newerThanPage = (sp: ScrapPrice): boolean => sp.observedAt > mtime;
+
   const affected = new Set<string>();
   let batchId = 0;
+  let stored = 0;
   ctx.repo.transaction(() => {
-    batchId = ctx.repo.createImportBatch({ fileName, pageKind: parsed.pageKind, fileMtime: mtime, importedAt: now, itemCount: best.size });
     const previous = new Map<string, ScrapPrice[]>();
-    for (const { sku } of best.values()) {
-      if (!previous.has(sku)) previous.set(sku, ctx.repo.scrapPricesForSku(sku).filter((sp) => sp.source === 'import'));
+    for (const sku of [...[...best.values()].map((b) => b.sku), ...soldOut]) {
+      if (!previous.has(sku)) previous.set(sku, ctx.repo.scrapPricesForSku(sku).filter(replaceable));
     }
     const kept = new Set<number>();
+    const writes: { id: number | null; sku: string; item: Item }[] = [];
     for (const { sku, item } of best.values()) {
-      const olds = previous.get(sku) ?? [];
-      const sameExtras = olds.find((o) => !kept.has(o.id) && o.special !== null && specialKey(o.special) === specialKey(item.special));
-      const saved = ctx.repo.upsertScrapPrice({
-        ...(sameExtras ? { id: sameExtras.id } : {}),
+      const key = specialKey(item.special);
+      // A newer row with unrecorded extras must block this write too, or the plain copy is doubled.
+      const same = (previous.get(sku) ?? []).filter((o) => !kept.has(o.id) && extrasKey(o) === key);
+      const newer = same.find(newerThanPage);
+      if (newer) {
+        kept.add(newer.id);
+        skipped.push({ reason: 'a newer saved page already set this price', title: item.title || item.name });
+        continue;
+      }
+      const target = same[0] ?? null;
+      if (target) kept.add(target.id);
+      writes.push({ id: target?.id ?? null, sku, item });
+    }
+
+    batchId = ctx.repo.createImportBatch({ fileName, pageKind: parsed.pageKind, fileMtime: mtime, importedAt: now, itemCount: writes.length });
+    for (const { id: priceId, sku, item } of writes) {
+      ctx.repo.upsertScrapPrice({
+        ...(priceId !== null ? { id: priceId } : {}),
         sku,
         name: item.name || ctx.schema.nameForSku(sku),
         costKeys: item.costKeys,
@@ -282,11 +337,17 @@ export function importSavedPage(ctx: HandlerContext, p: { html: string; fileName
         assetId: item.assetId,
         stock: item.stock,
       });
-      kept.add(saved.id);
       affected.add(sku);
     }
-    // Earlier imported prices for these SKUs that this page no longer lists are replaced.
-    for (const olds of previous.values()) for (const o of olds) if (!kept.has(o.id)) ctx.repo.deleteScrapPrice(o.id);
+    stored = writes.length;
+    // Earlier imported prices for these SKUs that this page no longer lists, or shows sold out, are removed.
+    for (const [sku, olds] of previous) {
+      for (const o of olds) {
+        if (kept.has(o.id) || newerThanPage(o)) continue;
+        ctx.repo.deleteScrapPrice(o.id);
+        affected.add(sku);
+      }
+    }
   });
 
   const result: ImportResult = {
@@ -294,7 +355,7 @@ export function importSavedPage(ctx: HandlerContext, p: { html: string; fileName
     fileName,
     pageKind: parsed.pageKind,
     parsed: parsed.items.length,
-    stored: best.size,
+    stored,
     skipped: skipped.slice(0, 500),
     warnings: parsed.warnings.slice(0, 100),
   };
@@ -370,6 +431,40 @@ export function createRpcHandlers(ctx: HandlerContext): RpcHandler {
       .catch(() => undefined);
   };
 
+  /** The repo write for a validated price ('prices.upsert', 'prices.bulkUpsert'): base SKU, paint moved into the extras. */
+  const priceRow = (p: z.infer<typeof priceInput>, now: UnixMs) => {
+    const { full, base, paint } = splitSku(p.sku);
+    let special: SpecialAttrs | null | undefined = p.special;
+    if (paint !== null) special = { ...(special ?? emptySpecial()), paint };
+    const name = p.name?.trim() || schema.nameForSku(full);
+    const observedAt = p.observedAt !== undefined ? Math.min(p.observedAt, now + 60_000) : now;
+    const input: ScrapPriceInput & { name: string; observedAt: UnixMs; source: 'user' | 'import' } = withoutUndefined({
+      id: p.id,
+      sku: base,
+      name,
+      costKeys: p.costKeys,
+      costScrap: Math.round(p.costScrap),
+      source: p.source ?? 'user',
+      observedAt,
+      note: p.note === undefined ? undefined : p.note?.trim() || null,
+      importBatch: p.importBatch,
+      special,
+      assetId: p.assetId,
+      stock: p.stock,
+    });
+    return { input, base };
+  };
+
+  // In-memory 1 h cache lives inside the checker, one per service process.
+  const buyers = createBuyerChecker({
+    bptfApi: ctx.bptfApi,
+    http,
+    clock,
+    log,
+    settings: () => ctx.settings(),
+    secret: (name) => ctx.secret(name),
+  });
+
   const handlers: Record<string, (params: unknown, method: string) => unknown> = {
     'status.get': () => ctx.status(),
 
@@ -378,20 +473,39 @@ export function createRpcHandlers(ctx: HandlerContext): RpcHandler {
     'opps.events': (params, m) => repo.listEvents(withoutUndefined(parse(eventQuery, params, m) ?? {})),
 
     'opps.exportCsv': (params, m) => {
-      const { kind, query } = parse(z.object({ kind: z.enum(['opportunities', 'events']), query: oppQuery }), params, m);
+      const { kind, query, shopping } = parse(
+        z.object({ kind: z.enum(['opportunities', 'events', 'shopping']), query: oppQuery, shopping: shoppingQuery }),
+        params,
+        m,
+      );
       const stamp = dateStamp(clock.now());
       if (kind === 'events') {
         return { csv: eventsCsv(repo.listEvents({ limit: 5000 })), suggestedName: `flipdesk-events-${stamp}.csv` };
+      }
+      if (kind === 'shopping') {
+        // Every matching row: paging does not apply to the file.
+        const kp = engine.keyPrice();
+        const { limit: _limit, offset: _offset, ...filters } = shopping ?? {};
+        const list = buildShoppingList(repo.allOpportunities(), withoutUndefined(filters), kp, clock.now());
+        return { csv: shoppingCsv(list.rows, kp.valueScrap), suggestedName: `flipdesk-shopping-${stamp}.csv` };
       }
       // The dashboard's filters and sort, so the file matches the list; paging and grouping do not apply.
       const rows = repo.queryOpportunities(withoutUndefined(query ?? {}));
       return { csv: opportunitiesCsv(rows, engine.keyPrice().valueScrap), suggestedName: `flipdesk-opportunities-${stamp}.csv` };
     },
 
+    'shopping.list': (params, m) =>
+      buildShoppingList(repo.allOpportunities(), withoutUndefined(parse(shoppingQuery, params, m) ?? {}), engine.keyPrice(), clock.now()),
+
     'item.detail': async (params, m) => {
-      const { sku } = parse(skuOnly, params, m);
+      const { sku, history: withHistory, target } = parse(
+        z.object({ sku: skuText, history: z.boolean().optional(), target: z.enum(['newest', 'plain']).optional() }),
+        params,
+        m,
+      );
       const { full, base } = splitSku(sku);
-      const history = await historyFor(base);
+      // Quick entry's live preview asks without history: local only, no PriceDB request.
+      const history = withHistory === false ? [] : await historyFor(base);
       return buildItemDetail({
         repo,
         schema,
@@ -401,6 +515,7 @@ export function createRpcHandlers(ctx: HandlerContext): RpcHandler {
         now: clock.now(),
         snapshot: snapshotInfo(base),
         history,
+        ...(target ? { target } : {}),
       });
     },
 
@@ -478,27 +593,7 @@ export function createRpcHandlers(ctx: HandlerContext): RpcHandler {
     },
 
     'prices.upsert': (params, m) => {
-      const p = parse(priceInput, params, m);
-      const now = clock.now();
-      const { full, base, paint } = splitSku(p.sku);
-      let special: SpecialAttrs | null | undefined = p.special;
-      if (paint !== null) special = { ...(special ?? emptySpecial()), paint };
-      const name = p.name?.trim() || schema.nameForSku(full);
-      const observedAt = p.observedAt !== undefined ? Math.min(p.observedAt, now + 60_000) : now;
-      const input: ScrapPriceInput & { name: string; observedAt: UnixMs; source: 'user' | 'import' } = withoutUndefined({
-        id: p.id,
-        sku: base,
-        name,
-        costKeys: p.costKeys,
-        costScrap: Math.round(p.costScrap),
-        source: p.source ?? 'user',
-        observedAt,
-        note: p.note === undefined ? undefined : p.note?.trim() || null,
-        importBatch: p.importBatch,
-        special,
-        assetId: p.assetId,
-        stock: p.stock,
-      });
+      const { input, base } = priceRow(parse(priceInput, params, m), clock.now());
       const saved = repo.upsertScrapPrice(input);
       ctx.pricesChanged();
       engine.markDirty([base]);
@@ -506,6 +601,54 @@ export function createRpcHandlers(ctx: HandlerContext): RpcHandler {
       refreshPricedb(base);
       return saved;
     },
+
+    // No per-row snapshot or PriceDB request: the scheduler's watched-SKU jobs pick new SKUs up within their budgets.
+    'prices.bulkUpsert': (params, m) => {
+      const { rows } = parse(z.object({ rows: z.array(priceInput).max(MAX_BULK_LINES, `at most ${MAX_BULK_LINES} rows`) }), params, m);
+      const now = clock.now();
+      // Each row is a whole typed price: no keys means 0 keys (an update must not keep the old keys),
+      // and a typed price belongs to no import batch.
+      const writes = rows.map((r) => priceRow({ ...r, costKeys: r.costKeys ?? 0, source: 'user', importBatch: null }, now));
+      let added = 0;
+      let updated = 0;
+      repo.transaction(() => {
+        for (const w of writes) {
+          repo.upsertScrapPrice(w.input);
+          if (w.input.id !== undefined) updated++;
+          else added++;
+        }
+      });
+      if (writes.length > 0) {
+        ctx.pricesChanged();
+        engine.markDirty(new Set(writes.map((w) => w.base)));
+      }
+      return { added, updated };
+    },
+
+    'prices.parseBulk': (params, m) => {
+      const { text, bareUnit } = parse(
+        z.object({ text: z.string().max(MAX_BULK_TEXT_CHARS, 'the paste is too large'), bareUnit: z.enum(['ref', 'scrap', 'keys']).optional() }),
+        params,
+        m,
+      );
+      const resolve = (t: string) => {
+        try {
+          return t.trim() ? schema.resolve(t) : null;
+        } catch {
+          return null;
+        }
+      };
+      const r = parseBulkPrices(text, bareUnit ?? 'ref', resolve);
+      if (r.refusal !== null) throw new Error(r.refusal);
+      // Without the item list every name would read "Item not recognised"; say what is really wrong.
+      if (!schema.isLoaded() && r.rows.length > 0) throw new Error(SCHEMA_LOADING_MESSAGE);
+      return { rows: r.rows, rejected: r.rejected };
+    },
+
+    'prices.exportCsv': () => ({
+      csv: pricesCsv(repo.listScrapPrices(), engine.keyPrice().valueScrap),
+      suggestedName: `flipdesk-prices-${dateStamp(clock.now())}.csv`,
+    }),
 
     'prices.delete': (params, m) => {
       const { id: priceId } = parse(idOnly, params, m);
@@ -522,7 +665,9 @@ export function createRpcHandlers(ctx: HandlerContext): RpcHandler {
 
     'rules.upsert': (params, m) => {
       const p = parse(ruleInput, params, m);
-      const rule = repo.upsertRule(withoutUndefined({ ...p, filter: withoutUndefined(p.filter), observedAt: p.observedAt ?? clock.now() }));
+      const rule = repo.upsertRule(
+        withoutUndefined({ ...p, costScrap: Math.round(p.costScrap), filter: withoutUndefined(p.filter), observedAt: p.observedAt ?? clock.now() }),
+      );
       ctx.pricesChanged();
       engine.markAllDirty();
       return rule;
@@ -540,6 +685,49 @@ export function createRpcHandlers(ctx: HandlerContext): RpcHandler {
       const p = parse(ruleInput.extend({ name: z.string().max(120) }), params, m);
       return previewRule(repo, schema, withoutUndefined(p.filter), 20);
     },
+
+    'rules.exportJson': () => {
+      const now = clock.now();
+      return { json: rulesToJson(repo.listRules(), now), suggestedName: `flipdesk-rules-${dateStamp(now)}.json` };
+    },
+
+    // Adds only; existing rules are never deleted or overwritten (rulesFromJson drops ids).
+    'rules.importJson': (params, m) => {
+      const { json } = parse(z.object({ json: z.string().max(MAX_RULES_JSON_CHARS, 'the backup is too large') }), params, m);
+      const { rules, skipped } = rulesFromJson(json);
+      const now = clock.now();
+      let added = 0;
+      repo.transaction(() => {
+        // Restoring the same backup twice must not double every rule (and every rule candidate).
+        const existing = new Set(repo.listRules().map(ruleKey));
+        const seen = new Set<string>();
+        for (const r of rules) {
+          const { id: _id, ...rest } = r;
+          const input = withoutUndefined({
+            ...rest,
+            filter: withoutUndefined(rest.filter),
+            // A date in the future would keep the rule looking freshly observed forever.
+            observedAt: Math.min(rest.observedAt ?? now, now),
+          });
+          const key = ruleKey(input);
+          if (existing.has(key) || seen.has(key)) {
+            const why = existing.has(key) ? 'already in your rules' : 'repeated in this backup';
+            if (skipped.length < MAX_RULE_SKIP_LINES) skipped.push(`"${input.name.slice(0, 60)}": ${why}`);
+            continue;
+          }
+          seen.add(key);
+          repo.upsertRule(input);
+          added++;
+        }
+      });
+      if (added > 0) {
+        ctx.pricesChanged();
+        engine.markAllDirty();
+      }
+      return { added, skipped };
+    },
+
+    'buyer.check': (params, m) => buyers.check(parse(z.object({ steamid: steamId64 }), params, m).steamid),
 
     'journal.list': (params, m) => {
       const p = parse(z.object({ limit: limit(10_000) }).optional(), params, m);

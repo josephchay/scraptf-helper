@@ -135,3 +135,21 @@ describe('mergeSettings', () => {
     expect('injected' in (out.import.permission as unknown as Record<string, unknown>)).toBe(false);
   });
 });
+
+describe('v0.2 defaults', () => {
+  it('ignores references older than 30 days and flags margins over 200% by default', () => {
+    expect(DEFAULT_SETTINGS.profit.referenceMaxAgeMs).toBe(30 * 24 * 60 * 60 * 1000);
+    expect(DEFAULT_SETTINGS.profit.suspectMargin).toBe(2);
+  });
+
+  it('notifies every input kind with sound, as before v0.2', () => {
+    expect(DEFAULT_SETTINGS.notifications.inputKinds).toEqual(['user', 'import', 'rule']);
+    expect(DEFAULT_SETTINGS.notifications.silent).toBe(false);
+  });
+
+  it('replaces the notification input kinds instead of merging them', () => {
+    const out = mergeSettings(base(), { notifications: { inputKinds: ['user'] } });
+    expect(out.notifications.inputKinds).toEqual(['user']);
+    expect(out.notifications.inputKinds).not.toBe(DEFAULT_SETTINGS.notifications.inputKinds);
+  });
+});

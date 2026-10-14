@@ -3,6 +3,7 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useRef, use
 import type { AppStatus, DeepPartial, Scrap, SecretsStatus, Settings } from '../../shared/types';
 import { isMock, rpc } from '../api';
 import { errorMessage } from '../format';
+import { createServiceStateTracker, type ServiceStateTracker } from '../serviceStateModel';
 import { useHashRoute } from './useHashRoute';
 import { usePush } from './useRpc';
 import { writePref } from './usePersistentState';
@@ -24,7 +25,7 @@ export interface AppContextValue {
   keyScrap: Scrap | null;
   /** Last connection problem talking to the app itself (not to a platform). */
   bridgeError: string | null;
-  /** Background service process state pushed by main; null until the first push (assumed ready). */
+  /** Background service process state from main (its push, or 'app.serviceState' on load); null until known (assumed ready). */
   serviceState: PushContract['service.state'] | null;
   updateSettings: (patch: DeepPartial<Settings>) => Promise<Settings | null>;
   refreshStatus: () => void;
@@ -103,15 +104,15 @@ export function AppProvider({ children }: { children: ReactNode }) {
   usePush('ui.openItem', (p) => {
     if (p && typeof p.sku === 'string' && p.sku.trim()) setItemSku(p.sku.trim());
   });
-  const lastServiceState = useRef<string | null>(null);
-  usePush('service.state', (p) => {
-    if (!p || typeof p.state !== 'string') return;
-    const prev = lastServiceState.current;
-    lastServiceState.current = p.state;
-    setServiceState(p);
-    // A (re)started service has fresh status; fetch it once it is ready again.
-    if (p.state === 'ready' && prev !== null && prev !== 'ready') refreshStatus();
-  });
+  const serviceTracker = useRef<ServiceStateTracker | null>(null);
+  serviceTracker.current ??= createServiceStateTracker(setServiceState, refreshStatus);
+  usePush('service.state', (p) => serviceTracker.current?.onPush(p));
+  // The push is sent once per change; a page loaded after it (crash reload, late first open) asks main.
+  useEffect(() => {
+    rpc('app.serviceState')
+      .then((p) => serviceTracker.current?.onCurrent(p))
+      .catch(() => undefined);
+  }, []);
 
   useEffect(() => {
     if (settings) applyAppearance(settings.ui);

@@ -212,7 +212,7 @@ export interface ServiceHost {
 }
 
 /** Pushes only main sends (ARCHITECTURE: settings, the dashboard drawer, the service banner). */
-export const MAIN_ONLY_PUSH_EVENTS: readonly PushEvent[] = ['settings.changed', 'ui.openItem', 'service.state'];
+export const MAIN_ONLY_PUSH_EVENTS: readonly PushEvent[] = ['settings.changed', 'ui.openItem', 'ui.quickPrefill', 'service.state'];
 /** Pushes the service may send; anything else from the service is dropped as unrecognised. */
 export const SERVICE_PUSH_EVENTS: readonly PushEvent[] = PUSH_EVENTS.filter((e) => !MAIN_ONLY_PUSH_EVENTS.includes(e));
 const pushEvents = new Set<string>(SERVICE_PUSH_EVENTS);
@@ -242,20 +242,21 @@ export function serviceEnv(src: NodeJS.ProcessEnv): Record<string, string> {
   return out;
 }
 
-/** The 'service.state' push for the dashboard banner; null for internal states ('idle', 'stopping'). */
+/**
+ * The 'service.state' push for the dashboard banner; null for internal states ('idle', 'stopping').
+ * The next attempt goes out as a time, not as "in N s": the push is sent once per state change,
+ * so a relative countdown would stay frozen (up to 15 min in the crash-loop delay).
+ */
 export function serviceStatePush(s: ServiceHostStatus, now: number): PushContract['service.state'] | null {
   const err = s.lastError ? clip(s.lastError, 160) : null;
   switch (s.state) {
     case 'starting':
     case 'ready':
-      return { state: s.state, detail: null };
-    case 'restarting': {
-      const secs = s.nextRestartAt !== null ? Math.max(1, Math.round((s.nextRestartAt - now) / 1000)) : null;
-      const parts = [secs !== null ? `Next attempt in ${secs} s.` : null, err].filter((x): x is string => x !== null);
-      return { state: 'restarting', detail: parts.length ? parts.join(' ') : null };
-    }
+      return { state: s.state, detail: null, nextAttemptAt: null };
+    case 'restarting':
+      return { state: 'restarting', detail: err, nextAttemptAt: s.nextRestartAt !== null && s.nextRestartAt > now ? s.nextRestartAt : null };
     case 'stopped':
-      return { state: 'stopped', detail: err };
+      return { state: 'stopped', detail: err, nextAttemptAt: null };
     default:
       return null;
   }

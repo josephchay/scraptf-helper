@@ -1,13 +1,15 @@
-import { useMemo, useRef, useState } from 'react';
-import type { ScrapPrice } from '../../shared/types';
-import { rpc } from '../api';
-import { ConfirmButton, Field, Tabs } from '../components/Controls';
+import { useMemo, useRef, useState, type MouseEvent } from 'react';
+import type { BulkPriceRow, Scrap, ScrapPrice } from '../../shared/types';
+import { rpc, saveCsv } from '../api';
+import { BULK_MAX_LINES, bulkCommitMessage, bulkInputStats, bulkPlanSummary, isSkipped, planBulkCommit, type BulkLineState, type BulkPlan } from '../bulkModel';
+import { ConfirmButton, Field, Segmented, Tabs, type Option } from '../components/Controls';
 import { EmptyState, ErrorBanner, LoadingBlock } from '../components/Feedback';
 import { Icon } from '../components/Icon';
+import { useItemMenu } from '../components/ItemMenu';
 import { ItemName } from '../components/ItemName';
 import { ItemPicker, type ItemPickerHandle, type PickedItem } from '../components/ItemPicker';
 import { PriceInput, readPrice, type BareUnit } from '../components/PriceInput';
-import { errorMessage, fmtAge, fmtDateTime, fmtKeysMetal, fmtMoney } from '../format';
+import { DASH, errorMessage, fmtAge, fmtDateTime, fmtKeysMetal, fmtMoney } from '../format';
 import { useApp } from '../hooks/appContext';
 import { usePersistentState } from '../hooks/usePersistentState';
 import { usePush, useRpcQuery, useThrottled } from '../hooks/useRpc';
@@ -17,6 +19,13 @@ import { RulesPanel } from './RulesPanel';
 function sanitizeUnit(v: unknown): BareUnit {
   return v === 'scrap' || v === 'keys' ? v : 'ref';
 }
+
+// Same wording as PriceInput's toggle.
+const UNIT_OPTIONS: readonly Option<BareUnit>[] = [
+  { value: 'ref', label: 'ref', title: 'A bare number like 12 means 12 refined' },
+  { value: 'scrap', label: 'scrap', title: 'A bare number like 12 means 12 scrap' },
+  { value: 'keys', label: 'keys', title: 'A bare number like 2 means 2 keys' },
+];
 
 export function PricesPage() {
   const { segments, navigate } = useApp();
@@ -49,8 +58,33 @@ function PriceSheet() {
   usePush('prices.changed', reloadSoon);
   const [editing, setEditing] = useState<ScrapPrice | null>(null);
   const [sort, setSort] = useState<{ col: SortCol; asc: boolean }>({ col: 'age', asc: true });
+  const [pasteOpen, setPasteOpen] = usePersistentState<boolean>('prices.pasteOpen', false, (v) => v === true);
+  // Focus the paste box only when the user opens it, not when it was left open last time.
+  const [pasteFocus, setPasteFocus] = useState(false);
+  const pasteBtn = useRef<HTMLButtonElement>(null);
+  const [exporting, setExporting] = useState(false);
+  const menu = useItemMenu();
   const now = useNow(10_000);
   const staleMs = settings?.profit.inputStaleMs ?? 2 * 3_600_000;
+
+  const exportCsv = async () => {
+    setExporting(true);
+    try {
+      const r = await saveCsv(() => rpc('prices.exportCsv'));
+      if (r.saved) toast(`Saved ${r.path ?? 'CSV'}`, 'good');
+    } catch (e) {
+      toast(`Export failed: ${errorMessage(e)}`, 'bad');
+    } finally {
+      setExporting(false);
+    }
+  };
+
+  // Right-click, or Shift+F10 / the ContextMenu key on the focused row link: the menu
+  // places a keyboard event's 0,0 next to that link (ItemMenu resolveMenuPoint).
+  const openMenu = (p: ScrapPrice, e: MouseEvent<HTMLElement>) => {
+    e.preventDefault();
+    menu.open({ sku: p.sku, name: p.name }, { x: e.clientX, y: e.clientY });
+  };
 
   const rows = useMemo(() => {
     const k = keyScrap ?? 0;
@@ -101,7 +135,23 @@ function PriceSheet() {
   return (
     <div className="stack">
       <section className="card form-card" aria-labelledby="price-form-title">
-        <h2 id="price-form-title">{editing ? `Edit price #${editing.id}` : 'Add a scrap.tf price'}</h2>
+        <div className="section-head">
+          <h2 id="price-form-title">{editing ? `Edit price #${editing.id}` : 'Add a scrap.tf price'}</h2>
+          <button
+            ref={pasteBtn}
+            type="button"
+            className={`btn small${pasteOpen ? ' active' : ''}`}
+            aria-expanded={pasteOpen}
+            aria-controls={pasteOpen ? 'bulk-panel' : undefined}
+            title="Paste many item and price lines at once"
+            onClick={() => {
+              setPasteFocus(!pasteOpen);
+              setPasteOpen(!pasteOpen);
+            }}
+          >
+            <Icon name="plus" size={14} /> Paste a list
+          </button>
+        </div>
         <p className="muted small">Type what you see on scrap.tf. The app never visits scrap.tf itself.</p>
         <PriceForm
           key={editing?.id ?? 'new'}
@@ -115,14 +165,31 @@ function PriceSheet() {
         />
       </section>
 
+      {pasteOpen ? (
+        <BulkPastePanel
+          autoFocus={pasteFocus}
+          onClose={() => {
+            setPasteOpen(false);
+            // The close button unmounts with the panel; keep keyboard focus nearby.
+            pasteBtn.current?.focus();
+          }}
+          onSaved={after}
+        />
+      ) : null}
+
       <section className="card table-card" aria-labelledby="price-list-title">
         <div className="section-head">
           <h2 id="price-list-title">
             Your prices <span className="count-badge">{list.data?.length ?? 0}</span>
           </h2>
-          <div className="search-box small">
-            <Icon name="search" size={14} />
-            <input type="search" className="input" placeholder="Filter" aria-label="Filter prices" value={q} onChange={(e) => setQ(e.target.value)} />
+          <div className="sheet-tools">
+            <button type="button" className="btn small" disabled={exporting} onClick={() => void exportCsv()} title="Save the whole price sheet as a CSV file">
+              <Icon name="download" size={14} /> Export CSV
+            </button>
+            <div className="search-box small">
+              <Icon name="search" size={14} />
+              <input type="search" className="input" placeholder="Filter" aria-label="Filter prices" value={q} onChange={(e) => setQ(e.target.value)} />
+            </div>
           </div>
         </div>
         {list.error ? <ErrorBanner message={list.error} onRetry={() => void list.reload()} /> : null}
@@ -152,7 +219,7 @@ function PriceSheet() {
                   const age = now - p.observedAt;
                   const stale = age > staleMs;
                   return (
-                    <tr key={p.id} className={editing?.id === p.id ? 'selected' : undefined}>
+                    <tr key={p.id} className={editing?.id === p.id ? 'selected' : undefined} onContextMenu={(e) => openMenu(p, e)}>
                       <td>
                         <div className="cell-clip">
                           <button type="button" className="row-link" onClick={() => openItem(p.sku)} title="Open item">
@@ -206,8 +273,262 @@ function PriceSheet() {
           </div>
         )}
       </section>
+      {menu.element}
     </div>
   );
+}
+
+const BULK_PLACEHOLDER = ['Team Captain, 1 key 5 ref', 'Strange Rocket Launcher = 3.33', '5021;6 @ 52 ref', '# lines starting with # are skipped'].join('\n');
+
+interface BulkPreview {
+  /** The text and unit this preview was made from; editing either makes it stale. */
+  text: string;
+  unit: BareUnit;
+  rows: BulkPriceRow[];
+  plan: BulkPlan;
+}
+
+/**
+ * Paste many "<item> <separator> <price>" lines, preview how each one parses,
+ * then save the valid ones in one 'prices.bulkUpsert'. Nothing is written by
+ * Preview. Page content is refused by the service (R10: saved pages go through
+ * the opt-in import only).
+ */
+function BulkPastePanel({ autoFocus, onClose, onSaved }: { autoFocus: boolean; onClose: () => void; onSaved: () => void }) {
+  const { keyScrap, toast } = useApp();
+  const [text, setText] = useState('');
+  const [unit, setUnit] = usePersistentState<BareUnit>('bulk.unit', 'ref', sanitizeUnit);
+  const [preview, setPreview] = useState<BulkPreview | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState<'preview' | 'save' | null>(null);
+  const [onlySkipped, setOnlySkipped] = useState(false);
+  const stats = useMemo(() => bulkInputStats(text), [text]);
+  const stale = preview !== null && (preview.text !== text || preview.unit !== unit);
+  const overLimit = stats.overLines || stats.overBytes;
+
+  const runPreview = async () => {
+    setBusy('preview');
+    setError(null);
+    try {
+      // The full list, so a pasted item the user already priced updates that price instead of adding a second one.
+      const [parsed, existing] = await Promise.all([rpc('prices.parseBulk', { text, bareUnit: unit }), rpc('prices.list', {})]);
+      setPreview({ text, unit, rows: parsed.rows, plan: planBulkCommit(parsed.rows, existing) });
+      setOnlySkipped(false);
+    } catch (e) {
+      setPreview(null);
+      setError(errorMessage(e));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const save = async () => {
+    if (!preview || stale) return;
+    setBusy('save');
+    try {
+      // Fresh ids: one price deleted since the preview would fail the whole call.
+      const plan = planBulkCommit(preview.rows, await rpc('prices.list', {}));
+      if (!plan.inputs.length) {
+        toast('Nothing to save: every line has a problem.', 'warn');
+        return;
+      }
+      const r = await rpc('prices.bulkUpsert', { rows: plan.inputs });
+      toast(bulkCommitMessage(r, plan.skipped), 'good');
+      setText('');
+      setPreview(null);
+      onSaved();
+    } catch (e) {
+      toast(`Not saved: ${errorMessage(e)}`, 'bad');
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const plan = preview?.plan ?? null;
+  const ready = plan ? plan.added + plan.updated : 0;
+  const shownRows = preview ? (onlySkipped ? preview.rows.filter((r) => isSkipped(plan?.states.get(r.line))) : preview.rows) : [];
+
+  return (
+    <section className="card bulk-card" id="bulk-panel" aria-labelledby="bulk-title">
+      <div className="section-head">
+        <h2 id="bulk-title">Paste a list</h2>
+        <button type="button" className="icon-btn" aria-label="Close paste a list" title="Close" onClick={onClose}>
+          <Icon name="close" size={14} />
+        </button>
+      </div>
+      <p className="muted small">
+        One item per line: a name, SKU or backpack.tf / marketplace.tf link, then a tab, comma, semicolon, <code>=</code>, <code>@</code> or <code> - </code>, then the price you
+        saw on scrap.tf. At most {BULK_MAX_LINES} lines. Saved pages go through Import instead.
+      </p>
+      <form
+        className="bulk-form"
+        onSubmit={(e) => {
+          e.preventDefault();
+          void runPreview();
+        }}
+      >
+        <textarea
+          id="bulk-text"
+          className="input mono bulk-text"
+          rows={7}
+          autoFocus={autoFocus}
+          // A successful save clears the box, which would also wipe lines typed while it ran.
+          readOnly={busy === 'save'}
+          spellCheck={false}
+          autoComplete="off"
+          aria-label="Lines to paste"
+          aria-describedby="bulk-stats"
+          placeholder={BULK_PLACEHOLDER}
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+          onKeyDown={(e) => {
+            // Ctrl+Enter previews without leaving the keyboard.
+            if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+              e.preventDefault();
+              if (stats.lines && !overLimit && !busy) void runPreview();
+            }
+          }}
+        />
+        <div className="form-actions">
+          <span className="muted small">Bare numbers mean</span>
+          <Segmented small ariaLabel="Unit for bare numbers" value={unit} onChange={setUnit} options={UNIT_OPTIONS} />
+          <button type="submit" className="btn primary" disabled={!stats.lines || overLimit || busy !== null}>
+            <Icon name="search" size={14} /> {busy === 'preview' ? 'Reading…' : 'Preview'}
+          </button>
+          {text ? (
+            <button
+              type="button"
+              className="btn ghost"
+              disabled={busy !== null}
+              onClick={() => {
+                setText('');
+                setPreview(null);
+                setError(null);
+              }}
+            >
+              Clear
+            </button>
+          ) : null}
+          <span id="bulk-stats" className={`small${overLimit ? ' tone-text-bad' : ' muted'}`} aria-live="polite">
+            {stats.overBytes
+              ? 'Larger than 100 KB. Split it into smaller pastes.'
+              : `${stats.lines} of ${BULK_MAX_LINES} lines${stats.overLines ? '. Split it into smaller pastes.' : ''}`}
+          </span>
+        </div>
+      </form>
+
+      {/* role="alert": the refusal or failure is announced, not only shown. */}
+      {error ? <ErrorBanner message={error} /> : null}
+
+      {preview && plan ? (
+        <div className="bulk-preview">
+          <div className="bulk-summary">
+            <span role="status" className={ready ? undefined : 'tone-text-warn'}>
+              {bulkPlanSummary(plan)}
+            </span>
+            {plan.skipped ? (
+              <label className="check-inline small">
+                <input type="checkbox" checked={onlySkipped} onChange={(e) => setOnlySkipped(e.target.checked)} /> Only skipped lines
+              </label>
+            ) : null}
+            {stale ? <span className="tone-text-warn small">The text or unit changed. Preview again before saving.</span> : null}
+          </div>
+          {preview.rows.length === 0 ? (
+            <p className="muted small">No item lines found.</p>
+          ) : (
+            <div className="table-wrap bulk-table-wrap">
+              <table className="table compact-table">
+                <thead>
+                  <tr>
+                    <th className="num">Line</th>
+                    <th>Pasted</th>
+                    <th>Item</th>
+                    <th className="num">Price</th>
+                    <th>Result</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {shownRows.map((r) => (
+                    <BulkRow key={r.line} row={r} state={plan.states.get(r.line)} keyScrap={keyScrap} />
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+          <div className="form-actions">
+            <button type="button" className="btn primary" disabled={!ready || stale || busy !== null} onClick={() => void save()}>
+              <Icon name="check" size={14} /> {busy === 'save' ? 'Saving…' : ready === 1 ? 'Save 1 price' : `Save ${ready} prices`}
+            </button>
+            <span className="muted small">Saved as typed prices, seen now. Lines with problems are left out.</span>
+          </div>
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
+function BulkRow({ row, state, keyScrap }: { row: BulkPriceRow; state: BulkLineState | undefined; keyScrap: Scrap | null }) {
+  const bad = state?.kind === 'error';
+  const muted = state?.kind === 'superseded';
+  return (
+    <tr className={bad ? 'bulk-bad' : muted ? 'excluded' : undefined}>
+      <td className="num muted">{row.line}</td>
+      <td>
+        <div className="bulk-raw mono small" title={row.raw}>
+          {row.raw.trim()}
+        </div>
+      </td>
+      <td>
+        {row.sku && row.name ? (
+          <div className="cell-clip">
+            <ItemName sku={row.sku} name={row.name} maxTags={3} />
+            <div className="muted small ellipsis">
+              <code>{row.sku}</code>
+            </div>
+          </div>
+        ) : (
+          <span className="muted">{DASH}</span>
+        )}
+      </td>
+      <td className="num">
+        {/* An unparsed line carries 0/0; show that as missing, not as a free item. */}
+        {bad && !row.costKeys && !row.costScrap ? (
+          <span className="muted">{DASH}</span>
+        ) : (
+          <>
+            <span className="money">{fmtKeysMetal(row.costKeys, row.costScrap)}</span>
+            {row.costKeys && keyScrap ? <div className="muted small">{fmtMoney(Math.round(row.costKeys * keyScrap) + row.costScrap, null)}</div> : null}
+          </>
+        )}
+      </td>
+      <td>
+        <BulkResult state={state} />
+      </td>
+    </tr>
+  );
+}
+
+function BulkResult({ state }: { state: BulkLineState | undefined }) {
+  if (!state) return null;
+  switch (state.kind) {
+    case 'error':
+      return (
+        <span className="tone-text-bad small">
+          <Icon name="warning" size={12} /> {state.message}
+        </span>
+      );
+    case 'superseded':
+      return <span className="muted small">Repeated on line {state.byLine}, which is used</span>;
+    case 'add':
+      return <span className="pill tone-good">New</span>;
+    case 'update':
+      return (
+        <span className="small">
+          <span className="pill tone-info">Update</span>{' '}
+          <span className="muted">{state.samePrice ? 'same price, marks it seen now' : `was ${fmtKeysMetal(state.previous.costKeys, state.previous.costScrap)}`}</span>
+        </span>
+      );
+  }
 }
 
 export function PriceForm({

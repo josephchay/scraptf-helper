@@ -123,6 +123,8 @@ export function res(data: unknown, init: { status?: number; headers?: Record<str
 export class FakeHttp implements HttpClient {
   readonly calls: HttpCall[] = [];
   paused = false;
+  /** Host blocks, as the real client keeps (and persists) them. */
+  readonly blocked = new Map<string, string>();
   constructor(public route: Route) {}
 
   async request<T = unknown>(url: string, opts: HttpRequestOptions = {}): Promise<HttpResponse<T>> {
@@ -141,11 +143,14 @@ export class FakeHttp implements HttpClient {
   budgets() {
     return [];
   }
-  hostBlocked(): string | null {
-    return null;
+  hostBlocked(host: string): string | null {
+    return this.blocked.get(host) ?? null;
   }
-  unblockHost(): void {
-    // no-op
+  blockHost(host: string, reason: string): void {
+    this.blocked.set(host, reason);
+  }
+  unblockHost(host: string): void {
+    this.blocked.delete(host);
   }
   userAgent(): string {
     return 'TF2FlipDesk/0.1.0 (+test)';

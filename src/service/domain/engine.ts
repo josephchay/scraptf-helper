@@ -9,7 +9,7 @@
 import { z } from 'zod';
 import { categoryOfSkuOnly } from '../../shared/categories';
 import { formatScrap, valueScrap } from '../../shared/currency';
-import { baseSku as toBaseSku, fromObject, fromString, looksLikeSku } from '../../shared/sku';
+import { baseSku as toBaseSku, fromObject, fromString, isValidSku } from '../../shared/sku';
 import { CATEGORIES, CURRENCY_SKUS, EMPTY_SPECIAL } from '../../shared/types';
 import type {
   Category,
@@ -36,8 +36,8 @@ import { scoreConfidence } from './confidence';
 import { selectKeyPrice } from './keyprice';
 import { anyEffectBaseOf, classifyOrder, dedupeOrders, isSpecialEmpty, matchContext, normalizeSpecial, ruleMatches } from './matcher';
 import type { MatchContext, MatchTarget } from './matcher';
-import { computePrices, lookupReferences, outlierRefs, referencePrices, toOrderSummary, valueOrders } from './pricing';
-import { profitStatus, profitTier } from './tiers';
+import { computePrices, lookupReferences, outlierRefs, pickRevenueOrder, referencePrices, toOrderSummary, usableReferences, valueOrders } from './pricing';
+import { INPUT_KIND_ORDER, maxCostFor, profitStatus, profitTier } from './tiers';
 
 export const DEBOUNCE_MS = 1000;
 export const SWEEP_INTERVAL_MS = 60_000;
@@ -105,9 +105,17 @@ function nonNegative(n: number): number {
 }
 
 export function revenueOrderOf(o: Pick<Opportunity, 'bestOrder' | 'consOrder' | 'instantOrder'>, useOrder: ProfitSettings['useOrder']): OrderSummary | null {
-  if (useOrder === 'best') return o.bestOrder;
-  if (useOrder === 'instant') return o.instantOrder;
-  return o.consOrder;
+  return pickRevenueOrder({ best: o.bestOrder, conservative: o.consOrder, instant: o.instantOrder }, useOrder);
+}
+
+/**
+ * A stored row's revenue order when useOrder is not at hand (CSV, shopping list).
+ * Exact: computePrices sorts ties bots first and its outlier test depends only on
+ * the value, so two of best/conservative/instant with the same value are the same order.
+ */
+export function revenueOrderByValue(o: Pick<Opportunity, 'revenueScrap' | 'bestOrder' | 'consOrder' | 'instantOrder'>): OrderSummary | null {
+  if (o.revenueScrap === null) return null;
+  return [o.consOrder, o.bestOrder, o.instantOrder].find((x) => x !== null && x !== undefined && x.valueScrap === o.revenueScrap) ?? null;
 }
 
 export function evaluateOpportunity(a: EvaluateArgs): Opportunity {
@@ -121,14 +129,17 @@ export function evaluateOpportunity(a: EvaluateArgs): Opportunity {
     classified.filter((o) => o.eligible),
     keyScrap,
   );
-  const prices = computePrices(eligible, outlierRefs(a.references), p);
+  // F4: a stale reference must not mark current orders as outliers; scoreConfidence gates its own use the same way.
+  const prices = computePrices(eligible, outlierRefs(usableReferences(a.references, p.referenceMaxAgeMs, now).references), p);
   const summary = (o: (typeof eligible)[number] | null): OrderSummary | null =>
     o ? toOrderSummary(o, prices.outlierIds.has(o.listing.id) ? ['outlier'] : []) : null;
 
-  const revenueOrder = p.useOrder === 'best' ? prices.best : p.useOrder === 'instant' ? prices.instant : prices.conservative;
+  const revenueOrder = pickRevenueOrder(prices, p.useOrder);
   const revenueScrap = revenueOrder?.valueScrap ?? null;
   const profitScrap = revenueScrap === null ? null : revenueScrap - costScrap - nonNegative(p.frictionScrap);
   const margin = profitScrap === null || costScrap <= 0 ? null : profitScrap / costScrap;
+  // The suspect-margin guard treats a free item with a profit like profitStatus does: an unbounded margin.
+  const guardMargin = margin ?? (profitScrap !== null && profitScrap > 0 ? Number.POSITIVE_INFINITY : null);
 
   const conf = scoreConfidence({
     order: revenueOrder,
@@ -138,6 +149,7 @@ export function evaluateOpportunity(a: EvaluateArgs): Opportunity {
     inputObservedAt: input.observedAt,
     isUnusual: a.isUnusual,
     revenueScrap,
+    margin: guardMargin,
     keyScrap,
     now,
     profit: p,
@@ -166,6 +178,8 @@ export function evaluateOpportunity(a: EvaluateArgs): Opportunity {
     revenueScrap,
     profitScrap,
     margin,
+    // F1: the scrap.tf price this row's revenue still clears the thresholds at.
+    maxCostScrap: maxCostFor(revenueScrap, p),
     confidence: conf.score,
     confidenceLevel: conf.level,
     flags,
@@ -185,7 +199,8 @@ export function evaluateOpportunity(a: EvaluateArgs): Opportunity {
 
 /** A user/import price as an engine input, or null when it cannot be evaluated (bad SKU, currency, bad cost). */
 export function explicitInput(sp: ScrapPrice): EngineInput | null {
-  if (typeof sp.sku !== 'string' || !looksLikeSku(sp.sku)) return null;
+  // Strict: a token fromString would drop must not turn the price into another item.
+  if (typeof sp.sku !== 'string' || !isValidSku(sp.sku)) return null;
   if (!Number.isFinite(sp.costScrap) || sp.costScrap < 0) return null;
   const costKeys = sp.costKeys ?? 0;
   if (!Number.isFinite(costKeys) || costKeys < 0) return null;
@@ -419,6 +434,19 @@ export function createEngine(deps: EngineDeps): Engine {
   // sweep skip loading listings for rule-only SKUs whose orders cannot beat any rule cost.
   const bestRaw = new Map<string, number>();
   let bestRawSince = 0;
+  // Effect-specific bases whose bestRaw includes a generic any-effect book, by that generic
+  // base: a change to the generic book must invalidate them too, or a rule-only SKU with no
+  // stored row keeps a stale bestRaw and the sweep shortcut hides it for up to 10 min.
+  const bestRawByGeneric = new Map<string, Set<string>>();
+
+  function setBestRaw(base: string, value: number): void {
+    bestRaw.set(base, value);
+    const any = anyEffectBaseOf(base);
+    if (any === null || any === base) return;
+    let set = bestRawByGeneric.get(any);
+    if (!set) bestRawByGeneric.set(any, (set = new Set()));
+    set.add(base);
+  }
 
   // Buy book per base SKU, invalidated exactly like bestRaw (markDirty, markAllDirty,
   // fingerprint change, periodic refresh), so a warm sweep only reads the books that
@@ -448,11 +476,27 @@ export function createEngine(deps: EngineDeps): Engine {
 
   function forgetBase(base: string): void {
     bestRaw.delete(base);
+    const any = anyEffectBaseOf(base);
+    const set = any !== null ? bestRawByGeneric.get(any) : undefined;
+    if (any !== null && set) {
+      set.delete(base);
+      if (set.size === 0) bestRawByGeneric.delete(any);
+    }
     dropBook(base);
+  }
+
+  /** The effect-specific bases that read this generic book; their own books are unchanged and stay cached. */
+  function forgetDependents(generic: string): string[] {
+    const set = bestRawByGeneric.get(generic);
+    if (!set) return [];
+    bestRawByGeneric.delete(generic);
+    for (const b of set) bestRaw.delete(b);
+    return [...set];
   }
 
   function forgetAllBases(): void {
     bestRaw.clear();
+    bestRawByGeneric.clear();
     clearBooks();
   }
 
@@ -688,12 +732,18 @@ export function createEngine(deps: EngineDeps): Engine {
     // ----- evaluate -----
     const results = new Map<string, Opportunity>();
 
-    const evaluateBase = (base: string, listings: readonly Listing[], w: BaseWork): void => {
+    /**
+     * `ownBuys`: the base has buy orders of its own. Rules apply only then, in both run
+     * modes: a full sweep cannot enumerate effect SKUs that only a generic any-effect
+     * book covers, so a dirty run must not create rule rows for them either (they
+     * would appear on the tick and be deleted by the next sweep).
+     */
+    const evaluateBase = (base: string, listings: readonly Listing[], w: BaseWork, ownBuys: boolean): void => {
       let refs: ReferencePrices | null = null;
       const references = (): ReferencePrices => (refs ??= referencePrices(lookupReferences(repo, base), K, now));
       let maxRaw = Number.NEGATIVE_INFINITY;
       for (const l of listings) if (l.intent === 'buy') maxRaw = Math.max(maxRaw, valueScrap(l.keys, l.metalScrap, K));
-      bestRaw.set(base, maxRaw);
+      setBestRaw(base, maxRaw);
 
       for (const inp of w.explicit) {
         evaluated++;
@@ -713,7 +763,7 @@ export function createEngine(deps: EngineDeps): Engine {
         results.set(opp.key, opp);
       }
 
-      if (w.rules.length === 0 || listings.length === 0) {
+      if (!ownBuys || w.rules.length === 0 || listings.length === 0) {
         evaluated += w.rules.length;
         return;
       }
@@ -760,10 +810,11 @@ export function createEngine(deps: EngineDeps): Engine {
         // A generic "any effect" book is combined per run: each part is invalidated by its own markDirty.
         const any = anyEffectBaseOf(base);
         const generic = any !== null && any !== base && hasOrders(any) ? bookOf(any) : [];
-        evaluateBase(base, generic.length > 0 ? [...own, ...generic] : own, work.get(base)!);
+        const ownBuys = own.some((l) => l.intent === 'buy');
+        evaluateBase(base, generic.length > 0 ? [...own, ...generic] : own, work.get(base)!, ownBuys);
       }
     }
-    for (const [base, w] of work) if (!listed.has(base)) evaluateBase(base, [], w);
+    for (const [base, w] of work) if (!listed.has(base)) evaluateBase(base, [], w, false);
 
     // ----- diff against what is stored -----
     const upserts: Opportunity[] = [];
@@ -828,10 +879,13 @@ export function createEngine(deps: EngineDeps): Engine {
     let notifyMeta: string | null = null;
     if (n?.enabled) {
       const dedupMs = Number.isFinite(n.dedupMs) && n.dedupMs > 0 ? n.dedupMs : 0;
+      const kinds = notifyKinds(n.inputKinds);
       const last = loadNotified();
       for (const opp of results.values()) {
         if (opp.status !== 'profitable' || opp.profitScrap === null) continue;
         if (opp.confidence < n.minConfidence || opp.profitScrap < n.minProfitScrap) continue;
+        // F6: input kinds the user muted; F5: a suspect margin is shown but never toasted.
+        if (!kinds.has(opp.inputKind) || opp.flags.includes('suspect-margin')) continue;
         const ts = last.get(opp.key);
         if (ts !== undefined && now - ts < dedupMs && now >= ts) continue;
         toNotify.push(opp);
@@ -864,13 +918,13 @@ export function createEngine(deps: EngineDeps): Engine {
     if (toNotify.length > 0) {
       const individual = toNotify.slice(0, MAX_NOTIFICATIONS_PER_RUN);
       for (const opp of individual) {
-        safeCall(() => events.onNotify({ title: `Profit: ${opp.name || opp.sku}`, body: notificationBody(opp, K, p.useOrder), sku: opp.sku }));
+        safeCall(() => events.onNotify({ title: notificationTitle(opp), body: notificationBody(opp, K, p.useOrder), sku: opp.sku }));
       }
-      const rest = toNotify.length - individual.length;
-      if (rest > 0) {
+      const rest = toNotify.slice(individual.length);
+      if (rest.length > 0) {
         safeCall(() =>
           events.onNotify({
-            title: `${rest} more profitable flip${rest === 1 ? '' : 's'}`,
+            title: notificationSummaryTitle(rest),
             body: 'They passed your notification thresholds. Open TF2 Flip Desk to see them.',
             sku: null,
           }),
@@ -950,6 +1004,10 @@ export function createEngine(deps: EngineDeps): Engine {
         const base = baseOf(t);
         dirty.add(base);
         forgetBase(base);
+        // A generic any-effect book changed: the effect SKUs that read it are re-evaluated
+        // on this tick, including rule-only ones with no stored row (the run's own
+        // expansion only covers SKUs with a price or a row).
+        for (const b of forgetDependents(base)) dirty.add(b);
         if (dirty.size > MAX_DIRTY) {
           dirty.clear();
           forgetAllBases();
@@ -989,9 +1047,35 @@ export function createEngine(deps: EngineDeps): Engine {
   };
 }
 
-/** '<profit> (<margin>%) — sell to <bot/human> buy order'. */
+/** settings.notifications.inputKinds as a set; a missing or broken value means every kind (the default). */
+export function notifyKinds(v: unknown): ReadonlySet<InputKind> {
+  if (!Array.isArray(v)) return new Set(INPUT_KIND_ORDER);
+  return new Set(INPUT_KIND_ORDER.filter((k) => v.includes(k)));
+}
+
+/** 'Candidate: <name>' for a rule estimate (the user still has to find it on scrap.tf), else 'Profit: <name>'. */
+export function notificationTitle(o: Pick<Opportunity, 'inputKind' | 'name' | 'sku'>): string {
+  return `${o.inputKind === 'rule' ? 'Candidate' : 'Profit'}: ${o.name || o.sku}`;
+}
+
+/** Title of the toast that folds the rest of a burst; rule candidates are not called flips (they are unverified). */
+export function notificationSummaryTitle(rest: readonly Pick<Opportunity, 'inputKind'>[]): string {
+  const n = rest.length;
+  const rules = rest.filter((o) => o.inputKind === 'rule').length;
+  if (rules === 0) return `${n} more profitable flip${n === 1 ? '' : 's'}`;
+  if (rules === n) return `${n} more candidate${n === 1 ? '' : 's'} to check on scrap.tf`;
+  return `${n} more flips and candidates`;
+}
+
+/**
+ * Rule candidate: 'Check scrap.tf, pay up to <ceiling>. Sells for <revenue> (<bot/human> buyer)'.
+ * Typed or imported: '<profit> (<margin>%) — sell to <bot/human> buy order, pay up to <ceiling>'.
+ */
 export function notificationBody(o: Opportunity, keyScrap: Scrap, useOrder: ProfitSettings['useOrder']): string {
   const order = revenueOrderOf(o, useOrder);
+  const buyer = order?.isBot ? 'bot' : 'human';
+  const ceiling = typeof o.maxCostScrap === 'number' && Number.isFinite(o.maxCostScrap) ? `, pay up to ${money(o.maxCostScrap, keyScrap)}` : '';
+  if (o.inputKind === 'rule') return `Check scrap.tf${ceiling}. Sells for ${money(o.revenueScrap, keyScrap)} (${buyer} buyer)`;
   const m = pct(o.margin);
-  return `${money(o.profitScrap, keyScrap)}${m ? ` (${m})` : ''} — sell to ${order?.isBot ? 'bot' : 'human'} buy order`;
+  return `${money(o.profitScrap, keyScrap)}${m ? ` (${m})` : ''} — sell to ${buyer} buy order${ceiling}`;
 }

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { fetchEventsAfter, mergeEvents } from '../../src/renderer/eventFeed';
+import { MAX_KEPT_EVENTS, fetchEventsAfter, mergeEvents, olderPageLimit } from '../../src/renderer/eventFeed';
 import type { OpportunityEvent } from '../../src/shared/types';
 
 function ev(id: number, ts = 1_000): OpportunityEvent {
@@ -25,6 +25,31 @@ describe('mergeEvents', () => {
   it('dedupes by id, newest first, capped', () => {
     expect(mergeEvents([ev(1), ev(3)], [ev(3), ev(2)]).map((e) => e.id)).toEqual([3, 2, 1]);
     expect(mergeEvents([ev(1), ev(2), ev(3)], [], 2).map((e) => e.id)).toEqual([3, 2]);
+  });
+});
+
+describe('"Load older events" at the in-memory cap', () => {
+  it('requests nothing once the list is full, because the merge would drop the whole page again', () => {
+    const full = range(1_001, 1_000 + MAX_KEPT_EVENTS).reverse().map((id) => ev(id));
+    const olderPage = range(701, 1_000).reverse().map((id) => ev(id));
+    // What the page did before: merge a full page into a full list. Nothing changes, so the
+    // next click asks for the same page again.
+    const merged = mergeEvents(full, olderPage);
+    expect(merged.at(-1)!.id).toBe(full.at(-1)!.id);
+    expect(olderPageLimit(full.length, 300)).toBe(0);
+  });
+
+  it('asks only for what still fits, so every fetched event is kept', () => {
+    expect(olderPageLimit(0, 300)).toBe(300);
+    expect(olderPageLimit(MAX_KEPT_EVENTS - 100, 300)).toBe(100);
+    expect(olderPageLimit(MAX_KEPT_EVENTS + 5, 300)).toBe(0);
+    const kept = range(201, 500).reverse().map((id) => ev(id));
+    const limit = olderPageLimit(kept.length, 300, 400);
+    expect(limit).toBe(100);
+    const older = range(1, 200).reverse().slice(0, limit).map((id) => ev(id));
+    const merged = mergeEvents(kept, older, 400);
+    expect(merged).toHaveLength(400);
+    expect(merged.at(-1)!.id).toBe(older.at(-1)!.id);
   });
 });
 

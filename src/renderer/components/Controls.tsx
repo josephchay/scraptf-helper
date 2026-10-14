@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
+import { useEffect, useId, useReducer, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
 import { Icon, type IconName } from './Icon';
 
 export interface Option<T extends string | number> {
@@ -186,6 +186,36 @@ export function CheckList<T extends string | number>({
   );
 }
 
+/**
+ * Plain checkboxes for a multi-choice setting. Reports one toggle at a time so
+ * the caller decides the stored order (and can re-read fresh state).
+ */
+export function CheckGroup<T extends string | number>({
+  values,
+  options,
+  onToggle,
+  ariaLabel,
+  disabled = false,
+}: {
+  values: readonly T[];
+  options: readonly (Option<T> & { hint?: string })[];
+  onToggle: (value: T, on: boolean) => void;
+  ariaLabel: string;
+  disabled?: boolean;
+}) {
+  return (
+    <div className="check-list check-group" role="group" aria-label={ariaLabel}>
+      {options.map((o) => (
+        <label key={String(o.value)} className="check-row" title={o.title}>
+          <input type="checkbox" checked={values.includes(o.value)} disabled={disabled} onChange={(e) => onToggle(o.value, e.target.checked)} />
+          <span>{o.label}</span>
+          {o.hint ? <span className="muted small">{o.hint}</span> : null}
+        </label>
+      ))}
+    </div>
+  );
+}
+
 /** Switch-styled checkbox. */
 export function Toggle({
   checked,
@@ -337,6 +367,51 @@ export async function commitSucceeded(result: unknown): Promise<boolean> {
   }
 }
 
+export interface CommitDraft {
+  draft: string;
+  /** The draft shows the stored value (nothing typed since), so a new stored value replaces it even while focused. */
+  mirrors: boolean;
+  error: string | null;
+  /** Bumped after a save so the stored value is adopted on the next render, when the parent has it. */
+  resync: number;
+}
+
+export type CommitDraftAction =
+  | { type: 'typed'; text: string }
+  | { type: 'value'; value: string; focused: boolean }
+  | { type: 'saved'; submitted: string }
+  | { type: 'rejected'; submitted: string; value: string }
+  | { type: 'escape'; value: string }
+  | { type: 'error'; error: string | null };
+
+export function initCommitDraft(value: string): CommitDraft {
+  return { draft: value, mirrors: true, error: null, resync: 0 };
+}
+
+/**
+ * CommitInput's draft. A saved value is normalised by the app ("1.5" ref is
+ * stored as 14 scrap and shown as "1.55"), so after a save the field takes the
+ * stored value, also when that value did not change and also while it keeps
+ * focus after Enter; otherwise it would keep showing text that is not in effect.
+ */
+export function commitDraftReducer(s: CommitDraft, a: CommitDraftAction): CommitDraft {
+  switch (a.type) {
+    case 'typed':
+      return { ...s, draft: a.text, mirrors: false };
+    case 'value':
+      return (!a.focused || s.mirrors) && s.draft !== a.value ? { ...s, draft: a.value, mirrors: true } : s;
+    case 'saved':
+      // Only when the user has not typed something else since.
+      return s.draft === a.submitted ? { ...s, mirrors: true, resync: s.resync + 1 } : s;
+    case 'rejected':
+      return s.draft === a.submitted ? { ...s, draft: a.value, mirrors: true, error: NOT_SAVED_MESSAGE } : s;
+    case 'escape':
+      return { ...s, draft: a.value, mirrors: true, error: null };
+    case 'error':
+      return s.error === a.error ? s : { ...s, error: a.error };
+  }
+}
+
 /**
  * Text input that keeps a local draft and commits on blur or Enter, so typing
  * does not fire a settings write per keystroke. Esc restores the saved value,
@@ -367,13 +442,11 @@ export function CommitInput({
   ariaLabel?: string;
   suffix?: ReactNode;
 }) {
-  const [draft, setDraft] = useState(value);
-  const [error, setError] = useState<string | null>(null);
+  const [state, dispatch] = useReducer(commitDraftReducer, value, initCommitDraft);
+  const { draft, error, resync } = state;
   const focused = useRef(false);
   const latestValue = useRef(value);
   latestValue.current = value;
-  const latestDraft = useRef(draft);
-  latestDraft.current = draft;
   const mounted = useRef(true);
   useEffect(() => {
     mounted.current = true;
@@ -381,23 +454,24 @@ export function CommitInput({
       mounted.current = false;
     };
   }, []);
+  // `resync` re-runs this after a save even when the stored text did not change;
+  // that render already holds the parent's updated settings.
   useEffect(() => {
-    if (!focused.current) setDraft(value);
-  }, [value]);
+    dispatch({ type: 'value', value, focused: focused.current });
+  }, [value, resync]);
   const commit = () => {
     if (draft === value) {
-      setError(null);
+      dispatch({ type: 'error', error: null });
       return;
     }
     const err = validate ? validate(draft) : null;
-    setError(err);
+    dispatch({ type: 'error', error: err });
     if (err) return;
     const submitted = draft;
     void commitSucceeded(onCommit(submitted)).then((ok) => {
-      // Only revert if the user has not typed something else since.
-      if (ok || !mounted.current || latestDraft.current !== submitted) return;
-      setDraft(latestValue.current);
-      setError(NOT_SAVED_MESSAGE);
+      if (!mounted.current) return;
+      if (ok) dispatch({ type: 'saved', submitted });
+      else dispatch({ type: 'rejected', submitted, value: latestValue.current });
     });
   };
   return (
@@ -415,7 +489,7 @@ export function CommitInput({
           onFocus={() => {
             focused.current = true;
           }}
-          onChange={(e) => setDraft(e.target.value)}
+          onChange={(e) => dispatch({ type: 'typed', text: e.target.value })}
           onBlur={() => {
             focused.current = false;
             commit();
@@ -425,8 +499,7 @@ export function CommitInput({
               e.preventDefault();
               commit();
             } else if (e.key === 'Escape') {
-              setDraft(value);
-              setError(null);
+              dispatch({ type: 'escape', value });
             }
           }}
         />

@@ -8,8 +8,9 @@ import type { IpcMain, IpcMainInvokeEvent } from 'electron';
 import { z } from 'zod';
 import type { Logger } from '../service/contracts';
 import { decodeHtmlBuffer } from '../shared/htmlDecode';
-import { MAIN_METHODS, SERVICE_METHODS, type AppInfo, type RpcMethod } from '../shared/rpc';
+import { MAIN_METHODS, SERVICE_METHODS, type AppInfo, type PushContract, type RpcMethod } from '../shared/rpc';
 import { validateSettingsPatch } from '../shared/settingsSchema';
+import { isValidSku } from '../shared/sku';
 import type { SecretName, SecretsStatus, Settings } from '../shared/types';
 import { isTrustedSenderUrl, MAX_IMPORT_BYTES, safeErrorMessage, sanitizeFileName } from './paths';
 import { MAX_SECRET_LENGTH, secretNameSchema } from './secrets';
@@ -28,10 +29,13 @@ export interface MainRpcDeps {
   settings: { get(): Settings; set(patch: unknown): Settings };
   secrets: { status(): SecretsStatus; set(name: SecretName, value: string | null): SecretsStatus };
   service: { callRaw(method: RpcMethod, params: unknown): Promise<unknown> };
-  showQuickEntry(): void;
+  /** With a SKU, the quick-entry window gets push 'ui.quickPrefill' once its page has loaded. */
+  showQuickEntry(sku?: string): void;
   /** Shows the dashboard and sends it push 'ui.openItem'. */
   openItemInDashboard(sku: string): void;
   appInfo(): AppInfo;
+  /** The current 'service.state' push (serviceStatePush of the host's status), for a page that loaded after it was sent. */
+  serviceState(): PushContract['service.state'] | null;
   isAllowedExternalUrl(url: string): boolean;
   openExternal(url: string): Promise<void>;
   dialogs: {
@@ -56,6 +60,9 @@ const secretsSetParams = z.object({
 });
 const linksOpenParams = z.object({ url: z.string().min(1).max(4096) });
 const openItemParams = z.object({ sku: z.string().trim().min(1).max(200).regex(/^\d+;\d+(;[a-z0-9-]+)*$/i, 'not a SKU') });
+// Same rule as the service's skuText (rpcHandlers.ts): the SKU is pushed to the renderer as is.
+const quickEntrySku = z.string().trim().min(1).max(300).toLowerCase().refine(isValidSku, 'not a SKU');
+const showQuickEntryParams = z.object({ sku: quickEntrySku.optional() }).nullish();
 const saveTextParams = z.object({
   suggestedName: z.string().max(255),
   text: z.string().max(MAX_SAVE_TEXT_CHARS),
@@ -72,14 +79,21 @@ function parseParams<T>(schema: z.ZodType<T>, params: unknown, method: string): 
   return r.data;
 }
 
-/** File types file.saveText may write (the save dialog offers exactly these). */
+/** File types file.saveText may write for a CSV export (the save dialog offers exactly these). */
 export const SAVE_EXTENSIONS: ReadonlySet<string> = new Set(['.csv', '.txt']);
+/** File types for a JSON backup (rules export), offered when the suggested name ends in .json. */
+export const JSON_SAVE_EXTENSIONS: ReadonlySet<string> = new Set(['.json', '.txt']);
 
 /** `name` with its extension replaced by .csv (kept when it already is .csv). */
 export function withCsvExtension(name: string): string {
   const ext = path.extname(name);
   if (ext.toLowerCase() === '.csv') return name;
   return `${ext ? name.slice(0, -ext.length) : name}.csv`;
+}
+
+/** True for a JSON backup name; anything else is offered as .csv. */
+export function isJsonExportName(name: string): boolean {
+  return path.extname(name).toLowerCase() === '.json';
 }
 
 function isHttpsUrl(url: string): boolean {
@@ -112,9 +126,15 @@ export function createRpcRouter(deps: MainRpcDeps): RpcRouter {
     switch (method) {
       case 'app.info':
         return deps.appInfo();
-      case 'app.showQuickEntry':
-        deps.showQuickEntry();
+      case 'app.serviceState':
+        // Answered by main itself: the service may be exactly what is down.
+        return deps.serviceState();
+      case 'app.showQuickEntry': {
+        const sku = parseParams(showQuickEntryParams, params, method)?.sku;
+        if (sku === undefined) deps.showQuickEntry();
+        else deps.showQuickEntry(sku);
         return { ok: true };
+      }
       case 'app.hideWindow':
         ctx.hideWindow();
         return { ok: true };
@@ -175,12 +195,14 @@ export function createRpcRouter(deps: MainRpcDeps): RpcRouter {
       }
       case 'file.saveText': {
         const p = parseParams(saveTextParams, params, method);
-        // Exports are CSV: the caller's name never decides the file type (no .bat/.hta/.url).
-        const name = withCsvExtension(sanitizeFileName(p.suggestedName, 'export.csv'));
+        // Exports are CSV, or a JSON backup: the caller's name never picks any other type (no .bat/.hta/.url).
+        const safe = sanitizeFileName(p.suggestedName, 'export.csv');
+        const json = isJsonExportName(safe);
+        const name = json ? safe : withCsvExtension(safe);
         const target = await deps.dialogs.saveFile(ctx.window, name);
         if (!target) return { saved: false, path: null };
-        if (!SAVE_EXTENSIONS.has(path.extname(target).toLowerCase())) {
-          throw new Error('Exports can only be saved as .csv or .txt files.');
+        if (!(json ? JSON_SAVE_EXTENSIONS : SAVE_EXTENSIONS).has(path.extname(target).toLowerCase())) {
+          throw new Error(json ? 'Backups can only be saved as .json or .txt files.' : 'Exports can only be saved as .csv or .txt files.');
         }
         await deps.files.writeText(target, p.text);
         return { saved: true, path: target };

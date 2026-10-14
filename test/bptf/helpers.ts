@@ -257,6 +257,9 @@ export class FakeHttp implements HttpClient {
   hostBlocked(host: string): string | null {
     return this.blocked.get(host) ?? null;
   }
+  blockHost(host: string, reason: string): void {
+    this.blocked.set(host, reason);
+  }
   unblockHost(host: string): void {
     this.blocked.delete(host);
   }

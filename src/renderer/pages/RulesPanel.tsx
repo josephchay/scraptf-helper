@@ -1,7 +1,8 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { Category, PriceRule, PriceRuleInput, RuleFilter } from '../../shared/types';
 import { CATEGORIES, CATEGORY_LABELS } from '../../shared/types';
 import { rpc } from '../api';
+import { checkRulesFile, RULES_JSON_MAX_CHARS, rulesImportToast, stripBom } from '../bulkModel';
 import { ChipGroup, ConfirmButton, Field, TriState } from '../components/Controls';
 import { Banner, EmptyState, ErrorBanner, LoadingBlock } from '../components/Feedback';
 import { Icon } from '../components/Icon';
@@ -23,11 +24,53 @@ export function RulesPanel() {
   const { toast, bumpData } = useApp();
   const rules = useRpcQuery('rules.list', undefined);
   const [editing, setEditing] = useState<PriceRule | 'new' | null>(null);
+  const [backupBusy, setBackupBusy] = useState(false);
+  const [skipped, setSkipped] = useState<string[] | null>(null);
+  const fileRef = useRef<HTMLInputElement>(null);
   const now = useNow(30_000);
 
   const after = () => {
     void rules.reload();
     bumpData();
+  };
+
+  // saveCsv() forces .csv; main writes a suggested *.json name as a JSON backup.
+  const exportRules = async () => {
+    setBackupBusy(true);
+    try {
+      const { json, suggestedName } = await rpc('rules.exportJson');
+      const r = await rpc('file.saveText', { suggestedName, text: json });
+      if (r.saved) toast(`Saved ${r.path ?? 'rules backup'}`, 'good');
+    } catch (e) {
+      toast(`Export failed: ${errorMessage(e)}`, 'bad');
+    } finally {
+      setBackupBusy(false);
+    }
+  };
+
+  // The file is read locally from the user's pick; only its text goes to the service.
+  const importRules = async (file: File) => {
+    const problem = checkRulesFile(file);
+    if (problem) {
+      toast(problem, 'bad');
+      return;
+    }
+    setBackupBusy(true);
+    // The list from an earlier import would read as this file's result.
+    setSkipped(null);
+    try {
+      const json = stripBom(await file.text());
+      if (json.length > RULES_JSON_MAX_CHARS) throw new Error('That file is larger than 5 MB, so it is not a rules backup.');
+      const r = await rpc('rules.importJson', { json });
+      const t = rulesImportToast(r);
+      toast(t.text, t.tone);
+      setSkipped(r.skipped.length ? r.skipped : null);
+      if (r.added) after();
+    } catch (e) {
+      toast(`Import failed: ${errorMessage(e)}`, 'bad');
+    } finally {
+      setBackupBusy(false);
+    }
   };
 
   const toggle = async (r: PriceRule, enabled: boolean) => {
@@ -57,6 +100,40 @@ export function RulesPanel() {
         <strong>candidate</strong> to check on scrap.tf by hand. The app cannot see scrap.tf&apos;s stock, and rule estimates never reach High confidence.
       </Banner>
 
+      <div className="section-actions">
+        {editing ? null : (
+          <button type="button" className="btn primary" onClick={() => setEditing('new')}>
+            <Icon name="plus" size={14} /> New rule
+          </button>
+        )}
+        <span className="section-actions-spacer" />
+        <button
+          type="button"
+          className="btn"
+          disabled={backupBusy || !rules.data?.length}
+          title={rules.data?.length ? 'Save every rule to a .json file, e.g. to move to another computer' : 'No rules to export yet'}
+          onClick={() => void exportRules()}
+        >
+          <Icon name="download" size={14} /> Export rules
+        </button>
+        <button type="button" className="btn" disabled={backupBusy} title="Add the rules from a backup made with Export rules. Existing rules are kept." onClick={() => fileRef.current?.click()}>
+          <Icon name="folder" size={14} /> Import rules
+        </button>
+        <input
+          ref={fileRef}
+          type="file"
+          // Export rules can also be saved as .txt (main's Text filter).
+          accept=".json,.txt,application/json,text/plain"
+          hidden
+          onChange={(e) => {
+            const f = e.target.files?.[0];
+            // Cleared so picking the same file again fires a change.
+            e.target.value = '';
+            if (f) void importRules(f);
+          }}
+        />
+      </div>
+
       {editing ? (
         <RuleEditor
           key={editing === 'new' ? 'new' : editing.id}
@@ -69,13 +146,28 @@ export function RulesPanel() {
             setEditing(null);
           }}
         />
-      ) : (
-        <div className="section-actions">
-          <button type="button" className="btn primary" onClick={() => setEditing('new')}>
-            <Icon name="plus" size={14} /> New rule
-          </button>
-        </div>
-      )}
+      ) : null}
+
+      {skipped ? (
+        <Banner tone="warn" icon="warning">
+          <div className="import-skipped">
+            <div className="section-head">
+              <strong>
+                {skipped.length === 1 ? '1 rule was' : `${skipped.length} rules were`} skipped from the backup
+              </strong>
+              <button type="button" className="icon-btn" aria-label="Dismiss" title="Dismiss" onClick={() => setSkipped(null)}>
+                <Icon name="close" size={14} />
+              </button>
+            </div>
+            <ul className="skipped-list small">
+              {skipped.slice(0, 50).map((s, i) => (
+                <li key={i}>{s}</li>
+              ))}
+              {skipped.length > 50 ? <li className="muted">…and {skipped.length - 50} more</li> : null}
+            </ul>
+          </div>
+        </Banner>
+      ) : null}
 
       {rules.error ? <ErrorBanner message={rules.error} onRetry={() => void rules.reload()} /> : null}
       {rules.loading ? (

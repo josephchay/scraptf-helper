@@ -1,0 +1,104 @@
+/* Row context menu (ItemMenu, F9); also the drawer's buyer actions menu. */
+
+.item-menu {
+  position: fixed;
+  z-index: 150; /* above the drawer (80), below toasts (200) and tooltips */
+  width: max-content;
+  min-width: 220px;
+  max-width: min(360px, calc(100vw - 16px));
+  padding: 4px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: var(--surface);
+  box-shadow: var(--shadow);
+  font-size: 12.5px;
+  outline: none;
+}
+
+.item-menu-title {
+  max-width: 100%;
+  padding: 5px 8px 4px;
+  overflow: hidden;
+  color: var(--text-muted);
+  font-size: 11.5px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.item-menu-heading {
+  padding: 4px 8px 2px;
+  color: var(--text-faint);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.item-menu-sep {
+  height: 1px;
+  margin: 4px 2px;
+  background: var(--border);
+}
+
+.item-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-height: 28px;
+  padding: 4px 8px;
+  border: 0;
+  border-radius: 5px;
+  background: none;
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+
+.item-menu-item:focus {
+  outline: none;
+}
+
+.item-menu-item:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: -2px;
+}
+
+.item-menu-item.active {
+  background: var(--row-selected);
+}
+
+.item-menu-item[aria-disabled='true'] {
+  color: var(--text-muted);
+  cursor: default;
+}
+
+.item-menu-item > .icon {
+  color: var(--text-muted);
+}
+
+.item-menu-icon-gap {
+  flex-shrink: 0;
+  width: 14px;
+}
+
+.item-menu-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.item-menu-hint {
+  flex-shrink: 0;
+  color: var(--text-faint);
+  font-size: 11px;
+}
+
+.item-menu-item.tone-warn > .icon,
+.item-menu-item.tone-warn .item-menu-label,
+.item-menu-item.tone-warn .item-menu-hint {
+  color: var(--warn);
+}

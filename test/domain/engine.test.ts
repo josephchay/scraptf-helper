@@ -110,6 +110,8 @@ describe('engine end to end', () => {
       revenueScrap: 108,
       profitScrap: 18,
       margin: 0.2,
+      // 99 is the largest cost that still leaves 9 scrap (minProfitScrap) at an 8%+ margin.
+      maxCostScrap: 99,
       buyerCount: 3,
       status: 'profitable',
       profitTier: 'ref2',
@@ -125,7 +127,7 @@ describe('engine end to end', () => {
     expect(events.map((e) => e.kind).sort()).toEqual(['appeared', 'notified']);
     expect(events.find((e) => e.kind === 'appeared')!.summary).toBe('profit 2.00 ref, 20% margin (bot, online)');
     expect(h.events.changed).toEqual([{ appeared: 1, changed: 0, gone: 0, at: T0 }]);
-    expect(h.events.notified).toEqual([{ title: 'Profit: Team Captain', body: '2.00 ref (20%) — sell to bot buy order', sku: '378;6' }]);
+    expect(h.events.notified).toEqual([{ title: 'Profit: Team Captain', body: '2.00 ref (20%) — sell to bot buy order, pay up to 11.00 ref', sku: '378;6' }]);
     expect(h.engine.stats()).toMatchObject({ lastRunAt: T0, evaluated: 1 });
     expect(h.engine.keyPrice()).toMatchObject({ valueScrap: K, source: 'pricedb' });
   });
@@ -294,6 +296,103 @@ describe('generic any-effect unusual buy orders', () => {
     expect(o.status).toBe('profitable');
     expect(o.revenueScrap).toBe(12 * K);
     h.engine.stop();
+  });
+
+  const UNUSUALS_RULE = { name: 'Unusuals', filter: { categories: ['unusuals' as const] }, costKeys: 5, costScrap: 0, observedAt: T0 };
+  const genericOrder = (keys: number): Listing =>
+    makeListing({ id: 'generic', steamid: 'G', sku: '378;5', baseSku: '378;5', keys, metalScrap: 0, itemName: 'Unusual Team Captain' });
+  const eventsFor = (repo: Repo, key: string): string[] =>
+    repo
+      .listEvents({ limit: 1000 })
+      .filter((e) => e.key === key)
+      .map((e) => e.kind);
+
+  it('does not flap a rule row for an effect SKU whose only orders are generic ones', () => {
+    const h = setup();
+    h.repo.upsertListings([genericOrder(12)]);
+    const rule = h.repo.upsertRule(UNUSUALS_RULE);
+    const key = `378;5;u13|rule:${rule.id}`;
+    h.engine.start();
+    h.timers.advance(1000);
+    expect(h.repo.getOpportunity(key)).toBeNull();
+    // e.g. a PriceDB row for the effect SKU marks it dirty; the full sweep cannot see it.
+    for (let i = 0; i < 3; i++) {
+      h.engine.markDirty(['378;5;u13']);
+      h.timers.advance(1000);
+      expect(h.repo.getOpportunity(key)).toBeNull();
+      h.timers.advance(SWEEP_INTERVAL_MS);
+      expect(h.repo.getOpportunity(key)).toBeNull();
+    }
+    expect(eventsFor(h.repo, key)).toEqual([]);
+    // The generic base itself still gets its rule row.
+    expect(h.repo.getOpportunity(`378;5|rule:${rule.id}`)?.status).toBe('profitable');
+    h.engine.stop();
+  });
+
+  it('keeps a rule row for an effect SKU with its own orders stable across dirty runs and sweeps', () => {
+    const h = setup();
+    h.repo.upsertListings([
+      genericOrder(12),
+      makeListing({ id: 'own', steamid: 'O', sku: '378;5;u13', baseSku: '378;5;u13', keys: 1, metalScrap: 0 }),
+    ]);
+    const rule = h.repo.upsertRule(UNUSUALS_RULE);
+    const key = `378;5;u13|rule:${rule.id}`;
+    h.engine.start();
+    h.timers.advance(1000);
+    expect(h.repo.getOpportunity(key)).toMatchObject({ status: 'profitable', revenueScrap: 12 * K });
+    h.engine.markDirty(['378;5;u13']);
+    h.timers.advance(1000);
+    h.timers.advance(SWEEP_INTERVAL_MS);
+    expect(h.repo.getOpportunity(key)?.status).toBe('profitable');
+    expect(eventsFor(h.repo, key).filter((k) => k !== 'notified')).toEqual(['appeared']);
+    h.engine.stop();
+  });
+
+  it('sees a new generic order for a rule-only effect SKU on the next tick, not 10 minutes later', () => {
+    const h = setup();
+    h.repo.upsertListings([makeListing({ id: 'own', steamid: 'O', sku: '378;5;u13', baseSku: '378;5;u13', keys: 1, metalScrap: 0 })]);
+    const rule = h.repo.upsertRule(UNUSUALS_RULE);
+    const key = `378;5;u13|rule:${rule.id}`;
+    h.engine.start();
+    h.timers.advance(1000);
+    h.timers.advance(SWEEP_INTERVAL_MS); // a sweep caches bestRaw (1 key, below the 5-key rule cost)
+    expect(h.repo.getOpportunity(key)).toBeNull();
+
+    h.repo.upsertListings([genericOrder(12)]);
+    h.engine.markDirty(['378;5']);
+    h.timers.advance(1000);
+    expect(h.repo.getOpportunity(key)).toMatchObject({ status: 'profitable', revenueScrap: 12 * K, profitScrap: 7 * K });
+    h.timers.advance(SWEEP_INTERVAL_MS);
+    expect(h.repo.getOpportunity(key)?.status).toBe('profitable');
+    h.engine.stop();
+  });
+
+  it('sees a new generic order for a rule-only effect SKU when a full run consumes the dirty mark', async () => {
+    const h = setup();
+    h.repo.upsertListings([makeListing({ id: 'own', steamid: 'O', sku: '378;5;u13', baseSku: '378;5;u13', keys: 1, metalScrap: 0 })]);
+    const rule = h.repo.upsertRule(UNUSUALS_RULE);
+    const key = `378;5;u13|rule:${rule.id}`;
+    await h.engine.runNow();
+    expect(h.repo.getOpportunity(key)).toBeNull();
+    h.clock.advance(SWEEP_INTERVAL_MS);
+    h.repo.upsertListings([genericOrder(12)]);
+    h.engine.markDirty(['378;5']);
+    await h.engine.runNow();
+    expect(h.repo.getOpportunity(key)?.status).toBe('profitable');
+  });
+});
+
+describe('notes keywords in the engine', () => {
+  it('runs (and flags the order) when a keyword contains a hyphen', async () => {
+    const h = setup({ settings: { profit: { notesKeywords: ['paint', 'pre-fest'] } } });
+    const { priceId } = seedTeamCaptain(h.repo);
+    h.repo.upsertListings([makeListing({ id: 'tc-notes', steamid: 'S9', metalScrap: 110, details: 'pre-fest only, buying fast' })]);
+    await expect(h.engine.runNow()).resolves.toMatchObject({ evaluated: 1 });
+    const o = h.repo.getOpportunity(`378;6|price:${priceId}`)!;
+    expect(o.status).toBe('profitable');
+    // The flagged order still counts as an exit, with the flag.
+    expect(o.bestOrder).toMatchObject({ listingId: 'tc-notes' });
+    expect(o.bestOrder?.flags).toContain('notes-flag');
   });
 });
 
@@ -747,6 +846,16 @@ describe('explicitInput', () => {
     expect(explicitInput({ ...base, sku: '378;5;u13;p16738740' })!.target.anyEffectBase).toBe('378;5');
     expect(explicitInput({ ...base, sku: '378;5' })!.target.anyEffectBase).toBeNull();
     expect(explicitInput({ ...base, sku: '378;6' })!.target.anyEffectBase).toBeNull();
+  });
+
+  it('rejects SKUs whose tokens fromString would silently drop', () => {
+    const base = { id: 9, name: '', costKeys: 0, costScrap: 10, source: 'user' as const, observedAt: T0, note: null, importBatch: null, special: null, assetId: null, stock: null };
+    expect(explicitInput({ ...base, sku: '205;11;KT-3' })).toBeNull();
+    expect(explicitInput({ ...base, sku: '378;6;UNCRAFTABLE' })).toBeNull();
+    expect(explicitInput({ ...base, sku: '378;5;U13' })).toBeNull();
+    expect(explicitInput({ ...base, sku: '378;6;uncratable' })).toBeNull();
+    expect(explicitInput({ ...base, sku: '205;11;kt-3' })!.sku).toBe('205;11;kt-3');
+    expect(explicitInput({ ...base, sku: '378;6;uncraftable' })!.sku).toBe('378;6;uncraftable');
   });
 
   it('rejects broken costs', () => {

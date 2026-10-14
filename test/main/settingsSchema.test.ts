@@ -287,3 +287,54 @@ describe('validateSettingsPatch / applySettingsPatch', () => {
     expect(next.keyPrice.mode).toBe('manual');
   });
 });
+
+describe('v0.2 settings (reference age, suspect margin, notification controls)', () => {
+  const DAY = 24 * 60 * 60 * 1000;
+
+  it('has the documented defaults', () => {
+    expect(DEFAULT_SETTINGS.profit.referenceMaxAgeMs).toBe(30 * DAY);
+    expect(DEFAULT_SETTINGS.profit.suspectMargin).toBe(2);
+    expect(DEFAULT_SETTINGS.notifications.inputKinds).toEqual(['user', 'import', 'rule']);
+    expect(DEFAULT_SETTINGS.notifications.silent).toBe(false);
+  });
+
+  it('fills them in for a settings file written before v0.2, without reporting them', () => {
+    const raw = clone() as unknown as Record<string, any>;
+    delete raw.profit.referenceMaxAgeMs;
+    delete raw.profit.suspectMargin;
+    delete raw.notifications.inputKinds;
+    delete raw.notifications.silent;
+    const { settings, invalid } = parseSettingsWithReport(raw);
+    expect(settings).toEqual(DEFAULT_SETTINGS);
+    expect(invalid).toEqual([]);
+  });
+
+  it('falls back per field when a stored value is out of range', () => {
+    const raw = clone() as unknown as Record<string, any>;
+    raw.profit.referenceMaxAgeMs = 366 * DAY;
+    raw.profit.suspectMargin = -1;
+    raw.notifications.silent = 'yes';
+    const { settings, invalid } = parseSettingsWithReport(raw);
+    expect(settings.profit.referenceMaxAgeMs).toBe(30 * DAY);
+    expect(settings.profit.suspectMargin).toBe(2);
+    expect(settings.notifications.silent).toBe(false);
+    expect(invalid.sort()).toEqual(['notifications.silent', 'profit.referenceMaxAgeMs', 'profit.suspectMargin']);
+  });
+
+  it('keeps the valid, de-duplicated input kinds', () => {
+    const raw = clone() as unknown as Record<string, any>;
+    raw.notifications.inputKinds = ['user', 'bogus', 'user', 'rule', 7];
+    expect(parseSettings(raw).notifications.inputKinds).toEqual(['user', 'rule']);
+    raw.notifications.inputKinds = [];
+    expect(parseSettings(raw).notifications.inputKinds).toEqual([]);
+  });
+
+  it('validates patches: ranges, 0 turning the margin guard off, and arrays replacing whole', () => {
+    expect(applySettingsPatch(clone(), { profit: { suspectMargin: 0, referenceMaxAgeMs: 0 } }).profit).toMatchObject({ suspectMargin: 0, referenceMaxAgeMs: 0 });
+    expect(applySettingsPatch(clone(), { profit: { suspectMargin: 1000, referenceMaxAgeMs: 365 * DAY } }).profit.suspectMargin).toBe(1000);
+    expect(() => applySettingsPatch(clone(), { profit: { suspectMargin: 1001 } })).toThrow(/profit\.suspectMargin/);
+    expect(() => applySettingsPatch(clone(), { profit: { referenceMaxAgeMs: 1.5 } })).toThrow(/profit\.referenceMaxAgeMs/);
+    expect(applySettingsPatch(clone(), { notifications: { inputKinds: ['user'], silent: true } }).notifications).toMatchObject({ inputKinds: ['user'], silent: true });
+    expect(() => applySettingsPatch(clone(), { notifications: { inputKinds: ['everything'] } })).toThrow(/notifications\.inputKinds/);
+  });
+});

@@ -86,6 +86,7 @@ describe('exports', () => {
     revenueScrap: 650,
     profitScrap: 71,
     margin: 0.12262,
+    maxCostScrap: null,
     confidence: 72,
     confidenceLevel: 'high',
     flags: ['outlier-best', 'notes-flag'],
@@ -135,6 +136,18 @@ describe('exports', () => {
     expect(second![col('profit')]).toBe("'-1.00 ref");
     expect(second![col('margin_pct')]).toBe('');
     expect(second![col('buyer')]).toBe('');
+  });
+
+  it('carries the pay-up-to ceiling as a number and as scrap.tf shows it (F1)', () => {
+    const rows = parseCsv(opportunitiesCsv([{ ...opp, maxCostScrap: 650 }, { ...opp, key: 'k2', maxCostScrap: 81 }, { ...opp, key: 'k3', maxCostScrap: null }], 567));
+    const [header, ...body] = rows;
+    const col = (name: string) => header!.indexOf(name);
+    expect(header!.slice(col('margin_pct'), col('buyers') + 1)).toEqual(['margin_pct', 'pay_up_to_ref', 'pay_up_to', 'buyers']);
+    expect(body.map((r) => [r[col('pay_up_to_ref')], r[col('pay_up_to')]])).toEqual([
+      ['72.22', '1 key 9.22 ref'],
+      ['9', '9.00 ref'],
+      ['', ''],
+    ]);
   });
 
   it('exports events', () => {

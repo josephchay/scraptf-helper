@@ -223,6 +223,34 @@ describe('migrations', () => {
     expect(c).toBeUndefined();
   });
 
+  it('adds the pay-up-to column to a version 1 database without losing its rows (V2)', () => {
+    const t = tmp();
+    const path = t.file();
+    const raw = new DatabaseSync(path);
+    expect(migrate(raw, MIGRATIONS.slice(0, 1))).toEqual({ from: 0, to: 1, applied: [1] });
+    raw
+      .prepare(
+        'INSERT INTO opportunities (key, sku, name, category, input_ref, input_kind, confidence_level, refs, profit_tier, status, input_observed_at, first_seen_at, updated_at) ' +
+          "VALUES ('378;6|price:1', '378;6', 'Team Captain', 'hats', 'price:1', 'user', 'high', '{\"pricedb\":null,\"community\":null}', 'ref2', 'profitable', 1, 2, 3)",
+      )
+      .run();
+    raw.close();
+
+    const repo = track(openRepo(path));
+    const old = repo.getOpportunity('378;6|price:1')!;
+    expect(old).toMatchObject({ sku: '378;6', name: 'Team Captain', status: 'profitable', maxCostScrap: null });
+    repo.upsertOpportunities([{ ...old, maxCostScrap: 99 }]);
+    expect(repo.getOpportunity('378;6|price:1')!.maxCostScrap).toBe(99);
+
+    const check = track(new DatabaseSync(path));
+    expect(userVersion(check)).toBe(2);
+    const cols = check
+      .prepare('PRAGMA table_info(opportunities)')
+      .all()
+      .map((r) => r['name']);
+    expect(cols).toContain('max_cost_scrap');
+  });
+
   it('refuses a database written by a newer schema version', () => {
     const t = tmp();
     const path = t.file();

@@ -28,7 +28,8 @@ import { isAllowedExternalUrl } from '../shared/links';
 import type { AppInfo, PushContract } from '../shared/rpc';
 import type { AppStatus, HealthReport } from '../shared/types';
 import { acquireMachineLock, type MachineLock } from './instanceLock';
-import { createRpcRouter, registerRpcHandler } from './ipc';
+import { createRpcRouter, isJsonExportName, registerRpcHandler } from './ipc';
+import { clip, notificationContent, notificationOptions } from './notify';
 import { APP_USER_MODEL_ID, parseLaunchArgs, readFileBounded, resolveAppPaths, safeErrorMessage, type AppPaths } from './paths';
 import { APP_SCHEME_PRIVILEGES, registerAppProtocol } from './protocol';
 import { createSecretsStore, type SecretsStore } from './secrets';
@@ -81,10 +82,6 @@ let lastStatus: AppStatus | null = null;
 let machineLock: MachineLock | null = null;
 const liveNotifications = new Set<Notification>();
 
-function clip(s: string, max: number): string {
-  return s.length > max ? `${s.slice(0, max - 3)}...` : s;
-}
-
 function writeReport(file: string, report: unknown): void {
   try {
     mkdirSync(path.dirname(file), { recursive: true });
@@ -136,21 +133,15 @@ function applyLoginItem(openAtLogin: boolean): void {
 // Pushes from the service
 // ---------------------------------------------------------------------------
 
-const notifySchema = z.looseObject({
-  title: z.string().min(1),
-  body: z.string(),
-  sku: z.string().nullable().catch(null),
-});
-
 function showNotification(rt: Runtime, payload: unknown): void {
-  const parsed = notifySchema.safeParse(payload);
-  if (!parsed.success) {
+  const data = notificationContent(payload);
+  if (!data) {
     log.warn('ignored a malformed notify push');
     return;
   }
-  if (args.smokeTest || !rt.settings.get().notifications.enabled || !Notification.isSupported()) return;
-  const data: PushContract['notify'] = { title: clip(parsed.data.title, 120), body: clip(parsed.data.body, 400), sku: parsed.data.sku };
-  const n = new Notification({ title: data.title, body: data.body, icon: rt.paths.iconPng });
+  const prefs = rt.settings.get().notifications;
+  if (args.smokeTest || !prefs.enabled || !Notification.isSupported()) return;
+  const n = new Notification(notificationOptions(data, prefs, rt.paths.iconPng));
   // Holding a reference keeps the click handler alive until the toast is gone.
   liveNotifications.add(n);
   const release = () => liveNotifications.delete(n);
@@ -228,6 +219,7 @@ function handlePush(rt: Runtime, event: keyof PushContract, payload: unknown): v
       return;
     case 'settings.changed':
     case 'ui.openItem':
+    case 'ui.quickPrefill':
     case 'service.state':
       // Main owns these; the service host already drops them (MAIN_ONLY_PUSH_EVENTS).
       return;
@@ -253,13 +245,11 @@ async function pickPath(win: unknown, options: OpenDialogOptions): Promise<strin
 async function pickSavePath(win: unknown, suggestedName: string): Promise<string | null> {
   const parent = parentOf(win);
   // Fixed types: the caller's name never decides what kind of file gets written (ipc.ts checks the result too).
+  const json = isJsonExportName(suggestedName);
   const options: SaveDialogOptions = {
-    title: 'Save export',
+    title: json ? 'Save backup' : 'Save export',
     defaultPath: path.join(app.getPath('downloads'), suggestedName),
-    filters: [
-      { name: 'CSV', extensions: ['csv'] },
-      { name: 'Text', extensions: ['txt'] },
-    ],
+    filters: [json ? { name: 'JSON', extensions: ['json'] } : { name: 'CSV', extensions: ['csv'] }, { name: 'Text', extensions: ['txt'] }],
   };
   const r = parent ? await dialog.showSaveDialog(parent, options) : await dialog.showSaveDialog(options);
   return r.canceled || !r.filePath ? null : r.filePath;
@@ -577,12 +567,13 @@ function start(): void {
       settings,
       secrets,
       service: host,
-      showQuickEntry: () => rt.windows.showQuickEntry(),
+      showQuickEntry: (sku) => rt.windows.showQuickEntry(sku),
       openItemInDashboard: (sku) => {
         rt.windows.hideQuickEntry();
         openItemInDashboard(rt, sku);
       },
       appInfo,
+      serviceState: () => serviceStatePush(host.status(), Date.now()),
       isAllowedExternalUrl,
       openExternal: (url) => shell.openExternal(url),
       dialogs: {

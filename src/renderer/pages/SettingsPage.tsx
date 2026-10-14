@@ -1,15 +1,33 @@
-import { useState, type ReactNode } from 'react';
+import { useRef, useState, type ReactNode } from 'react';
 import { parsePrice } from '../../shared/currency';
-import type { SecretName, Settings } from '../../shared/types';
+import type { InputKind, SecretName, Settings } from '../../shared/types';
 import { rpc } from '../api';
-import { CommitInput, Field, Segmented, Toggle } from '../components/Controls';
+import { CheckGroup, CommitInput, Field, Segmented, Toggle } from '../components/Controls';
 import { ExternalLink } from '../components/ExternalLink';
 import { Banner, LoadingBlock } from '../components/Feedback';
 import { Icon } from '../components/Icon';
 import { accelLabel, errorMessage, fmtDateTime, fmtRefOnly, parseSteamIdList } from '../format';
 import { useApp } from '../hooks/appContext';
 import { useRpcQuery } from '../hooks/useRpc';
-import { MIN_MARGIN_PCT, MIN_PROFIT_PCT_OF_COST, numberValidator, userAgentPreview, validateContactUrl, validateHotkey } from '../settingsFields';
+import {
+  daysTextToMs,
+  inputKindsHint,
+  MIN_MARGIN_PCT,
+  MIN_PROFIT_PCT_OF_COST,
+  msToDaysText,
+  NOTIFY_INPUT_KINDS,
+  numberValidator,
+  pctTextToRatio,
+  ratioToPctText,
+  REFERENCE_MAX_AGE_DAYS,
+  referenceAgeHint,
+  setInputKind,
+  SUSPECT_MARGIN_PCT,
+  suspectMarginHint,
+  userAgentPreview,
+  validateContactUrl,
+  validateHotkey,
+} from '../settingsFields';
 
 const SECTIONS = [
   ['set-access', 'backpack.tf access'],
@@ -305,6 +323,28 @@ function ProfitSection({ s }: { s: Settings }) {
           <CommitInput id="p-stale" inputMode="numeric" value={String(Math.round(p.inputStaleMs / 60_000))} validate={numberValidator(1, 60 * 24 * 30)} onCommit={(v) => set({ inputStaleMs: Math.round(Number(v)) * 60_000 })} suffix="min" />
         </Field>
       </div>
+      <div className="form-grid two">
+        <Field label="Ignore reference prices older than" htmlFor="p-refage" hint={referenceAgeHint(p.referenceMaxAgeMs)}>
+          <CommitInput
+            id="p-refage"
+            inputMode="decimal"
+            value={msToDaysText(p.referenceMaxAgeMs)}
+            validate={numberValidator(REFERENCE_MAX_AGE_DAYS.min, REFERENCE_MAX_AGE_DAYS.max)}
+            onCommit={(v) => set({ referenceMaxAgeMs: daysTextToMs(v) })}
+            suffix="days"
+          />
+        </Field>
+        <Field label="Suspect margin above" htmlFor="p-suspect" hint={suspectMarginHint(p.suspectMargin)}>
+          <CommitInput
+            id="p-suspect"
+            inputMode="decimal"
+            value={ratioToPctText(p.suspectMargin)}
+            validate={numberValidator(SUSPECT_MARGIN_PCT.min, SUSPECT_MARGIN_PCT.max)}
+            onCommit={(v) => set({ suspectMargin: pctTextToRatio(v) })}
+            suffix="%"
+          />
+        </Field>
+      </div>
       <Field label="Buyer note keywords" htmlFor="p-notes" hint="Comma separated. Orders whose note mentions one are flagged and lose confidence.">
         <CommitInput
           id="p-notes"
@@ -327,6 +367,23 @@ function NotifySection({ s }: { s: Settings }) {
   const { updateSettings } = useApp();
   const n = s.notifications;
   const set = (patch: Partial<Settings['notifications']>) => updateSettings({ notifications: patch });
+  // Arrays replace whole, so a second tick before the first save returns must build on the first
+  // one. A ref, because both ticks can run before React re-renders.
+  const sent = useRef<{ base: InputKind[]; next: InputKind[] } | null>(null);
+  const [, rerender] = useState(0);
+  const currentKinds = () => (sent.current && sent.current.base === n.inputKinds ? sent.current.next : n.inputKinds);
+  const toggleKind = (kind: InputKind, on: boolean) => {
+    const mark = { base: n.inputKinds, next: setInputKind(currentKinds(), kind, on) };
+    sent.current = mark;
+    rerender((x) => x + 1);
+    void set({ inputKinds: mark.next }).then((r) => {
+      if (!r && sent.current === mark) {
+        sent.current = null;
+        rerender((x) => x + 1);
+      }
+    });
+  };
+  const kinds = currentKinds();
   return (
     <Section id="set-notify" title="Notifications">
       <Toggle checked={n.enabled} onChange={(enabled) => set({ enabled })} label="Desktop notifications for new profitable items" />
@@ -341,6 +398,10 @@ function NotifySection({ s }: { s: Settings }) {
           <CommitInput id="n-dedup" inputMode="numeric" value={String(Math.round(n.dedupMs / 60_000))} validate={numberValidator(1, 60 * 24)} onCommit={(v) => set({ dedupMs: Math.round(Number(v)) * 60_000 })} suffix="min" />
         </Field>
       </div>
+      <Field label="Notify for" hint={inputKindsHint(kinds)}>
+        <CheckGroup ariaLabel="Notify for these inputs" values={kinds} options={NOTIFY_INPUT_KINDS} onToggle={toggleKind} />
+      </Field>
+      <Toggle checked={n.silent} onChange={(silent) => void set({ silent })} label="Silent notifications" description="Shown without the Windows notification sound." />
     </Section>
   );
 }

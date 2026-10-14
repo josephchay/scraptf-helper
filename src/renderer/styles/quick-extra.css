@@ -1,0 +1,123 @@
+/* Quick entry: live preview, pay-up-to and link row (F2). */
+
+/* The key hints give way before the title when the window is narrow (mock pill shown). */
+.quick-head h1 {
+  white-space: nowrap;
+}
+
+.quick-keys {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.quick-row .btn {
+  flex-shrink: 0;
+}
+
+.quick-preview {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-2);
+  transition: border-color 0.12s;
+}
+
+/* Typed price at or under the ceiling. */
+.quick-preview.under {
+  border-color: var(--good);
+  box-shadow: inset 3px 0 0 var(--good);
+}
+
+.qp-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.qp-head .item-name-wrap {
+  min-width: 0;
+  flex: 1;
+}
+
+.qp-busy {
+  flex-shrink: 0;
+  width: 12px;
+  height: 12px;
+  border: 2px solid var(--border-strong);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+.qp-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px 8px;
+  min-height: 20px;
+}
+
+.qp-label {
+  min-width: 64px;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.qp-line .buyer-name {
+  display: inline-block;
+  max-width: 130px;
+  white-space: nowrap;
+}
+
+.qp-count {
+  margin-left: auto;
+}
+
+.qp-ceiling .money {
+  font-size: 14px;
+}
+
+.quick-preview.under .qp-ceiling .money {
+  color: var(--good);
+}
+
+.qp-foot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 10px;
+  padding-top: 6px;
+  border-top: 1px solid var(--border-soft);
+}
+
+.qp-links {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px 10px;
+  min-width: 0;
+  font-size: 12px;
+}
+
+.qp-copy {
+  display: inline-flex;
+  gap: 2px;
+  margin-left: auto;
+}
+
+.qp-copy .btn.small {
+  height: 22px;
+  padding: 0 6px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .qp-busy {
+    animation: none;
+  }
+}

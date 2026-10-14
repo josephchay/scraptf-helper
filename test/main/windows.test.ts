@@ -48,6 +48,7 @@ const fake = vi.hoisted(() => {
     destroyed = false;
     minimized = false;
     loaded: string | null = null;
+    loads = 0;
     position: number[] = [];
     alwaysOnTop: unknown[] = [];
     constructor(public opts: Record<string, any>) {
@@ -56,6 +57,7 @@ const fake = vi.hoisted(() => {
     }
     loadURL(url: string) {
       this.loaded = url;
+      this.loads++;
       return Promise.resolve();
     }
     show() {
@@ -112,7 +114,7 @@ vi.mock('electron', () => ({
   },
 }));
 
-const { createWindowManager, hardenSession, hardenWebContents, windowWebPreferences, DARK_BACKGROUND } = await import(
+const { createWindowManager, hardenSession, hardenWebContents, windowWebPreferences, DARK_BACKGROUND, MAX_CRASH_RELOADS, CRASH_RELOAD_WINDOW_MS } = await import(
   '../../src/main/windows'
 );
 
@@ -231,9 +233,10 @@ describe('hardenSession', () => {
 });
 
 describe('window manager', () => {
-  function manager(over: { hideOnClose?: boolean; quitting?: boolean } = {}) {
+  function manager(over: { hideOnClose?: boolean; quitting?: boolean; now?: () => number } = {}) {
     const onDashboardClosed = vi.fn();
     const wm = createWindowManager({
+      now: over.now,
       preloadPath: 'C:/app/dist/preload.cjs',
       iconPath: 'C:/app/assets/icon.png',
       devTools: false,
@@ -346,7 +349,7 @@ describe('window manager', () => {
     const q = fake.FakeWin.all[0]!;
     expect(q.opts).toMatchObject({
       width: 460,
-      height: 380,
+      height: 420,
       frame: false,
       alwaysOnTop: true,
       skipTaskbar: true,
@@ -355,7 +358,7 @@ describe('window manager', () => {
     });
     expect(q.opts.webPreferences.additionalArguments).toEqual([`${WINDOW_KIND_ARG}quick-entry`]);
     expect(q.loaded).toBe(QUICK_ENTRY_URL);
-    expect(q.position).toEqual([1920 + (2560 - 460) / 2, (1400 - 380) / 2]);
+    expect(q.position).toEqual([1920 + (2560 - 460) / 2, (1400 - 420) / 2]);
     expect(q.visible).toBe(false);
     q.emit('ready-to-show');
     expect(q.visible).toBe(true);
@@ -400,6 +403,101 @@ describe('window manager', () => {
     expect(wm.windowFor(q.webContents as never)).toBe(q);
   });
 
+  const gone = (w: Win, reason = 'crashed') => w.webContents.emit('render-process-gone', {}, { reason, exitCode: 1 });
+
+  it('reloads a crashed dashboard renderer and holds pushes for the new page', () => {
+    const { wm, onDashboardClosed } = manager({ hideOnClose: false });
+    const w = wm.showDashboard() as unknown as Win;
+    w.emit('ready-to-show');
+    w.webContents.emit('did-finish-load');
+    expect(w.loads).toBe(1);
+
+    gone(w, 'oom');
+    expect(w.loads).toBe(2);
+    expect(w.loaded).toBe(DASHBOARD_URL);
+    // Same window: destroying it would quit the app when close-to-tray is off.
+    expect(w.destroyed).toBe(false);
+    expect(onDashboardClosed).not.toHaveBeenCalled();
+    expect(wm.showDashboard()).toBe(w);
+
+    // A notification click right after the crash reaches the reloaded page.
+    wm.sendToDashboard('ui.openItem', { sku: '5021;6' });
+    expect(w.webContents.sent).toEqual([]);
+    w.webContents.emit('did-finish-load');
+    expect(w.webContents.sent).toEqual([['push', 'ui.openItem', { sku: '5021;6' }]]);
+  });
+
+  it('does not reload after a clean exit', () => {
+    const { wm } = manager();
+    const w = wm.ensureDashboard(false) as unknown as Win;
+    gone(w, 'clean-exit');
+    expect(w.loads).toBe(1);
+  });
+
+  it('leaves a renderer that dies while the app quits alone', async () => {
+    const { wm } = manager({ quitting: true });
+    const w = wm.ensureDashboard(false) as unknown as Win;
+    gone(w, 'killed');
+    expect(w.loads).toBe(1);
+    wm.showQuickEntry();
+    const q = fake.FakeWin.all[1]!;
+    gone(q, 'killed');
+    await new Promise((r) => setImmediate(r));
+    expect(q.destroyed).toBe(false);
+  });
+
+  it('caps automatic reloads of a crash-looping dashboard, then reloads when it is shown again', () => {
+    let t = 1_000;
+    const { wm } = manager({ now: () => t });
+    const w = wm.ensureDashboard(false) as unknown as Win;
+    w.emit('ready-to-show');
+    for (let i = 0; i < MAX_CRASH_RELOADS; i++) gone(w);
+    expect(w.loads).toBe(1 + MAX_CRASH_RELOADS);
+    gone(w);
+    expect(w.loads).toBe(1 + MAX_CRASH_RELOADS);
+
+    // Showing it is the user's request, not a loop.
+    wm.showDashboard();
+    expect(w.loads).toBe(2 + MAX_CRASH_RELOADS);
+    expect(w.visible).toBe(true);
+    wm.showDashboard();
+    expect(w.loads).toBe(2 + MAX_CRASH_RELOADS);
+
+    t += CRASH_RELOAD_WINDOW_MS;
+    gone(w);
+    expect(w.loads).toBe(3 + MAX_CRASH_RELOADS);
+  });
+
+  it('shows a dashboard whose renderer died before its first paint', () => {
+    const { wm } = manager();
+    const w = wm.showDashboard() as unknown as Win;
+    expect(w.visible).toBe(false);
+    gone(w);
+    expect(w.visible).toBe(true);
+    expect(w.loads).toBe(2);
+  });
+
+  it('replaces a crashed quick-entry window with a fresh one on the next show', async () => {
+    const { wm } = manager();
+    wm.showQuickEntry();
+    const q = fake.FakeWin.all[0]!;
+    q.emit('ready-to-show');
+    gone(q, 'oom');
+    await new Promise((r) => setImmediate(r));
+    expect(q.destroyed).toBe(true);
+
+    wm.toggleQuickEntry();
+    expect(fake.FakeWin.all).toHaveLength(2);
+    const fresh = fake.FakeWin.all[1]!;
+    expect(fresh.loaded).toBe(QUICK_ENTRY_URL);
+    fresh.emit('ready-to-show');
+    expect(fresh.visible).toBe(true);
+
+    gone(fresh, 'clean-exit');
+    await new Promise((r) => setImmediate(r));
+    expect(fresh.destroyed).toBe(false);
+  });
+
   it('destroys everything on demand', () => {
     const { wm } = manager();
     wm.ensureDashboard(false);
@@ -407,5 +505,45 @@ describe('window manager', () => {
     wm.destroyAll();
     expect(fake.FakeWin.all.every((w) => w.destroyed)).toBe(true);
     expect(wm.dashboard()).toBeNull();
+  });
+
+  it('prefills quick entry: held until the page loads, then sent at once; the latest show wins', () => {
+    const { wm } = manager();
+    wm.showQuickEntry('378;6');
+    const q = fake.FakeWin.all[0]!;
+    expect(q.webContents.sent).toEqual([]);
+    // A plain show (hotkey) before the page loads drops the waiting prefill.
+    wm.showQuickEntry();
+    wm.showQuickEntry('5021;6');
+    q.emit('ready-to-show');
+    q.webContents.emit('did-finish-load');
+    expect(q.webContents.sent).toEqual([['push', 'ui.quickPrefill', { sku: '5021;6' }]]);
+    q.webContents.emit('did-finish-load');
+    expect(q.webContents.sent).toHaveLength(1);
+
+    wm.showQuickEntry('30359;6');
+    expect(q.webContents.sent[1]).toEqual(['push', 'ui.quickPrefill', { sku: '30359;6' }]);
+    wm.showQuickEntry();
+    expect(q.webContents.sent).toHaveLength(2);
+    expect(q.visible).toBe(true);
+
+    // A full reload holds the next prefill again.
+    q.webContents.emit('did-start-navigation', { isMainFrame: true, isSameDocument: false });
+    wm.showQuickEntry('378;6');
+    expect(q.webContents.sent).toHaveLength(2);
+    q.webContents.emit('did-finish-load');
+    expect(q.webContents.sent[2]).toEqual(['push', 'ui.quickPrefill', { sku: '378;6' }]);
+  });
+
+  it('never sends a prefill to the dashboard', () => {
+    const { wm } = manager();
+    const d = wm.showDashboard() as unknown as Win;
+    d.emit('ready-to-show');
+    d.webContents.emit('did-finish-load');
+    wm.showQuickEntry('378;6');
+    const q = fake.FakeWin.all[1]!;
+    q.webContents.emit('did-finish-load');
+    expect(d.webContents.sent).toEqual([]);
+    expect(q.webContents.sent).toEqual([['push', 'ui.quickPrefill', { sku: '378;6' }]]);
   });
 });

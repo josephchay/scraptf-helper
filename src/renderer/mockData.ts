@@ -1,29 +1,41 @@
 // Deterministic fake data for running the dashboard in a plain browser.
 // Development only: none of these prices, buyers or listings are real.
 
-import { refToScrap, formatScrap } from '../shared/currency';
+import { frictionOf, maxCostFor } from '../shared/ceiling';
+import { parsePrice, refToScrap, formatScrap, type ParsedPrice } from '../shared/currency';
+import { scraptfPageFor } from '../shared/links';
+import { communityMaxAgeMs } from '../shared/referenceAge';
 import { fromString } from '../shared/sku';
+import { CATEGORIES, CATEGORY_LABELS } from '../shared/types';
 import type {
+  BulkPriceRow,
   Category,
   ConfidenceLevel,
   HistoryPoint,
   InputKind,
+  ItemRevenue,
   JournalEntry,
   JournalSummary,
+  KeyPriceState,
   LinkSpec,
   Opportunity,
   OrderSummary,
   PriceRule,
+  PriceRuleInput,
   ReferencePrices,
+  ResolvedItem,
   RuleFilter,
   Scrap,
   ScrapPrice,
   Settings,
+  ShoppingListResult,
+  ShoppingQuery,
+  ShoppingRow,
   SpecialAttrs,
   UnixMs,
 } from '../shared/types';
 import { confidenceLevelOf } from './format';
-import { statusFor, tierForProfit } from './oppModel';
+import { matchesSearch, revenueOrderOf, statusFor, tierForProfit } from './oppModel';
 
 export const MOCK_KEY_SCRAP = 568; // 63.11 ref
 
@@ -374,6 +386,85 @@ function signed(n: number): string {
   return n > 0 ? `+${n}` : `${n}`;
 }
 
+const DAY_MS = 86_400_000;
+/** Highest Low score (MEDIUM_CONFIDENCE - 1 in the service's tiers.ts). */
+const LOW_CAP = 44;
+
+/** References older than profit.referenceMaxAgeMs count as absent (F4), with the reason shown to the user. */
+export function usableReferences(
+  refs: ReferencePrices,
+  settings: Settings,
+  now: UnixMs,
+): { pdbBuy: Scrap | null; pdbSell: Scrap | null; community: Scrap | null; communityHigh: Scrap | null; stale: string[] } {
+  const maxAge = settings.profit.referenceMaxAgeMs;
+  const stale: string[] = [];
+  const p = refs.pricedb;
+  const pdbOk = p !== null && !(p.ageMs !== null && p.ageMs > maxAge);
+  if (p && !pdbOk) stale.push(`PriceDB price is ${Math.floor((p.ageMs ?? 0) / DAY_MS)} days old, ignored`);
+  const c = refs.community;
+  const cAge = c?.lastUpdate != null ? now - c.lastUpdate * 1000 : null;
+  // Like the service: community prices are hand-set, so they get at least a year.
+  const commOk = c !== null && !(cAge !== null && cAge > communityMaxAgeMs(maxAge));
+  if (c && !commOk) stale.push(`Community price is ${Math.floor((cAge ?? 0) / DAY_MS)} days old, ignored`);
+  return {
+    pdbBuy: pdbOk ? (p?.buyScrap ?? null) : null,
+    pdbSell: pdbOk ? (p?.sellScrap ?? null) : null,
+    community: commOk ? (c?.valueScrap ?? null) : null,
+    communityHigh: commOk ? (c?.valueHighScrap ?? null) : null,
+    stale,
+  };
+}
+
+/** Any positive usable reference, as the service's hasReferenceValue: a PriceDB sell price alone still checks the price (F5). */
+function hasUsableReference(refs: ReturnType<typeof usableReferences>): boolean {
+  return [refs.pdbBuy, refs.pdbSell, refs.community, refs.communityHigh].some((v) => v !== null && v > 0);
+}
+
+/** The mock's pricing of one book: eligible orders valued with the key price, then best, conservative and instant. */
+export function mockPrices(
+  book: MockBook,
+  settings: Settings,
+  keyScrap: Scrap,
+  now: UnixMs,
+): { eligible: OrderSummary[]; best: OrderSummary | null; cons: OrderSummary | null; instant: OrderSummary | null; refs: ReturnType<typeof usableReferences> } {
+  const blocked = new Set(settings.blocklist);
+  const eligible = book.buy
+    .filter((o) => o.eligible && !blocked.has(o.steamid))
+    .map((o) => ({ ...o, valueScrap: Math.round(o.keys * keyScrap) + o.metalScrap }))
+    .sort((a, b) => b.valueScrap - a.valueScrap);
+  const refs = usableReferences(book.references, settings, now);
+  const med = median(eligible.slice(0, 5).map((o) => o.valueScrap));
+  const isOutlier = (o: OrderSummary) =>
+    o.flags.includes('outlier') ||
+    (eligible.length >= 3 && o.valueScrap > settings.profit.outlierVsMedian * med) ||
+    (refs.pdbSell !== null && o.valueScrap > settings.profit.outlierVsRef * refs.pdbSell);
+  return {
+    eligible,
+    best: eligible[0] ?? null,
+    cons: eligible.find((o) => !isOutlier(o)) ?? null,
+    instant: eligible.find((o) => !isOutlier(o) && o.isBot) ?? null,
+    refs,
+  };
+}
+
+/** ItemDetail.revenue for the mock drawer and quick entry. */
+export function mockRevenue(book: MockBook, settings: Settings, keyScrap: Scrap, now: UnixMs): ItemRevenue {
+  const { eligible, best, cons, instant } = mockPrices(book, settings, keyScrap, now);
+  const useOrder = settings.profit.useOrder;
+  const order = useOrder === 'best' ? best : useOrder === 'instant' ? instant : cons;
+  const revenueScrap = order?.valueScrap ?? null;
+  return {
+    bestScrap: best?.valueScrap ?? null,
+    consScrap: cons?.valueScrap ?? null,
+    instantScrap: instant?.valueScrap ?? null,
+    useOrder,
+    revenueScrap,
+    order,
+    maxCostScrap: maxCostFor(revenueScrap, settings.profit),
+    eligibleCount: eligible.length,
+  };
+}
+
 export function evaluateOpportunity(
   book: MockBook,
   input: MockInput,
@@ -383,11 +474,7 @@ export function evaluateOpportunity(
   prev: Opportunity | null,
 ): Opportunity {
   const sku = book.item.sku;
-  const blocked = new Set(settings.blocklist);
-  const eligible = book.buy
-    .filter((o) => o.eligible && !blocked.has(o.steamid))
-    .map((o) => ({ ...o, valueScrap: Math.round(o.keys * keyScrap) + o.metalScrap }))
-    .sort((a, b) => b.valueScrap - a.valueScrap);
+  const { eligible, best, cons, instant, refs } = mockPrices(book, settings, keyScrap, now);
 
   const flags: string[] = [];
   const reasons: string[] = [];
@@ -398,22 +485,17 @@ export function evaluateOpportunity(
   };
 
   const costScrap = Math.round(input.costKeys * keyScrap) + input.costScrapRaw;
-  const best = eligible[0] ?? null;
-  const top = eligible.slice(0, 5).map((o) => o.valueScrap);
-  const med = median(top);
-  const pdbSell = book.references.pricedb?.sellScrap ?? null;
-  const isOutlier = (o: OrderSummary) =>
-    o.flags.includes('outlier') ||
-    (eligible.length >= 3 && o.valueScrap > settings.profit.outlierVsMedian * med) ||
-    (pdbSell !== null && o.valueScrap > settings.profit.outlierVsRef * pdbSell);
-  const cons = eligible.find((o) => !isOutlier(o)) ?? null;
-  const instant = eligible.find((o) => !isOutlier(o) && o.isBot) ?? null;
   if (best && cons && best.listingId !== cons.listingId) flags.push('outlier-best');
+  if (refs.stale.length > 0) {
+    flags.push('stale-reference');
+    reasons.push(...refs.stale);
+  }
 
   const chosen = settings.profit.useOrder === 'best' ? best : settings.profit.useOrder === 'instant' ? instant : cons;
   const revenue = chosen ? chosen.valueScrap : null;
-  const profit = revenue === null ? null : revenue - costScrap - settings.profit.frictionScrap;
+  const profit = revenue === null ? null : revenue - costScrap - frictionOf(settings.profit);
   const margin = profit === null || costScrap <= 0 ? null : profit / costScrap;
+  const refVal = refs.pdbBuy ?? refs.community;
 
   if (cons) {
     const pulse = book.meta.get(cons.listingId)?.pulseAgeMs ?? null;
@@ -427,7 +509,6 @@ export function evaluateOpportunity(
     }
     const near = eligible.filter((o) => o.valueScrap >= cons.valueScrap * 0.9 && o.valueScrap <= cons.valueScrap * 1.1);
     if (new Set(near.map((o) => o.steamid)).size >= 2) add(10, `${near.length} buyers within 10% of the conservative price`);
-    const refVal = book.references.pricedb?.buyScrap ?? book.references.community?.valueScrap ?? null;
     if (refVal === null) {
       add(-10, 'No reference price to compare with');
       flags.push('no-reference');
@@ -463,6 +544,13 @@ export function evaluateOpportunity(
   score = Math.max(0, Math.min(100, Math.round(score)));
   // Rule estimates are capped at Medium (brief §8).
   if (input.kind === 'rule' && score > 69) score = 69;
+  // F5: a huge margin with few buyers and nothing to compare with is usually the wrong variant or unit.
+  const suspect = settings.profit.suspectMargin;
+  if (suspect > 0 && margin !== null && margin > suspect && eligible.length < 3 && !hasUsableReference(refs)) {
+    flags.push('suspect-margin');
+    reasons.push(`Margin over ${Math.round(suspect * 100)}% with no reference and few buyers. Check the variant and units`);
+    score = Math.min(score, LOW_CAP);
+  }
   const level: ConfidenceLevel = confidenceLevelOf(score);
 
   const key = `${sku}|${input.ref}`;
@@ -482,6 +570,7 @@ export function evaluateOpportunity(
     revenueScrap: revenue,
     profitScrap: profit,
     margin,
+    maxCostScrap: maxCostFor(revenue, settings.profit),
     confidence: score,
     confidenceLevel: level,
     flags,
@@ -497,6 +586,178 @@ export function evaluateOpportunity(
     firstSeenAt: prev?.firstSeenAt ?? now,
     updatedAt: now,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Shopping list (mock stand-in for src/service/domain/shopping.ts)
+// ---------------------------------------------------------------------------
+
+const INPUT_KINDS: readonly InputKind[] = ['user', 'import', 'rule'];
+
+/** One row per SKU with a ceiling, highest-confidence input first; filtered, sorted by category then ceiling, paged. */
+export function mockShoppingList(
+  opps: readonly Opportunity[],
+  q: ShoppingQuery,
+  useOrder: Settings['profit']['useOrder'],
+  keyPrice: KeyPriceState | null,
+  now: UnixMs,
+): ShoppingListResult {
+  const bySku = new Map<string, Opportunity[]>();
+  for (const o of opps) {
+    const list = bySku.get(o.sku);
+    if (list) list.push(o);
+    else bySku.set(o.sku, [o]);
+  }
+  const all: ShoppingRow[] = [];
+  for (const list of bySku.values()) {
+    const top = list
+      .filter((o) => o.maxCostScrap !== null && o.maxCostScrap > 0 && o.status !== 'no-buyers' && o.revenueScrap !== null)
+      .sort((a, b) => b.confidence - a.confidence || (b.maxCostScrap ?? 0) - (a.maxCostScrap ?? 0) || a.key.localeCompare(b.key))[0];
+    if (!top) continue;
+    // Same pick as the service: a cost is only judged against its own row's ceiling.
+    const known = top.inputKind !== 'rule' ? top : (list.filter((o) => o.inputKind !== 'rule').sort((a, b) => b.inputObservedAt - a.inputObservedAt)[0] ?? null);
+    const maxCostScrap = top.maxCostScrap!;
+    const knownCostScrap = known ? known.costScrap : null;
+    const knownMaxCostScrap = known?.maxCostScrap ?? null;
+    all.push({
+      sku: top.sku,
+      name: top.name,
+      category: top.category,
+      bankPageUrl: scraptfPageFor(top.category),
+      maxCostScrap,
+      revenueScrap: top.revenueScrap!,
+      revenueOrder: revenueOrderOf(top, useOrder),
+      confidence: top.confidence,
+      confidenceLevel: top.confidenceLevel,
+      buyerCount: top.buyerCount,
+      knownCostScrap,
+      knownMaxCostScrap,
+      underCeiling: knownCostScrap === null ? null : knownMaxCostScrap !== null && knownCostScrap <= knownMaxCostScrap,
+      inputKinds: INPUT_KINDS.filter((k) => list.some((o) => o.inputKind === k)),
+      flags: top.flags,
+      updatedAt: top.updatedAt,
+    });
+  }
+  const rows = all
+    .filter((r) => !q.categories?.length || q.categories.includes(r.category))
+    .filter((r) => matchesSearch(r, q.search))
+    .filter((r) => q.minCeilingScrap === undefined || r.maxCostScrap >= q.minCeilingScrap)
+    .filter((r) => !q.onlyBotBuyers || r.revenueOrder?.isBot === true)
+    .sort((a, b) => CATEGORIES.indexOf(a.category) - CATEGORIES.indexOf(b.category) || b.maxCostScrap - a.maxCostScrap || a.name.localeCompare(b.name));
+  const groups = CATEGORIES.map((category) => ({
+    category,
+    label: CATEGORY_LABELS[category],
+    count: rows.filter((r) => r.category === category).length,
+    bankPageUrl: scraptfPageFor(category),
+  })).filter((g) => g.count > 0);
+  const offset = Math.max(0, q.offset ?? 0);
+  const page = q.limit === undefined ? rows.slice(offset) : rows.slice(offset, offset + Math.max(1, q.limit));
+  return { rows: page, total: rows.length, groups, keyPrice, generatedAt: now };
+}
+
+// ---------------------------------------------------------------------------
+// Bulk paste and rules backup (mock stand-ins for src/service/priceSheetIo.ts)
+// ---------------------------------------------------------------------------
+
+export const PAGE_CONTENT_REFUSAL = 'This looks like page content. Use Import for saved pages.';
+const MAX_BULK_LINES = 500;
+const MAX_BULK_BYTES = 100 * 1024;
+const SEPARATOR_CHARS = '\t,;=@';
+
+/** `<item> <sep> <price>`, else the last price-looking words. Null when no split gives a price. */
+function splitLine(line: string, bareUnit: 'ref' | 'scrap' | 'keys'): { item: string; price: ParsedPrice } | null {
+  // The leftmost separator whose right side is a price: names may hold commas ("Rock, Paper, Scissors").
+  for (let i = 0; i < line.length; i++) {
+    const width = SEPARATOR_CHARS.includes(line[i]!) ? 1 : line.startsWith(' - ', i) ? 3 : 0;
+    if (width === 0) continue;
+    const item = line.slice(0, i).trim();
+    const price = parsePrice(line.slice(i + width), bareUnit);
+    if (item && price) return { item, price };
+  }
+  const words = line.split(/\s+/);
+  for (let k = Math.min(4, words.length - 1); k >= 1; k--) {
+    const price = parsePrice(words.slice(words.length - k).join(' '), bareUnit);
+    if (price) return { item: words.slice(0, words.length - k).join(' '), price };
+  }
+  return null;
+}
+
+/** Preview of a bulk paste. Throws the refusal for page content or a paste over the limits (R10). */
+export function mockParseBulk(
+  text: string,
+  bareUnit: 'ref' | 'scrap' | 'keys',
+  resolve: (text: string) => ResolvedItem | null,
+): { rows: BulkPriceRow[]; rejected: number } {
+  if (text.includes('<') || /scrap\.tf\//i.test(text)) throw new Error(PAGE_CONTENT_REFUSAL);
+  if (new TextEncoder().encode(text).length > MAX_BULK_BYTES) throw new Error('That paste is larger than 100 KB. Split it into smaller pastes.');
+  // Same line breaks as the service parser (bare CR too).
+  const lines = text.split(/\r\n|\n|\r/);
+  const items = lines.filter((l) => l.trim() && !l.trim().startsWith('#'));
+  if (items.length > MAX_BULK_LINES) throw new Error(`At most ${MAX_BULK_LINES} lines per paste.`);
+  const rows: BulkPriceRow[] = [];
+  lines.forEach((raw, i) => {
+    const line = raw.trim();
+    if (!line || line.startsWith('#')) return;
+    const row: BulkPriceRow = { line: i + 1, raw, sku: null, name: null, costKeys: 0, costScrap: 0, error: null };
+    const split = splitLine(line, bareUnit);
+    if (!split) {
+      rows.push({ ...row, error: 'No price found (e.g. "Team Captain, 1 key 5 ref")' });
+      return;
+    }
+    const item = resolve(split.item);
+    const priced: BulkPriceRow = { ...row, name: item?.name ?? null, costKeys: split.price.keys, costScrap: split.price.scrap };
+    // As the service: only a clean match with a non-zero price is saveable, and only a saveable row carries a sku.
+    const problem = item === null ? `Item not recognised: ${split.item.slice(0, 80)}` : bulkItemProblem(item);
+    if (problem !== null || item === null) rows.push({ ...priced, error: problem ?? 'Item not recognised' });
+    else if (split.price.keys === 0 && split.price.scrap === 0) rows.push({ ...priced, error: 'The price is 0' });
+    else rows.push({ ...priced, sku: item.sku });
+  });
+  return { rows, rejected: rows.filter((r) => r.error !== null).length };
+}
+
+/** The service's priceSheetIo itemProblem: a guess or an incomplete SKU would price the wrong item. */
+function bulkItemProblem(r: ResolvedItem): string | null {
+  if (r.match === 'fuzzy') return `Closest match only ("${r.name}"). Use the exact name, a SKU or an item link`;
+  return r.warnings.find((w) => !/BLU twin/i.test(w)) ?? null;
+}
+
+export const RULES_BACKUP_FORMAT = 'tf2-flip-desk-rules';
+
+export function mockRulesToJson(rules: readonly PriceRule[], now: UnixMs): string {
+  const out = rules.map(({ name, filter, costKeys, costScrap, observedAt, enabled }) => ({ name, filter, costKeys, costScrap, observedAt, enabled }));
+  return JSON.stringify({ format: RULES_BACKUP_FORMAT, version: 1, exportedAt: now, rules: out }, null, 2);
+}
+
+/** Lenient: a bare array of rules is accepted too. Each invalid rule is skipped with a reason. */
+export function mockRulesFromJson(json: string): { rules: PriceRuleInput[]; skipped: string[] } {
+  let data: unknown;
+  try {
+    data = JSON.parse(json);
+  } catch {
+    throw new Error('Not a rules backup: the file is not valid JSON.');
+  }
+  const list = Array.isArray(data) ? data : typeof data === 'object' && data !== null ? (data as { rules?: unknown }).rules : undefined;
+  if (!Array.isArray(list)) throw new Error('Not a rules backup: no "rules" list found.');
+  const rules: PriceRuleInput[] = [];
+  const skipped: string[] = [];
+  list.forEach((raw, i) => {
+    const r = (typeof raw === 'object' && raw !== null ? raw : {}) as Record<string, unknown>;
+    const label = typeof r['name'] === 'string' && r['name'].trim() ? `"${r['name'].trim().slice(0, 60)}"` : `Rule ${i + 1}`;
+    if (typeof r['name'] !== 'string' || !r['name'].trim()) skipped.push(`${label}: a rule needs a name`);
+    else if (typeof r['filter'] !== 'object' || r['filter'] === null || Array.isArray(r['filter'])) skipped.push(`${label}: filter is missing`);
+    else if (typeof r['costScrap'] !== 'number' || !Number.isFinite(r['costScrap']) || r['costScrap'] < 0) skipped.push(`${label}: costScrap must be zero or more`);
+    else {
+      rules.push({
+        name: r['name'].trim().slice(0, 120),
+        filter: structuredClone(r['filter']) as RuleFilter,
+        costKeys: typeof r['costKeys'] === 'number' && r['costKeys'] >= 0 ? r['costKeys'] : 0,
+        costScrap: Math.round(r['costScrap']),
+        ...(typeof r['observedAt'] === 'number' ? { observedAt: r['observedAt'] } : {}),
+        enabled: r['enabled'] !== false,
+      });
+    }
+  });
+  return { rules, skipped };
 }
 
 // ---------------------------------------------------------------------------

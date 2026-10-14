@@ -3,7 +3,7 @@
 
 import { categoryOfSkuOnly } from '../../shared/categories';
 import { buildLinks } from '../../shared/links';
-import { fromObject, fromString, looksLikeSku } from '../../shared/sku';
+import { fromObject, fromString, isValidSku, looksLikeSku } from '../../shared/sku';
 import { CATEGORIES, CATEGORY_LABELS, CURRENCY_SKUS, EMPTY_SPECIAL, PROFIT_TIER_LABELS } from '../../shared/types';
 import type {
   Category,
@@ -11,6 +11,7 @@ import type {
   GroupSummary,
   HistoryPoint,
   ItemDetail,
+  ItemRevenue,
   KeyPriceState,
   Listing,
   OppListResult,
@@ -26,8 +27,19 @@ import { explicitInput } from './engine';
 import { DEFAULT_KEY_SCRAP } from './keyprice';
 import { EXCLUDING_FLAGS, UNVERIFIED_AFTER_MS, anyEffectBaseOf, classifyOrder, dedupeOrders, matchContext, ruleMatches } from './matcher';
 import type { MatchContext, MatchTarget } from './matcher';
-import { computePrices, lookupReferences, outlierRefs, referencePrices, refreshReferenceAge, toOrderSummary, valueOrders } from './pricing';
-import { CONFIDENCE_LABELS, CONFIDENCE_ORDER, INPUT_KIND_LABELS, INPUT_KIND_ORDER, TIER_ORDER } from './tiers';
+import {
+  computePrices,
+  lookupReferences,
+  outlierRefs,
+  pickRevenueOrder,
+  referencePrices,
+  refreshReferenceAge,
+  toOrderSummary,
+  usableReferences,
+  valueOrders,
+} from './pricing';
+import type { PriceResult, ValuedOrderLike } from './pricing';
+import { CONFIDENCE_LABELS, CONFIDENCE_ORDER, INPUT_KIND_LABELS, INPUT_KIND_ORDER, TIER_ORDER, maxCostFor } from './tiers';
 
 export const DEFAULT_LIST_LIMIT = 500;
 export const MAX_LIST_LIMIT = 5000;
@@ -138,6 +150,12 @@ export interface ItemDetailArgs {
   now: UnixMs;
   snapshot: ItemDetail['snapshot'];
   history?: HistoryPoint[];
+  /**
+   * What the buy book is classified against. 'newest' (default, the drawer): the
+   * newest stored copy's extras. 'plain' (quick entry): a clean copy of `sku`,
+   * paint from the SKU only, which is the row quick entry's prices.upsert creates.
+   */
+  target?: 'newest' | 'plain';
 }
 
 function attempt<T>(fn: () => T, fallback: T): T {
@@ -163,15 +181,33 @@ function sellSummaries(sells: readonly Listing[], match: MatchContext, keyScrap:
     .map((o) => toOrderSummary(o));
 }
 
+/** Feature F2: the engine's revenue for this book (same prices, same useOrder pick) with its "pay up to" ceiling. */
+export function itemRevenue<T extends ValuedOrderLike>(prices: PriceResult<T>, eligibleCount: number, settings: Settings): ItemRevenue {
+  const useOrder = settings.profit.useOrder;
+  const chosen = pickRevenueOrder(prices, useOrder);
+  const revenueScrap = chosen?.valueScrap ?? null;
+  return {
+    bestScrap: prices.best?.valueScrap ?? null,
+    consScrap: prices.conservative?.valueScrap ?? null,
+    instantScrap: prices.instant?.valueScrap ?? null,
+    useOrder,
+    revenueScrap,
+    order: chosen ? toOrderSummary(chosen, prices.outlierIds.has(chosen.listing.id) ? ['outlier'] : []) : null,
+    maxCostScrap: maxCostFor(revenueScrap, settings.profit),
+    eligibleCount,
+  };
+}
+
 /**
  * Everything the item drawer shows. Buy orders are classified against the
  * item's most recent scrap.tf price (its extras), or against a clean copy when
- * there is none. Returns null for text that is not a SKU or an item nothing is
- * known about.
+ * there is none or `target` is 'plain'. Returns null for text that is not a SKU
+ * or an item nothing is known about.
  */
 export function buildItemDetail(args: ItemDetailArgs): ItemDetail | null {
   const { repo, schema, settings, now } = args;
-  if (typeof args.sku !== 'string' || !looksLikeSku(args.sku)) return null;
+  // Strict: "205;11;KT-3" must not show the drawer of plain "205;11".
+  if (typeof args.sku !== 'string' || !isValidSku(args.sku)) return null;
   const obj = fromString(args.sku.trim());
   const sku = fromObject(obj);
   const base = fromObject({ ...obj, paint: null });
@@ -192,7 +228,8 @@ export function buildItemDetail(args: ItemDetailArgs): ItemDetail | null {
   }
 
   const paint = typeof obj.paint === 'number' && obj.paint > 0 ? obj.paint : null;
-  const fromPrice = scrapPrices.length > 0 ? explicitInput(scrapPrices[0]!) : null;
+  // Quick entry saves a plain copy, so its preview must not inherit a newer painted or spelled import's extras.
+  const fromPrice = args.target !== 'plain' && scrapPrices.length > 0 ? explicitInput(scrapPrices[0]!) : null;
   const target: MatchTarget = fromPrice?.target ?? {
     baseSku: base,
     special: { ...EMPTY_SPECIAL, spells: [], parts: [], paint },
@@ -211,11 +248,9 @@ export function buildItemDetail(args: ItemDetailArgs): ItemDetail | null {
     }),
   ];
   const valued = valueOrders(classified, keyScrap);
-  const prices = computePrices(
-    valued.filter((o) => o.eligible),
-    outlierRefs(references),
-    settings.profit,
-  );
+  const eligible = valued.filter((o) => o.eligible);
+  // Stale references are ignored exactly as the engine does (F4), so the drawer agrees with the row.
+  const prices = computePrices(eligible, outlierRefs(usableReferences(references, settings.profit.referenceMaxAgeMs, now).references), settings.profit);
   const buyOrders = valued
     .map((o) => toOrderSummary(o, prices.outlierIds.has(o.listing.id) ? ['outlier'] : []))
     .sort((a, b) => Number(b.eligible) - Number(a.eligible));
@@ -227,13 +262,17 @@ export function buildItemDetail(args: ItemDetailArgs): ItemDetail | null {
       : (scrapPrices.find((p) => p.name.trim())?.name ?? buys.find((l) => l.itemName)?.itemName ?? sku);
   const rawCategory = attempt<Category | null>(() => schema.categoryForSku(sku), null);
   const category = rawCategory !== null && CATEGORIES.includes(rawCategory) ? rawCategory : categoryOfSkuOnly(obj);
+  // backpack.tf names never include paint (the schema appends "(Paint: …)" for painted SKUs), so
+  // a painted item is searched on backpack.tf by its unpainted name.
+  const baseName = base === sku ? name : attempt(() => schema.nameForSku(base), base);
+  const bptfName = baseName && baseName !== base ? baseName : name;
 
   const links = attempt(
     () =>
       buildLinks({
         sku,
         skuObject: obj,
-        fullName: name,
+        fullName: bptfName,
         baseName: attempt(() => schema.baseNameForSku(sku), ''),
         marketHashName: attempt(() => schema.marketHashName(sku), null),
         effectName: obj.effect !== null ? attempt(() => schema.effectName(obj.effect!), null) : null,
@@ -247,8 +286,11 @@ export function buildItemDetail(args: ItemDetailArgs): ItemDetail | null {
   return {
     sku,
     name,
+    // The links' fullName.
+    bptfName,
     category,
     skuObject: obj,
+    revenue: itemRevenue(prices, eligible.length, settings),
     buyOrders,
     sellListings: sellSummaries(sells, match, keyScrap),
     references,
