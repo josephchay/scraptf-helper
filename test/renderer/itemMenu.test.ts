@@ -1,16 +1,23 @@
 // F9: the row context menu's pure model (placement, roving focus, content).
 
+import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import {
+  MENU_ANCHOR_SLACK_PX,
   MENU_MARGIN,
   MODAL_SELECTOR,
+  RECORD_BUY_TITLE,
+  RECORD_SALE_TITLE,
+  anchorMoved,
   copiedMessage,
   copyTargets,
+  createMenuClosePolicy,
   flattenSections,
   groupLinks,
   hostLabel,
   isContextMenuKey,
   isEnabledItem,
+  isScrollKey,
   itemMenuSections,
   menuPointForRect,
   modalHostOf,
@@ -37,35 +44,149 @@ describe('placeMenu', () => {
     expect(p.top).toBe(700 - 300);
   });
 
-  it('stays inside the margin when flipping is not enough', () => {
-    // Too far left to flip, too high to flip up: pinned to the margins.
-    const p = placeMenu({ x: 100, y: 100 }, { width: 240, height: 760 }, { width: 300, height: 800 });
-    expect(p.left).toBeGreaterThanOrEqual(MENU_MARGIN);
-    expect(p.left + 240).toBeLessThanOrEqual(300 - MENU_MARGIN);
-    expect(p.top).toBe(MENU_MARGIN);
-  });
-
-  it('caps a menu taller than the window and pins it to the top margin', () => {
-    const p = placeMenu({ x: 50, y: 400 }, { width: 240, height: 2000 }, VIEW);
-    expect(p.top).toBe(MENU_MARGIN);
+  it('H4: opens upward with its bottom edge at the pointer when it does not fit below', () => {
+    // A row near the bottom: the menu sits right above the pointer, not pinned to the top margin over the row.
+    const p = placeMenu({ x: 100, y: 600 }, MENU, VIEW);
+    expect(p.top + MENU.height).toBe(600);
+    expect(p.top).toBe(300);
     expect(p.maxHeight).toBe(VIEW.height - 2 * MENU_MARGIN);
   });
 
+  it('H4: a menu too tall for either side takes the roomier one and scrolls, never covering the pointer', () => {
+    // More room below: opens down from the pointer with a scrollbar.
+    const down = placeMenu({ x: 100, y: 100 }, { width: 240, height: 760 }, { width: 300, height: 800 });
+    expect(down.left).toBeGreaterThanOrEqual(MENU_MARGIN);
+    expect(down.left + 240).toBeLessThanOrEqual(300 - MENU_MARGIN);
+    expect(down.top).toBe(100);
+    expect(down.maxHeight).toBe(800 - MENU_MARGIN - 100);
+    // More room above: opens up, bottom at the pointer, capped to the room above.
+    const up = placeMenu({ x: 50, y: 500 }, { width: 240, height: 2000 }, VIEW);
+    expect(up.top).toBe(MENU_MARGIN);
+    expect(up.maxHeight).toBe(500 - MENU_MARGIN);
+    expect(up.top + up.maxHeight).toBe(500);
+  });
+
   it('never returns a position outside the viewport, for any pointer', () => {
-    for (const x of [-50, 0, 1, 600, 1199, 1200, 5000, Number.NaN]) {
-      for (const y of [-50, 0, 1, 400, 799, 800, 5000, Number.POSITIVE_INFINITY]) {
-        const p = placeMenu({ x, y }, MENU, VIEW);
-        expect(p.left).toBeGreaterThanOrEqual(MENU_MARGIN);
-        expect(p.top).toBeGreaterThanOrEqual(MENU_MARGIN);
-        expect(p.left + MENU.width).toBeLessThanOrEqual(VIEW.width - MENU_MARGIN);
-        expect(p.top + MENU.height).toBeLessThanOrEqual(VIEW.height - MENU_MARGIN);
+    for (const size of [MENU, { width: 240, height: 760 }, { width: 2000, height: 2000 }]) {
+      for (const x of [-50, 0, 1, 600, 1199, 1200, 5000, Number.NaN]) {
+        for (const y of [-50, 0, 1, 400, 799, 800, 5000, Number.POSITIVE_INFINITY]) {
+          for (const upY of [undefined, y - 30, Number.NaN]) {
+            const p = placeMenu(upY === undefined ? { x, y } : { x, y, upY }, size, VIEW);
+            const shown = Math.min(size.height, p.maxHeight);
+            const w = Math.min(size.width, VIEW.width - 2 * MENU_MARGIN);
+            expect(p.left).toBeGreaterThanOrEqual(MENU_MARGIN);
+            expect(p.top).toBeGreaterThanOrEqual(MENU_MARGIN);
+            expect(p.left + w).toBeLessThanOrEqual(VIEW.width - MENU_MARGIN);
+            expect(p.top + shown).toBeLessThanOrEqual(VIEW.height - MENU_MARGIN);
+            expect(p.maxHeight).toBeLessThanOrEqual(VIEW.height - 2 * MENU_MARGIN);
+          }
+        }
       }
     }
+  });
+
+  it('H4: never covers the point it opened at, wherever that is inside the margins', () => {
+    for (const height of [120, 300, 500, 760, 2000]) {
+      for (let y = MENU_MARGIN; y <= VIEW.height - MENU_MARGIN; y += 37) {
+        const p = placeMenu({ x: 300, y }, { width: 240, height }, VIEW);
+        const bottom = p.top + Math.min(height, p.maxHeight);
+        // Either entirely below the pointer or entirely above it.
+        expect(p.top >= y || bottom <= y, `height ${height}, y ${y}`).toBe(true);
+      }
+    }
+  });
+
+  it('H4: a menu hung under a button or opened from the keyboard flips up above it (upY), not over it', () => {
+    // The drawer's buyer button: y under it, upY at its top. Near the bottom it opens above the button.
+    const btn = placeMenu({ x: 300, y: 702, upY: 676 }, MENU, VIEW);
+    expect(btn.top + MENU.height).toBe(676);
+    // Room below: upY plays no part.
+    expect(placeMenu({ x: 300, y: 202, upY: 176 }, MENU, VIEW).top).toBe(202);
+    // A keyboard-opened menu near the bottom ends at the row's top edge.
+    const row = menuPointForRect({ left: 0, top: 660, width: 900, height: 34 });
+    const kb = placeMenu(row, MENU, VIEW);
+    expect(kb.top + MENU.height).toBe(660);
+    // Too tall for either side: capped to the room above the button.
+    const tall = placeMenu({ x: 300, y: 702, upY: 676 }, { width: 240, height: 2000 }, VIEW);
+    expect(tall.top).toBe(MENU_MARGIN);
+    expect(tall.top + tall.maxHeight).toBe(676);
+  });
+
+  it('H4: an upY below the pointer (or junk) never pushes the menu over the pointer', () => {
+    for (const upY of [900, 600, Number.NaN]) expect(placeMenu({ x: 300, y: 600, upY }, MENU, VIEW).top + MENU.height, String(upY)).toBe(600);
+    // An anchor whose top is off screen leaves no room above: it opens below with a scrollbar instead.
+    const off = placeMenu({ x: 300, y: 600, upY: -40 }, MENU, VIEW);
+    expect(off.top).toBe(600);
+    expect(off.maxHeight).toBe(VIEW.height - MENU_MARGIN - 600);
   });
 
   it('survives a tiny window', () => {
     const p = placeMenu({ x: 5, y: 5 }, MENU, { width: 10, height: 10 });
     expect(p).toEqual({ left: MENU_MARGIN, top: MENU_MARGIN, maxHeight: 0 });
+  });
+});
+
+describe('closing on scroll (H4)', () => {
+  const OPENED = 10_000;
+  const at = (ms: number) => OPENED + ms;
+
+  it('closes on a wheel, a touch drag or a scroll key outside the menu', () => {
+    const p = createMenuClosePolicy({ left: 10, top: 100 }, OPENED);
+    expect(p.closes({ type: 'wheel', inside: false })).toBe(true);
+    expect(p.closes({ type: 'touchmove', inside: false })).toBe(true);
+    for (const key of ['PageDown', 'PageUp', 'Home', 'End', 'ArrowDown', 'ArrowUp', ' ']) expect(p.closes({ type: 'key', key, inside: false }), key).toBe(true);
+  });
+
+  it('ignores the same inside the menu (it scrolls itself), other keys, chords and typing in a field', () => {
+    const p = createMenuClosePolicy({ left: 10, top: 100 }, OPENED);
+    expect(p.closes({ type: 'wheel', inside: true })).toBe(false);
+    expect(p.closes({ type: 'touchmove', inside: true })).toBe(false);
+    expect(p.closes({ type: 'key', key: 'PageDown', inside: true })).toBe(false);
+    expect(p.closes({ type: 'key', key: 'a', inside: false })).toBe(false);
+    expect(p.closes({ type: 'key', key: 'Enter', inside: false })).toBe(false);
+    expect(p.closes({ type: 'key', key: 'End', inside: false, ctrlKey: true })).toBe(false);
+    expect(p.closes({ type: 'key', key: ' ', inside: false, editable: true })).toBe(false);
+    expect(isScrollKey({ key: 'PageDown' })).toBe(true);
+    expect(isScrollKey({ key: 'Tab' })).toBe(false);
+  });
+
+  it('does not close on a bare scroll event that leaves the anchor where it was (a programmatic smooth scroll)', () => {
+    const p = createMenuClosePolicy({ left: 10, top: 100 }, OPENED);
+    expect(p.closes({ type: 'scroll', inside: false, anchor: { left: 10, top: 100 }, at: at(1000) })).toBe(false);
+    // Up to 4 px is jitter (sub-pixel layout, scroll anchoring after a live refresh).
+    expect(p.closes({ type: 'scroll', inside: false, anchor: { left: 14, top: 96 }, at: at(1100) })).toBe(false);
+    expect(MENU_ANCHOR_SLACK_PX).toBe(4);
+  });
+
+  it('closes when a scroll moves the anchor more than 4 px, or takes it away', () => {
+    const p = createMenuClosePolicy({ left: 10, top: 100 }, OPENED);
+    expect(p.closes({ type: 'scroll', inside: false, anchor: { left: 10, top: 105 }, at: at(1000) })).toBe(true);
+    expect(createMenuClosePolicy({ left: 10, top: 100 }, OPENED).closes({ type: 'scroll', inside: false, anchor: { left: 4, top: 100 }, at: at(1000) })).toBe(true);
+    expect(createMenuClosePolicy({ left: 10, top: 100 }, OPENED).closes({ type: 'scroll', inside: false, anchor: null, at: at(1000) })).toBe(true);
+    // A scroll of the menu itself never does.
+    expect(createMenuClosePolicy({ left: 10, top: 100 }, OPENED).closes({ type: 'scroll', inside: true, anchor: null, at: at(1000) })).toBe(false);
+  });
+
+  it('lets the row be scrolled into view right after opening, then measures from there', () => {
+    const p = createMenuClosePolicy({ left: 10, top: 100 }, OPENED);
+    // The click that opened the menu selected the row and the page scrolled it into view.
+    expect(p.closes({ type: 'scroll', inside: false, anchor: { left: 10, top: 60 }, at: at(50) })).toBe(false);
+    expect(p.closes({ type: 'scroll', inside: false, anchor: { left: 10, top: 62 }, at: at(1000) })).toBe(false);
+    expect(p.closes({ type: 'scroll', inside: false, anchor: { left: 10, top: 100 }, at: at(1100) })).toBe(true);
+  });
+
+  it('without an anchor only a user scroll closes it', () => {
+    const p = createMenuClosePolicy(null, OPENED);
+    expect(p.closes({ type: 'scroll', inside: false, anchor: null, at: at(5000) })).toBe(false);
+    expect(p.closes({ type: 'wheel', inside: false })).toBe(true);
+  });
+
+  it('anchorMoved compares both axes against the slack', () => {
+    expect(anchorMoved(null, null)).toBe(false);
+    expect(anchorMoved({ left: 0, top: 0 }, null)).toBe(true);
+    expect(anchorMoved({ left: 0, top: 0 }, { left: 4, top: -4 })).toBe(false);
+    expect(anchorMoved({ left: 0, top: 0 }, { left: 0, top: 4.5 })).toBe(true);
+    expect(anchorMoved({ left: 0, top: 0 }, { left: 10, top: 0 }, 20)).toBe(false);
   });
 });
 
@@ -77,17 +198,19 @@ describe('keyboard opening', () => {
     expect(isContextMenuKey({ key: 'Enter', shiftKey: true })).toBe(false);
   });
 
-  it('places a keyboard-opened menu inside the focused row', () => {
-    expect(menuPointForRect({ left: 200, top: 300, width: 600, height: 34 })).toEqual({ x: 224, y: 328 });
-    expect(menuPointForRect({ left: 10, top: 10, width: 20, height: 10 })).toEqual({ x: 20, y: 20 });
+  it('places a keyboard-opened menu inside the focused row, and above the row when it flips up', () => {
+    expect(menuPointForRect({ left: 200, top: 300, width: 600, height: 34 })).toEqual({ x: 224, y: 328, upY: 300 });
+    expect(menuPointForRect({ left: 10, top: 10, width: 20, height: 10 })).toEqual({ x: 20, y: 20, upY: 10 });
   });
 
   it('keeps a real pointer position', () => {
     expect(resolveMenuPoint({ x: 400, y: 200 }, { left: 0, top: 0, width: 50, height: 20 }, VIEW)).toEqual({ x: 400, y: 200 });
+    // A button-anchored point keeps where an upward menu ends.
+    expect(resolveMenuPoint({ x: 400, y: 200, upY: 170 }, null, VIEW)).toEqual({ x: 400, y: 200, upY: 170 });
   });
 
   it('falls back to the focused element for a 0,0 (keyboard) contextmenu event, else near the top', () => {
-    expect(resolveMenuPoint({ x: 0, y: 0 }, { left: 100, top: 50, width: 300, height: 30 }, VIEW)).toEqual({ x: 124, y: 78 });
+    expect(resolveMenuPoint({ x: 0, y: 0 }, { left: 100, top: 50, width: 300, height: 30 }, VIEW)).toEqual({ x: 124, y: 78, upY: 50 });
     expect(resolveMenuPoint({ x: 0, y: 0 }, null, VIEW)).toEqual({ x: 600, y: 200 });
     expect(resolveMenuPoint({ x: Number.NaN, y: 5 }, null, VIEW)).toEqual({ x: 600, y: 200 });
   });
@@ -196,6 +319,20 @@ describe('item menu content', () => {
     ]);
   });
 
+  it('offers Record buy… and Record sale… (the journal, F12) right after Record scrap.tf price', () => {
+    const items = flattenSections(itemMenuSections(target, { status: 'loading' }));
+    expect(items.slice(4, 7).map((i) => [i.label, i.action])).toEqual([
+      ['Record scrap.tf price…', { kind: 'quick-entry' }],
+      ['Record buy…', { kind: 'record', side: 'buy' }],
+      ['Record sale…', { kind: 'record', side: 'sell' }],
+    ]);
+    const trade = itemMenuSections(target, { status: 'loading' }).find((s) => s.id === 'trade')!;
+    expect(trade.items.every(isEnabledItem)).toBe(true);
+    expect(trade.items.map((i) => i.title)).toEqual([RECORD_BUY_TITLE, RECORD_SALE_TITLE]);
+    // Writes the journal only: the wording never promises a trade.
+    for (const t of [RECORD_BUY_TITLE, RECORD_SALE_TITLE]) expect(t).toMatch(/Nothing is (bought|sold)\./);
+  });
+
   it('shows a disabled placeholder while the links load or when they fail', () => {
     const loading = flattenSections(itemMenuSections(target, { status: 'loading' })).at(-1)!;
     expect(loading.label).toBe('Loading links…');
@@ -246,5 +383,33 @@ describe('link helpers', () => {
   it('labels hosts without www', () => {
     expect(hostLabel('https://www.backpack.tf/stats')).toBe('backpack.tf');
     expect(hostLabel('not a url')).toBe('');
+  });
+});
+
+describe('item menu wiring (F12 record entries, H4 closing)', () => {
+  const menu = readFileSync(new URL('../../src/renderer/components/ItemMenu.tsx', import.meta.url), 'utf8');
+  const drawer = readFileSync(new URL('../../src/renderer/pages/ItemDrawer.tsx', import.meta.url), 'utf8');
+
+  it('prefills Record buy / Record sale from the local item.detail, newest click only, nothing after the page is left', () => {
+    // History off: a local read, no PriceDB request.
+    expect(menu).toContain("rpc('item.detail', { sku: target.sku, history: false })");
+    expect(menu).toMatch(/if \(recordGate\.isCurrent\(ticket\)\) openRecord\.current\(recordTradeInit\(side, target, d, profit\.current\)\)/);
+    expect(menu).toContain('useEffect(() => () => recordGate.cancel(), [recordGate]);');
+    // A failed read still opens the dialog, without a price.
+    expect(menu).toMatch(/\.catch\(\(\): ItemDetail \| null => null\)/);
+    expect(menu).toContain('{recordTrade.element}');
+  });
+
+  it('closes on user scrolling and on an anchor that moved, not on any scroll event', () => {
+    for (const ev of ["'wheel'", "'touchmove'", "'keydown'", "'scroll'"]) expect(menu).toContain(`window.addEventListener(${ev}`);
+    expect(menu).not.toMatch(/SCROLL_GRACE_MS/);
+    expect(menu).toContain('createMenuClosePolicy(boxOf(anchorEl), performance.now())');
+    // The row, not the cell text a live refresh may replace.
+    expect(menu).toContain(`hit.closest('[role="row"], tr') ?? hit`);
+  });
+
+  it('hangs the drawer buyer menu from its button: it flips up above the button, not over it', () => {
+    expect(drawer).toContain('openMenu(o, { x: r.right, y: r.bottom + 2, upY: r.top - 2 }, e.currentTarget);');
+    expect(drawer).toContain('anchor={menu.anchor}');
   });
 });

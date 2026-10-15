@@ -21,9 +21,10 @@ describe('journalSummary (FIFO)', () => {
   });
 
   it('matches sells to the oldest buy first', () => {
-    const s = journalSummary([row('buy', 'A', 10), row('buy', 'A', 12), row('sell', 'A', 15)]);
+    const left = row('buy', 'A', 12);
+    const s = journalSummary([row('buy', 'A', 10, { ts: left.ts - 500 }), left, row('sell', 'A', 15)]);
     expect(s.realizedProfitScrap).toBe(5);
-    expect(s.open).toEqual([{ sku: 'A', name: 'Item A', qty: 1, costScrap: 12 }]);
+    expect(s.open).toEqual([{ sku: 'A', name: 'Item A', qty: 1, costScrap: 12, lots: [{ id: left.id, ts: left.ts, costScrap: 12, keys: 0, scrap: 12, keyPriceScrap: 567 }] }]);
   });
 
   it('handles partially closed positions across several SKUs', () => {
@@ -38,7 +39,7 @@ describe('journalSummary (FIFO)', () => {
     ]);
     expect(s.realizedTrades).toBe(3);
     expect(s.realizedProfitScrap).toBe(10 + -10 + 9);
-    expect(s.open).toEqual([{ sku: 'A', name: 'Item A', qty: 1, costScrap: 12 }]);
+    expect(s.open).toEqual([{ sku: 'A', name: 'Item A', qty: 1, costScrap: 12, lots: [expect.objectContaining({ costScrap: 12 })] }]);
     expect(s.bySku).toEqual([
       { sku: 'A', name: 'Item A', realizedProfitScrap: 19, trades: 2 },
       { sku: 'B', name: 'Item B', realizedProfitScrap: -10, trades: 1 },
@@ -73,10 +74,12 @@ describe('journalSummary (FIFO)', () => {
   });
 
   it('keeps open positions at their buy-time value', () => {
-    const s = journalSummary([row('buy', 'U', 5, { keys: 2, keyPriceScrap: 500 }), row('buy', 'W', 0, { keys: 1, keyPriceScrap: 600 })]);
+    const u = row('buy', 'U', 5, { keys: 2, keyPriceScrap: 500 });
+    const w = row('buy', 'W', 0, { keys: 1, keyPriceScrap: 600 });
+    const s = journalSummary([u, w]);
     expect(s.open).toEqual([
-      { sku: 'U', name: 'Item U', qty: 1, costScrap: 1005 },
-      { sku: 'W', name: 'Item W', qty: 1, costScrap: 600 },
+      { sku: 'U', name: 'Item U', qty: 1, costScrap: 1005, lots: [{ id: u.id, ts: u.ts, costScrap: 1005, keys: 2, scrap: 5, keyPriceScrap: 500 }] },
+      { sku: 'W', name: 'Item W', qty: 1, costScrap: 600, lots: [{ id: w.id, ts: w.ts, costScrap: 600, keys: 1, scrap: 0, keyPriceScrap: 600 }] },
     ]);
   });
 
@@ -111,10 +114,52 @@ describe('journalSummary (FIFO)', () => {
       row('buy', 'A', 10, { name: 'New name' }),
       row('buy', 'A', 10, { name: '  ' }),
     ]);
-    expect(s.open).toEqual([
+    expect(s.open.map(({ lots: _lots, ...p }) => p)).toEqual([
       { sku: 'B', name: 'Item B', qty: 1, costScrap: 90 },
       { sku: 'A', name: 'New name', qty: 3, costScrap: 30 },
     ]);
+  });
+
+  it('lists each open lot oldest first, at its own buy-time key price (F11 holdings)', () => {
+    const late = row('buy', 'K', 3, { keys: 1, keyPriceScrap: 600 });
+    const early = row('buy', 'K', 0, { keys: 1, keyPriceScrap: 550, ts: late.ts - 60_000 });
+    const sold = row('buy', 'K', 1, { keyPriceScrap: 550, ts: late.ts - 120_000 });
+    const s = journalSummary([late, row('sell', 'K', 20), early, sold]);
+    // The sell closed the oldest buy; the next sale closes `early`.
+    expect(s.open).toEqual([
+      {
+        sku: 'K',
+        name: 'Item K',
+        qty: 2,
+        costScrap: 550 + 603,
+        lots: [
+          { id: early.id, ts: early.ts, costScrap: 550, keys: 1, scrap: 0, keyPriceScrap: 550 },
+          { id: late.id, ts: late.ts, costScrap: 603, keys: 1, scrap: 3, keyPriceScrap: 600 },
+        ],
+      },
+    ]);
+  });
+
+  it('keeps lots in time order with their buy row ids; a buy that settles an earlier sell is no lot', () => {
+    // Logged out of order: ids do not follow time.
+    const third = row('buy', 'L', 30, { ts: T0 + 3_000_000 });
+    const first = row('buy', 'L', 10, { ts: T0 + 1_000_000 });
+    const second = row('buy', 'L', 20, { ts: T0 + 2_000_000 });
+    // A sale logged before any buy of M waits for M's next buy, which then is not held.
+    const earlySell = row('sell', 'M', 50, { ts: T0 + 500_000 });
+    const settles = row('buy', 'M', 40, { ts: T0 + 600_000 });
+    const held = row('buy', 'M', 45, { ts: T0 + 700_000 });
+    const s = journalSummary([third, earlySell, first, held, settles, second]);
+    const l = s.open.find((p) => p.sku === 'L')!;
+    expect(l.lots).toEqual([
+      { id: first.id, ts: first.ts, costScrap: 10, keys: 0, scrap: 10, keyPriceScrap: 567 },
+      { id: second.id, ts: second.ts, costScrap: 20, keys: 0, scrap: 20, keyPriceScrap: 567 },
+      { id: third.id, ts: third.ts, costScrap: 30, keys: 0, scrap: 30, keyPriceScrap: 567 },
+    ]);
+    expect(l.qty).toBe(l.lots.length);
+    expect(l.costScrap).toBe(60);
+    expect(s.open.find((p) => p.sku === 'M')!.lots).toEqual([{ id: held.id, ts: held.ts, costScrap: 45, keys: 0, scrap: 45, keyPriceScrap: 567 }]);
+    expect(s.realizedProfitScrap).toBe(10);
   });
 
   it('ignores junk rows and an empty journal', () => {

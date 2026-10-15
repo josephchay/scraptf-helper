@@ -1,5 +1,7 @@
-import type { ReactNode } from 'react';
+import type { FocusEvent, MouseEvent, ReactNode } from 'react';
 import { useApp } from '../hooks/appContext';
+import { topmostModalIn } from '../itemMenuModel';
+import type { ToastHold, ToastItem } from '../toastModel';
 import { Icon, type IconName } from './Icon';
 
 export function EmptyState({
@@ -67,19 +69,90 @@ export function LoadingBlock({ label = 'Loading…' }: { label?: string }) {
   );
 }
 
+/**
+ * A toast leaving while it holds focus (its Undo or Dismiss was pressed) would drop focus to <body>,
+ * behind an open modal: the Record trade dialog's keys and focus trap, and the drawer's, would stop
+ * working, and Esc would reach the drawer. Focus goes to the modal on top instead, if one is open.
+ */
+function keepFocusInModal(e: MouseEvent<HTMLButtonElement>): void {
+  const toast = e.currentTarget.parentElement;
+  const active = document.activeElement;
+  if (!toast || !active || !toast.contains(active)) return;
+  topmostModalIn<HTMLElement>(document.body)?.focus({ preventScroll: true });
+}
+
 export function ToastStack() {
-  const { toasts, dismissToast } = useApp();
+  const { toasts, dismissToast, holdToast } = useApp();
+  return <ToastList toasts={toasts} onDismiss={dismissToast} onHold={holdToast} />;
+}
+
+/**
+ * The toasts themselves (exported for tests). An action button (H3) runs the action and dismisses
+ * the toast; hover and focus on an action toast hold its countdown so an Undo stays reachable.
+ */
+export function ToastList({
+  toasts,
+  onDismiss,
+  onHold,
+}: {
+  toasts: readonly ToastItem[];
+  onDismiss: (id: number) => void;
+  onHold?: (id: number, why: ToastHold, on: boolean) => void;
+}) {
   return (
     <div className="toasts" aria-live="polite" aria-atomic="false">
-      {toasts.map((t) => (
-        <div key={t.id} className={`toast tone-${t.tone}`} role={t.tone === 'bad' ? 'alert' : 'status'}>
-          <Icon name={t.tone === 'good' ? 'check' : t.tone === 'bad' || t.tone === 'warn' ? 'warning' : 'info'} />
-          <span>{t.text}</span>
-          <button type="button" className="icon-btn" aria-label="Dismiss" onClick={() => dismissToast(t.id)}>
-            <Icon name="close" size={14} />
-          </button>
-        </div>
-      ))}
+      {toasts.map((t) => {
+        const action = t.action;
+        const hold = action && onHold ? (why: ToastHold, on: boolean) => onHold(t.id, why, on) : null;
+        return (
+          <div
+            key={t.id}
+            className={`toast tone-${t.tone}${action ? ' has-action' : ''}`}
+            role={t.tone === 'bad' ? 'alert' : 'status'}
+            onMouseEnter={hold ? () => hold('hover', true) : undefined}
+            onMouseLeave={hold ? () => hold('hover', false) : undefined}
+            onFocus={hold ? () => hold('focus', true) : undefined}
+            onBlur={
+              hold
+                ? (e: FocusEvent<HTMLDivElement>) => {
+                    // Moving between the toast's own buttons keeps the hold.
+                    if (!e.currentTarget.contains(e.relatedTarget as Node | null)) hold('focus', false);
+                  }
+                : undefined
+            }
+          >
+            <Icon name={t.tone === 'good' ? 'check' : t.tone === 'bad' || t.tone === 'warn' ? 'warning' : 'info'} />
+            <span>{t.text}</span>
+            {action ? (
+              <button
+                type="button"
+                className="btn small toast-action"
+                onClick={(e) => {
+                  try {
+                    action.onClick();
+                  } finally {
+                    onDismiss(t.id);
+                    keepFocusInModal(e);
+                  }
+                }}
+              >
+                {action.label}
+              </button>
+            ) : null}
+            <button
+              type="button"
+              className="icon-btn"
+              aria-label="Dismiss"
+              onClick={(e) => {
+                onDismiss(t.id);
+                keepFocusInModal(e);
+              }}
+            >
+              <Icon name="close" size={14} />
+            </button>
+          </div>
+        );
+      })}
     </div>
   );
 }

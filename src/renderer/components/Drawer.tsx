@@ -1,6 +1,11 @@
 import { useEffect, useRef, type ReactNode } from 'react';
 
 const FOCUSABLE = 'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+/**
+ * Toast buttons sit outside the panel (the stack is above it), so the trap lets Tab reach them too:
+ * otherwise a keyboard user could never press a toast's Undo (Block buyer, Record trade) while it is open.
+ */
+export const TOAST_FOCUSABLE = '.toasts button:not([disabled])';
 
 /**
  * Where Tab should move focus to keep it inside a modal panel, or null to let
@@ -9,15 +14,35 @@ const FOCUSABLE = 'a[href], button:not([disabled]), input:not([disabled]), selec
  * or outside it.
  */
 export function trapFocusTarget<T>(items: readonly T[], active: T | null, shift: boolean): T | null {
-  const first = items[0];
-  const last = items[items.length - 1];
-  if (first === undefined || last === undefined) return null;
-  const i = active === null ? -1 : items.indexOf(active);
-  if (shift) return i <= 0 ? last : null;
-  return i === -1 || i === items.length - 1 ? first : null;
+  return trapFocusTargetIn([items], active, shift);
 }
 
-/** Right-hand panel over the page. Esc or the backdrop closes it; focus returns to the opener and stays inside while open. */
+/**
+ * trapFocusTarget over several groups that are each in DOM order but not next to each other in the
+ * page (the panel's controls, then the toast buttons). Tab cycles through all of them as one list:
+ * inside a group the browser's own move is the same, so only a step across a group's edge, or the
+ * wrap at either end, returns a target.
+ */
+export function trapFocusTargetIn<T>(groups: readonly (readonly T[])[], active: T | null, shift: boolean): T | null {
+  const items = groups.flat();
+  if (items.length === 0) return null;
+  const i = active === null ? -1 : items.indexOf(active);
+  if (i === -1) return (shift ? items[items.length - 1] : items[0]) ?? null;
+  const step = shift ? -1 : 1;
+  const j = (i + step + items.length) % items.length;
+  const groupOf = (k: number): number => {
+    let end = 0;
+    for (let g = 0; g < groups.length; g++) {
+      end += groups[g]!.length;
+      if (k < end) return g;
+    }
+    return -1;
+  };
+  if (j === i + step && groupOf(i) === groupOf(j)) return null;
+  return items[j] ?? null;
+}
+
+/** Right-hand panel over the page. Esc or the backdrop closes it; focus returns to the opener and stays inside (plus the toasts) while open. */
 export function Drawer({ open, onClose, labelledBy, children }: { open: boolean; onClose: () => void; labelledBy: string; children: ReactNode }) {
   const panel = useRef<HTMLDivElement>(null);
   const opener = useRef<Element | null>(null);
@@ -35,15 +60,17 @@ export function Drawer({ open, onClose, labelledBy, children }: { open: boolean;
       // aria-modal: Tab and Shift+Tab cycle within the panel instead of reaching the hidden page behind it.
       if (e.key === 'Tab' && !e.defaultPrevented && panel.current) {
         const root = panel.current;
-        const items = [...root.querySelectorAll<HTMLElement>(FOCUSABLE)].filter((el) => el.getClientRects().length > 0);
+        const shown = (el: HTMLElement) => el.getClientRects().length > 0;
+        const items = [...root.querySelectorAll<HTMLElement>(FOCUSABLE)].filter(shown);
         if (!items.length) {
           e.preventDefault();
           root.focus();
           return;
         }
+        const toastItems = [...document.querySelectorAll<HTMLElement>(TOAST_FOCUSABLE)].filter(shown);
         const focused = document.activeElement;
-        const active = focused instanceof HTMLElement && focused !== root && root.contains(focused) ? focused : null;
-        const target = trapFocusTarget(items, active, e.shiftKey);
+        const active = focused instanceof HTMLElement && focused !== root && (root.contains(focused) || toastItems.includes(focused)) ? focused : null;
+        const target = trapFocusTargetIn([items, toastItems], active, e.shiftKey);
         if (target) {
           e.preventDefault();
           target.focus();

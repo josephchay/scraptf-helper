@@ -243,9 +243,16 @@ const V2_MAX_COST = `
 ALTER TABLE opportunities ADD COLUMN max_cost_scrap INTEGER;
 `;
 
+// Per-category item counts of a saved page, fixed at import time (ImportBatch.categories): later
+// imports re-tag the rows they share, so the rows alone lose which page a batch was.
+const V3_BATCH_CATEGORIES = `
+ALTER TABLE import_batches ADD COLUMN categories TEXT;
+`;
+
 export const MIGRATIONS: readonly Migration[] = Object.freeze([
   { version: 1, name: 'initial schema', sql: V1_INITIAL },
   { version: 2, name: 'opportunity pay-up-to ceiling', sql: V2_MAX_COST },
+  { version: 3, name: 'saved-page batch categories', sql: V3_BATCH_CATEGORIES },
 ]);
 
 export const SCHEMA_VERSION: number = MIGRATIONS.reduce((max, m) => Math.max(max, m.version), 0);

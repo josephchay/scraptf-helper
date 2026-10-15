@@ -1,11 +1,16 @@
-// F3 / F8 / F1 in the item drawer: buyer actions, price actions and the ceiling.
+// F3 / F8 / F1 / F12 in the item drawer: buyer actions, price actions, the
+// ceiling and the trade-recording prefills (also used by the item menu).
 
+import { readFileSync } from 'node:fs';
 import { describe, expect, it, vi } from 'vitest';
 import {
+  RECORD_BUY_VENUE,
+  RECORD_SALE_VENUE,
   backgroundCheckListings,
   blockBuyer,
   blocklistWith,
   blocklistWithout,
+  buyerLabel,
   buyerMenuSections,
   buyerProfileUrls,
   ceilingVerdict,
@@ -19,13 +24,21 @@ import {
   isReferenceTooOld,
   isRuleCandidate,
   isSteamId64,
+  newestScrapPrice,
   priceFormHeading,
+  priceIsForSku,
+  recordBuyInit,
+  recordInitTitle,
+  recordSaleInit,
+  recordTradeInit,
   reconfirmInput,
   referenceAgeGates,
+  saleNote,
   unblockBuyer,
   type BlocklistDeps,
 } from '../../src/renderer/itemMenuModel';
 import { usableReferences } from '../../src/service/domain/pricing';
+import { DEFAULT_SETTINGS } from '../../src/shared/defaults';
 import type { BuyerCheck, Opportunity, OrderSummary, ReferencePrices, ScrapPrice } from '../../src/shared/types';
 
 const ID = '76561198012345678';
@@ -120,13 +133,14 @@ describe('buyer profile links', () => {
 describe('buyer actions menu', () => {
   const labels = (s: ReturnType<typeof buyerMenuSections>) => flattenSections(s).map((i) => i.label);
 
-  it('offers open, copy, check and block', () => {
+  it('offers open, copy, record sale, check and block', () => {
     const s = buyerMenuSections(order('a', 10), { blocked: false, highlightCheck: false, checking: false });
-    expect(labels(s)).toEqual(['Open on backpack.tf', 'Steam profile', 'Copy SteamID64', 'Check bans', 'Block buyer']);
+    expect(labels(s)).toEqual(['Open on backpack.tf', 'Steam profile', 'Copy SteamID64', 'Record sale to this buyer', 'Check bans', 'Block buyer']);
     expect(flattenSections(s).map((i) => i.action)).toEqual([
       { kind: 'open', url: `https://backpack.tf/profiles/${ID}` },
       { kind: 'open', url: `https://steamcommunity.com/profiles/${ID}` },
       { kind: 'copy-id' },
+      { kind: 'record-sale' },
       { kind: 'check' },
       { kind: 'block' },
     ]);
@@ -147,9 +161,114 @@ describe('buyer actions menu', () => {
     expect(isEnabledItem(busy)).toBe(false);
   });
 
-  it('disables everything but copy for a malformed id', () => {
+  it('disables everything but copy and recording for a malformed id', () => {
     const items = flattenSections(buyerMenuSections(order('a', 10, 'bogus'), { blocked: false, highlightCheck: false, checking: false }));
-    expect(items.filter(isEnabledItem).map((i) => i.id)).toEqual(['copy-id']);
+    // Recording only writes your journal, so it works for any order.
+    expect(items.filter(isEnabledItem).map((i) => i.id)).toEqual(['copy-id', 'record-sale']);
+  });
+});
+
+describe('recording trades from the drawer and the item menu (F12)', () => {
+  const ITEM = { sku: '378;6', name: 'Team Captain' };
+  const PROFIT = { ...DEFAULT_SETTINGS.profit, useOrder: 'conservative' as const };
+
+  it('prefills a buy on scrap.tf with your newest scrap.tf price, typed or saved, keys kept apart', () => {
+    const prices = [
+      price({ id: 1, observedAt: 1000, costKeys: 0, costScrap: 90 }),
+      price({ id: 2, observedAt: 3000, costKeys: 1, costScrap: 12, source: 'import' }),
+      price({ id: 3, observedAt: 2000, costKeys: 0, costScrap: 80 }),
+    ];
+    expect(newestScrapPrice(prices)?.id).toBe(2);
+    expect(recordBuyInit(ITEM, prices)).toEqual({ side: 'buy', sku: '378;6', name: 'Team Captain', venue: 'scrap.tf', keys: 1, scrap: 12 });
+    // Same time: the later row wins, as the market's known-price pick does.
+    expect(newestScrapPrice([price({ id: 4, observedAt: 5 }), price({ id: 9, observedAt: 5 })])?.id).toBe(9);
+    // No price yet: the venue only, the user types the price.
+    expect(recordBuyInit(ITEM, [])).toEqual({ side: 'buy', sku: '378;6', name: 'Team Captain', venue: 'scrap.tf' });
+    expect(RECORD_BUY_VENUE).toBe('scrap.tf');
+  });
+
+  it("prefills a buy with this very copy's price: never a painted or spelled copy's under the plain SKU", () => {
+    const PINK = 16738740;
+    const special = { paint: null, spells: [], parts: [], sheen: null, killstreaker: null, customName: false, customDesc: false };
+    // One bank-page import: the plain and the pink copy share the page's time; the later card has the higher id.
+    const plain = price({ id: 1, observedAt: 5000, costScrap: 18, source: 'import', special });
+    const pink = price({ id: 2, observedAt: 5000, costScrap: 90, source: 'import', special: { ...special, paint: PINK } });
+    const spelled = price({ id: 3, observedAt: 6000, costScrap: 300, special: { ...special, spells: ['Exorcism'] } });
+    const prices = [plain, pink, spelled];
+    expect(recordBuyInit(ITEM, prices)).toEqual({ side: 'buy', sku: '378;6', name: 'Team Captain', venue: 'scrap.tf', keys: 0, scrap: 18 });
+    // The painted SKU (a painted Holdings row's drawer) takes its paint's price, and keeps its SKU.
+    const painted = { sku: `378;6;p${PINK}`, name: 'Team Captain (Paint: Pink as Hell)' };
+    expect(recordBuyInit(painted, prices)).toMatchObject({ sku: `378;6;p${PINK}`, scrap: 90 });
+    // The mock keeps the paint on the price's SKU instead of in its extras.
+    expect(recordBuyInit(painted, [price({ id: 5, sku: `378;6;p${PINK}`, costScrap: 95 })])).toMatchObject({ scrap: 95 });
+    // Extras never recorded (null) read as a plain copy, as the saved-page import reads them.
+    expect(priceIsForSku(price({ special: null }), '378;6')).toBe(true);
+    expect(priceIsForSku(pink, '378;6')).toBe(false);
+    expect(priceIsForSku(plain, painted.sku)).toBe(false);
+    expect(priceIsForSku(pink, '378;6;p3100495')).toBe(false);
+    // No price for this copy: the venue only, rather than another copy's price.
+    expect(recordBuyInit(ITEM, [pink, spelled])).toEqual({ side: 'buy', sku: '378;6', name: 'Team Captain', venue: 'scrap.tf' });
+    expect(recordTradeInit('buy', ITEM, { name: 'Team Captain', scrapPrices: [pink, plain], revenue: null, buyOrders: [] }, PROFIT)).toMatchObject({ scrap: 18 });
+  });
+
+  it('prefills a sale on backpack.tf at the order price, noted "Sold to <buyer>"', () => {
+    const o = { ...order('a', 0), keys: 2, metalScrap: 15, valueScrap: 2 * 568 + 15, userName: '  Trader Joe ' };
+    expect(recordSaleInit(ITEM, o)).toEqual({ side: 'sell', sku: '378;6', name: 'Team Captain', venue: 'backpack.tf', keys: 2, scrap: 15, note: 'Sold to Trader Joe' });
+    // No name on the order: the SteamID64.
+    expect(saleNote({ userName: null, steamid: ID })).toBe(`Sold to ${ID}`);
+    expect(saleNote({ userName: '   ', steamid: ID })).toBe(`Sold to ${ID}`);
+    expect(buyerLabel({ userName: 'Bob', steamid: ID })).toBe('Bob');
+    expect(recordSaleInit(ITEM, null)).toEqual({ side: 'sell', sku: '378;6', name: 'Team Captain', venue: 'backpack.tf' });
+    expect(RECORD_SALE_VENUE).toBe('backpack.tf');
+  });
+
+  it('the item menu uses the revenue order (Settings: revenue used for profit), not simply the top bid', () => {
+    const top = { ...order('top', 200), flags: ['outlier'] };
+    const cons = order('cons', 150);
+    const d = { name: 'Team Captain', scrapPrices: [price({ costScrap: 70 })], revenue: null, buyOrders: [top, cons] };
+    expect(recordTradeInit('sell', ITEM, d, PROFIT)).toMatchObject({ scrap: 150, note: 'Sold to Buyer' });
+    expect(recordTradeInit('sell', ITEM, d, { ...PROFIT, useOrder: 'best' })).toMatchObject({ scrap: 200 });
+    // The service's own revenue wins when it sent one.
+    const served = { ...d, revenue: { bestScrap: 200, consScrap: 150, instantScrap: null, useOrder: 'conservative' as const, revenueScrap: 120, order: order('srv', 120), maxCostScrap: 100, eligibleCount: 2 } };
+    expect(recordTradeInit('sell', ITEM, served, PROFIT)).toMatchObject({ scrap: 120 });
+    expect(recordTradeInit('buy', ITEM, d, PROFIT)).toEqual({ side: 'buy', sku: '378;6', name: 'Team Captain', venue: 'scrap.tf', keys: 0, scrap: 70 });
+  });
+
+  it('opens without a price when the item could not be read, and never without a name', () => {
+    expect(recordTradeInit('buy', ITEM, null, PROFIT)).toEqual({ side: 'buy', sku: '378;6', name: 'Team Captain', venue: 'scrap.tf' });
+    expect(recordTradeInit('sell', ITEM, null, PROFIT)).toEqual({ side: 'sell', sku: '378;6', name: 'Team Captain', venue: 'backpack.tf' });
+    expect(recordTradeInit('buy', { sku: '378;6', name: ' ' }, null, PROFIT).name).toBe('378;6');
+    expect(recordTradeInit('buy', { sku: '378;6', name: '' }, { name: 'Team Captain', scrapPrices: [], revenue: null, buyOrders: [] }, PROFIT).name).toBe('Team Captain');
+  });
+
+  it('says on the button what the dialog opens with, and that nothing is traded', () => {
+    expect(recordInitTitle(recordBuyInit(ITEM, [price({ costKeys: 1, costScrap: 12 })]))).toBe(
+      'Write a buy at 1 key 1.33 ref on scrap.tf to your journal; you can change it first. Nothing is traded.',
+    );
+    expect(recordInitTitle(recordSaleInit(ITEM, order('a', 18)))).toBe('Write a sale at 2.00 ref on backpack.tf (Sold to Buyer) to your journal; you can change it first. Nothing is traded.');
+    expect(recordInitTitle(recordSaleInit(ITEM, null))).toBe('Write a sale on backpack.tf to your journal; you can change it first. Nothing is traded.');
+  });
+});
+
+describe('item drawer wiring (F12 entry points, H3 Undo on the toast)', () => {
+  const drawer = readFileSync(new URL('../../src/renderer/pages/ItemDrawer.tsx', import.meta.url), 'utf8');
+  const css = readFileSync(new URL('../../src/renderer/styles/drawer-extra.css', import.meta.url), 'utf8');
+
+  it('blocks a buyer with Undo as a toast action, and the in-drawer undo bar is gone', () => {
+    expect(drawer).toMatch(/toast\(`Blocked \$\{who\}\. Their orders no longer count toward profit\.`, 'info', \{ action: \{ label: 'Undo', onClick: \(\) => void remove\(steamid, who\) \} \}\)/);
+    expect(drawer).not.toMatch(/drawer-undo|undoBlock|dismissUndo|UNDO_MS/);
+    expect(css).not.toMatch(/drawer-undo/);
+  });
+
+  it('records a buy, a sale and a sale to one buyer through the one Record trade dialog', () => {
+    expect(drawer).toContain('const recordTrade = useRecordTrade();');
+    expect(drawer).toContain('recordTrade.open(buyInit)');
+    expect(drawer).toContain('recordTrade.open(saleInit)');
+    expect(drawer).toContain('recordTrade.open(recordSaleInit(d, o))');
+    expect(drawer).toContain("case 'record-sale':");
+    expect(drawer).toContain('{recordTrade.element}');
+    // Journal writes go through the dialog; the drawer itself writes nothing new and contacts nobody.
+    expect(drawer).not.toMatch(/rpc\('journal\./);
   });
 });
 

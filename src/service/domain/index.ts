@@ -9,6 +9,9 @@ export {
   NOTIFY_META_KEY,
   RETENTION,
   SWEEP_INTERVAL_MS,
+  bookFlags,
+  buyerCountOf,
+  cleanTarget,
   createEngine,
   evaluateOpportunity,
   explicitInput,
@@ -16,13 +19,16 @@ export {
   notificationSummaryTitle,
   notificationTitle,
   notifyKinds,
+  priceBook,
   revenueOrderByValue,
   revenueOrderOf,
   ruleInput,
   runMaintenance,
+  validRule,
   type EngineDeps,
   type EngineInput,
   type EvaluateArgs,
+  type PricedBook,
 } from './engine';
 
 export { DEFAULT_KEY_SCRAP, KEY_PRICE_STALE_MS, defaultKeyPrice, isQuoteStale, selectKeyPrice } from './keyprice';
@@ -123,3 +129,29 @@ export { journalSummary, journalValue } from './journal';
 export { CSV_BOM, csvCell, eventsCsv, journalCsv, opportunitiesCsv, toCsv, type CsvCell } from './csv';
 
 export { buildShoppingList, shoppingCsv } from './shopping';
+
+export {
+  MARKET_DIRTY_BATCH_MS,
+  MARKET_FULL_EVERY_MS,
+  MARKET_NOTIFY_MS,
+  MARKET_RETRY_MAX_MS,
+  MARKET_RETRY_MIN_MS,
+  MARKET_SLICE_MS,
+  createMarketIndex,
+  evaluateMarketBase,
+  marketCsv,
+  type MarketEval,
+  type MarketEvalArgs,
+  type MarketIndex,
+  type MarketIndexDeps,
+} from './market';
+
+export {
+  HOLDINGS_CHECK_MS,
+  HOLDINGS_NOTIFY_META_KEY,
+  createHoldings,
+  holdingNotification,
+  holdingsCsv,
+  type Holdings,
+  type HoldingsDeps,
+} from './holdings';

@@ -18,7 +18,7 @@ import { createSteamMarket } from './connectors/steamMarket';
 import type { Clock, FeedBatch, Logger, Repo, ServiceDeps, WebSocketLike } from './contracts';
 import { systemClock } from './contracts';
 import { SchemaVersionError, openRepo } from './db';
-import { RETENTION, createEngine, explicitInput, selectKeyPrice } from './domain';
+import { RETENTION, createEngine, createHoldings, createMarketIndex, explicitInput, selectKeyPrice } from './domain';
 import { createFolderWatcher, type FolderWatcher, type WatchFactory } from './import';
 import {
   BUDGETS,
@@ -314,7 +314,7 @@ export function createServiceCore(opts: ServiceCoreOptions): ServiceCore {
   const scm = createSteamMarket(deps);
   const bptfApi = createBptfApi({ ...deps, schema });
 
-  // ----- watchlist: base SKUs with a scrap.tf price -----
+  // ----- watchlist: base SKUs with a scrap.tf price, and held ones (F11) -----
   let watched: Set<string> | null = null;
   let priceCount = 0;
   const watchedSet = (): Set<string> => {
@@ -324,6 +324,13 @@ export function createServiceCore(opts: ServiceCoreOptions): ServiceCore {
     for (const sp of prices) {
       const inp = explicitInput(sp);
       if (inp) set.add(inp.baseSku);
+    }
+    // Open journal lots: the budgeted snapshot job keeps their book fresh and their sell listings are kept.
+    // No new request kind: held SKUs only join the same watch list (reset by ctx.journalChanged).
+    try {
+      for (const b of holdings.heldBases()) set.add(b);
+    } catch (err) {
+      log.warn(`could not read the held items: ${errorText(err)}`);
     }
     priceCount = prices.length;
     watched = set;
@@ -431,6 +438,31 @@ export function createServiceCore(opts: ServiceCoreOptions): ServiceCore {
     },
   });
 
+  // Live market (F10): reads the same local book as the engine and values keys with its key price.
+  // It keeps serving its last state while the network is paused (the feed stops anyway).
+  const market = createMarketIndex({
+    ...deps,
+    schema,
+    timers,
+    keyPrice: () => engine.keyPrice(),
+    onChanged: (p) => push('market.changed', p),
+    // syncFolderWatch drops the watcher when the folder is missing; a failed OS watch is not alive.
+    // Read only from market.list, after construction, so the later `let watcher` is initialised.
+    folderWatchActive: () => watcher !== null && watcher.handle.alive(),
+    // Called from the index's timers only, after construction, so `holdings` below is initialised.
+    onBasesChanged: (bases) => holdings.onBasesChanged(bases),
+  });
+
+  // Holdings (F11): open journal lots priced from the market index; "Sell:" notifications go through main.
+  const holdings = createHoldings({
+    ...deps,
+    schema,
+    market,
+    timers,
+    keyPrice: () => engine.keyPrice(),
+    notify: (n) => push('notify', n),
+  });
+
   // ----- backpack.tf feed -----
   /** Listing id -> when the feed deleted it, oldest first (lets a snapshot taken earlier not re-create it). */
   const feedDeletes = new Map<string, UnixMs>();
@@ -466,7 +498,10 @@ export function createServiceCore(opts: ServiceCoreOptions): ServiceCore {
       if (keep.length > 0) repo.upsertListings(keep);
     });
     for (const l of keep) if (l.intent === 'buy') affected.add(l.baseSku);
-    if (affected.size > 0) engine.markDirty(affected);
+    if (affected.size > 0) {
+      engine.markDirty(affected);
+      market.markDirty(affected);
+    }
   };
   const socket = createBptfSocket({ ...deps, schema, onBatch, timers, ...(opts.wsFactory ? { wsFactory: opts.wsFactory } : {}) });
 
@@ -518,6 +553,7 @@ export function createServiceCore(opts: ServiceCoreOptions): ServiceCore {
       }
     });
     engine.markDirty(affected);
+    market.markDirty(affected);
     log.info(`snapshot ${base}: ${mine.length} listings`);
   };
 
@@ -529,6 +565,9 @@ export function createServiceCore(opts: ServiceCoreOptions): ServiceCore {
       if (lastKeyScrap !== null) log.info(`key price moved ${lastKeyScrap} -> ${kp.valueScrap} scrap`);
       lastKeyScrap = kp.valueScrap;
       engine.markAllDirty();
+      // Ceilings and key-priced orders move with the key value.
+      market.markAllDirty();
+      holdings.settingsChanged();
     }
     scheduleStatusCheck();
   };
@@ -547,7 +586,10 @@ export function createServiceCore(opts: ServiceCoreOptions): ServiceCore {
     if (want && !pricedbSocketOn) {
       pricedbSocketOn = true;
       pricedb.startSocket((row) => {
-        engine.markDirty([toBaseSku(row.sku)]);
+        // A new reference moves confidence and the outlier test of that item.
+        const bases = [toBaseSku(row.sku)];
+        engine.markDirty(bases);
+        market.markDirty(bases);
         if (row.sku === '5021;6') keyQuotesChanged();
       });
     } else if (!want && pricedbSocketOn) {
@@ -776,14 +818,24 @@ export function createServiceCore(opts: ServiceCoreOptions): ServiceCore {
     bptfApi,
     scm,
     engine,
+    market,
+    holdings,
     push,
     status: computeStatus,
     health: computeHealth,
     pricesChanged: () => {
       watched = null;
+      // Every price and rule write: the Live market re-reads the user's side only (no rebuild).
+      market.pricesChanged();
       scheduleStatusCheck();
       // Every window's price sheet and count refresh, including saves from quick entry.
       push('prices.changed', { at: clock.now() });
+    },
+    journalChanged: () => {
+      // Held SKUs join or leave the watch list; holdings re-read the journal.
+      watched = null;
+      holdings.journalChanged();
+      push('journal.changed', { at: clock.now() });
     },
     queueSnapshot,
     snapshot,
@@ -818,6 +870,7 @@ export function createServiceCore(opts: ServiceCoreOptions): ServiceCore {
     pricedb,
     bptfApi,
     engine,
+    market,
     watchedBaseSkus: () => [...watchedSet()],
     nextQueuedSnapshot: () => snapshotQueue.shift() ?? null,
     snapshot,
@@ -838,6 +891,8 @@ export function createServiceCore(opts: ServiceCoreOptions): ServiceCore {
       }
       lastKeyScrap = selectKeyPrice(repo.keyQuotes(), settings, clock.now()).valueScrap;
       engine.start();
+      market.start();
+      holdings.start();
       statusTimer = timers.setInterval(() => {
         flushOppLog();
         retryFolderWatch();
@@ -852,6 +907,8 @@ export function createServiceCore(opts: ServiceCoreOptions): ServiceCore {
       syncPricedbSocket();
       syncFolderWatch();
       engine.markAllDirty();
+      // The Live market's first build, once the schema has loaded (or failed to; a later load rebuilds).
+      market.markAllDirty();
       checkStatus();
       log.info(`service started (schema ${schema.isLoaded() ? 'loaded' : 'not loaded yet'})`);
     },
@@ -862,6 +919,8 @@ export function createServiceCore(opts: ServiceCoreOptions): ServiceCore {
       started = false;
       scheduler.stop();
       engine.stop();
+      market.stop();
+      holdings.stop();
       socket.stop();
       if (pricedbSocketOn) pricedb.stopSocket();
       pricedbSocketOn = false;
@@ -901,6 +960,13 @@ export function createServiceCore(opts: ServiceCoreOptions): ServiceCore {
         engine.markAllDirty();
         keyQuotesChanged();
       }
+      // Thresholds, notes keywords and the blocklist change every ceiling and eligibility; notifications
+      // do not touch the market, and a key value move is handled by keyQuotesChanged above.
+      const marketKey = (s: Settings) => JSON.stringify([s.profit, s.blocklist]);
+      if (marketKey(prev) !== marketKey(next)) market.markAllDirty();
+      // Holdings judge sells with the profit thresholds and gate "Sell:" notifications on settings.notifications.
+      const holdingsKey = (s: Settings) => JSON.stringify([s.profit, s.blocklist, s.notifications]);
+      if (holdingsKey(prev) !== holdingsKey(next)) holdings.settingsChanged();
       if (prev.connectors.bptfApi !== next.connectors.bptfApi || prev.connectors.pricedb !== next.connectors.pricedb) {
         for (const id of ['key-bptf', 'bptf-prices', 'key-pricedb', 'pricedb-all']) scheduler.kick(id);
       }

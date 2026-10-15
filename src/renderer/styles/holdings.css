@@ -1,0 +1,381 @@
+/* Holdings page (F11) and the Record trade dialog (F12). Reuse the opportunities grid (.opp-scroll,
+   .opp-row) and the market's patterns; only the holdings' own tracks, status pills, header totals and
+   the dialog's comparison line live here. Colours come from tokens.css; the flash respects
+   prefers-reduced-motion. */
+
+.holdings-page {
+  height: 100%;
+}
+
+/* ---------- header totals ---------- */
+
+.holdings-totals {
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+}
+
+.holdings-totals .stat {
+  padding: 10px 14px;
+}
+
+.holdings-totals .stat-value {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Unrealised P/L and "sellable now" carry their tone on the card edge as well as in the figure. */
+.holdings-pl.tone-good,
+.holdings-pl.tone-bad,
+.holdings-sellable {
+  box-shadow: inset 3px 0 0 var(--tone);
+}
+
+/* ---------- table ---------- */
+
+/* Item / Qty / Your cost / Held for / Sells now for / Buyers / Profit now / Confidence / Updated / actions.
+   Each set of tracks (plus gaps and padding) fits the width its query starts at: full needs 1210px;
+   the queries drop Buyers and Confidence, then Held for, then Updated, down to ~840px (the 960px
+   minimum window). Your cost keeps room for a key-priced lot ("20 keys 58.66 ref") at every width. */
+.holdings-scroll {
+  --hold-cols: minmax(190px, 1fr) 40px 124px 60px 212px 54px 186px 66px 52px 112px;
+}
+
+.holdings-scroll .opp-row {
+  grid-template-columns: var(--hold-cols);
+}
+
+@container (max-width: 1210px) {
+  .holdings-scroll .opp-row {
+    --hold-cols: minmax(170px, 1fr) 40px 124px 60px 212px 186px 52px 112px;
+  }
+  .holdings-scroll .opp-row > .h-buyers,
+  .holdings-scroll .opp-row > .h-conf {
+    display: none;
+  }
+}
+
+@container (max-width: 1050px) {
+  .holdings-scroll .opp-row {
+    --hold-cols: minmax(160px, 1fr) 40px 124px 196px 180px 52px 112px;
+  }
+  .holdings-scroll .opp-row > .h-held {
+    display: none;
+  }
+}
+
+@container (max-width: 950px) {
+  .holdings-scroll .opp-row {
+    --hold-cols: minmax(150px, 1fr) 36px 120px 176px 172px 108px;
+  }
+  .holdings-scroll .opp-row > .h-updated {
+    display: none;
+  }
+}
+
+/* Rows in normal flow under the sticky header: holdings are few, so the grid is not virtualised. */
+.holdings-body > .opp-row {
+  position: relative;
+}
+
+.h-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.holding-row.status-no-buyers .h-item .item-name {
+  opacity: 0.85;
+}
+
+.h-cost .money {
+  font-weight: 600;
+}
+
+.h-sells {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.h-sells > .money {
+  flex-shrink: 0;
+}
+
+.h-sells .buyer-type {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 4px;
+  color: var(--text-muted);
+}
+
+.h-sells .buyer-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: 12px;
+}
+
+.buyer-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.buyer-link > .icon {
+  flex-shrink: 0;
+}
+
+.h-profit {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.h-profit > .money {
+  flex-shrink: 0;
+  font-weight: 650;
+}
+
+/* Gives way before the figure, so the profit stays readable in a narrow column. */
+.holding-pill {
+  display: inline-block;
+  flex-shrink: 1;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  line-height: 20px;
+}
+
+.h-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.h-actions .btn {
+  white-space: nowrap;
+}
+
+.journal-holdings-link {
+  font-weight: 500;
+}
+
+/* ---------- live flash ---------- */
+
+/* Two names per direction: a row that changes again within the flash restarts its animation. */
+@keyframes holding-flash-up-a {
+  from {
+    background-color: color-mix(in srgb, var(--good) 26%, transparent);
+  }
+}
+
+@keyframes holding-flash-up-b {
+  from {
+    background-color: color-mix(in srgb, var(--good) 26%, transparent);
+  }
+}
+
+@keyframes holding-flash-down-a {
+  from {
+    background-color: color-mix(in srgb, var(--bad) 22%, transparent);
+  }
+}
+
+@keyframes holding-flash-down-b {
+  from {
+    background-color: color-mix(in srgb, var(--bad) 22%, transparent);
+  }
+}
+
+.holding-row.flash-up.flash-a {
+  animation: holding-flash-up-a 1.6s ease-out;
+}
+
+.holding-row.flash-up.flash-b {
+  animation: holding-flash-up-b 1.6s ease-out;
+}
+
+.holding-row.flash-down.flash-a {
+  animation: holding-flash-down-a 1.6s ease-out;
+}
+
+.holding-row.flash-down.flash-b {
+  animation: holding-flash-down-b 1.6s ease-out;
+}
+
+/* ---------- Record trade dialog ---------- */
+
+/* Above the item drawer (80) and its menus' host, below the toasts (200) so the Undo shows over it. */
+.rt-root {
+  position: fixed;
+  inset: 0;
+  z-index: 120;
+  display: grid;
+  place-items: center;
+  padding: 16px;
+}
+
+.rt-backdrop {
+  position: absolute;
+  inset: 0;
+  background: var(--backdrop);
+}
+
+.rt-dialog {
+  position: relative;
+  width: min(540px, 100%);
+  max-height: calc(100vh - 32px);
+  overflow: auto;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  background: var(--bg);
+  box-shadow: var(--shadow);
+  outline: none;
+  animation: rt-in 0.14s ease-out;
+}
+
+@keyframes rt-in {
+  from {
+    transform: translateY(8px);
+    opacity: 0;
+  }
+}
+
+.rt-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 16px 10px;
+  border-bottom: 1px solid var(--border);
+}
+
+.rt-title-wrap {
+  min-width: 0;
+}
+
+.rt-title {
+  margin: 0;
+  font-size: 15px;
+}
+
+.rt-item {
+  margin-top: 4px;
+  min-width: 0;
+}
+
+.rt-item .item-name {
+  white-space: normal;
+}
+
+.rt-body {
+  display: grid;
+  gap: 12px;
+  padding: 14px 16px;
+}
+
+.rt-row {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+@media (max-width: 520px) {
+  .rt-row {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.rt-compare {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-height: 52px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-2);
+  box-shadow: inset 3px 0 0 var(--tone);
+  font-size: 12.5px;
+}
+
+.rt-compare.tone-muted {
+  box-shadow: none;
+}
+
+.rt-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px 8px;
+  min-height: 20px;
+}
+
+.rt-label {
+  min-width: 72px;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.rt-strong {
+  font-size: 14px;
+  font-weight: 650;
+}
+
+.rt-count {
+  margin-left: auto;
+}
+
+.rt-buyer {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+}
+
+.rt-buyer > .icon {
+  color: var(--text-muted);
+}
+
+.rt-buyer .buyer-name {
+  max-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rt-verdict {
+  line-height: 1.45;
+}
+
+.rt-foot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 10px 16px 14px;
+  border-top: 1px solid var(--border);
+}
+
+.rt-foot-hint {
+  margin-right: auto;
+}
+
+/* No fade with reduced motion: a still tint for the same moment, plus the arrow in Profit now. */
+@media (prefers-reduced-motion: reduce) {
+  .holding-row.flash-up,
+  .holding-row.flash-down {
+    animation: none !important;
+  }
+  .holding-row.flash-up {
+    background-color: var(--good-weak);
+  }
+  .holding-row.flash-down {
+    background-color: var(--bad-weak);
+  }
+  .rt-dialog {
+    animation: none;
+  }
+}

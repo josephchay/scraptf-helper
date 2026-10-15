@@ -1,0 +1,207 @@
+// F11 holdings rules shared by the service, the mock and the dashboard: the
+// figures for the next lot and for every unit, the status from profitStatus,
+// the order (sellable first), the totals and the CSV cells. Pure; no network.
+
+import { describe, expect, it } from 'vitest';
+import { maxCostFor, profitStatus } from '../../src/shared/ceiling';
+import { DEFAULT_SETTINGS } from '../../src/shared/defaults';
+import {
+  HOLDINGS_CSV_COLUMNS,
+  holdingComparator,
+  holdingFigures,
+  holdingMatches,
+  holdingRow,
+  holdingStatusOf,
+  holdingsCsvCells,
+  holdingsMatching,
+  holdingsResult,
+  holdingsTotals,
+  lotCostAt,
+  type HoldingBuySide,
+} from '../../src/shared/holdings';
+import { valueScrap } from '../../src/shared/currency';
+import { HOLDING_STATUSES, type HoldingRow, type JournalPosition, type OrderSummary } from '../../src/shared/types';
+
+const NOW = Date.UTC(2026, 9, 15, 12, 0, 0);
+const KEY = 568;
+const P = DEFAULT_SETTINGS.profit;
+
+function order(over: Partial<OrderSummary> = {}): OrderSummary {
+  return {
+    listingId: 'l1',
+    steamid: '76561198000000001',
+    userName: 'Metal Bank Bot',
+    keys: 0,
+    metalScrap: 60,
+    valueScrap: 60,
+    isBot: true,
+    online: true,
+    lastEventAt: NOW - 60_000,
+    bumpedAt: null,
+    details: '',
+    flags: [],
+    eligible: true,
+    ...over,
+  };
+}
+
+function buy(revenueScrap: number | null, over: Partial<HoldingBuySide> = {}): HoldingBuySide {
+  return {
+    revenueScrap,
+    bestScrap: revenueScrap,
+    instantScrap: revenueScrap,
+    revenueOrder: revenueScrap === null ? null : order({ valueScrap: revenueScrap, metalScrap: revenueScrap }),
+    bestOrder: revenueScrap === null ? null : order({ valueScrap: revenueScrap, metalScrap: revenueScrap }),
+    buyerCount: revenueScrap === null ? 0 : 3,
+    confidence: 70,
+    confidenceLevel: 'high',
+    flags: [],
+    lastOrderChangeAt: NOW - 60_000,
+    ...over,
+  };
+}
+
+function position(sku: string, costs: number[], name = `Item ${sku}`): JournalPosition {
+  const lots = costs.map((c, i) => ({ id: i + 1, ts: NOW - (costs.length - i) * 3_600_000, costScrap: c, keys: 0, scrap: c, keyPriceScrap: KEY }));
+  return { sku, name, qty: lots.length, costScrap: costs.reduce((t, c) => t + c, 0), lots };
+}
+
+const rowOf = (sku: string, costs: number[], b: HoldingBuySide | null, name?: string): HoldingRow => holdingRow(position(sku, costs, name), 'hats', b, P);
+
+describe('holding status', () => {
+  it('is profitStatus of the next lot in holding terms', () => {
+    expect(holdingStatusOf('profitable')).toBe('sell');
+    expect(holdingStatusOf('below-threshold')).toBe('hold');
+    expect(holdingStatusOf('unprofitable')).toBe('loss');
+    expect(holdingStatusOf('no-buyers')).toBe('no-buyers');
+    expect(HOLDING_STATUSES).toEqual(['sell', 'hold', 'loss', 'no-buyers']);
+  });
+
+  it('sells exactly when the next lot cost is at or under the Pay up to ceiling', () => {
+    const revenue = 200;
+    const ceiling = maxCostFor(revenue, P)!;
+    expect(holdingFigures({ revenueScrap: revenue, qty: 1, costScrap: ceiling, nextLotCostScrap: ceiling }, P).status).toBe('sell');
+    expect(holdingFigures({ revenueScrap: revenue, qty: 1, costScrap: ceiling + 1, nextLotCostScrap: ceiling + 1 }, P).status).toBe('hold');
+    expect(holdingFigures({ revenueScrap: revenue, qty: 1, costScrap: revenue, nextLotCostScrap: revenue }, P).status).toBe('loss');
+    expect(holdingFigures({ revenueScrap: null, qty: 1, costScrap: 10, nextLotCostScrap: 10 }, P)).toEqual({
+      profitNowScrap: null,
+      profitAllScrap: null,
+      margin: null,
+      status: 'no-buyers',
+    });
+  });
+});
+
+describe('holdingRow', () => {
+  it('prices the next FIFO lot and every unit, with friction per unit', () => {
+    const p = { ...P, frictionScrap: 2 };
+    const r = holdingRow(position('378;6', [40, 50]), 'hats', buy(60), p);
+    expect(r).toMatchObject({ qty: 2, costScrap: 90, nextLotCostScrap: 40, heldSince: NOW - 2 * 3_600_000 });
+    expect(r.profitNowScrap).toBe(60 - 40 - 2);
+    expect(r.profitAllScrap).toBe(60 * 2 - 90 - 2 * 2);
+    expect(r.margin).toBeCloseTo(18 / 40);
+    expect(r.status).toBe(holdingStatusOf(profitStatus(18, 40, p)));
+    expect(r).toMatchObject({ revenueScrap: 60, bestScrap: 60, instantScrap: 60, buyerCount: 3, confidence: 70, confidenceLevel: 'high' });
+    expect(r.revenueOrder?.valueScrap).toBe(60);
+  });
+
+  it('reads no buyers as no revenue, low confidence and no order', () => {
+    const r = rowOf('30359;6', [12], null);
+    expect(r).toMatchObject({ status: 'no-buyers', revenueScrap: null, revenueOrder: null, bestOrder: null, buyerCount: 0, confidence: 0, confidenceLevel: 'low', profitNowScrap: null, margin: null });
+  });
+
+  it('flags a painted copy (priced against its clean base) and copies the buy flags', () => {
+    const flags = ['stale-reference'];
+    const r = rowOf('378;6;p15185211', [40], buy(80, { flags }));
+    expect(r.flags).toEqual(['stale-reference', 'has-extras']);
+    expect(flags).toEqual(['stale-reference']);
+    expect(rowOf('378;6', [40], buy(80)).flags).toEqual([]);
+  });
+
+  it('has no margin for a free lot (profitStatus treats it as unbounded)', () => {
+    const r = rowOf('378;6', [0], buy(30));
+    expect(r.margin).toBeNull();
+    expect(r.status).toBe('sell');
+  });
+
+  it('falls back to the average lot when a position has no lots listed', () => {
+    const r = holdingRow({ sku: 'a', name: 'A', qty: 2, costScrap: 30, lots: [] }, 'other', buy(40), P);
+    expect(r).toMatchObject({ nextLotCostScrap: 15, heldSince: 0 });
+  });
+
+  it('values key-priced lots at the key price the revenue is valued at, as the journal books a sale', () => {
+    // Bought for 1 key while a key was 500; a buyer pays exactly 1 key now that it is KEY (568).
+    const keyLot = (keys: number, scrap: number, k: number, id: number) => ({ id, ts: NOW - id * 3_600_000, costScrap: valueScrap(keys, scrap, k), keys, scrap, keyPriceScrap: k });
+    const one: JournalPosition = { sku: '30920;6', name: 'Taunt', qty: 1, costScrap: 500, lots: [keyLot(1, 0, 500, 1)] };
+    const up = holdingRow(one, 'taunts', buy(KEY), P, KEY);
+    // Same keys in and out: no profit, so no "Sell:" from the key price move alone.
+    expect(up).toMatchObject({ costScrap: KEY, nextLotCostScrap: KEY, profitNowScrap: 0, profitAllScrap: 0, status: 'loss' });
+    // Without a key price the buy-time cost stays.
+    expect(holdingRow(one, 'taunts', buy(KEY), P)).toMatchObject({ nextLotCostScrap: 500, profitNowScrap: KEY - 500 });
+
+    // Key down: bought for 10 keys at 600, a buyer pays 10 keys + 18 scrap at 568: +18, not a loss.
+    const ten: JournalPosition = { sku: '378;5;u13', name: 'Unusual', qty: 2, costScrap: 6000 + 5 * 600 + 9, lots: [keyLot(10, 0, 600, 1), keyLot(5, 9, 600, 2)] };
+    const down = holdingRow(ten, 'unusuals', buy(10 * KEY + 18), P, KEY);
+    expect(down).toMatchObject({ nextLotCostScrap: 10 * KEY, costScrap: 15 * KEY + 9, profitNowScrap: 18, profitAllScrap: 2 * (10 * KEY + 18) - (15 * KEY + 9) });
+    expect(down.status).not.toBe('loss');
+    expect(lotCostAt(ten.lots[1]!, KEY)).toBe(5 * KEY + 9);
+    expect(lotCostAt({ costScrap: 77 }, KEY)).toBe(77);
+    expect(lotCostAt(ten.lots[0]!, null)).toBe(6000);
+  });
+});
+
+describe('order, search and totals', () => {
+  const sell = rowOf('1', [10], buy(60), 'Sell small');
+  const sellBig = rowOf('2', [10], buy(200), 'Sell big');
+  const hold = rowOf('3', [55], buy(60), 'Hold');
+  const loss = rowOf('4', [80], buy(60), 'Loss');
+  const none = rowOf('5', [12], null, 'Nobody');
+
+  it('puts sellable first, then the biggest profit now', () => {
+    expect([none, loss, hold, sell, sellBig].sort(holdingComparator).map((r) => r.name)).toEqual(['Sell big', 'Sell small', 'Hold', 'Loss', 'Nobody']);
+    // Ties go by name, then SKU.
+    const a = rowOf('9', [10], buy(60), 'Alpha');
+    const b = rowOf('8', [10], buy(60), 'Alpha');
+    expect([a, b].sort(holdingComparator).map((r) => r.sku)).toEqual(['8', '9']);
+  });
+
+  it('searches name and SKU word by word', () => {
+    expect(holdingMatches({ name: 'Strange Knife', sku: '194;11' }, ['knife', '194'])).toBe(true);
+    expect(holdingMatches({ name: 'Strange Knife', sku: '194;11' }, ['knife', 'australium'])).toBe(false);
+    expect(holdingsMatching([sell, hold], { search: '  hold ' }).map((r) => r.name)).toEqual(['Hold']);
+    expect(holdingsMatching([hold, sell], {}).map((r) => r.name)).toEqual(['Sell small', 'Hold']);
+  });
+
+  it('totals everything held; rows without revenue add cost but no worth', () => {
+    const rows = [sell, hold, none];
+    expect(holdingsTotals(rows)).toEqual({
+      items: 3,
+      units: 3,
+      costScrap: 10 + 55 + 12,
+      worthNowScrap: 60 + 60,
+      profitNowScrap: sell.profitAllScrap! + hold.profitAllScrap!,
+      sellable: 1,
+    });
+    const res = holdingsResult(rows, { search: 'nobody' }, null, NOW);
+    expect(res.rows.map((r) => r.name)).toEqual(['Nobody']);
+    // The header is about the whole position, whatever the search.
+    expect(res.totals.items).toBe(3);
+    expect(res).toMatchObject({ keyPrice: null, generatedAt: NOW });
+  });
+});
+
+describe('CSV cells', () => {
+  it('follow the column list, money as keys + ref, blanks for missing values', () => {
+    expect(HOLDINGS_CSV_COLUMNS).toEqual(['sku', 'name', 'qty', 'cost', 'next_lot_cost', 'held_since', 'sells_for', 'buyer', 'profit_now', 'profit_all', 'status', 'confidence']);
+    const r = holdingRow(position('378;6', [KEY + 18, 600]), 'hats', buy(KEY + 90), P);
+    const cells = holdingsCsvCells(r, KEY);
+    expect(cells).toHaveLength(HOLDINGS_CSV_COLUMNS.length);
+    expect(cells.slice(0, 3)).toEqual(['378;6', 'Item 378;6', 2]);
+    expect(cells[4]).toBe('1 key 2.00 ref');
+    expect(cells[5]).toBe(new Date(r.heldSince).toISOString());
+    expect(cells[7]).toBe('Metal Bank Bot (bot)');
+    expect(cells[10]).toBe(r.status);
+    const empty = holdingsCsvCells(rowOf('5', [12], null), KEY);
+    expect([empty[6], empty[7], empty[8], empty[9], empty[10]]).toEqual(['', '', '', '', 'no-buyers']);
+  });
+});

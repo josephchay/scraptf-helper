@@ -12,6 +12,8 @@ import type {
   DeepPartial,
   EventQuery,
   HealthReport,
+  HoldingsQuery,
+  HoldingsResult,
   ImportBatch,
   ImportResult,
   ItemDetail,
@@ -20,6 +22,8 @@ import type {
   JournalInput,
   JournalSummary,
   LinkSpec,
+  MarketListResult,
+  MarketQuery,
   OppListResult,
   OppQuery,
   OpportunityEvent,
@@ -52,13 +56,31 @@ export interface RpcContract {
   /**
    * `query` filters and sorts the opportunities export like 'opps.list' (paging ignored); omitted, every row.
    * kind 'shopping' exports the shopping list filtered by `shopping` (paging ignored).
+   * kind 'market' exports the live market filtered and sorted by `market` (paging ignored).
+   * kind 'holdings' exports the holdings matching `holdings`, in the page's order.
    */
   'opps.exportCsv': {
-    params: { kind: 'opportunities' | 'events' | 'shopping'; query?: OppQuery; shopping?: ShoppingQuery };
+    params: {
+      kind: 'opportunities' | 'events' | 'shopping' | 'market' | 'holdings';
+      query?: OppQuery;
+      shopping?: ShoppingQuery;
+      market?: MarketQuery;
+      holdings?: HoldingsQuery;
+    };
     result: { csv: string; suggestedName: string };
   };
   /** One row per SKU with a "pay up to" ceiling, to browse scrap.tf against by hand. */
   'shopping.list': { params: ShoppingQuery; result: ShoppingListResult };
+  /**
+   * Live market (F10): every base SKU with eligible backpack.tf buyers in the local book, plus every
+   * SKU the user has a scrap.tf price for. Read from the service's in-memory index; no network.
+   */
+  'market.list': { params: MarketQuery; result: MarketListResult };
+  /**
+   * Holdings (F11): the journal's open FIFO lots, priced against the same local book as the Live
+   * market. No request of its own; held SKUs only join the budgeted snapshot watch list.
+   */
+  'holdings.list': { params: HoldingsQuery; result: HoldingsResult };
   /**
    * `history: false` skips the PriceDB history fetch (local only, fast); default true.
    * `target: 'plain'` classifies the book against a clean copy of `sku` (the row quick
@@ -156,6 +178,8 @@ export const SERVICE_METHODS: readonly RpcMethod[] = [
   'opps.events',
   'opps.exportCsv',
   'shopping.list',
+  'market.list',
+  'holdings.list',
   'item.detail',
   'buyer.check',
   'item.refresh',
@@ -191,10 +215,14 @@ export const SERVICE_METHODS: readonly RpcMethod[] = [
 /** Events pushed from the service (through main) to the dashboard. */
 export interface PushContract {
   'opps.changed': { appeared: number; changed: number; gone: number; at: number };
+  /** The live market index changed (throttled to one per 2 s): `changed` rows of `total`. */
+  'market.changed': { changed: number; total: number; at: number };
   'status.changed': AppStatus;
   'import.done': ImportResult;
   /** The price sheet (scrap.tf prices or rules) changed, from any window or an import. */
   'prices.changed': { at: number };
+  /** The trade journal changed ('journal.add', 'journal.delete'): the Journal and Holdings pages refresh. */
+  'journal.changed': { at: number };
   /** Service asks main to show a desktop notification. */
   'notify': { title: string; body: string; sku: string | null };
   'settings.changed': Settings;
@@ -214,9 +242,11 @@ export type PushEvent = keyof PushContract;
 
 export const PUSH_EVENTS: readonly PushEvent[] = [
   'opps.changed',
+  'market.changed',
   'status.changed',
   'import.done',
   'prices.changed',
+  'journal.changed',
   'notify',
   'settings.changed',
   'ui.openItem',

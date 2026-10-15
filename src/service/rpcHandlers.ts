@@ -6,14 +6,22 @@ import { z } from 'zod';
 import { buildLinks } from '../shared/links';
 import type { PushContract, PushEvent } from '../shared/rpc';
 import { SERVICE_METHODS } from '../shared/rpc';
+import { MARKET_MAX_LIMIT, MARKET_MAX_SEARCH_CHARS, MARKET_SORTS, countCategories } from '../shared/market';
 import { baseSku as toBaseSku, canonical, fromObject, fromString, isValidSku, looksLikeSku } from '../shared/sku';
 import {
   EMPTY_SPECIAL,
+  MARKET_SOURCES,
+  MARKET_VERDICTS,
   SECRET_NAMES,
   type AppStatus,
+  type Category,
+  type CategoryCounts,
   type HealthReport,
   type HistoryPoint,
   type ImportResult,
+  type MarketSort,
+  type MarketSource,
+  type MarketVerdict,
   type ScrapPrice,
   type ScrapPriceInput,
   type SecretName,
@@ -31,6 +39,8 @@ import {
   opportunitiesCsv,
   previewRule,
 } from './domain';
+import { holdingsCsv, type Holdings } from './domain/holdings';
+import { marketCategoryOf, marketCsv, type MarketIndex } from './domain/market';
 import { buildShoppingList, shoppingCsv } from './domain/shopping';
 import { createBuyerChecker } from './buyerCheck';
 import { isImportableItem, MAX_IMPORT_BYTES, parseScrapTfHtml } from './import';
@@ -48,6 +58,10 @@ export interface HandlerContext {
   bptfApi: BptfApi;
   scm: SteamMarket;
   engine: Engine;
+  /** Live market index (F10): in memory, fed by the same local book as the engine; no network. */
+  market: MarketIndex;
+  /** Holdings (F11): open journal lots priced from the same local book; no network. */
+  holdings: Holdings;
   settings(): Settings;
   secret(name: SecretName): string | null;
   push<E extends PushEvent>(event: E, payload: PushContract[E]): void;
@@ -55,6 +69,8 @@ export interface HandlerContext {
   health(): HealthReport;
   /** The scrap.tf price list changed (watchlist cache, setup checklist). */
   pricesChanged(): void;
+  /** A journal row was added or deleted: held SKUs (watch list), holdings, and the 'journal.changed' push. */
+  journalChanged(): void;
   /** Queue a background snapshot for a base SKU (served by the scheduler within the budget). */
   queueSnapshot(baseSku: string): void;
   snapshot(baseSku: string, priority: 'user' | 'background'): Promise<void>;
@@ -152,6 +168,28 @@ const shoppingQuery = z
   })
   .optional();
 
+const marketQuery = z
+  .object({
+    search: z.string().max(MARKET_MAX_SEARCH_CHARS).optional(),
+    categories: z.array(categoryEnum).max(20).optional(),
+    verdicts: z.array(z.enum(MARKET_VERDICTS as unknown as [MarketVerdict, ...MarketVerdict[]])).max(10).optional(),
+    sources: z.array(z.enum(MARKET_SOURCES as unknown as [MarketSource, ...MarketSource[]])).max(5).optional(),
+    minCeilingScrap: nonNeg.optional(),
+    onlyBotBuyers: z.boolean().optional(),
+    minBuyers: z.number().int().min(0).max(100_000).optional(),
+    sort: z.enum(MARKET_SORTS as unknown as [MarketSort, ...MarketSort[]]).optional(),
+    dir: z.enum(['asc', 'desc']).optional(),
+    limit: z.number().int().min(1).max(MARKET_MAX_LIMIT).optional(),
+    offset: z.number().int().min(0).optional(),
+  })
+  .optional();
+
+const holdingsQuery = z
+  .object({
+    search: z.string().max(MARKET_MAX_SEARCH_CHARS).optional(),
+  })
+  .optional();
+
 const steamId64 = z.string().trim().regex(/^\d{17}$/, 'expected a 17-digit SteamID64');
 
 /** Bulk paste preview: the helper enforces the 100 KB / 500-line limits with a friendly refusal; this only bounds memory. */
@@ -232,6 +270,19 @@ function emptySpecial(): SpecialAttrs {
 // ---------------------------------------------------------------------------
 // Saved-page import (also used by the folder watcher)
 // ---------------------------------------------------------------------------
+
+/** The stored base SKUs per category, as the Live market files them (an unreadable SKU counts for none). */
+function storedCategories(schema: SchemaService, skus: readonly string[]): CategoryCounts {
+  const list: Category[] = [];
+  for (const sku of skus) {
+    try {
+      list.push(marketCategoryOf(schema, sku));
+    } catch {
+      // counts for no page, as in the index
+    }
+  }
+  return countCategories(list);
+}
 
 function specialKey(s: SpecialAttrs): string {
   return JSON.stringify([s.paint, [...s.spells].sort(), [...s.parts].sort(), s.sheen, s.killstreaker, s.customName, s.customDesc]);
@@ -321,7 +372,10 @@ export function importSavedPage(ctx: HandlerContext, p: { html: string; fileName
       writes.push({ id: target?.id ?? null, sku, item });
     }
 
-    batchId = ctx.repo.createImportBatch({ fileName, pageKind: parsed.pageKind, fileMtime: mtime, importedAt: now, itemCount: writes.length });
+    // Classified now, from what this page stores: a later import (an /items list) re-tags the rows it
+    // shares with this one, and the coverage strip must still know which bank page this was (F13).
+    const categories = storedCategories(ctx.schema, writes.map((w) => w.sku));
+    batchId = ctx.repo.createImportBatch({ fileName, pageKind: parsed.pageKind, fileMtime: mtime, importedAt: now, itemCount: writes.length, categories });
     for (const { id: priceId, sku, item } of writes) {
       ctx.repo.upsertScrapPrice({
         ...(priceId !== null ? { id: priceId } : {}),
@@ -426,7 +480,10 @@ export function createRpcHandlers(ctx: HandlerContext): RpcHandler {
     ctx.pricedb
       .item(base)
       .then((r) => {
-        if (r) engine.markDirty([base]);
+        if (!r) return;
+        engine.markDirty([base]);
+        // The new reference moves the Live market row's confidence and outlier test too.
+        ctx.market.markDirty([base]);
       })
       .catch(() => undefined);
   };
@@ -473,8 +530,14 @@ export function createRpcHandlers(ctx: HandlerContext): RpcHandler {
     'opps.events': (params, m) => repo.listEvents(withoutUndefined(parse(eventQuery, params, m) ?? {})),
 
     'opps.exportCsv': (params, m) => {
-      const { kind, query, shopping } = parse(
-        z.object({ kind: z.enum(['opportunities', 'events', 'shopping']), query: oppQuery, shopping: shoppingQuery }),
+      const { kind, query, shopping, market, holdings } = parse(
+        z.object({
+          kind: z.enum(['opportunities', 'events', 'shopping', 'market', 'holdings']),
+          query: oppQuery,
+          shopping: shoppingQuery,
+          market: marketQuery,
+          holdings: holdingsQuery,
+        }),
         params,
         m,
       );
@@ -489,6 +552,16 @@ export function createRpcHandlers(ctx: HandlerContext): RpcHandler {
         const list = buildShoppingList(repo.allOpportunities(), withoutUndefined(filters), kp, clock.now());
         return { csv: shoppingCsv(list.rows, kp.valueScrap), suggestedName: `flipdesk-shopping-${stamp}.csv` };
       }
+      if (kind === 'market') {
+        // The page's filters and sort; paging does not apply to the file.
+        const { limit: _limit, offset: _offset, ...filters } = market ?? {};
+        const rows = ctx.market.all(withoutUndefined(filters), clock.now());
+        return { csv: marketCsv(rows, engine.keyPrice().valueScrap), suggestedName: `flipdesk-market-${stamp}.csv` };
+      }
+      if (kind === 'holdings') {
+        const rows = ctx.holdings.all(withoutUndefined(holdings ?? {}), clock.now());
+        return { csv: holdingsCsv(rows, engine.keyPrice().valueScrap), suggestedName: `flipdesk-holdings-${stamp}.csv` };
+      }
       // The dashboard's filters and sort, so the file matches the list; paging and grouping do not apply.
       const rows = repo.queryOpportunities(withoutUndefined(query ?? {}));
       return { csv: opportunitiesCsv(rows, engine.keyPrice().valueScrap), suggestedName: `flipdesk-opportunities-${stamp}.csv` };
@@ -496,6 +569,12 @@ export function createRpcHandlers(ctx: HandlerContext): RpcHandler {
 
     'shopping.list': (params, m) =>
       buildShoppingList(repo.allOpportunities(), withoutUndefined(parse(shoppingQuery, params, m) ?? {}), engine.keyPrice(), clock.now()),
+
+    // In memory only: the index reads the local book the live feed fills, with no request of its own.
+    'market.list': (params, m) => ctx.market.list(withoutUndefined(parse(marketQuery, params, m) ?? {}), clock.now()),
+
+    // Also local only: the journal's open lots against the same book the market index reads.
+    'holdings.list': (params, m) => ctx.holdings.list(withoutUndefined(parse(holdingsQuery, params, m) ?? {}), clock.now()),
 
     'item.detail': async (params, m) => {
       const { sku, history: withHistory, target } = parse(
@@ -737,7 +816,7 @@ export function createRpcHandlers(ctx: HandlerContext): RpcHandler {
     'journal.add': (params, m) => {
       const p = parse(journalInput, params, m);
       const { full } = splitSku(p.sku);
-      return repo.addJournal({
+      const row = repo.addJournal({
         ts: p.ts ?? clock.now(),
         side: p.side,
         venue: p.venue,
@@ -748,11 +827,15 @@ export function createRpcHandlers(ctx: HandlerContext): RpcHandler {
         keyPriceScrap: engine.keyPrice().valueScrap,
         note: p.note?.trim() || null,
       });
+      ctx.journalChanged();
+      return row;
     },
 
+    // Also the toast's Undo after a recorded trade (F12), so holdings and the journal page follow.
     'journal.delete': (params, m) => {
       const { id: entryId } = parse(idOnly, params, m);
       repo.deleteJournal(entryId);
+      ctx.journalChanged();
       return { ok: true };
     },
 

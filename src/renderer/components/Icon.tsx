@@ -158,6 +158,22 @@ const PATHS = {
   arrowDown: <path d="M12 5v14M19 12l-7 7-7-7" />,
   expand: <path d="M7 15l5 5 5-5M7 9l5-5 5 5" />,
   collapse: <path d="M7 20l5-5 5 5M7 4l5 5 5-5" />,
+  // Live market (F10): bars with a live dot.
+  market: (
+    <>
+      <path d="M4 20V13M9.5 20V8M15 20v-5M3 20h18" />
+      <circle cx="19" cy="6" r="2.2" />
+    </>
+  ),
+  // The market's Freeze toggle.
+  freeze: <path d="M12 2v20M3.3 7l17.4 10M3.3 17L20.7 7M9 4l3 2.5L15 4M9 20l3-2.5 3 2.5" />,
+  // Holdings (F11): a parcel, the items you still hold.
+  holdings: (
+    <>
+      <path d="M21 7.5l-9-4.5-9 4.5v9l9 4.5 9-4.5z" />
+      <path d="M3 7.5l9 4.5 9-4.5M12 12v9M7.5 5.3l9 4.5" />
+    </>
+  ),
 } satisfies Record<string, ReactNode>;
 
 export type IconName = keyof typeof PATHS;

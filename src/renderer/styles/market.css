@@ -1,0 +1,414 @@
+/* Live market page (F10). Reuses the opportunities grid (.opp-scroll, .opp-row) and the shopping
+   list's patterns; only the market's own tracks, verdict pills, header strip (with the rebuild
+   error, H1, and the saved-page coverage chips, F13) and the row flash live here. Colours come
+   from tokens.css; the flash respects prefers-reduced-motion. */
+
+.market-page {
+  height: 100%;
+}
+
+/* ---------- header strip ---------- */
+
+.market-strip {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+
+.market-strip-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+  min-width: 0;
+}
+
+.market-strip .sep {
+  width: 1px;
+  height: 14px;
+  background: var(--border-strong);
+}
+
+.market-side {
+  color: var(--text-muted);
+}
+
+.market-side > .icon {
+  color: var(--text-faint);
+}
+
+.market-index {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-variant-numeric: tabular-nums;
+}
+
+.market-index > .icon {
+  color: var(--text-faint);
+}
+
+/* H1: the rebuild could not read the local database; it says when it retries. */
+.market-index.error,
+.market-index.error > .icon {
+  color: var(--warn);
+}
+
+/* ---------- scrap.tf saved-page coverage (F13) ---------- */
+
+/* One chip per bank page; a click opens it in the user's browser, the app never fetches it. */
+.market-coverage {
+  gap: 4px 6px;
+}
+
+.coverage-chip {
+  height: 22px;
+  padding: 0 8px;
+  font-size: 12px;
+}
+
+.coverage-label {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.coverage-status {
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.coverage-chip.tone-good,
+.coverage-chip.tone-warn {
+  border-color: var(--tone);
+}
+
+.coverage-chip.tone-muted .coverage-label {
+  color: var(--text-muted);
+  font-weight: 500;
+}
+
+.market-progress {
+  position: relative;
+  display: inline-block;
+  flex-shrink: 0;
+  width: 72px;
+  height: 6px;
+  border-radius: 3px;
+  background: var(--surface-3);
+  overflow: hidden;
+}
+
+.market-progress > span {
+  position: absolute;
+  inset: 0 auto 0 0;
+  border-radius: 3px;
+  background: var(--accent);
+  transition: width 0.4s ease-out;
+}
+
+.market-page .empty-body .market-progress {
+  display: block;
+  width: 240px;
+  margin: 4px auto 10px;
+}
+
+.market-page .empty-body p {
+  margin: 0;
+}
+
+/* The one-time boundary note: quiet, dismissable. */
+.market-note {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 6px 4px 12px;
+  border: 1px dashed var(--border-strong);
+  border-radius: 8px;
+  color: var(--text-muted);
+  font-size: 12.5px;
+}
+
+.market-note > .icon {
+  color: var(--info);
+}
+
+.market-note-text {
+  flex: 1;
+  min-width: 0;
+}
+
+/* ---------- filters ---------- */
+
+.market-sort {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.market-verdicts {
+  align-items: center;
+}
+
+.verdict-chip .status-dot {
+  width: 7px;
+  height: 7px;
+}
+
+.verdict-chip.on {
+  border-color: var(--tone);
+  background: var(--tone-weak);
+}
+
+.verdict-chip .chip-count {
+  min-width: 18px;
+  padding: 0 5px;
+  border-radius: 8px;
+  background: var(--surface-3);
+  color: var(--text-muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
+
+.verdict-chip.on .chip-count {
+  background: transparent;
+  color: var(--text);
+}
+
+.market-page .summary-actions {
+  align-items: center;
+}
+
+.market-waiting {
+  margin-right: 4px;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.market-waiting.has-waiting {
+  color: var(--warn);
+  font-weight: 600;
+}
+
+/* ---------- table ---------- */
+
+/* Item / Category / Sells for / Buyers / Pay up to / Your scrap.tf price / Verdict / Confidence / Updated.
+   Full needs ~1212px; the queries below drop Category, then Buyers, then Confidence, down to ~840px
+   (the 960px minimum window). */
+.market-scroll {
+  --market-cols: minmax(200px, 1fr) 104px 210px 56px 108px 172px 132px 70px 56px;
+}
+
+.market-scroll .opp-row {
+  grid-template-columns: var(--market-cols);
+}
+
+@container (max-width: 1230px) {
+  .market-scroll .opp-row {
+    --market-cols: minmax(180px, 1fr) 200px 52px 104px 168px 128px 66px 52px;
+  }
+  .market-scroll .opp-row > .m-cat {
+    display: none;
+  }
+}
+
+@container (max-width: 1060px) {
+  .market-scroll .opp-row {
+    --market-cols: minmax(160px, 1fr) 190px 100px 164px 124px 64px 52px;
+  }
+  .market-scroll .opp-row > .m-buyers {
+    display: none;
+  }
+}
+
+@container (max-width: 950px) {
+  .market-scroll .opp-row {
+    --market-cols: minmax(150px, 1fr) 176px 100px 160px 120px 50px;
+  }
+  .market-scroll .opp-row > .m-conf,
+  .market-scroll .src-age {
+    display: none;
+  }
+}
+
+.m-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.market-row.verdict-no-buyers .m-item .item-name {
+  opacity: 0.85;
+}
+
+.m-cat {
+  font-size: 12px;
+}
+
+.m-sells {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.m-sells > .money {
+  flex-shrink: 0;
+}
+
+.m-sells .buyer-type {
+  flex-shrink: 0;
+  color: var(--text-muted);
+}
+
+.m-sells .buyer-name {
+  min-width: 0;
+  font-size: 12px;
+}
+
+.m-pay {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 3px;
+}
+
+.m-pay .money {
+  font-weight: 650;
+}
+
+.m-yours {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 5px;
+}
+
+.m-yours > * {
+  flex-shrink: 0;
+}
+
+/* The badge gives way first, so the price itself stays readable. */
+.m-yours > .src-badge {
+  flex-shrink: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.src-badge {
+  padding: 0 4px;
+  border-radius: 3px;
+  background: var(--muted-weak);
+  color: var(--text-muted);
+  font-size: 10.5px;
+  font-weight: 650;
+  white-space: nowrap;
+}
+
+.src-badge.src-page {
+  background: var(--info-weak);
+  color: var(--info);
+}
+
+.src-badge.src-typed {
+  background: var(--accent-weak);
+  color: var(--accent);
+}
+
+.src-age {
+  font-weight: 500;
+}
+
+.src-stock {
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* A rule estimate is a guess, not a price you saw. */
+.rule-est {
+  color: var(--text-muted);
+  font-style: italic;
+}
+
+.m-verdict {
+  display: flex;
+  align-items: center;
+}
+
+/* Block-level so a long "Flip +2 keys 10.33 ref" ellipses instead of spilling. */
+.verdict-pill {
+  display: inline-block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  line-height: 20px;
+  vertical-align: middle;
+}
+
+.flash-arrow {
+  flex-shrink: 0;
+}
+
+/* ---------- live flash ---------- */
+
+/* Two names per direction: a row that changes again within the flash restarts its animation.
+   Only a `from` keyframe, so the row eases back to whatever its background is (hover, selected). */
+@keyframes market-flash-up-a {
+  from {
+    background-color: color-mix(in srgb, var(--good) 26%, transparent);
+  }
+}
+
+@keyframes market-flash-up-b {
+  from {
+    background-color: color-mix(in srgb, var(--good) 26%, transparent);
+  }
+}
+
+@keyframes market-flash-down-a {
+  from {
+    background-color: color-mix(in srgb, var(--bad) 22%, transparent);
+  }
+}
+
+@keyframes market-flash-down-b {
+  from {
+    background-color: color-mix(in srgb, var(--bad) 22%, transparent);
+  }
+}
+
+.market-row.flash-up.flash-a {
+  animation: market-flash-up-a 1.6s ease-out;
+}
+
+.market-row.flash-up.flash-b {
+  animation: market-flash-up-b 1.6s ease-out;
+}
+
+.market-row.flash-down.flash-a {
+  animation: market-flash-down-a 1.6s ease-out;
+}
+
+.market-row.flash-down.flash-b {
+  animation: market-flash-down-b 1.6s ease-out;
+}
+
+/* No fade with reduced motion: a still tint for the same moment, plus the arrow in Pay up to. */
+@media (prefers-reduced-motion: reduce) {
+  .market-row.flash-up,
+  .market-row.flash-down {
+    animation: none !important;
+  }
+  .market-row.flash-up {
+    background-color: var(--good-weak);
+  }
+  .market-row.flash-down {
+    background-color: var(--bad-weak);
+  }
+}

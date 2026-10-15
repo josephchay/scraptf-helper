@@ -478,6 +478,184 @@ export interface ShoppingListResult {
   generatedAt: UnixMs;
 }
 
+// ---------------------------------------------------------------------------
+// Live market (F10): every item with backpack.tf buyers or a scrap.tf price of yours
+// ---------------------------------------------------------------------------
+
+/**
+ * flip: known scrap.tf cost <= maxCostScrap.
+ * over: known cost > maxCostScrap (or maxCostScrap null while buyers exist).
+ * rule-flip: no known cost, but a matching rule's price <= maxCostScrap.
+ * unchecked: no known cost, no rule flip.
+ * no-buyers: known cost, but no eligible buy orders.
+ */
+export type MarketVerdict = 'flip' | 'over' | 'rule-flip' | 'unchecked' | 'no-buyers';
+export const MARKET_VERDICTS: readonly MarketVerdict[] = ['flip', 'rule-flip', 'unchecked', 'over', 'no-buyers'];
+
+/** Where the user's scrap.tf side of a row comes from: typed, a saved page (import), or nothing. */
+export type MarketSource = 'typed' | 'page' | 'none';
+export const MARKET_SOURCES: readonly MarketSource[] = ['page', 'typed', 'none'];
+
+export type MarketSort = 'ceiling' | 'revenue' | 'buyers' | 'profit' | 'updated' | 'name';
+
+export interface MarketQuery {
+  search?: string;
+  categories?: Category[];
+  verdicts?: MarketVerdict[];
+  sources?: MarketSource[];
+  minCeilingScrap?: Scrap;
+  /** Only rows whose revenue order is a bot's. */
+  onlyBotBuyers?: boolean;
+  minBuyers?: number;
+  sort?: MarketSort;
+  dir?: 'asc' | 'desc';
+  /** 1..2000, default 200. The dashboard reads its whole loaded window (≤ 2000 rows) in one call (H2). */
+  limit?: number;
+  offset?: number;
+}
+
+export interface MarketRow {
+  /** Base SKU (no paint). */
+  sku: string;
+  name: string;
+  category: Category;
+  revenueScrap: Scrap | null;
+  bestScrap: Scrap | null;
+  consScrap: Scrap | null;
+  instantScrap: Scrap | null;
+  revenueOrder: OrderSummary | null;
+  buyerCount: number;
+  maxCostScrap: Scrap | null;
+  /** Buy-side only: buyers and references (a fresh neutral input, no margin guard). */
+  confidence: number;
+  confidenceLevel: ConfidenceLevel;
+  flags: string[];
+  /** The user's side. Newest of typed/imported wins; source says which. */
+  knownCostScrap: Scrap | null;
+  knownSource: MarketSource;
+  knownObservedAt: UnixMs | null;
+  /** From the saved page when knownSource is 'page'. */
+  stock: number | null;
+  /** Lowest enabled matching rule price, valued with the current key price. */
+  ruleCostScrap: Scrap | null;
+  /** revenue - known cost - friction, when both exist. */
+  profitScrap: Scrap | null;
+  verdict: MarketVerdict;
+  /** Newest lastEventAt among the eligible orders. */
+  lastOrderChangeAt: UnixMs | null;
+  evaluatedAt: UnixMs;
+}
+
+export interface MarketStats {
+  entries: number;
+  building: boolean;
+  /** 0..1 */
+  progress: number;
+  lastFullAt: UnixMs | null;
+  lastChangeAt: UnixMs | null;
+  pendingDirty: number;
+  /** The last rebuild failed (a local read error); it is retried with backoff. */
+  lastError: string | null;
+  /** When the next rebuild attempt runs after a failure, else null. */
+  retryAt: UnixMs | null;
+}
+
+/**
+ * One scrap.tf bank page and how recently the user saved it (saved-page import, F13).
+ * One entry per SCRAPTF_BANK_PAGES row (src/shared/links.ts), in that order.
+ */
+export interface ScraptfCoverage {
+  /** The page's own category; the items page (taunts, tools, paints) uses 'other'. */
+  category: Category;
+  label: string;
+  /** The static bank page; the user opens it in their own browser, the app never fetches it. */
+  url: string;
+  /** Newest import of a saved page for this category, or null when never saved. */
+  lastSavedAt: UnixMs | null;
+  /** Items on that newest saved page. */
+  items: number;
+}
+
+export interface MarketListResult {
+  rows: MarketRow[];
+  total: number;
+  /** Over the query ignoring its own verdicts filter, so the chips show what each would add. */
+  counts: Record<MarketVerdict, number>;
+  scraptf: { typed: number; pages: number; newestPageAt: UnixMs | null; importEnabled: boolean; watchFolder: boolean; coverage: ScraptfCoverage[] };
+  stats: MarketStats;
+  keyPrice: KeyPriceState | null;
+  generatedAt: UnixMs;
+}
+
+// ---------------------------------------------------------------------------
+// Holdings (F11): the journal's open lots, priced live against backpack.tf buyers
+// ---------------------------------------------------------------------------
+
+/**
+ * profitStatus (src/shared/ceiling.ts) of the next lot's profit:
+ * sell = 'profitable' (clears the profit thresholds), hold = 'below-threshold' (positive, under them),
+ * loss = 'unprofitable' (profit ≤ 0), no-buyers = no revenue (no eligible buy order to price against).
+ */
+export type HoldingStatus = 'sell' | 'hold' | 'loss' | 'no-buyers';
+/** Display and sort order: sellable first. */
+export const HOLDING_STATUSES: readonly HoldingStatus[] = ['sell', 'hold', 'loss', 'no-buyers'];
+
+export interface HoldingsQuery {
+  /** Words matched against name and SKU, like the Live market search. */
+  search?: string;
+}
+
+/** One SKU with open journal lots. Money is per unit unless the name says otherwise. */
+export interface HoldingRow {
+  /** The journal's SKU (may carry paint); the buy side is read for its base SKU. */
+  sku: string;
+  name: string;
+  category: Category;
+  qty: number;
+  /**
+   * All open lots, total. Each lot's keys are valued at today's key price, as the journal will
+   * book a sale (keys and metal netted apart), so a key price move alone never reads as profit.
+   */
+  costScrap: Scrap;
+  /** The lot a sale would close (FIFO, oldest), valued like costScrap. */
+  nextLotCostScrap: Scrap;
+  /** When the oldest open lot was bought. */
+  heldSince: UnixMs;
+  /** Per-unit revenue from the live book, same math as the market index (useOrder, eligibility, outliers). */
+  revenueScrap: Scrap | null;
+  bestScrap: Scrap | null;
+  instantScrap: Scrap | null;
+  revenueOrder: OrderSummary | null;
+  bestOrder: OrderSummary | null;
+  buyerCount: number;
+  /** revenueScrap - nextLotCostScrap - friction */
+  profitNowScrap: Scrap | null;
+  /** revenueScrap * qty - costScrap - friction * qty */
+  profitAllScrap: Scrap | null;
+  /** profitNowScrap / nextLotCostScrap; null without revenue or for a free lot. */
+  margin: number | null;
+  status: HoldingStatus;
+  /** Buy-side confidence, as on the Live market row. */
+  confidence: number;
+  confidenceLevel: ConfidenceLevel;
+  flags: string[];
+  /** Newest lastEventAt among the eligible orders. */
+  lastOrderChangeAt: UnixMs | null;
+}
+
+export interface HoldingsResult {
+  /** Matching rows, by status (sell first), then profitNowScrap descending (holdingComparator). */
+  rows: HoldingRow[];
+  /**
+   * Over everything held, whatever the search: items (SKUs), units, cost of all open lots;
+   * worthNowScrap and profitNowScrap (unrealised P/L, the sum of profitAllScrap) count only rows
+   * with a revenue; sellable counts rows in status 'sell'.
+   */
+  totals: { items: number; units: number; costScrap: Scrap; worthNowScrap: Scrap; profitNowScrap: Scrap; sellable: number };
+  keyPrice: KeyPriceState | null;
+  generatedAt: UnixMs;
+}
+
 export interface EventQuery {
   limit?: number;
   beforeId?: number;
@@ -637,6 +815,9 @@ export interface ImportResult {
   warnings: string[];
 }
 
+/** Items per category (absent = none). */
+export type CategoryCounts = Partial<Record<Category, number>>;
+
 export interface ImportBatch {
   id: number;
   fileName: string;
@@ -644,6 +825,12 @@ export interface ImportBatch {
   fileMtime: UnixMs;
   importedAt: UnixMs;
   itemCount: number;
+  /**
+   * The items this batch stored, per category, counted when it was imported (the F13 coverage strip
+   * classifies the page from it). A later import rewrites matching rows in place under its own batch
+   * id, so the price rows cannot say this afterwards. null for batches imported before 0.3.
+   */
+  categories?: CategoryCounts | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -677,11 +864,29 @@ export interface JournalInput {
   note?: string | null;
 }
 
+/** One open buy, not yet matched by a sell. */
+export interface JournalLot {
+  /** The buy row's id. */
+  id: number;
+  ts: UnixMs;
+  /** Valued at the buy row's own key price. */
+  costScrap: Scrap;
+  /**
+   * The price as paid, keys and metal apart, and the key price that applied. A sale is netted
+   * against these per currency (journalSummary), so Holdings values them at today's key price.
+   */
+  keys: number;
+  scrap: Scrap;
+  keyPriceScrap: Scrap;
+}
+
 export interface JournalPosition {
   sku: string;
   name: string;
   qty: number;
   costScrap: Scrap;
+  /** The open lots, oldest first (the next sale closes lots[0]); qty === lots.length. */
+  lots: JournalLot[];
 }
 
 export interface JournalSummary {
@@ -833,6 +1038,8 @@ export interface Settings {
     inputKinds: InputKind[];
     /** Passed to Electron's Notification({ silent }) by main. */
     silent: boolean;
+    /** "Sell: <name>" when a held item becomes sellable at a profit (F11). */
+    holdings: boolean;
   };
   app: { startAtLogin: boolean; startHidden: boolean; closeToTray: boolean; quickEntryHotkey: string };
   networkPaused: boolean;

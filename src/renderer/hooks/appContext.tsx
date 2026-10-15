@@ -4,17 +4,12 @@ import type { AppStatus, DeepPartial, Scrap, SecretsStatus, Settings } from '../
 import { isMock, rpc } from '../api';
 import { errorMessage } from '../format';
 import { createServiceStateTracker, type ServiceStateTracker } from '../serviceStateModel';
+import { createToastTimers, pushToast, toastTimeoutMs, type ToastHold, type ToastItem, type ToastOptions, type ToastTimers, type ToastTone } from '../toastModel';
 import { useHashRoute } from './useHashRoute';
 import { usePush } from './useRpc';
 import { writePref } from './usePersistentState';
 
-export type ToastTone = 'info' | 'good' | 'warn' | 'bad';
-
-export interface ToastItem {
-  id: number;
-  text: string;
-  tone: ToastTone;
-}
+export type { ToastAction, ToastHold, ToastItem, ToastOptions, ToastTone } from '../toastModel';
 
 export interface AppContextValue {
   isMock: boolean;
@@ -36,8 +31,14 @@ export interface AppContextValue {
   openItem: (sku: string) => void;
   closeItem: () => void;
   toasts: ToastItem[];
-  toast: (text: string, tone?: ToastTone) => void;
+  /**
+   * Shows a toast; returns its id. With `opts.action` (e.g. Undo) it stays 12 s by default, pauses
+   * while hovered or focused, and the action button runs onClick and dismisses it (H3).
+   */
+  toast: (text: string, tone?: ToastTone, opts?: ToastOptions) => number;
   dismissToast: (id: number) => void;
+  /** Hover or focus on an action toast holds its countdown (ToastStack calls this). */
+  holdToast: (id: number, why: ToastHold, on: boolean) => void;
   /** Bumped after local mutations so counts elsewhere refresh. */
   dataVersion: number;
   bumpData: () => void;
@@ -72,12 +73,22 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const toastSeq = useRef(1);
   const { segments, navigate } = useHashRoute();
 
-  const toast = useCallback((text: string, tone: ToastTone = 'info') => {
+  // A toast pushed out of a full stack keeps its countdown; it expires as a no-op filter.
+  const toastTimers = useRef<ToastTimers | null>(null);
+  toastTimers.current ??= createToastTimers((id) => setToasts((t) => t.filter((x) => x.id !== id)));
+  useEffect(() => () => toastTimers.current?.clearAll(), []);
+  const toast = useCallback((text: string, tone: ToastTone = 'info', opts?: ToastOptions): number => {
     const id = toastSeq.current++;
-    setToasts((t) => [...t.slice(-3), { id, text, tone }]);
-    setTimeout(() => setToasts((t) => t.filter((x) => x.id !== id)), tone === 'bad' ? 8000 : 4500);
+    const item: ToastItem = { id, text, tone, timeoutMs: toastTimeoutMs(tone, opts), ...(opts?.action ? { action: opts.action } : {}) };
+    setToasts((t) => pushToast(t, item));
+    toastTimers.current?.start(id, item.timeoutMs, { pausable: item.action !== undefined });
+    return id;
   }, []);
-  const dismissToast = useCallback((id: number) => setToasts((t) => t.filter((x) => x.id !== id)), []);
+  const dismissToast = useCallback((id: number) => {
+    toastTimers.current?.clear(id);
+    setToasts((t) => t.filter((x) => x.id !== id));
+  }, []);
+  const holdToast = useCallback((id: number, why: ToastHold, on: boolean) => toastTimers.current?.hold(id, why, on), []);
 
   const refreshStatus = useCallback(() => {
     rpc('status.get')
@@ -157,10 +168,11 @@ export function AppProvider({ children }: { children: ReactNode }) {
       toasts,
       toast,
       dismissToast,
+      holdToast,
       dataVersion,
       bumpData,
     }),
-    [status, settings, secrets, bridgeError, serviceState, updateSettings, refreshStatus, segments, navigate, itemSku, openItem, closeItem, toasts, toast, dismissToast, dataVersion, bumpData],
+    [status, settings, secrets, bridgeError, serviceState, updateSettings, refreshStatus, segments, navigate, itemSku, openItem, closeItem, toasts, toast, dismissToast, holdToast, dataVersion, bumpData],
   );
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;

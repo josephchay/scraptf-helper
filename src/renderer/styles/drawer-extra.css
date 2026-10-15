@@ -1,4 +1,4 @@
-/* Item drawer: buyer actions, price actions and copy buttons (F3, F8, F9). The menus are styled in item-menu.css. */
+/* Item drawer: buyer actions, price actions, copy buttons and trade recording (F3, F8, F9, F12). The menus are styled in item-menu.css. Block buyer's Undo is a toast action (H3). */
 
 /* ---------- header copy buttons ---------- */
 
@@ -12,6 +12,20 @@
 
 .drawer-copy .btn.small {
   height: 24px;
+}
+
+/* ---------- record a trade (F12) ---------- */
+
+.drawer-trade-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+}
+
+.drawer-trade-row > .muted {
+  flex: 1 1 220px;
+  min-width: 0;
 }
 
 /* ---------- your scrap.tf prices ---------- */
@@ -125,20 +139,4 @@
 
 .buyer-check-details {
   font-weight: 600;
-}
-
-/* ---------- undo toast (block buyer) ---------- */
-
-/* Sticks to the bottom of the drawer's scroll area; the app's toasts have no actions. */
-.drawer-undo {
-  position: sticky;
-  bottom: 12px;
-  z-index: 4;
-  align-self: flex-end;
-  align-items: center;
-  max-width: min(460px, 100%);
-}
-
-.drawer-undo > .icon {
-  margin-top: 0;
 }

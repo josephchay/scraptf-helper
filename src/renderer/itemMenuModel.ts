@@ -1,13 +1,17 @@
-// Pure helpers behind the row context menu (ItemMenu, F9) and the item drawer's
-// buyer actions (F3), price actions (F8) and copy buttons (F9). No DOM and no
-// RPC here, so all of it is unit-tested; the components only wire it up.
+// Pure helpers behind the row context menu (ItemMenu, F9; placement and closing,
+// H4) and the item drawer's buyer actions (F3), price actions (F8), copy buttons
+// (F9) and trade recording prefills (F12). No DOM and no RPC here, so all of it
+// is unit-tested; the components only wire it up.
 
 import { communityMaxAgeMs } from '../shared/referenceAge';
+import { fromString } from '../shared/sku';
 import type { BuyerCheck, ItemDetail, LinkGroup, LinkSpec, Opportunity, OrderSummary, Scrap, ScrapPrice, ScrapPriceInput, UnixMs } from '../shared/types';
 import type { IconName } from './components/Icon';
 import type { ItemMenuTarget } from './components/ItemMenu';
-import { fmtAgo, truncate } from './format';
+import type { RecordTradeInit } from './components/RecordTradeDialog';
+import { fmtAgo, fmtKeysMetal, truncate } from './format';
 import { revenueOrderOf, type UseOrder } from './oppModel';
+import { BUY_VENUE, previewRevenue, type PreviewSettings } from './quickModel';
 
 // ---------------------------------------------------------------------------
 // Placement
@@ -16,6 +20,11 @@ import { revenueOrderOf, type UseOrder } from './oppModel';
 export interface MenuPoint {
   x: number;
   y: number;
+  /**
+   * Where an upward menu's bottom edge goes (H4): the top of the button or row the menu hangs
+   * from, so flipping up does not cover it. Defaults to `y` (a right-click's pointer).
+   */
+  upY?: number;
 }
 
 export interface MenuSize {
@@ -30,10 +39,13 @@ const finiteOr = (n: number, fallback: number): number => (Number.isFinite(n) ? 
 const clampTo = (n: number, lo: number, hi: number): number => Math.max(lo, Math.min(hi, n));
 
 /**
- * Where a menu opened at `at` goes: right of and below the pointer when it fits,
- * flipped left or up when it does not, and pinned inside the margin (with
- * `maxHeight` for a scrollbar) when even that does not fit, such as a long link
- * list in a short window.
+ * Where a menu opened at `at` goes (H4): right of and below the pointer when it
+ * fits, flipped left at the right edge. When it does not fit below, it opens
+ * upward with its bottom edge at the pointer (or at `at.upY`, the top of the
+ * button or row it hangs from), so it never covers the row it was opened on.
+ * When it fits on neither side (a long link list in a short window), it takes
+ * the side with more room and `maxHeight` gives it a scrollbar there. Always
+ * clamped to the viewport.
  */
 export function placeMenu(at: MenuPoint, size: MenuSize, viewport: MenuSize, margin = MENU_MARGIN): { left: number; top: number; maxHeight: number } {
   const vw = Math.max(0, finiteOr(viewport.width, 0));
@@ -44,18 +56,110 @@ export function placeMenu(at: MenuPoint, size: MenuSize, viewport: MenuSize, mar
   const h = Math.min(Math.max(0, finiteOr(size.height, 0)), maxH);
   const x = clampTo(finiteOr(at.x, margin), 0, vw);
   const y = clampTo(finiteOr(at.y, margin), 0, vh);
+  // Never below the pointer: an upward menu ending under it would cover what was clicked.
+  const yUp = clampTo(finiteOr(at.upY ?? y, y), 0, y);
   const left = x + w <= vw - margin ? x : x - w;
-  const top = y + h <= vh - margin ? y : y - h;
+  const below = Math.max(0, vh - margin - y);
+  const above = Math.max(0, yUp - margin);
+  let top: number;
+  let maxHeight: number;
+  if (h <= below) {
+    top = y;
+    maxHeight = maxH;
+  } else if (h <= above || above >= below) {
+    // Upward, bottom edge at the pointer (or the anchor's top); capped to the room above when even that is short.
+    const shown = Math.min(h, above);
+    top = yUp - shown;
+    maxHeight = h <= above ? maxH : above;
+  } else {
+    top = y;
+    maxHeight = below;
+  }
+  const shown = Math.min(h, maxHeight);
   return {
     left: Math.round(clampTo(left, margin, Math.max(margin, vw - margin - w))),
-    top: Math.round(clampTo(top, margin, Math.max(margin, vh - margin - h))),
-    maxHeight: Math.round(maxH),
+    top: Math.round(clampTo(top, margin, Math.max(margin, vh - margin - shown))),
+    maxHeight: Math.round(maxHeight),
   };
 }
 
-/** Where a menu opened from the keyboard appears: just inside the focused row's lower-left corner. */
+// ---------------------------------------------------------------------------
+// Closing on scroll (H4)
+// ---------------------------------------------------------------------------
+
+/** How far the menu's anchor may move under a scroll before the menu closes. */
+export const MENU_ANCHOR_SLACK_PX = 4;
+
+/** Keys that scroll the page when pressed outside the menu (the menu handles its own). */
+const SCROLL_KEYS: ReadonlySet<string> = new Set(['PageUp', 'PageDown', 'Home', 'End', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', ' ', 'Spacebar']);
+
+export function isScrollKey(e: { key: string; ctrlKey?: boolean; altKey?: boolean; metaKey?: boolean }): boolean {
+  return SCROLL_KEYS.has(e.key) && !e.ctrlKey && !e.altKey && !e.metaKey;
+}
+
+export interface AnchorBox {
+  left: number;
+  top: number;
+}
+
+/**
+ * True when the anchor moved more than `slack` px since `before`, or is gone (null: unmounted).
+ * A scroll that leaves the anchor in place (a programmatic smooth scroll elsewhere, a live
+ * refresh that keeps the rows still) does not count.
+ */
+export function anchorMoved(before: AnchorBox | null, after: AnchorBox | null, slack = MENU_ANCHOR_SLACK_PX): boolean {
+  if (before === null) return false;
+  if (after === null) return true;
+  return Math.abs(after.left - before.left) > slack || Math.abs(after.top - before.top) > slack;
+}
+
+export type MenuCloseEvent =
+  | { type: 'wheel' | 'touchmove'; inside: boolean }
+  | { type: 'key'; key: string; inside: boolean; ctrlKey?: boolean; altKey?: boolean; metaKey?: boolean; editable?: boolean }
+  | { type: 'scroll'; inside: boolean; anchor: AnchorBox | null; at: number };
+
+export interface MenuClosePolicy {
+  /** Whether this event closes the menu. */
+  closes(e: MenuCloseEvent): boolean;
+}
+
+/**
+ * When an open menu closes because of scrolling (H4). Only a user scroll does it: the wheel,
+ * a touch drag, or a scroll key pressed outside the menu; or a scroll of something around the
+ * anchor that moves it more than MENU_ANCHOR_SLACK_PX. A bare 'scroll' event (a programmatic
+ * smooth scroll, scroll anchoring after a live refresh) does not. During the first `graceMs`
+ * a scroll moves the baseline instead: the click that opened the menu may select its row,
+ * and the page then scrolls it into view.
+ */
+export function createMenuClosePolicy(anchorAtOpen: AnchorBox | null, openedAt: number, graceMs = 200): MenuClosePolicy {
+  let base = anchorAtOpen;
+  return {
+    closes(e) {
+      if (e.inside) return false;
+      switch (e.type) {
+        case 'wheel':
+        case 'touchmove':
+          return true;
+        case 'key':
+          return !e.editable && isScrollKey(e);
+        case 'scroll':
+          if (e.at - openedAt <= graceMs) {
+            // A row that went away during the grace still closes the menu on the next scroll.
+            if (base !== null && e.anchor !== null) base = e.anchor;
+            return false;
+          }
+          return anchorMoved(base, e.anchor);
+      }
+    },
+  };
+}
+
+/**
+ * Where a menu opened from the keyboard appears: just inside the focused row's lower-left corner,
+ * or, when it does not fit below, above the row (upY), not over it.
+ */
 export function menuPointForRect(r: { left: number; top: number; width: number; height: number }): MenuPoint {
-  return { x: Math.round(r.left + Math.min(24, r.width / 2)), y: Math.round(r.top + Math.min(r.height, 28)) };
+  return { x: Math.round(r.left + Math.min(24, r.width / 2)), y: Math.round(r.top + Math.min(r.height, 28)), upY: Math.round(r.top) };
 }
 
 /**
@@ -80,6 +184,47 @@ export const MODAL_SELECTOR = '[aria-modal="true"]';
 export function modalHostOf<T>(el: { closest(selector: string): T | null } | null | undefined): T | null {
   if (!el || typeof el.closest !== 'function') return null;
   return el.closest(MODAL_SELECTOR);
+}
+
+/** Structural, so the walks below run on the DOM and on the tests' minimal DOM alike. */
+interface TreeNode {
+  nodeType?: number;
+  getAttribute?(name: string): string | null;
+  childNodes?: ArrayLike<TreeNode>;
+}
+
+/**
+ * The open modal on top (aria-modal="true", last in document order: the Record trade dialog is
+ * portalled into the drawer or after the app), or null. Focus goes back there when a toast that
+ * held it goes away, instead of dropping to <body> behind the modal.
+ */
+export function topmostModalIn<T extends TreeNode>(root: T): T | null {
+  let found: T | null = null;
+  const walk = (n: TreeNode): void => {
+    const kids = n.childNodes;
+    if (!kids) return;
+    for (let i = 0; i < kids.length; i++) {
+      const c = kids[i]!;
+      if (c.nodeType === 1 && c.getAttribute?.('aria-modal') === 'true') found = c as T;
+      walk(c);
+    }
+  };
+  walk(root);
+  return found;
+}
+
+interface UpNode {
+  parentNode: UpNode | null;
+  getAttribute?(name: string): string | null;
+}
+
+/** Whether a node sits in the toast stack, whose Undo stays reachable while a modal is open. */
+export function inToastStack(n: UpNode | null): boolean {
+  for (let c: UpNode | null = n; c; c = c.parentNode) {
+    const cls = typeof c.getAttribute === 'function' ? c.getAttribute('class') : null;
+    if (cls && cls.split(/\s+/).includes('toasts')) return true;
+  }
+  return false;
 }
 
 /** Shift+F10 or the ContextMenu key: the keyboard ways to open a row's context menu. */
@@ -190,7 +335,13 @@ export function copiedMessage(text: string, ok: boolean): string {
 // Item menu (F9)
 // ---------------------------------------------------------------------------
 
-export type ItemMenuAction = { kind: 'details' } | { kind: 'copy'; text: string } | { kind: 'quick-entry' } | { kind: 'link'; url: string };
+export type ItemMenuAction =
+  | { kind: 'details' }
+  | { kind: 'copy'; text: string }
+  | { kind: 'quick-entry' }
+  /** F12: open the Record trade dialog for this item (a journal row; nothing is traded). */
+  | { kind: 'record'; side: 'buy' | 'sell' }
+  | { kind: 'link'; url: string };
 
 export type LinksState = { status: 'loading' } | { status: 'error'; message: string } | { status: 'ready'; links: readonly LinkSpec[] };
 
@@ -218,8 +369,8 @@ export function hostLabel(url: string): string {
 
 /**
  * Item menu content: Open details; Copy SKU / name / backpack.tf name; Record
- * scrap.tf price… (quick entry, prefilled); then the link groups once
- * 'links.forSku' answers.
+ * scrap.tf price… (quick entry, prefilled); Record buy… / Record sale… (the
+ * journal, F12); then the link groups once 'links.forSku' answers.
  */
 export function itemMenuSections(target: ItemMenuTarget, links: LinksState): MenuSection<ItemMenuAction>[] {
   const sections: MenuSection<ItemMenuAction>[] = [
@@ -229,6 +380,13 @@ export function itemMenuSections(target: ItemMenuTarget, links: LinksState): Men
       items: copyTargets(target).map((c) => ({ id: `copy-${c.kind}`, label: c.label, title: c.text, icon: 'copy' as const, action: { kind: 'copy' as const, text: c.text } })),
     },
     { id: 'price', items: [{ id: 'quick-entry', label: 'Record scrap.tf price…', hint: 'Quick entry', icon: 'plus', action: { kind: 'quick-entry' } }] },
+    {
+      id: 'trade',
+      items: [
+        { id: 'record-buy', label: 'Record buy…', hint: 'Journal', title: RECORD_BUY_TITLE, icon: 'cart', action: { kind: 'record', side: 'buy' } },
+        { id: 'record-sale', label: 'Record sale…', hint: 'Journal', title: RECORD_SALE_TITLE, icon: 'journal', action: { kind: 'record', side: 'sell' } },
+      ],
+    },
   ];
   if (links.status === 'loading') {
     sections.push({ id: 'links', label: 'Links', items: [{ id: 'links-loading', label: 'Loading links…', disabled: true, action: null }] });
@@ -264,7 +422,7 @@ export function buyerProfileUrls(steamid: string): { backpack: string; steam: st
   return { backpack: `https://backpack.tf/profiles/${id}`, steam: `https://steamcommunity.com/profiles/${id}` };
 }
 
-export type BuyerMenuAction = { kind: 'open'; url: string } | { kind: 'copy-id' } | { kind: 'check' } | { kind: 'block' } | { kind: 'unblock' };
+export type BuyerMenuAction = { kind: 'open'; url: string } | { kind: 'copy-id' } | { kind: 'record-sale' } | { kind: 'check' } | { kind: 'block' } | { kind: 'unblock' };
 
 export function buyerMenuSections(
   order: Pick<OrderSummary, 'steamid'>,
@@ -281,6 +439,8 @@ export function buyerMenuSections(
       ],
     },
     { id: 'copy', items: [{ id: 'copy-id', label: 'Copy SteamID64', title: order.steamid, icon: 'copy', action: { kind: 'copy-id' } }] },
+    // A journal row only (F12): it works for any order, valid id or not.
+    { id: 'record', items: [{ id: 'record-sale', label: 'Record sale to this buyer', hint: 'Journal', title: RECORD_SALE_BUYER_TITLE, icon: 'journal', action: { kind: 'record-sale' } }] },
     {
       id: 'manage',
       items: [
@@ -474,5 +634,104 @@ export function referenceAgeGates(
 export function fmtDays(ms: number): string {
   const d = Math.round(ms / 86_400_000);
   return `${d} day${d === 1 ? '' : 's'}`;
+}
+
+// ---------------------------------------------------------------------------
+// Recording trades (F12): what the Record trade dialog opens with
+// ---------------------------------------------------------------------------
+
+/** Where a recorded buy happened by default: the flip loop buys on scrap.tf ... */
+export const RECORD_BUY_VENUE = BUY_VENUE;
+/** ... and sells to a backpack.tf buy order. */
+export const RECORD_SALE_VENUE = 'backpack.tf';
+
+export const RECORD_BUY_TITLE = 'Write a buy of this item to your journal, prefilled with your newest scrap.tf price. Nothing is bought.';
+export const RECORD_SALE_TITLE = 'Write a sale of this item to your journal, prefilled with the buy order your profit uses. Nothing is sold.';
+export const RECORD_SALE_BUYER_TITLE = "Write a sale to this buyer to your journal, at this order's price. Nothing is sold or offered.";
+
+/** The buyer as a person reads it: the backpack.tf name, else the SteamID64. */
+export function buyerLabel(o: Pick<OrderSummary, 'userName' | 'steamid'>): string {
+  return o.userName?.trim() || o.steamid;
+}
+
+export function saleNote(o: Pick<OrderSummary, 'userName' | 'steamid'>): string {
+  return `Sold to ${buyerLabel(o)}`;
+}
+
+/** The newest scrap.tf price of yours, typed or from a saved page (ties to the higher id); null without one. */
+export function newestScrapPrice(prices: readonly ScrapPrice[]): ScrapPrice | null {
+  let best: ScrapPrice | null = null;
+  for (const p of prices) if (best === null || p.observedAt > best.observedAt || (p.observedAt === best.observedAt && p.id > best.id)) best = p;
+  return best;
+}
+
+/** The paint a SKU names, or null (also for text that is not a SKU). */
+function paintOfSku(sku: string): number | null {
+  try {
+    const paint = fromString(sku).paint;
+    return typeof paint === 'number' && paint > 0 ? paint : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Whether a stored price is one for the copy `sku` names. Prices sit under the base SKU with the paint
+ * and other extras in `special` (null: never recorded, read as a plain copy, as the saved-page import
+ * does): a painted SKU takes prices of its paint, a plain SKU only prices with no extras at all.
+ */
+export function priceIsForSku(p: Pick<ScrapPrice, 'sku' | 'special'>, sku: string): boolean {
+  const s = p.special;
+  const paint = (typeof s?.paint === 'number' && s.paint > 0 ? s.paint : null) ?? paintOfSku(p.sku);
+  const want = paintOfSku(sku);
+  if (want !== null || paint !== null) return paint === want;
+  if (!s) return true;
+  return s.spells.length === 0 && s.parts.length === 0 && s.sheen === null && s.killstreaker === null && !s.customName && !s.customDesc;
+}
+
+/**
+ * A buy on scrap.tf at your newest scrap.tf price for this very copy (keys and metal kept apart, as
+ * typed). A painted or spelled copy's price is never borrowed: it would be recorded under this SKU
+ * and give Holdings the wrong cost. Without one the dialog opens with the venue only.
+ */
+export function recordBuyInit(item: { sku: string; name: string }, prices: readonly ScrapPrice[]): RecordTradeInit {
+  const p = newestScrapPrice(prices.filter((x) => priceIsForSku(x, item.sku)));
+  return { side: 'buy', sku: item.sku, name: item.name, venue: RECORD_BUY_VENUE, ...(p ? { keys: p.costKeys, scrap: p.costScrap } : {}) };
+}
+
+/** A sale on backpack.tf at `order`'s price, noted "Sold to <buyer>"; without an order only the venue is filled. */
+export function recordSaleInit(item: { sku: string; name: string }, order: OrderSummary | null): RecordTradeInit {
+  return {
+    side: 'sell',
+    sku: item.sku,
+    name: item.name,
+    venue: RECORD_SALE_VENUE,
+    ...(order ? { keys: order.keys, scrap: order.metalScrap, note: saleNote(order) } : {}),
+  };
+}
+
+/** A Record buy / Record sale button's tooltip: what the dialog opens with. */
+export function recordInitTitle(init: RecordTradeInit): string {
+  const what = init.side === 'buy' ? 'a buy' : 'a sale';
+  const price = init.keys !== undefined || init.scrap !== undefined ? ` at ${fmtKeysMetal(init.keys ?? 0, init.scrap ?? 0)}` : '';
+  const where = init.venue ? ` on ${init.venue}` : '';
+  const note = init.note ? ` (${init.note})` : '';
+  return `Write ${what}${price}${where}${note} to your journal; you can change it first. Nothing is traded.`;
+}
+
+/**
+ * The item menu's prefill, from 'item.detail' (local only, history off). The sale uses the
+ * revenue order (Settings: revenue used for profit), as the drawer does. `d` null (the read
+ * failed) opens the dialog with the venue only; the user types the price.
+ */
+export function recordTradeInit(
+  side: 'buy' | 'sell',
+  target: Pick<ItemMenuTarget, 'sku' | 'name'>,
+  d: Pick<ItemDetail, 'name' | 'scrapPrices' | 'revenue' | 'buyOrders'> | null,
+  p: PreviewSettings,
+): RecordTradeInit {
+  const item = { sku: target.sku, name: target.name.trim() || d?.name || target.sku };
+  if (side === 'buy') return recordBuyInit(item, d?.scrapPrices ?? []);
+  return recordSaleInit(item, d ? previewRevenue(d, p).order : null);
 }
 

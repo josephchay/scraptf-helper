@@ -4,7 +4,11 @@
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
-import type { Engine, Logger, Repo } from '../../src/service/contracts';
+import type { Engine, Logger, Repo, SchemaService } from '../../src/service/contracts';
+import { selectKeyPrice } from '../../src/service/domain/keyprice';
+import { createMarketIndex } from '../../src/service/domain/market';
+import { fromString } from '../../src/shared/sku';
+import { FakeClock, FakeTimers, makeDeps } from '../domain/helpers';
 import { openRepo } from '../../src/service/db';
 import { importSavedPage, type HandlerContext } from '../../src/service/rpcHandlers';
 import { DEFAULT_SETTINGS, mergeSettings } from '../../src/shared/defaults';
@@ -22,7 +26,7 @@ afterEach(() => {
   while (repos.length) repos.pop()!.close();
 });
 
-function setup() {
+function setup(schema: SchemaService = createStubSchema()) {
   const repo = openRepo(':memory:');
   repos.push(repo);
   const settings = mergeSettings(DEFAULT_SETTINGS, { import: { enabled: true, acknowledgedAt: NOW - 3_600_000 } });
@@ -37,7 +41,7 @@ function setup() {
     clock: { now: () => NOW },
     log,
     repo,
-    schema: createStubSchema(),
+    schema,
     engine,
     settings: () => settings,
     push: quiet,
@@ -45,7 +49,7 @@ function setup() {
   } as unknown as HandlerContext;
   const run = (html: string, mtimeMs: number, fileName = 'page.html'): ImportResult => importSavedPage(ctx, { html, fileName, mtimeMs });
   const imported = (sku: string): ScrapPrice[] => repo.scrapPricesForSku(sku).filter((p) => p.source === 'import');
-  return { repo, run, imported, dirty };
+  return { repo, run, imported, dirty, settings };
 }
 
 /** A saved bank page (/buy/hats) with the given cards. */
@@ -196,5 +200,47 @@ describe('importSavedPage: an older page never overwrites a newer one', () => {
     const r = h.run(bankPage([plainCaptain(45)]), NOW - 60_000);
     expect(r.stored).toBe(1);
     expect(h.imported('378;6').map((p) => p.costScrap)).toEqual([45]);
+  });
+});
+
+describe('importSavedPage: a saved page keeps the bank page it was (F13 coverage)', () => {
+  it('records the categories it stored, so an /items list re-tagging its rows later does not make it read "never saved"', () => {
+    const HATS = new Set([378, 126]);
+    const stub = createStubSchema();
+    const schema: SchemaService = { ...stub, categoryForSku: (sku) => (HATS.has(fromString(sku).defindex) ? 'hats' : 'other') };
+    const h = setup(schema);
+    const clock = new FakeClock(NOW);
+    const timers = new FakeTimers(clock);
+    const market = createMarketIndex({
+      ...makeDeps(h.repo, clock, () => h.settings),
+      schema,
+      timers,
+      keyPrice: () => selectKeyPrice([], h.settings, clock.now()),
+      onChanged: () => undefined,
+      folderWatchActive: () => true,
+    });
+    market.start();
+    timers.advance(0);
+    const hatsChip = () => market.list({}, clock.now()).scraptf.coverage.find((c) => c.category === 'hats');
+
+    const page = h.run(bankPage([plainCaptain(100), billsHat(60)]), NOW - 10 * 60_000, 'hats.html');
+    expect(h.repo.listImportBatches(1)[0]).toMatchObject({ id: page.batchId, pageKind: 'buy', itemCount: 2, categories: { hats: 2 } });
+    market.pricesChanged();
+    expect(hatsChip()).toMatchObject({ lastSavedAt: NOW - 10 * 60_000, items: 2 });
+
+    // The /items list lists the same two plain items: their rows are rewritten under its batch id.
+    const list = h.run(
+      itemsPage([
+        { defindex: 378, name: 'Team Captain', price: '2 refined', stock: '3/5' },
+        { defindex: 126, name: "Bill's Hat", price: '1 refined', stock: '2/5' },
+      ]),
+      NOW - 5 * 60_000,
+      'items.html',
+    );
+    expect([...h.imported('378;6'), ...h.imported('126;6')].map((p) => p.importBatch)).toEqual([list.batchId, list.batchId]);
+    market.pricesChanged();
+    // Still the hats page saved 10 minutes ago, not "never saved"; the list counts for no page.
+    expect(hatsChip()).toMatchObject({ lastSavedAt: NOW - 10 * 60_000, items: 2 });
+    market.stop();
   });
 });

@@ -1,4 +1,4 @@
-/* Quick entry: live preview, pay-up-to and link row (F2). */
+/* Quick entry: live preview, pay-up-to and link row (F2); "Bought it" after Save (F12). */
 
 /* The key hints give way before the title when the window is narrow (mock pill shown). */
 .quick-head h1 {
@@ -114,6 +114,18 @@
 .qp-copy .btn.small {
   height: 22px;
   padding: 0 6px;
+}
+
+/* ---------- after Save: "Bought it" (F12) ---------- */
+
+.quick-actions {
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+/* Recorded: the check reads as done, not as a disabled control. */
+.quick-bought:disabled > .icon {
+  color: var(--good);
 }
 
 @media (prefers-reduced-motion: reduce) {

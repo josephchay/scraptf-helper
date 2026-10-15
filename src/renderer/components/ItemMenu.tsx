@@ -1,36 +1,45 @@
 // Row context menu (feature F9): right-click, Shift+F10 or the ContextMenu key
-// on OppTable, PricesPage, LogPage and Shopping list rows. Open details, copy
-// SKU / name / backpack.tf name, record a scrap.tf price (quick entry,
-// prefilled) and the link groups from 'links.forSku', fetched lazily on open.
-// URLs open only through 'links.open' (openOrCopy -> openLink in api.ts).
+// on OppTable, PricesPage, LogPage, Shopping list and Live market rows. Open
+// details, copy SKU / name / backpack.tf name, record a scrap.tf price (quick
+// entry, prefilled), record a buy or a sale in the journal (F12, prefilled from
+// the local 'item.detail') and the link groups from 'links.forSku', fetched
+// lazily on open. URLs open only through 'links.open' (openOrCopy -> openLink
+// in api.ts). Recording writes the user's own journal; nothing is traded (R4).
 //
 // MenuPopover is the generic part (placement, roving focus, closing rules); the
 // drawer's buyer actions menu (F3) uses it too.
 
 import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode, type SyntheticEvent } from 'react';
 import { createPortal } from 'react-dom';
+import { DEFAULT_SETTINGS } from '../../shared/defaults';
+import type { ItemDetail } from '../../shared/types';
 import { rpc, windowKind } from '../api';
 import { copyText } from '../clipboard';
 import { errorMessage } from '../format';
 import { useApp } from '../hooks/appContext';
 import {
   copiedMessage,
+  createMenuClosePolicy,
   flattenSections,
   isEnabledItem,
   itemMenuSections,
   modalHostOf,
   placeMenu,
+  recordTradeInit,
   resolveMenuPoint,
   stepIndex,
   typeaheadIndex,
+  type AnchorBox,
   type ItemMenuAction,
   type LinksState,
   type MenuItemSpec,
   type MenuPoint,
   type MenuSection,
 } from '../itemMenuModel';
+import { createLatestGate } from '../quickModel';
 import { openOrCopy } from './ExternalLink';
 import { Icon } from './Icon';
+import { useRecordTrade } from './RecordTradeDialog';
 
 export interface ItemMenuTarget {
   sku: string;
@@ -59,25 +68,60 @@ interface OpenState {
 /**
  * A row's onContextMenu calls `open(target, { x: e.clientX, y: e.clientY })`
  * (for the keyboard, the row's bounding box, e.g. menuPointForRect); the page
- * renders `element` once.
+ * renders `element` once. It holds the Record trade dialog too, which outlives
+ * the menu that opened it.
  */
 export function useItemMenu(): { open(target: ItemMenuTarget, at: { x: number; y: number }): void; element: ReactNode } {
+  const { settings } = useApp();
   const [state, setState] = useState<OpenState | null>(null);
   const seq = useRef(0);
   const last = useRef<OpenState | null>(null);
   last.current = state;
-  const open = useCallback((target: ItemMenuTarget, at: { x: number; y: number }) => {
-    const active = document.activeElement;
-    // Reopened while open (a keydown and the contextmenu it causes): keep the row as the opener, not the old menu.
-    const opener = active instanceof Element && active.closest('.item-menu') ? (last.current?.opener ?? null) : active === document.body ? null : active;
-    setState({ seq: ++seq.current, target, at: menuPointFromEvent(at), opener });
-  }, []);
+  const recordTrade = useRecordTrade();
+  const openRecord = useRef(recordTrade.open);
+  openRecord.current = recordTrade.open;
+  const profit = useRef(settings?.profit ?? DEFAULT_SETTINGS.profit);
+  profit.current = settings?.profit ?? DEFAULT_SETTINGS.profit;
+  const [recordGate] = useState(createLatestGate);
+  // A page left (or a menu opened again) before the prefill read answered: no dialog pops up later.
+  useEffect(() => () => recordGate.cancel(), [recordGate]);
+
+  const open = useCallback(
+    (target: ItemMenuTarget, at: { x: number; y: number }) => {
+      recordGate.cancel();
+      const active = document.activeElement;
+      // Reopened while open (a keydown and the contextmenu it causes): keep the row as the opener, not the old menu.
+      const opener = active instanceof Element && active.closest('.item-menu') ? (last.current?.opener ?? null) : active === document.body ? null : active;
+      setState({ seq: ++seq.current, target, at: menuPointFromEvent(at), opener });
+    },
+    [recordGate],
+  );
   const close = useCallback(() => setState(null), []);
-  const element = state ? <ItemMenuView key={state.seq} state={state} onDone={close} /> : null;
+
+  // The prefill comes from the local book and price sheet ('item.detail', history off: no network).
+  // Only the newest click opens the dialog; a failed read opens it without a price.
+  const record = useCallback(
+    (side: 'buy' | 'sell', target: ItemMenuTarget) => {
+      const ticket = recordGate.next();
+      rpc('item.detail', { sku: target.sku, history: false })
+        .catch((): ItemDetail | null => null)
+        .then((d) => {
+          if (recordGate.isCurrent(ticket)) openRecord.current(recordTradeInit(side, target, d, profit.current));
+        });
+    },
+    [recordGate],
+  );
+
+  const element = (
+    <>
+      {state ? <ItemMenuView key={state.seq} state={state} onDone={close} onRecord={record} /> : null}
+      {recordTrade.element}
+    </>
+  );
   return { open, element };
 }
 
-function ItemMenuView({ state, onDone }: { state: OpenState; onDone: () => void }) {
+function ItemMenuView({ state, onDone, onRecord }: { state: OpenState; onDone: () => void; onRecord: (side: 'buy' | 'sell', target: ItemMenuTarget) => void }) {
   const { openItem, toast } = useApp();
   const { target } = state;
   const [links, setLinks] = useState<LinksState>({ status: 'loading' });
@@ -111,6 +155,9 @@ function ItemMenuView({ state, onDone }: { state: OpenState; onDone: () => void 
         return;
       case 'quick-entry':
         rpc('app.showQuickEntry', { sku: target.sku }).catch((e: unknown) => toast(`Could not open quick entry: ${errorMessage(e)}`, 'bad'));
+        return;
+      case 'record':
+        onRecord(a.side, target);
         return;
       case 'link':
         void openOrCopy(a.url, toast);
@@ -149,27 +196,57 @@ export interface MenuPopoverProps<A> {
    * Inside an aria-modal dialog (the item drawer) it must stay in the dialog, or assistive tech hides it.
    */
   container?: Element | null;
+  /**
+   * What the menu hangs from: a scroll that moves it more than 4 px closes the menu (H4). Defaults
+   * to the element under `at` when the menu opens (the row), else the opener.
+   */
+  anchor?: Element | null;
   onClose: () => void;
   onAction: (action: A, item: MenuItemSpec<A>) => void;
 }
 
 const stop = (e: SyntheticEvent) => e.stopPropagation();
-const SCROLL_GRACE_MS = 200;
 
 function restoreFocus(el: Element | null): void {
   if (el instanceof HTMLElement && document.contains(el)) el.focus({ preventScroll: true });
 }
 
 /**
+ * The row under the opening point (else the element there), skipping any menu still on screen;
+ * else the opener. The row, not the cell text: a live refresh may replace a cell's inner
+ * elements, and a detached anchor would close the menu on the next scroll.
+ */
+function anchorAt(at: MenuPoint, opener: Element | null): Element | null {
+  const hit = typeof document.elementFromPoint === 'function' ? document.elementFromPoint(at.x, at.y) : null;
+  if (hit && hit !== document.body && hit !== document.documentElement && !hit.closest('.item-menu')) return hit.closest('[role="row"], tr') ?? hit;
+  return opener && opener !== document.body ? opener : null;
+}
+
+/** Its position on screen, or null once it left the document (its row was unmounted). */
+function boxOf(el: Element | null): AnchorBox | null {
+  if (!el || !document.contains(el)) return null;
+  const r = el.getBoundingClientRect();
+  return { left: r.left, top: r.top };
+}
+
+function isEditable(t: EventTarget | null): boolean {
+  return t instanceof HTMLElement && (t.isContentEditable || t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT');
+}
+
+/**
  * Positioned popover menu in a portal: clamped to the viewport, roving focus
  * with arrows / Home / End / type-ahead, Enter or click to run, Esc or Tab to
- * dismiss. It closes on an outside pointer, a scroll outside it, a resize,
- * the window losing focus, focus moving elsewhere, or a route change.
+ * dismiss. It closes on an outside pointer, a user scroll outside it (wheel,
+ * touch, scroll keys) or a scroll that moves its anchor, a resize, the window
+ * losing focus, focus moving elsewhere, or a route change. A programmatic
+ * scroll that leaves the anchor in place does not close it.
  */
-export function MenuPopover<A>({ at, label, title, sections, opener, container, onClose, onAction }: MenuPopoverProps<A>) {
+export function MenuPopover<A>({ at, label, title, sections, opener, container, anchor, onClose, onAction }: MenuPopoverProps<A>) {
   const { segments, itemSku } = useApp();
   // Fixed once per open, so the portal never moves under the user.
   const [host] = useState<Element>(() => container ?? modalHostOf(opener) ?? document.body);
+  // Read during the first render, before this menu is on screen.
+  const [anchorEl] = useState<Element | null>(() => anchor ?? anchorAt(at, opener));
   const menuRef = useRef<HTMLDivElement>(null);
   const itemRefs = useRef(new Map<string, HTMLButtonElement>());
   const items = useMemo(() => flattenSections(sections), [sections]);
@@ -221,26 +298,39 @@ export function MenuPopover<A>({ at, label, title, sections, opener, container, 
 
   useEffect(() => {
     const inside = (t: EventTarget | null) => t instanceof Node && menuRef.current !== null && menuRef.current.contains(t);
+    const policy = createMenuClosePolicy(boxOf(anchorEl), performance.now());
     const onPointer = (e: PointerEvent) => {
       if (!inside(e.target)) onCloseRef.current();
     };
-    // The click that opened the menu may select its row, and the page then scrolls it into view: not a user scroll.
-    const openedAt = performance.now();
+    const onUserScroll = (e: Event) => {
+      if (policy.closes({ type: e.type === 'wheel' ? 'wheel' : 'touchmove', inside: inside(e.target) })) onCloseRef.current();
+    };
+    const onKey = (e: KeyboardEvent) => {
+      const ev = { type: 'key' as const, key: e.key, ctrlKey: e.ctrlKey, altKey: e.altKey, metaKey: e.metaKey, inside: inside(e.target), editable: isEditable(e.target) };
+      if (policy.closes(ev)) onCloseRef.current();
+    };
     const onScroll = (e: Event) => {
-      if (!inside(e.target) && performance.now() - openedAt > SCROLL_GRACE_MS) onCloseRef.current();
+      if (policy.closes({ type: 'scroll', inside: inside(e.target), anchor: boxOf(anchorEl), at: performance.now() })) onCloseRef.current();
     };
     const onAway = () => onCloseRef.current();
+    const passive = { capture: true, passive: true };
     document.addEventListener('pointerdown', onPointer, true);
-    window.addEventListener('scroll', onScroll, true);
+    window.addEventListener('wheel', onUserScroll, passive);
+    window.addEventListener('touchmove', onUserScroll, passive);
+    window.addEventListener('keydown', onKey, true);
+    window.addEventListener('scroll', onScroll, passive);
     window.addEventListener('resize', onAway);
     window.addEventListener('blur', onAway);
     return () => {
       document.removeEventListener('pointerdown', onPointer, true);
+      window.removeEventListener('wheel', onUserScroll, true);
+      window.removeEventListener('touchmove', onUserScroll, true);
+      window.removeEventListener('keydown', onKey, true);
       window.removeEventListener('scroll', onScroll, true);
       window.removeEventListener('resize', onAway);
       window.removeEventListener('blur', onAway);
     };
-  }, []);
+  }, [anchorEl]);
 
   // Navigating away (hash route, drawer item) leaves the menu's row behind.
   const routeKey = `${segments.join('/')}|${itemSku ?? ''}`;

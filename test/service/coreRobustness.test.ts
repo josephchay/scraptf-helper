@@ -18,7 +18,7 @@ import type { WatchFactory } from '../../src/service/import';
 import { createLogger } from '../../src/service/logger';
 import { DEFAULT_SETTINGS, mergeSettings } from '../../src/shared/defaults';
 import type { PushEvent } from '../../src/shared/rpc';
-import type { DeepPartial, HealthReport, ImportResult, ItemDetail, OpportunityEvent, SecretName, Settings } from '../../src/shared/types';
+import type { DeepPartial, HealthReport, ImportResult, ItemDetail, MarketListResult, OpportunityEvent, SecretName, Settings } from '../../src/shared/types';
 import { FakeSocket, type WsEvent, type WsSample } from '../bptf/helpers';
 
 const FIX = fileURLToPath(new URL('../fixtures/', import.meta.url));
@@ -442,6 +442,30 @@ describe('saved-page folder watch', () => {
     clock.offset += 61_000;
     await waitFor('the watch to restart', async () => (await watchHealth()).state === 'live');
     expect(fw.created()).toBe(2);
+  }, 30_000);
+
+  it('tells the Live market the folder watch is on only while it really runs', async () => {
+    const clock = offsetClock();
+    const fw = fakeWatch();
+    const h = setup({ patch: { networkPaused: true }, clock, fastStatus: true, watchFactory: fw.factory });
+    const folder = path.join(h.root, 'saved');
+    await h.core.start();
+    const side = async () => (await h.call<MarketListResult>('market.list', {})).scraptf;
+
+    // Chosen but missing: core logs that the watch is off, and the header must say so too.
+    h.update({ import: { enabled: true, acknowledgedAt: Date.now() - 1_000, watchFolder: folder } });
+    expect(await side()).toMatchObject({ importEnabled: true, watchFolder: false });
+    expect(fw.created()).toBe(0);
+
+    // The folder appears: the next retry watches it.
+    mkdirSync(folder);
+    clock.offset += 61_000;
+    await waitFor('the watch to start', async () => (await side()).watchFolder);
+    expect(fw.created()).toBe(1);
+
+    // The OS watch fails: off again until the retry restarts it.
+    fw.fail(new Error('EPERM: operation not permitted, watch'));
+    expect(await side()).toMatchObject({ importEnabled: true, watchFolder: false });
   }, 30_000);
 
   it('skips the one file a previous run died importing, instead of failing on it at every start', async () => {

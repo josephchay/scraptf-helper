@@ -37,6 +37,7 @@ import { selectKeyPrice } from './keyprice';
 import { anyEffectBaseOf, classifyOrder, dedupeOrders, isSpecialEmpty, matchContext, normalizeSpecial, ruleMatches } from './matcher';
 import type { MatchContext, MatchTarget } from './matcher';
 import { computePrices, lookupReferences, outlierRefs, pickRevenueOrder, referencePrices, toOrderSummary, usableReferences, valueOrders } from './pricing';
+import type { PriceResult, ValuedOrder } from './pricing';
 import { INPUT_KIND_ORDER, maxCostFor, profitStatus, profitTier } from './tiers';
 
 export const DEBOUNCE_MS = 1000;
@@ -108,6 +109,59 @@ export function revenueOrderOf(o: Pick<Opportunity, 'bestOrder' | 'consOrder' | 
   return pickRevenueOrder({ best: o.bestOrder, conservative: o.consOrder, instant: o.instantOrder }, useOrder);
 }
 
+/** A clean copy of `base` (no paint, spells or parts), with the any-effect base for an unusual: what rules and the Live market price. */
+export function cleanTarget(base: string): MatchTarget {
+  return { baseSku: base, special: { ...EMPTY_SPECIAL, spells: [], parts: [] }, anyEffectBase: anyEffectBaseOf(base) };
+}
+
+export interface PricedBook {
+  /** Eligible orders valued at the key price, best first. */
+  eligible: ValuedOrder[];
+  prices: PriceResult<ValuedOrder>;
+}
+
+/**
+ * A buy book priced for one target, exactly as an opportunity row is: deduplicated,
+ * classified, valued, then best / conservative / instant with outliers. Shared with the
+ * Live market so both read the same book the same way.
+ */
+export function priceBook(
+  listings: readonly Listing[],
+  target: MatchTarget,
+  references: ReferencePrices,
+  p: Pick<ProfitSettings, 'outlierVsMedian' | 'outlierVsRef' | 'referenceMaxAgeMs'>,
+  keyScrap: Scrap,
+  now: UnixMs,
+  match: MatchContext,
+): PricedBook {
+  const { kept } = dedupeOrders(listings.filter((l) => l.intent === 'buy'));
+  const classified = kept.map((listing) => ({ listing, ...classifyOrder(listing, target, match) }));
+  const eligible = valueOrders(
+    classified.filter((o) => o.eligible),
+    keyScrap,
+  );
+  // F4: a stale reference must not mark current orders as outliers; scoreConfidence gates its own use the same way.
+  const prices = computePrices(eligible, outlierRefs(usableReferences(references, p.referenceMaxAgeMs, now).references), p);
+  return { eligible, prices };
+}
+
+/** Distinct buyers among eligible orders (a listing without a SteamID counts on its own). */
+export function buyerCountOf(eligible: readonly { listing: Listing }[]): number {
+  return new Set(eligible.map((o) => o.listing.steamid || o.listing.id)).size;
+}
+
+/** The row flags derived from a priced book plus the confidence flags, in the engine's order. */
+export function bookFlags(book: PricedBook, confFlags: readonly string[], revenueScrap: Scrap | null, keyScrap: Scrap): string[] {
+  const { prices, eligible } = book;
+  const flags: string[] = [];
+  if (prices.best && prices.outlierIds.has(prices.best.listing.id)) flags.push('outlier-best');
+  if (eligible.length > 0 && prices.conservative === null) flags.push('all-outliers');
+  for (const f of confFlags) if (!flags.includes(f)) flags.push(f);
+  // Brief §5.8: informational only, the user decides.
+  if (revenueScrap !== null && keyScrap > 0 && revenueScrap > BACKGROUND_CHECK_KEYS * keyScrap) flags.push('background-check');
+  return flags;
+}
+
 /**
  * A stored row's revenue order when useOrder is not at hand (CSV, shopping list).
  * Exact: computePrices sorts ties bots first and its outlier test depends only on
@@ -123,14 +177,8 @@ export function evaluateOpportunity(a: EvaluateArgs): Opportunity {
   const p = settings.profit;
   const costScrap = valueScrap(input.costKeys, input.costScrapRaw, keyScrap);
 
-  const { kept } = dedupeOrders(a.listings.filter((l) => l.intent === 'buy'));
-  const classified = kept.map((listing) => ({ listing, ...classifyOrder(listing, input.target, a.match) }));
-  const eligible = valueOrders(
-    classified.filter((o) => o.eligible),
-    keyScrap,
-  );
-  // F4: a stale reference must not mark current orders as outliers; scoreConfidence gates its own use the same way.
-  const prices = computePrices(eligible, outlierRefs(usableReferences(a.references, p.referenceMaxAgeMs, now).references), p);
+  const book = priceBook(a.listings, input.target, a.references, p, keyScrap, now, a.match);
+  const { eligible, prices } = book;
   const summary = (o: (typeof eligible)[number] | null): OrderSummary | null =>
     o ? toOrderSummary(o, prices.outlierIds.has(o.listing.id) ? ['outlier'] : []) : null;
 
@@ -155,12 +203,7 @@ export function evaluateOpportunity(a: EvaluateArgs): Opportunity {
     profit: p,
   });
 
-  const flags: string[] = [];
-  if (prices.best && prices.outlierIds.has(prices.best.listing.id)) flags.push('outlier-best');
-  if (eligible.length > 0 && prices.conservative === null) flags.push('all-outliers');
-  for (const f of conf.flags) if (!flags.includes(f)) flags.push(f);
-  // Brief §5.8: informational only, the user decides.
-  if (revenueScrap !== null && keyScrap > 0 && revenueScrap > BACKGROUND_CHECK_KEYS * keyScrap) flags.push('background-check');
+  const flags = bookFlags(book, conf.flags, revenueScrap, keyScrap);
 
   return {
     key: input.key,
@@ -184,7 +227,7 @@ export function evaluateOpportunity(a: EvaluateArgs): Opportunity {
     confidenceLevel: conf.level,
     flags,
     reasons: conf.reasons,
-    buyerCount: new Set(eligible.map((o) => o.listing.steamid || o.listing.id)).size,
+    buyerCount: buyerCountOf(eligible),
     bestOrder: summary(prices.best),
     consOrder: summary(prices.conservative),
     instantOrder: summary(prices.instant),
@@ -246,11 +289,12 @@ export function ruleInput(rule: PriceRule, base: string, name = ''): EngineInput
     costScrapRaw: rule.costScrap,
     observedAt: rule.observedAt,
     // Rules describe clean copies.
-    target: { baseSku: base, special: { ...EMPTY_SPECIAL, spells: [], parts: [] }, anyEffectBase: anyEffectBaseOf(base) },
+    target: cleanTarget(base),
   };
 }
 
-function validRule(r: PriceRule): boolean {
+/** An enabled rule with a usable cost and filter (the engine and the Live market skip the rest). */
+export function validRule(r: PriceRule): boolean {
   return (
     r.enabled === true &&
     Number.isFinite(r.costScrap) &&

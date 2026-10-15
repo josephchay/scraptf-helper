@@ -355,10 +355,25 @@ describe('imports, request log and snapshots', () => {
     const b = repo.createImportBatch({ fileName: 'b.html', pageKind: 'unusuals', fileMtime: 2, importedAt: 20, itemCount: 0 });
     expect(b).toBeGreaterThan(a);
     expect(repo.listImportBatches(10)).toEqual([
-      { id: b, fileName: 'b.html', pageKind: 'unusuals', fileMtime: 2, importedAt: 20, itemCount: 0 },
-      { id: a, fileName: 'a.html', pageKind: 'buy', fileMtime: 1, importedAt: 10, itemCount: 3 },
+      { id: b, fileName: 'b.html', pageKind: 'unusuals', fileMtime: 2, importedAt: 20, itemCount: 0, categories: null },
+      { id: a, fileName: 'a.html', pageKind: 'buy', fileMtime: 1, importedAt: 10, itemCount: 3, categories: null },
     ]);
     expect(repo.listImportBatches(1)).toHaveLength(1);
+  });
+
+  it('keeps the categories a batch stored, cleaned of unknown categories and bad counts (F13)', () => {
+    const id = repo.createImportBatch({
+      fileName: 'hats.html',
+      pageKind: 'buy',
+      fileMtime: 1,
+      importedAt: 10,
+      itemCount: 4,
+      // An unknown category (a newer build's, or damage) is dropped, like a count under 1 or not a number.
+      categories: { hats: 3, weapons: 1.7, stranges: 0, unusuals: Number.NaN, ...({ nope: 9 } as object) },
+    });
+    expect(repo.listImportBatches(1)[0]).toMatchObject({ id, categories: { hats: 3, weapons: 1 } });
+    const none = repo.createImportBatch({ fileName: 'x.html', pageKind: 'buy', fileMtime: 2, importedAt: 20, itemCount: 0, categories: {} });
+    expect(repo.listImportBatches(1)[0]).toMatchObject({ id: none, categories: null });
   });
 
   it('appends, lists and purges the request log', () => {

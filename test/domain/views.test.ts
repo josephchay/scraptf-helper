@@ -292,6 +292,22 @@ describe('buildItemDetail', () => {
     expect(painted.buyOrders.find((o) => o.listingId === 'generic')!.flags).toEqual(['has-extras']);
   });
 
+  it("gives a painted SKU the prices of its paint, which are stored under the base SKU (Record buy's prefill)", () => {
+    const repo = newRepo();
+    const GREEN = 3100495;
+    repo.upsertListings([makeListing({ id: 'generic', steamid: 'G', metalScrap: 100 })]);
+    const plain = repo.upsertScrapPrice({ sku: '378;6', name: 'Team Captain', costScrap: 18, source: 'import', observedAt: T0 - HOUR, special: special() });
+    const pinkOld = repo.upsertScrapPrice({ sku: '378;6', name: 'Team Captain', costScrap: 95, source: 'user', observedAt: T0 - 2 * HOUR, special: special({ paint: PINK }) });
+    const pink = repo.upsertScrapPrice({ sku: '378;6', name: 'Team Captain', costScrap: 90, source: 'import', observedAt: T0 - HOUR, special: special({ paint: PINK }) });
+    repo.upsertScrapPrice({ sku: '378;6', name: 'Team Captain', costScrap: 70, source: 'import', observedAt: T0 - HOUR, special: special({ paint: GREEN }) });
+
+    expect(buildItemDetail(args(repo, `378;6;p${PINK}`))!.scrapPrices.map((p) => p.id)).toEqual([pink.id, pinkOld.id]);
+    expect(buildItemDetail(args(repo, '378;6;p15185211'))!.scrapPrices).toEqual([]);
+    // The plain SKU still lists every copy stored under it, as before.
+    expect(buildItemDetail(args(repo, '378;6'))!.scrapPrices.map((p) => p.id)).toContain(plain.id);
+    expect(buildItemDetail(args(repo, '378;6'))!.scrapPrices).toHaveLength(4);
+  });
+
   it('prices the eligible book like the engine, with the pay-up-to ceiling (F2)', () => {
     const repo = newRepo();
     repo.upsertListings([

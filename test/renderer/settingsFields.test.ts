@@ -1,8 +1,11 @@
+import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { isValidContactUrl } from '../../src/renderer/format';
 import {
   CONTACT_ERROR,
   daysTextToMs,
+  HOLDINGS_NOTIFY_LABEL,
+  holdingsNotifyHint,
   HOTKEY_HINT_ERROR,
   inputKindsHint,
   MIN_MARGIN_PCT,
@@ -158,6 +161,30 @@ describe('notification controls (F6)', () => {
   it('saves the silent switch', () => {
     expect(mainAccepts({ notifications: { silent: true } })).toBe(true);
     expect(applySettingsPatch(DEFAULT_SETTINGS, { notifications: { silent: true } }).notifications.silent).toBe(true);
+  });
+
+  it('saves the holdings sell alert switch (F11), on by default', () => {
+    expect(DEFAULT_SETTINGS.notifications.holdings).toBe(true);
+    expect(HOLDINGS_NOTIFY_LABEL).toBe('Notify when something you hold can be sold at a profit');
+    for (const holdings of [false, true]) {
+      expect(mainAccepts({ notifications: { holdings } })).toBe(true);
+      expect(applySettingsPatch(DEFAULT_SETTINGS, { notifications: { holdings } }).notifications.holdings).toBe(holdings);
+    }
+    // Only that switch changes; the rest of the section stays.
+    const off = applySettingsPatch(DEFAULT_SETTINGS, { notifications: { holdings: false } }).notifications;
+    expect({ ...off, holdings: true }).toEqual(DEFAULT_SETTINGS.notifications);
+  });
+
+  it('explains the holdings alert, and that it needs desktop notifications on', () => {
+    expect(holdingsNotifyHint(true)).toMatch(/clear your profit thresholds/);
+    expect(holdingsNotifyHint(true)).not.toMatch(/off/);
+    expect(holdingsNotifyHint(false)).toMatch(/^Desktop notifications are off/);
+  });
+
+  it('puts the switch in the Notifications section', () => {
+    const page = readFileSync(new URL('../../src/renderer/pages/SettingsPage.tsx', import.meta.url), 'utf8');
+    const section = page.slice(page.indexOf('function NotifySection'), page.indexOf('function FeedSection'));
+    expect(section).toContain('<Toggle checked={n.holdings} onChange={(holdings) => void set({ holdings })} label={HOLDINGS_NOTIFY_LABEL} description={holdingsNotifyHint(n.enabled)} />');
   });
 });
 

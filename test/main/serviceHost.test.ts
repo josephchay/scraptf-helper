@@ -238,7 +238,7 @@ describe('service host: messages from the service', () => {
     p.reply({ type: 'push', event: 'import.done', payload: { stored: 1 } });
     expect(seen).toEqual(['import.done']);
     expect(h.log.warn).toHaveBeenCalledTimes(3);
-    expect(SERVICE_PUSH_EVENTS).toEqual(expect.arrayContaining(['opps.changed', 'status.changed', 'import.done', 'notify']));
+    expect(SERVICE_PUSH_EVENTS).toEqual(expect.arrayContaining(['opps.changed', 'market.changed', 'journal.changed', 'status.changed', 'import.done', 'notify']));
     for (const e of MAIN_ONLY_PUSH_EVENTS) expect(SERVICE_PUSH_EVENTS).not.toContain(e);
     expect(MAIN_ONLY_PUSH_EVENTS).toContain('ui.quickPrefill');
     expect([...SERVICE_PUSH_EVENTS, ...MAIN_ONLY_PUSH_EVENTS].sort()).toEqual([...PUSH_EVENTS].sort());

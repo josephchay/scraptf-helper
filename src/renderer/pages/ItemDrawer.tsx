@@ -12,6 +12,7 @@ import { MenuPopover, menuPointFromEvent } from '../components/ItemMenu';
 import { ItemName, Money } from '../components/ItemName';
 import { ConfidenceBadge, FlagList, OnlineDot, TonePill } from '../components/Pills';
 import { PriceInput, parsedValueScrap, readPrice, type BareUnit } from '../components/PriceInput';
+import { useRecordTrade, type RecordTradeInit } from '../components/RecordTradeDialog';
 import { Sparkline } from '../components/Sparkline';
 import {
   INPUT_KIND_LABELS,
@@ -36,6 +37,7 @@ import { useNow } from '../hooks/useTimers';
 import {
   backgroundCheckListings,
   blockBuyer,
+  buyerLabel,
   buyerMenuSections,
   buyerProfileUrls,
   ceilingVerdict,
@@ -50,6 +52,9 @@ import {
   isSteamId64,
   modalHostOf,
   priceFormHeading,
+  recordBuyInit,
+  recordInitTitle,
+  recordSaleInit,
   reconfirmInput,
   referenceAgeGates,
   unblockBuyer,
@@ -57,6 +62,7 @@ import {
   type BuyerMenuAction,
   type MenuPoint,
 } from '../itemMenuModel';
+import { previewRevenue } from '../quickModel';
 
 export function ItemDrawer() {
   const { itemSku, closeItem } = useApp();
@@ -105,11 +111,18 @@ function ItemDetailView({ sku }: { sku: string }) {
     bumpData();
   }, [reloadDetail, bumpData]);
   const buyers = useBuyerActions(afterChange);
+  // F12: one dialog for Record buy, Record sale and each buyer's "Record sale to this buyer".
+  const recordTrade = useRecordTrade();
 
   const d = detail.data;
   const keyScrap = d?.keyPrice?.valueScrap ?? statusKey;
-  const useOrder = settings?.profit.useOrder ?? 'conservative';
+  const profit = settings?.profit ?? DEFAULT_SETTINGS.profit;
+  const useOrder = profit.useOrder;
   const checkListings = useMemo(() => backgroundCheckListings(d?.opportunities ?? [], useOrder), [d, useOrder]);
+  // The buy prefills with your newest scrap.tf price, the sale with the order your profit uses.
+  const buyInit = useMemo<RecordTradeInit | null>(() => (d ? recordBuyInit(d, d.scrapPrices) : null), [d]);
+  const saleInit = useMemo<RecordTradeInit | null>(() => (d ? recordSaleInit(d, previewRevenue(d, profit).order) : null), [d, profit]);
+  const recordSaleTo = useCallback((o: OrderSummary) => (d ? recordTrade.open(recordSaleInit(d, o)) : undefined), [d, recordTrade]);
 
   const doRefresh = async () => {
     setBusy(true);
@@ -216,6 +229,21 @@ function ItemDetailView({ sku }: { sku: string }) {
         ) : null}
       </div>
 
+      {/* F12: the user's own journal; Holdings follows it. Nothing is bought, sold or offered (R4). */}
+      <div className="drawer-trade-row" role="group" aria-label="Record a trade in your journal">
+        {buyInit ? (
+          <button type="button" className="btn small" title={recordInitTitle(buyInit)} onClick={() => recordTrade.open(buyInit)}>
+            <Icon name="cart" size={14} /> Record buy
+          </button>
+        ) : null}
+        {saleInit ? (
+          <button type="button" className="btn small" title={recordInitTitle(saleInit)} onClick={() => recordTrade.open(saleInit)}>
+            <Icon name="journal" size={14} /> Record sale
+          </button>
+        ) : null}
+        <span className="muted small">Bought it on scrap.tf or sold it? Write it to your journal; Holdings tracks what you hold.</span>
+      </div>
+
       <section className="drawer-section" aria-labelledby="sec-profit">
         <h3 id="sec-profit">Profit by input</h3>
         {d.opportunities.length ? (
@@ -245,7 +273,7 @@ function ItemDetailView({ sku }: { sku: string }) {
         keyScrap={keyScrap}
         now={now}
         kind="buy"
-        buyer={{ actions: buyers, highlight: checkListings, onOpenSettings: openSettings }}
+        buyer={{ actions: buyers, highlight: checkListings, onOpenSettings: openSettings, onRecordSale: recordSaleTo }}
       />
       <OrderBook title="Sell listings" orders={d.sellListings} keyScrap={keyScrap} now={now} kind="sell" />
 
@@ -265,42 +293,9 @@ function ItemDetailView({ sku }: { sku: string }) {
         <h3 id="sec-links">Open in your browser</h3>
         <LinkMenu links={linkList} />
       </section>
-
-      {buyers.undo ? (
-        <div className="toast tone-info drawer-undo" role="status">
-          <Icon name="info" />
-          <span>Blocked {buyers.undo.who}. Their orders no longer count toward profit.</span>
-          <button
-            type="button"
-            className="btn small"
-            onClick={(e) => {
-              keepFocusInDialog(e.currentTarget);
-              void buyers.undoBlock();
-            }}
-          >
-            Undo
-          </button>
-          <button
-            type="button"
-            className="icon-btn"
-            aria-label="Dismiss"
-            onClick={(e) => {
-              keepFocusInDialog(e.currentTarget);
-              buyers.dismissUndo();
-            }}
-          >
-            <Icon name="close" size={14} />
-          </button>
-        </div>
-      ) : null}
+      {recordTrade.element}
     </div>
   );
-}
-
-/** The undo bar is about to unmount with focus on it: park focus on the drawer, not on <body>. */
-function keepFocusInDialog(el: HTMLElement): void {
-  const dialog = modalHostOf(el);
-  if (dialog instanceof HTMLElement) dialog.focus({ preventScroll: true });
 }
 
 function DrawerHead({ title, onClose }: { title: string; onClose: () => void }) {
@@ -621,31 +616,15 @@ interface CheckState {
 interface BuyerActions {
   checks: Readonly<Record<string, CheckState>>;
   blocked: ReadonlySet<string>;
-  undo: { steamid: string; who: string } | null;
   check: (steamid: string) => Promise<void>;
   block: (o: OrderSummary) => Promise<void>;
   unblock: (o: OrderSummary) => Promise<void>;
-  undoBlock: () => Promise<void>;
-  dismissUndo: () => void;
-}
-
-const UNDO_MS = 12_000;
-
-function buyerLabel(o: Pick<OrderSummary, 'userName' | 'steamid'>): string {
-  return o.userName?.trim() || o.steamid;
 }
 
 function useBuyerActions(onChanged: () => void): BuyerActions {
   const { settings, updateSettings, toast } = useApp();
   const [checks, setChecks] = useState<Record<string, CheckState>>({});
-  const [undo, setUndo] = useState<{ steamid: string; who: string } | null>(null);
   const blocked = useMemo(() => new Set(settings?.blocklist ?? []), [settings]);
-
-  useEffect(() => {
-    if (!undo) return;
-    const id = setTimeout(() => setUndo(null), UNDO_MS);
-    return () => clearTimeout(id);
-  }, [undo]);
 
   // Always from a fresh settings.get, and always the full list: arrays replace in mergeSettings.
   const deps: BlocklistDeps = { getSettings: () => rpc('settings.get'), save: (patch) => updateSettings(patch) };
@@ -663,11 +642,13 @@ function useBuyerActions(onChanged: () => void): BuyerActions {
 
   const block = async (o: OrderSummary) => {
     const who = buyerLabel(o);
+    const steamid = o.steamid;
     try {
-      const r = await blockBuyer(o.steamid, deps);
+      const r = await blockBuyer(steamid, deps);
       if (r === 'already') toast(`${who} is already on your blocklist.`, 'info');
       else if (r === 'blocked') {
-        setUndo({ steamid: o.steamid, who });
+        // H3: Undo lives on the toast (12 s, held while hovered or focused); it unblocks from a fresh read.
+        toast(`Blocked ${who}. Their orders no longer count toward profit.`, 'info', { action: { label: 'Undo', onClick: () => void remove(steamid, who) } });
         onChanged();
       }
       // 'failed': updateSettings has already said why.
@@ -691,16 +672,9 @@ function useBuyerActions(onChanged: () => void): BuyerActions {
   return {
     checks,
     blocked,
-    undo,
     check,
     block,
     unblock: (o) => remove(o.steamid, buyerLabel(o)),
-    undoBlock: async () => {
-      if (!undo) return;
-      setUndo(null);
-      await remove(undo.steamid, undo.who);
-    },
-    dismissUndo: () => setUndo(null),
   };
 }
 
@@ -709,6 +683,8 @@ interface BuyerProps {
   /** listingIds whose Check bans is highlighted (revenue order of a 'background-check' opportunity). */
   highlight: ReadonlySet<string>;
   onOpenSettings: () => void;
+  /** "Record sale to this buyer" (F12): the Record trade dialog at this order's price. */
+  onRecordSale: (o: OrderSummary) => void;
 }
 
 function OrderBook({
@@ -728,7 +704,7 @@ function OrderBook({
 }) {
   const { toast } = useApp();
   const [showExcluded, setShowExcluded] = useState(true);
-  const [menu, setMenu] = useState<{ seq: number; order: OrderSummary; at: MenuPoint; opener: Element | null } | null>(null);
+  const [menu, setMenu] = useState<{ seq: number; order: OrderSummary; at: MenuPoint; opener: Element | null; anchor: Element | null } | null>(null);
   const menuSeq = useRef(0);
   const sectionRef = useRef<HTMLElement>(null);
   const excluded = orders.filter((o) => !o.eligible).length;
@@ -745,7 +721,8 @@ function OrderBook({
     [menu, menuBlocked, menuHighlight, menuChecking],
   );
 
-  const openMenu = (order: OrderSummary, at: MenuPoint) => {
+  /** `anchor`: the button the menu hangs under (a right-click anchors on the row under the pointer). */
+  const openMenu = (order: OrderSummary, at: MenuPoint, anchor: Element | null = null) => {
     const active = document.activeElement;
     const seq = ++menuSeq.current;
     setMenu((prev) => ({
@@ -754,6 +731,7 @@ function OrderBook({
       at,
       // Reopened from inside the open menu: focus still belongs back on the original row button.
       opener: active instanceof Element && active.closest('.item-menu') ? (prev?.opener ?? null) : active === document.body ? null : active,
+      anchor,
     }));
   };
 
@@ -765,6 +743,9 @@ function OrderBook({
         return;
       case 'copy-id':
         void copyText(o.steamid).then((ok) => toast(copiedMessage(o.steamid, ok), ok ? 'good' : 'bad'));
+        return;
+      case 'record-sale':
+        buyer.onRecordSale(o);
         return;
       case 'check':
         void buyer.actions.check(o.steamid);
@@ -871,8 +852,9 @@ function OrderBook({
                               title="Buyer actions"
                               onClick={(e) => {
                                 const r = e.currentTarget.getBoundingClientRect();
-                                // Right-aligned under the button: placeMenu flips it left at the drawer's edge.
-                                openMenu(o, { x: r.right, y: r.bottom + 2 });
+                                // Right-aligned under the button: placeMenu flips it left at the drawer's edge,
+                                // and above the button (upY) near the bottom of the window.
+                                openMenu(o, { x: r.right, y: r.bottom + 2, upY: r.top - 2 }, e.currentTarget);
                               }}
                             >
                               <Icon name="user" size={13} />
@@ -913,6 +895,7 @@ function OrderBook({
           opener={menu.opener}
           // Inside the drawer's aria-modal dialog, not on document.body.
           container={modalHostOf(sectionRef.current)}
+          anchor={menu.anchor}
           onClose={() => setMenu(null)}
           onAction={(a) => runBuyerAction(a, menu.order)}
         />

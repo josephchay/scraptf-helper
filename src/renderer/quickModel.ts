@@ -1,9 +1,11 @@
-// Pure helpers for the quick-entry window's live preview (feature F2) and its
-// prefill (F8). Kept out of QuickEntry.tsx so the rules are unit-tested.
+// Pure helpers for the quick-entry window's live preview (feature F2), its
+// prefill (F8) and "Bought it" (F12). Kept out of QuickEntry.tsx so the rules
+// are unit-tested.
 
 import { frictionOf, maxCostFor, type CeilingSettings } from '../shared/ceiling';
-import type { ItemDetail, ItemRevenue, LinkSpec, OpportunityStatus, OrderSummary, ProfitSettings, Scrap } from '../shared/types';
-import { fmtMoney } from './format';
+import { fromObject, fromString } from '../shared/sku';
+import type { ItemDetail, ItemRevenue, JournalEntry, JournalInput, LinkSpec, OpportunityStatus, OrderSummary, ProfitSettings, Scrap, ScrapPrice } from '../shared/types';
+import { fmtKeysMetal, fmtMoney } from './format';
 import { statusFor } from './oppModel';
 
 /** Quiet time after a pick before 'item.detail' runs, so arrowing through picks does not fire a request each. */
@@ -178,4 +180,57 @@ export interface CheckedEntry {
 /** A "Check only" result stays shown only while the item and the price text are unchanged. */
 export function isChecked(checked: CheckedEntry | null, now: { sku: string | null; text: string; unit: string }): boolean {
   return checked !== null && checked.sku === now.sku && checked.text === now.text && checked.unit === now.unit;
+}
+
+// ---------------------------------------------------------------------------
+// "Bought it" (F12): one click after Save records the buy in the journal
+// ---------------------------------------------------------------------------
+
+/** Where the flip loop buys: a quick-entry price is a scrap.tf price. */
+export const BUY_VENUE = 'scrap.tf';
+
+/**
+ * The SKU of the item the user saved. prices.upsert stores the base SKU and moves paint into the
+ * extras, so the paint goes back on: Holdings then flags the painted copy ('has-extras').
+ */
+export function savedItemSku(price: Pick<ScrapPrice, 'sku'> & { special?: ScrapPrice['special'] }): string {
+  const paint = price.special?.paint;
+  return typeof paint === 'number' && Number.isInteger(paint) && paint > 0 ? fromObject({ ...fromString(price.sku), paint }) : price.sku;
+}
+
+/** The journal row "Bought it" writes: a buy on scrap.tf at the price just saved, keys and metal as typed. */
+export function boughtItInput(price: Pick<ScrapPrice, 'sku' | 'name' | 'costKeys' | 'costScrap'> & { special?: ScrapPrice['special'] }): JournalInput {
+  return { side: 'buy', venue: BUY_VENUE, sku: savedItemSku(price), name: price.name, keys: price.costKeys, scrap: price.costScrap };
+}
+
+/**
+ * The saved price as it is stored now. An edit in the drawer or on the Prices page updates the row
+ * in place (same id), so the card and "Bought it" must take its current cost from a fresh read, not
+ * the copy prices.upsert returned. A row deleted since (often right after buying) keeps the last
+ * known copy, so the buy can still be recorded.
+ */
+export function freshSavedPrice(price: ScrapPrice, detail: Pick<ItemDetail, 'scrapPrices'> | null | undefined): ScrapPrice {
+  const rows = detail && Array.isArray(detail.scrapPrices) ? detail.scrapPrices : [];
+  return rows.find((p) => p.id === price.id) ?? price;
+}
+
+/** The confirmation toast (it carries Undo). */
+export function boughtItText(entry: Pick<JournalEntry, 'name' | 'sku' | 'keys' | 'scrap'>): string {
+  return `Recorded a buy of ${entry.name.trim() || entry.sku} at ${fmtKeysMetal(entry.keys, entry.scrap)} in your journal.`;
+}
+
+/** The button for one saved price: idle, recording, or recorded (entryId is the journal row, for Undo). */
+export type BoughtState = { priceId: number; status: 'saving' } | { priceId: number; status: 'done'; entryId: number };
+
+export function boughtButton(state: BoughtState | null, priceId: number): { label: string; disabled: boolean; done: boolean } {
+  const s = state && state.priceId === priceId ? state : null;
+  if (s?.status === 'saving') return { label: 'Recording…', disabled: true, done: false };
+  // Recorded once per save: a second click would add a second unit to Holdings.
+  if (s?.status === 'done') return { label: 'Recorded', disabled: true, done: true };
+  return { label: 'Bought it', disabled: false, done: false };
+}
+
+/** After Undo removed the row: back to idle, unless the button has moved on (another save, another record). */
+export function afterBoughtUndo(state: BoughtState | null, entryId: number): BoughtState | null {
+  return state?.status === 'done' && state.entryId === entryId ? null : state;
 }

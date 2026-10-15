@@ -9,12 +9,13 @@ import { ItemPicker, type ItemPickerHandle, type PickedItem } from '../component
 import { PriceInput, readPrice, type BareUnit } from '../components/PriceInput';
 import { errorMessage, fmtDateTime, fmtInt, fmtKeysMetal, fmtMoney, fromDateTimeLocal, toDateTimeLocal } from '../format';
 import { useApp } from '../hooks/appContext';
-import { useRpcQuery } from '../hooks/useRpc';
+import { useRpcQuery, useThrottled, useVisiblePush } from '../hooks/useRpc';
+import { undoneText } from '../recordTradeModel';
 
 const VENUES = ['scrap.tf', 'backpack.tf', 'marketplace.tf', 'Steam Community Market', 'Direct trade'];
 
 export function JournalPage() {
-  const { keyScrap, toast, openItem } = useApp();
+  const { keyScrap, toast, openItem, navigate } = useApp();
   const list = useRpcQuery('journal.list', { limit: 2000 });
   const summary = useRpcQuery('journal.summary', undefined);
 
@@ -22,11 +23,14 @@ export function JournalPage() {
     void list.reload();
     void summary.reload();
   };
+  // Every journal write pushes 'journal.changed', this page's own (Log a trade, Delete) included, so
+  // the push is the one refresh: calling after() as well would read the whole journal twice.
+  const reload = useThrottled(after, 300);
+  useVisiblePush('journal.changed', reload);
 
   const remove = async (e: JournalEntry) => {
     try {
       await rpc('journal.delete', { id: e.id });
-      after();
     } catch (err) {
       toast(errorMessage(err), 'bad');
     }
@@ -79,7 +83,7 @@ export function JournalPage() {
         <section className="card form-card" aria-labelledby="journal-form-title">
           <h2 id="journal-form-title">Log a trade</h2>
           <p className="muted small">A manual record of what you bought and sold. Sells are matched to the oldest buy of the same item.</p>
-          <JournalForm onSaved={after} />
+          <JournalForm />
         </section>
 
         <section className="card table-card" aria-labelledby="journal-list-title">
@@ -174,7 +178,15 @@ export function JournalPage() {
             )}
           </section>
           <section className="card" aria-labelledby="open-title">
-            <h2 id="open-title">Still holding</h2>
+            {/* The link sits beside the heading, not in it, so the section is named "Still holding" only. */}
+            <div className="section-head">
+              <h2 id="open-title">Still holding</h2>
+              {s.open.length ? (
+                <button type="button" className="link-btn small journal-holdings-link" onClick={() => navigate('holdings')} title="What each held item sells for now, and to whom">
+                  Live prices on Holdings
+                </button>
+              ) : null}
+            </div>
             {s.open.length ? (
               <table className="table">
                 <thead>
@@ -210,7 +222,7 @@ export function JournalPage() {
   );
 }
 
-function JournalForm({ onSaved }: { onSaved: () => void }) {
+function JournalForm() {
   const { keyScrap, toast } = useApp();
   const [side, setSide] = useState<JournalSide>('buy');
   const [venue, setVenue] = useState('scrap.tf');
@@ -252,12 +264,17 @@ function JournalForm({ onSaved }: { onSaved: () => void }) {
         ts: fromDateTimeLocal(when) ?? Date.now(),
         note: note.trim() || null,
       });
-      toast(`Logged ${e.side} of ${e.name}`, 'good');
+      // Undo deletes the row again; the 'journal.changed' push refreshes this page and Holdings.
+      const undo = () => {
+        rpc('journal.delete', { id: e.id })
+          .then(() => toast(undoneText(e), 'info'))
+          .catch((err: unknown) => toast(`Could not undo: ${errorMessage(err)}`, 'bad'));
+      };
+      toast(`Logged ${e.side} of ${e.name}`, 'good', { action: { label: 'Undo', onClick: undo } });
       setItem(null);
       setText('');
       setNote('');
       setWhen(toDateTimeLocal(Date.now()));
-      onSaved();
       picker.current?.focus();
     } catch (err) {
       setError(errorMessage(err));

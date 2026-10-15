@@ -13,6 +13,7 @@ import type {
   Repo,
   SchemaItemRow,
 } from '../contracts';
+import { cleanCategoryCounts } from '../../shared/market';
 import { CATEGORIES } from '../../shared/types';
 import type {
   CommunityRow,
@@ -619,6 +620,7 @@ function rowToImportBatch(r: SqlRow): ImportBatch {
     fileMtime: num(r['file_mtime']),
     importedAt: num(r['imported_at']),
     itemCount: num(r['item_count']),
+    categories: cleanCategoryCounts(parseJson(r['categories'])),
   };
 }
 
@@ -1389,13 +1391,15 @@ export function createRepo(db: SqliteDb): Repo {
     // ----- saved-page imports -----
 
     createImportBatch(b) {
+      const categories = cleanCategoryCounts(b.categories);
       return insertId(
-        'INSERT INTO import_batches (file_name, page_kind, file_mtime, imported_at, item_count) VALUES (?, ?, ?, ?, ?)',
+        'INSERT INTO import_batches (file_name, page_kind, file_mtime, imported_at, item_count, categories) VALUES (?, ?, ?, ?, ?, ?)',
         String(b.fileName ?? ''),
         String(b.pageKind),
         bindNum(b.fileMtime),
         bindNum(b.importedAt),
         bindNum(b.itemCount),
+        categories ? JSON.stringify(categories) : null,
       );
     },
 

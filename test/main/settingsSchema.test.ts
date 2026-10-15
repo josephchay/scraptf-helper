@@ -329,6 +329,25 @@ describe('v0.2 settings (reference age, suspect margin, notification controls)',
     expect(parseSettings(raw).notifications.inputKinds).toEqual([]);
   });
 
+  it('adds notifications.holdings (v0.3): on by default, on for older files, off only when stored off', () => {
+    expect(DEFAULT_SETTINGS.notifications.holdings).toBe(true);
+    const old = clone() as unknown as Record<string, any>;
+    delete old.notifications.holdings;
+    const loaded = parseSettingsWithReport(old);
+    expect(loaded.settings.notifications.holdings).toBe(true);
+    expect(loaded.invalid).toEqual([]);
+    const junk = clone() as unknown as Record<string, any>;
+    junk.notifications.holdings = 'no';
+    const parsed = parseSettingsWithReport(junk);
+    expect(parsed.settings.notifications.holdings).toBe(true);
+    expect(parsed.invalid).toEqual(['notifications.holdings']);
+    const off = clone() as unknown as Record<string, any>;
+    off.notifications.holdings = false;
+    expect(parseSettings(off).notifications.holdings).toBe(false);
+    expect(applySettingsPatch(clone(), { notifications: { holdings: false } }).notifications.holdings).toBe(false);
+    expect(() => applySettingsPatch(clone(), { notifications: { holdings: 'off' } })).toThrow(/notifications.holdings/);
+  });
+
   it('validates patches: ranges, 0 turning the margin guard off, and arrays replacing whole', () => {
     expect(applySettingsPatch(clone(), { profit: { suspectMargin: 0, referenceMaxAgeMs: 0 } }).profit).toMatchObject({ suspectMargin: 0, referenceMaxAgeMs: 0 });
     expect(applySettingsPatch(clone(), { profit: { suspectMargin: 1000, referenceMaxAgeMs: 365 * DAY } }).profit.suspectMargin).toBe(1000);

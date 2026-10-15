@@ -4,9 +4,20 @@
 import { frictionOf, maxCostFor } from '../shared/ceiling';
 import { parsePrice, refToScrap, formatScrap, type ParsedPrice } from '../shared/currency';
 import { scraptfPageFor } from '../shared/links';
+import {
+  emptyMarketCounts,
+  marketBuySideMatches,
+  marketComparator,
+  marketPage,
+  marketProfit,
+  marketSearchTokens,
+  marketUserSideMatches,
+  marketVerdict,
+} from '../shared/market';
+import type { HoldingBuySide } from '../shared/holdings';
 import { communityMaxAgeMs } from '../shared/referenceAge';
-import { fromString } from '../shared/sku';
-import { CATEGORIES, CATEGORY_LABELS } from '../shared/types';
+import { baseSku, fromString } from '../shared/sku';
+import { CATEGORIES, CATEGORY_LABELS, CURRENCY_SKUS } from '../shared/types';
 import type {
   BulkPriceRow,
   Category,
@@ -18,6 +29,9 @@ import type {
   JournalSummary,
   KeyPriceState,
   LinkSpec,
+  MarketQuery,
+  MarketRow,
+  MarketVerdict,
   Opportunity,
   OrderSummary,
   PriceRule,
@@ -186,12 +200,93 @@ export const EXTRA_NAMES: readonly CatalogItem[] = [
   { sku: '5021;6', name: 'Mann Co. Supply Crate Key', category: 'other', value: 0 },
 ];
 
+/** Small deterministic hash, so generated mock values do not depend on any RNG sequence. */
+function hashOf(text: string): number {
+  let h = 2166136261;
+  for (let i = 0; i < text.length; i++) h = Math.imul(h ^ text.charCodeAt(i), 16777619) >>> 0;
+  return h;
+}
+
+const MARKET_EFFECTS: readonly [number, string, number][] = [
+  // [effect id, name, price factor]
+  [6, 'Green Confetti', 0.6],
+  [7, 'Purple Confetti', 0.6],
+  [8, 'Haunted Ghosts', 1.2],
+  [9, 'Green Energy', 1],
+  [10, 'Purple Energy', 1.1],
+  [11, 'Circling TF Logo', 0.9],
+  [12, 'Massed Flies', 0.5],
+  [13, 'Burning Flames', 3.5],
+  [14, 'Scorching Flames', 2.2],
+  [17, 'Sunbeams', 2.4],
+  [29, 'Stormy Storm', 1],
+  [33, 'Orbiting Fire', 0.8],
+  [34, 'Bubbling', 0.7],
+  [35, 'Smoking', 0.6],
+  [38, 'Cloudy Moon', 1.3],
+  [702, 'Isotope', 0.8],
+  [704, 'Energy Orb', 1.4],
+];
+const MARKET_HATS: readonly [number, string][] = [
+  [378, 'Team Captain'],
+  [94, 'Texas Ten Gallon'],
+  [105, 'Brigade Helm'],
+  [52, "Batter's Helmet"],
+  [30357, 'Dark Falkirk Helm'],
+  [316, "Pyromancer's Mask"],
+  [387, 'Sight for Sore Eyes'],
+  [30140, 'Virtual Viewfinder'],
+  [30473, 'MK 50'],
+  [30177, 'Hong Kong Cone'],
+];
+const MARKET_WEAPONS: readonly [number, string][] = [
+  [35, 'Kritzkrieg'],
+  [37, 'Ubersaw'],
+  [416, 'Market Gardener'],
+  [357, 'Half-Zatoichi'],
+  [225, 'Your Eternal Reward'],
+  [61, 'Ambassador'],
+  [998, 'Vaccinator'],
+  [1151, 'Iron Bomber'],
+];
+
+/**
+ * Items only the Live market sees: buyers on backpack.tf but no price of yours, which is
+ * most of the real market. Generated without an RNG so the seeded mock stays as it was.
+ */
+export const MARKET_ONLY: readonly CatalogItem[] = (() => {
+  const taken = new Set(CATALOG.map((c) => c.sku));
+  const out: CatalogItem[] = [];
+  const add = (item: CatalogItem) => {
+    if (taken.has(item.sku)) return;
+    taken.add(item.sku);
+    out.push(item);
+  };
+  for (const [defindex, hat] of MARKET_HATS) {
+    for (const [effect, name, factor] of MARKET_EFFECTS) {
+      const sku = `${defindex};5;u${effect}`;
+      add({ sku, name: `${name} ${hat}`, category: 'unusuals', value: k(Math.max(6, Math.round((10 + (hashOf(sku) % 60)) * factor))) });
+    }
+  }
+  for (const [defindex, weapon] of MARKET_WEAPONS) {
+    const strange = `${defindex};11`;
+    add({ sku: strange, name: `Strange ${weapon}`, category: 'stranges', value: r(2 + (hashOf(strange) % 30) / 10) });
+    const tiers: [number, string, Scrap][] = [
+      [1, 'Killstreak', r(1.5 + (hashOf(`${defindex}k1`) % 15) / 10)],
+      [2, 'Specialized Killstreak', r(4 + (hashOf(`${defindex}k2`) % 50) / 10)],
+      [3, 'Professional Killstreak', k(1 + (hashOf(`${defindex}k3`) % 3), hashOf(`${defindex}k3r`) % 40)],
+    ];
+    for (const [kt, prefix, value] of tiers) add({ sku: `${defindex};6;kt-${kt}`, name: `${prefix} ${weapon}`, category: 'killstreaks', value });
+  }
+  return out;
+})();
+
 export function findCatalogItem(sku: string): CatalogItem | null {
-  return CATALOG.find((c) => c.sku === sku) ?? EXTRA_NAMES.find((c) => c.sku === sku) ?? null;
+  return CATALOG.find((c) => c.sku === sku) ?? EXTRA_NAMES.find((c) => c.sku === sku) ?? MARKET_ONLY.find((c) => c.sku === sku) ?? null;
 }
 
 export function allSearchable(): CatalogItem[] {
-  return [...CATALOG, ...EXTRA_NAMES];
+  return [...CATALOG, ...EXTRA_NAMES, ...MARKET_ONLY];
 }
 
 // ---------------------------------------------------------------------------
@@ -656,6 +751,169 @@ export function mockShoppingList(
 }
 
 // ---------------------------------------------------------------------------
+// Live market (mock stand-in for src/service/domain/market.ts)
+// ---------------------------------------------------------------------------
+
+const MARKET_CURRENCY: ReadonlySet<string> = new Set(CURRENCY_SKUS);
+
+/** The newest typed and the newest imported price per base SKU (the service's known-price map). */
+export interface MockKnown {
+  typed: ScrapPrice | null;
+  page: ScrapPrice | null;
+}
+
+export function mockKnownPrices(prices: readonly ScrapPrice[]): Map<string, MockKnown> {
+  const out = new Map<string, MockKnown>();
+  for (const p of prices) {
+    let base: string;
+    try {
+      base = baseSku(p.sku);
+    } catch {
+      continue;
+    }
+    if (MARKET_CURRENCY.has(base)) continue;
+    const slot = out.get(base) ?? { typed: null, page: null };
+    const side = p.source === 'import' ? 'page' : 'typed';
+    const cur = slot[side];
+    if (!cur || p.observedAt > cur.observedAt || (p.observedAt === cur.observedAt && p.id > cur.id)) slot[side] = p;
+    out.set(base, slot);
+  }
+  return out;
+}
+
+function hasExtras(p: ScrapPrice): boolean {
+  if (fromString(p.sku).paint) return true;
+  const s = p.special;
+  return s !== null && (s.paint !== null || s.spells.length > 0 || s.parts.length > 0 || s.sheen !== null || s.killstreaker !== null || s.customName || s.customDesc);
+}
+
+/** Keys valued with the current key price, metal as is (valueScrap in src/shared/currency.ts). */
+function costOf(p: { costKeys: number; costScrap: Scrap }, keyScrap: Scrap): Scrap {
+  return Math.round(p.costKeys * keyScrap) + p.costScrap;
+}
+
+/**
+ * One Live market row: the book priced like mockRevenue, buy-side confidence from a neutral input
+ * (fresh, free, so only buyers and references count), and the user's side joined in.
+ * Null when the item has no eligible buyers and no price of the user's (it is not in the market).
+ */
+export function mockMarketRow(args: {
+  item: Pick<CatalogItem, 'sku' | 'name' | 'category'>;
+  book: MockBook | null;
+  known: MockKnown | undefined;
+  rules: readonly PriceRule[];
+  settings: Settings;
+  keyScrap: Scrap;
+  now: UnixMs;
+}): MarketRow | null {
+  const { item, book, known, settings, keyScrap, now } = args;
+  if (MARKET_CURRENCY.has(item.sku)) return null;
+  const priced = book ? mockPrices(book, settings, keyScrap, now) : null;
+  const eligible = priced?.eligible ?? [];
+  const buyerCount = new Set(eligible.map((o) => o.steamid)).size;
+  const knownPrice = [known?.typed ?? null, known?.page ?? null]
+    .filter((p): p is ScrapPrice => p !== null)
+    .sort((a, b) => b.observedAt - a.observedAt || b.id - a.id)[0] ?? null;
+  if (buyerCount === 0 && knownPrice === null) return null;
+
+  const useOrder = settings.profit.useOrder;
+  const order = priced ? (useOrder === 'best' ? priced.best : useOrder === 'instant' ? priced.instant : priced.cons) : null;
+  const revenueScrap = order?.valueScrap ?? null;
+  const maxCostScrap = maxCostFor(revenueScrap, settings.profit);
+
+  let confidence = 0;
+  let flags: string[] = [];
+  if (book && buyerCount > 0) {
+    const neutral: MockInput = { kind: 'user', ref: 'market', costKeys: 0, costScrapRaw: 0, observedAt: now, special: null };
+    const o = evaluateOpportunity(book, neutral, settings, keyScrap, now, null);
+    confidence = o.confidence;
+    flags = o.flags.filter((f) => f !== 'stale-input' && f !== 'rule-estimate' && f !== 'suspect-margin');
+  }
+  // The ceiling is for a clean copy; a price for a painted or spelled copy is still shown, but marked.
+  if (knownPrice && hasExtras(knownPrice) && !flags.includes('has-extras')) flags.push('has-extras');
+
+  let ruleCostScrap: Scrap | null = null;
+  for (const rule of args.rules) {
+    if (!rule.enabled || !ruleMatches(rule.filter, item)) continue;
+    const c = costOf(rule, keyScrap);
+    if (ruleCostScrap === null || c < ruleCostScrap) ruleCostScrap = c;
+  }
+
+  const knownCostScrap = knownPrice ? costOf(knownPrice, keyScrap) : null;
+  let lastOrderChangeAt: UnixMs | null = null;
+  for (const o of eligible) if (lastOrderChangeAt === null || o.lastEventAt > lastOrderChangeAt) lastOrderChangeAt = o.lastEventAt;
+  const verdict: MarketVerdict = marketVerdict({ buyerCount, maxCostScrap, knownCostScrap, ruleCostScrap });
+  return {
+    sku: item.sku,
+    name: item.name,
+    category: item.category,
+    revenueScrap,
+    bestScrap: priced?.best?.valueScrap ?? null,
+    consScrap: priced?.cons?.valueScrap ?? null,
+    instantScrap: priced?.instant?.valueScrap ?? null,
+    revenueOrder: order,
+    buyerCount,
+    maxCostScrap,
+    confidence,
+    confidenceLevel: confidenceLevelOf(confidence),
+    flags,
+    knownCostScrap,
+    knownSource: knownPrice === null ? 'none' : knownPrice.source === 'import' ? 'page' : 'typed',
+    knownObservedAt: knownPrice?.observedAt ?? null,
+    stock: knownPrice?.source === 'import' ? knownPrice.stock : null,
+    ruleCostScrap,
+    profitScrap: marketProfit(revenueScrap, knownCostScrap, settings.profit),
+    verdict,
+    lastOrderChangeAt,
+    evaluatedAt: now,
+  };
+}
+
+/**
+ * Filters, counts, sorts and pages like the service's market.list. `counts` are taken over the
+ * query without its own verdicts filter; `matched` is every match in order (the CSV export).
+ */
+export function mockMarketQuery(all: readonly MarketRow[], q: MarketQuery): { rows: MarketRow[]; matched: MarketRow[]; total: number; counts: Record<MarketVerdict, number> } {
+  const tokens = marketSearchTokens(q.search);
+  const counts = emptyMarketCounts();
+  const matched: MarketRow[] = [];
+  for (const r of all) {
+    if (!marketBuySideMatches(r, q, tokens) || !marketUserSideMatches(r, q, true)) continue;
+    counts[r.verdict]++;
+    if (!q.verdicts?.length || q.verdicts.includes(r.verdict)) matched.push(r);
+  }
+  matched.sort(marketComparator(q.sort, q.dir));
+  const { limit, offset } = marketPage(q);
+  return { rows: matched.slice(offset, offset + limit), matched, total: matched.length, counts };
+}
+
+/** What the service's onChanged compares: an entry is new, gone, or moved in revenue, ceiling, buyers or revenue order. */
+export function marketSignature(r: MarketRow): string {
+  return `${r.revenueScrap}|${r.maxCostScrap}|${r.buyerCount}|${r.revenueOrder?.listingId ?? ''}`;
+}
+
+/**
+ * Holdings (F11): a held base SKU's buy side, read from the same book and math as its Live market
+ * row (as the service reads the market entry). Null when no eligible buyer is left.
+ */
+export function mockHoldingBuySide(book: MockBook, settings: Settings, keyScrap: Scrap, now: UnixMs): HoldingBuySide | null {
+  const row = mockMarketRow({ item: book.item, book, known: undefined, rules: [], settings, keyScrap, now });
+  if (!row || row.buyerCount === 0) return null;
+  return {
+    revenueScrap: row.revenueScrap,
+    bestScrap: row.bestScrap,
+    instantScrap: row.instantScrap,
+    revenueOrder: row.revenueOrder,
+    bestOrder: mockPrices(book, settings, keyScrap, now).best,
+    buyerCount: row.buyerCount,
+    confidence: row.confidence,
+    confidenceLevel: row.confidenceLevel,
+    flags: row.flags,
+    lastOrderChangeAt: row.lastOrderChangeAt,
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Bulk paste and rules backup (mock stand-ins for src/service/priceSheetIo.ts)
 // ---------------------------------------------------------------------------
 
@@ -784,7 +1042,7 @@ export function mockLinks(sku: string, name: string, assetId: string | null): Li
 
 export function mockJournalSummary(entries: readonly JournalEntry[]): JournalSummary {
   const sorted = [...entries].sort((a, b) => a.ts - b.ts || a.id - b.id);
-  const lots = new Map<string, { cost: Scrap; name: string }[]>();
+  const lots = new Map<string, { cost: Scrap; name: string; id: number; ts: UnixMs; keys: number; scrap: Scrap; k: Scrap }[]>();
   const bySku = new Map<string, { sku: string; name: string; realizedProfitScrap: Scrap; trades: number }>();
   let realized = 0;
   let trades = 0;
@@ -793,7 +1051,7 @@ export function mockJournalSummary(entries: readonly JournalEntry[]): JournalSum
     const queue = lots.get(e.sku) ?? [];
     lots.set(e.sku, queue);
     if (e.side === 'buy') {
-      queue.push({ cost: value, name: e.name });
+      queue.push({ cost: value, name: e.name, id: e.id, ts: e.ts, keys: e.keys, scrap: e.scrap, k: e.keyPriceScrap });
     } else {
       const lot = queue.shift();
       if (!lot) continue;
@@ -808,7 +1066,13 @@ export function mockJournalSummary(entries: readonly JournalEntry[]): JournalSum
   }
   const open = [...lots.entries()]
     .filter(([, q]) => q.length > 0)
-    .map(([sku, q]) => ({ sku, name: q[0]!.name, qty: q.length, costScrap: q.reduce((t, l) => t + l.cost, 0) }));
+    .map(([sku, q]) => ({
+      sku,
+      name: q[0]!.name,
+      qty: q.length,
+      costScrap: q.reduce((t, l) => t + l.cost, 0),
+      lots: q.map((l) => ({ id: l.id, ts: l.ts, costScrap: l.cost, keys: l.keys, scrap: l.scrap, keyPriceScrap: l.k })),
+    }));
   return { realizedProfitScrap: realized, realizedTrades: trades, open, bySku: [...bySku.values()] };
 }
 
@@ -865,6 +1129,11 @@ export function seedJournal(now: UnixMs): JournalEntry[] {
     { ts: now - 3 * day, side: 'buy', venue: 'scrap.tf', sku: '30357;5;u702', name: 'Isotope Dark Falkirk Helm', keys: 21, scrap: 0, keyPriceScrap: 568, note: 'background check done' },
     { ts: now - 2 * day, side: 'buy', venue: 'scrap.tf', sku: '1118;6', name: 'Taunt: Conga', keys: 0, scrap: r(10.66), keyPriceScrap: 568, note: null },
     { ts: now - 1 * day, side: 'sell', venue: 'backpack.tf', sku: '1118;6', name: 'Taunt: Conga', keys: 0, scrap: r(12.11), keyPriceScrap: 568, note: null },
+    // Still held (Holdings, F11): a loss, an item nobody buys, and two lots of one SKU.
+    { ts: now - 4 * day, side: 'buy', venue: 'scrap.tf', sku: '143;6', name: 'Earbuds', keys: 2, scrap: 0, keyPriceScrap: 568, note: 'overpaid' },
+    { ts: now - 36 * 3_600_000, side: 'buy', venue: 'scrap.tf', sku: '30359;6', name: 'Juggernaut Jacket', keys: 0, scrap: r(1.33), keyPriceScrap: 568, note: null },
+    { ts: now - 20 * 3_600_000, side: 'buy', venue: 'scrap.tf', sku: '194;11', name: 'Strange Knife', keys: 0, scrap: r(4.88), keyPriceScrap: 568, note: null },
+    { ts: now - 19 * 3_600_000, side: 'buy', venue: 'scrap.tf', sku: '194;11', name: 'Strange Knife', keys: 0, scrap: r(5.11), keyPriceScrap: 568, note: null },
   ];
   return rows.map((row, i) => ({ id: i + 1, ...row }));
 }

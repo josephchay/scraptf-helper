@@ -19,6 +19,7 @@ import type {
   Opportunity,
   OrderSummary,
   RuleFilter,
+  ScrapPrice,
   Settings,
   UnixMs,
 } from '../../shared/types';
@@ -198,6 +199,13 @@ export function itemRevenue<T extends ValuedOrderLike>(prices: PriceResult<T>, e
   };
 }
 
+/** A painted SKU's prices, newest first: rows stored under it, and the base SKU's rows of that paint. */
+function pricesOfPaint(repo: Repo, sku: string, base: string, paint: number): ScrapPrice[] {
+  const own = sku === base ? [] : repo.scrapPricesForSku(sku);
+  const ofPaint = repo.scrapPricesForSku(base).filter((p) => p.special?.paint === paint);
+  return [...own, ...ofPaint].sort((a, b) => b.observedAt - a.observedAt || b.id - a.id);
+}
+
 /**
  * Everything the item drawer shows. Buy orders are classified against the
  * item's most recent scrap.tf price (its extras), or against a clean copy when
@@ -213,7 +221,10 @@ export function buildItemDetail(args: ItemDetailArgs): ItemDetail | null {
   const base = fromObject({ ...obj, paint: null });
   const keyScrap = args.keyPrice?.valueScrap && args.keyPrice.valueScrap > 0 ? args.keyPrice.valueScrap : DEFAULT_KEY_SCRAP;
 
-  const scrapPrices = repo.scrapPricesForSku(sku);
+  const paint = typeof obj.paint === 'number' && obj.paint > 0 ? obj.paint : null;
+  // Prices are stored under the base SKU with the paint in their extras (prices.upsert, saved pages),
+  // so a painted SKU's own prices are the base rows of that paint (plus any stored under it as is).
+  const scrapPrices = paint === null ? repo.scrapPricesForSku(sku) : pricesOfPaint(repo, sku, base, paint);
   const opportunities = repo.opportunitiesForSku(sku);
   const listings = repo.listingsByBaseSku(base);
   const anyBase = anyEffectBaseOf(base);
@@ -227,7 +238,6 @@ export function buildItemDetail(args: ItemDetailArgs): ItemDetail | null {
     return null;
   }
 
-  const paint = typeof obj.paint === 'number' && obj.paint > 0 ? obj.paint : null;
   // Quick entry saves a plain copy, so its preview must not inherit a newer painted or spelled import's extras.
   const fromPrice = args.target !== 'plain' && scrapPrices.length > 0 ? explicitInput(scrapPrices[0]!) : null;
   const target: MatchTarget = fromPrice?.target ?? {

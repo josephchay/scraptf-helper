@@ -12,6 +12,9 @@ export default defineConfig({
     emptyOutDir: true,
     sourcemap: false,
     target: 'chrome140',
+    // The bundle is read from local disk (app://), never downloaded, so one chunk beats
+    // code-splitting (no loading flash on navigation); 500 kB is a web-delivery advisory.
+    chunkSizeWarningLimit: 1024,
   },
   server: { port: 5199, strictPort: true, host: '127.0.0.1' },
 });

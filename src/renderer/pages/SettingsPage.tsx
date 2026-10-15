@@ -12,6 +12,8 @@ import { useApp } from '../hooks/appContext';
 import { useRpcQuery } from '../hooks/useRpc';
 import {
   daysTextToMs,
+  HOLDINGS_NOTIFY_LABEL,
+  holdingsNotifyHint,
   inputKindsHint,
   MIN_MARGIN_PCT,
   MIN_PROFIT_PCT_OF_COST,
@@ -410,6 +412,8 @@ function NotifySection({ s }: { s: Settings }) {
       <Field label="Notify for" hint={inputKindsHint(kinds)}>
         <CheckGroup ariaLabel="Notify for these inputs" values={kinds} options={NOTIFY_INPUT_KINDS} onToggle={toggleKind} />
       </Field>
+      {/* F11: "Sell: <name>" when a held item's next lot can be sold at a profit. */}
+      <Toggle checked={n.holdings} onChange={(holdings) => void set({ holdings })} label={HOLDINGS_NOTIFY_LABEL} description={holdingsNotifyHint(n.enabled)} />
       <Toggle checked={n.silent} onChange={(silent) => void set({ silent })} label="Silent notifications" description="Shown without the Windows notification sound." />
     </Section>
   );

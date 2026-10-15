@@ -55,6 +55,7 @@ export const DEFAULT_SETTINGS: Settings = {
     dedupMs: 30 * 60 * 1000,
     inputKinds: ['user', 'import', 'rule'],
     silent: false,
+    holdings: true,
   },
   app: { startAtLogin: false, startHidden: false, closeToTray: true, quickEntryHotkey: 'CommandOrControl+Alt+F' },
   networkPaused: false,

@@ -6,7 +6,7 @@
 // moves do not rewrite past profit.
 
 import { valueScrap } from '../../shared/currency';
-import type { JournalEntry, JournalPosition, JournalSummary, Scrap } from '../../shared/types';
+import type { JournalEntry, JournalPosition, JournalSummary, Scrap, UnixMs } from '../../shared/types';
 import { DEFAULT_KEY_SCRAP } from './keyprice';
 
 function validKeyPrice(v: unknown): v is number {
@@ -27,6 +27,9 @@ interface Lot {
   keys: number;
   scrap: Scrap;
   k: Scrap;
+  /** The row's id and time (an open buy becomes a JournalLot). */
+  id: number;
+  ts: UnixMs;
 }
 
 /** Sell minus buy, netted per currency and valued at the sell row's key price. */
@@ -39,7 +42,7 @@ function pairProfit(sell: Lot, buy: Lot): Scrap {
  * open buy (the buy was never logged, or logged later) waits and is matched
  * against the next buy of that SKU; sells still unmatched at the end are not
  * counted as profit or as holdings. Open positions are valued at their buy rows'
- * own key prices.
+ * own key prices; each lot also keeps its keys and metal apart (JournalLot).
  */
 export function journalSummary(entries: JournalEntry[]): JournalSummary {
   const rows = (Array.isArray(entries) ? entries : [])
@@ -65,7 +68,7 @@ export function journalSummary(entries: JournalEntry[]): JournalSummary {
 
   for (const e of rows) {
     if (validKeyPrice(e.keyPriceScrap)) lastKeyPrice = e.keyPriceScrap;
-    const lot: Lot = { keys: finite(e.keys), scrap: finite(e.scrap), k: lastKeyPrice };
+    const lot: Lot = { keys: finite(e.keys), scrap: finite(e.scrap), k: lastKeyPrice, id: finite(e.id), ts: finite(e.ts) };
     const name = typeof e.name === 'string' && e.name.trim() ? e.name : names.get(e.sku) ?? e.sku;
     names.set(e.sku, name);
 
@@ -93,7 +96,10 @@ export function journalSummary(entries: JournalEntry[]): JournalSummary {
   const open: JournalPosition[] = [];
   for (const [sku, queue] of lots) {
     if (queue.length === 0) continue;
-    open.push({ sku, name: names.get(sku) ?? sku, qty: queue.length, costScrap: queue.reduce((t, l) => t + valueScrap(l.keys, l.scrap, l.k), 0) });
+    // Oldest first: the queue is in time order, so lots[0] is the one the next sale closes.
+    // keys/scrap ride along so Holdings can judge a sale the way pairProfit will book it.
+    const lotsOpen = queue.map((l) => ({ id: l.id, ts: l.ts, costScrap: valueScrap(l.keys, l.scrap, l.k), keys: l.keys, scrap: l.scrap, keyPriceScrap: l.k }));
+    open.push({ sku, name: names.get(sku) ?? sku, qty: queue.length, costScrap: lotsOpen.reduce((t, l) => t + l.costScrap, 0), lots: lotsOpen });
   }
   open.sort((a, b) => b.costScrap - a.costScrap || a.sku.localeCompare(b.sku));
 

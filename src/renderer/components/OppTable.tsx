@@ -167,8 +167,11 @@ export function OppTable({
       }
       const go = (n: number) => {
         e.preventDefault();
+        const id = rows[n]?.id ?? null;
+        // Nothing moves (k on the first row): no effect would clear the flag before a later re-sort.
+        if (id === selectedId) return;
         keyboardMove.current = true;
-        onSelect(rows[n]?.id ?? null);
+        onSelect(id);
       };
       switch (e.key) {
         case 'j':

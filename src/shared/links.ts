@@ -45,6 +45,27 @@ export function scraptfPageFor(category: Category): string {
   return Object.hasOwn(SCRAPTF_PAGES, category) ? SCRAPTF_PAGES[category] : SCRAPTF_PAGES.other;
 }
 
+/** One scrap.tf bank page as the Live market's coverage strip lists it (F13). */
+export interface ScraptfBankPage {
+  /** The page's own category (ScraptfCoverage.category); the items page uses 'other'. */
+  category: Category;
+  label: string;
+  url: string;
+  /** Item categories this page sells: a saved page counts for it when most of its items are in them. */
+  categories: readonly Category[];
+}
+
+/** The bank pages in strip order: the six /buy pages, then /unusuals. Every URL is a SCRAPTF_PAGES one. */
+export const SCRAPTF_BANK_PAGES: readonly ScraptfBankPage[] = Object.freeze([
+  { category: 'hats', label: 'Hats', url: SCRAPTF_PAGES.hats, categories: ['hats'] },
+  { category: 'weapons', label: 'Weapons', url: SCRAPTF_PAGES.weapons, categories: ['weapons'] },
+  { category: 'stranges', label: 'Stranges', url: SCRAPTF_PAGES.stranges, categories: ['stranges'] },
+  { category: 'killstreaks', label: 'Killstreaks', url: SCRAPTF_PAGES.killstreaks, categories: ['killstreaks'] },
+  { category: 'skins', label: 'Skins', url: SCRAPTF_PAGES.skins, categories: ['skins'] },
+  { category: 'other', label: 'Items', url: SCRAPTF_PAGES.other, categories: ['taunts', 'other'] },
+  { category: 'unusuals', label: 'Unusuals', url: SCRAPTF_PAGES.unusuals, categories: ['unusuals'] },
+] satisfies ScraptfBankPage[]);
+
 /** Where backpack.tf shows both the access token ("Reveal") and the API key (registered there first). */
 export const BPTF_API_ACCESS_URL = 'https://next.backpack.tf/account/api-access';
 

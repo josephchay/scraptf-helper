@@ -17,16 +17,22 @@ import { usePush, useThrottled, useVisiblePush } from '../hooks/useRpc';
 import { REVENUE_ORDER_TITLES, revenueOrderOf } from '../oppModel';
 import {
   PREVIEW_DEBOUNCE_MS,
+  afterBoughtUndo,
+  boughtButton,
+  boughtItInput,
+  boughtItText,
   buyerCountLabel,
   ceilingVerdict,
   compactLinks,
   createLatestGate,
+  freshSavedPrice,
   isCheckKey,
   isChecked,
   previewRevenue,
   previewTone,
   profitPreview,
   revenueBreakdown,
+  type BoughtState,
   type CheckedEntry,
 } from '../quickModel';
 
@@ -59,6 +65,9 @@ export function QuickEntry() {
   const [result, setResult] = useState<{ price: ScrapPrice; detail: ItemDetail | null } | null>(null);
   const [preview, setPreview] = useState<PreviewState | null>(null);
   const [checked, setChecked] = useState<CheckedEntry | null>(null);
+  const [bought, setBought] = useState<BoughtState | null>(null);
+  // A double click must not record the buy twice (Holdings would count two units).
+  const boughtBusy = useRef(false);
   const [focusPriceTick, setFocusPriceTick] = useState(0);
   const picker = useRef<ItemPickerHandle>(null);
   const priceRef = useRef<HTMLInputElement>(null);
@@ -198,7 +207,9 @@ export function QuickEntry() {
       try {
         const detail = await rpc('item.detail', { sku: price.sku, history: false });
         const ready = detail?.opportunities.some((o) => o.inputRef === `price:${price.id}`) ?? false;
-        setResult((r) => (r && r.price.id === price.id ? { price, detail } : r));
+        // The row as stored now: an edit elsewhere keeps its id, and 'Saved … at' and Bought it must follow it.
+        const fresh = freshSavedPrice(price, detail);
+        setResult((r) => (r && r.price.id === price.id ? { price: fresh, detail } : r));
         if (ready || !detail) return;
       } catch {
         // keep the saved confirmation; the push below retries
@@ -212,6 +223,8 @@ export function QuickEntry() {
   }, 2000);
   // `result` outlives Esc/blur (the window only hides), so gate on visibility rather than on it.
   useVisiblePush('opps.changed', refresh, result !== null);
+  // The saved price edited in the drawer or on the Prices page (same row id): re-read its cost.
+  useVisiblePush('prices.changed', refresh, result !== null);
 
   /** The picked (or typed) item and the parsed price, or null after showing what is missing. */
   const readEntry = async () => {
@@ -286,6 +299,45 @@ export function QuickEntry() {
     rpc('app.openItem', { sku: s }).catch((e: unknown) => toast(`Could not open the dashboard: ${errorMessage(e)}`, 'bad'));
   };
 
+  // F12 "Bought it": one click writes the journal buy at the saved price; the toast offers Undo.
+  // Only the user's own journal changes; nothing is bought (R4).
+  const undoBought = async (entryId: number) => {
+    try {
+      await rpc('journal.delete', { id: entryId });
+      setBought((b) => afterBoughtUndo(b, entryId));
+      toast('Removed that buy from your journal.', 'info');
+    } catch (e) {
+      toast(`Could not undo: ${errorMessage(e)}`, 'bad');
+    }
+  };
+
+  /** The saved row's current cost; the copy on the card if it cannot be read (or was deleted since). */
+  const currentPrice = async (saved: ScrapPrice): Promise<ScrapPrice> => {
+    try {
+      return freshSavedPrice(saved, await rpc('item.detail', { sku: saved.sku, history: false }));
+    } catch {
+      return saved;
+    }
+  };
+
+  const boughtIt = async (saved: ScrapPrice) => {
+    if (boughtBusy.current) return;
+    boughtBusy.current = true;
+    setBought({ priceId: saved.id, status: 'saving' });
+    try {
+      // Read again first: an edit that landed while the window was hidden has not refreshed the card yet.
+      const price = await currentPrice(saved);
+      const entry = await rpc('journal.add', boughtItInput(price));
+      setBought((b) => (b?.priceId === price.id ? { priceId: price.id, status: 'done', entryId: entry.id } : b));
+      toast(boughtItText(entry), 'good', { action: { label: 'Undo', onClick: () => void undoBought(entry.id) } });
+    } catch (e) {
+      setBought((b) => (b?.priceId === saved.id ? null : b));
+      toast(`Could not record the buy: ${errorMessage(e)}`, 'bad');
+    } finally {
+      boughtBusy.current = false;
+    }
+  };
+
   const copy = async (value: string, what: string) => {
     const ok = await copyText(value);
     toast(ok ? `Copied ${what}` : 'Could not copy to the clipboard.', ok ? 'good' : 'bad');
@@ -299,6 +351,7 @@ export function QuickEntry() {
   const revenueOrder = opp ? revenueOrderOf(opp, profit.useOrder) : (d?.buyOrders.find((o) => o.eligible && !o.flags.includes('outlier')) ?? null);
   const k = d?.keyPrice?.valueScrap ?? keyScrap;
   const payUpTo = opp?.maxCostScrap ?? d?.revenue?.maxCostScrap ?? null;
+  const boughtBtn = result ? boughtButton(bought, result.price.id) : null;
 
   return (
     <div className="quick">
@@ -415,6 +468,18 @@ export function QuickEntry() {
           )}
           {opp?.flags.length ? <FlagList flags={opp.flags} /> : null}
           <div className="quick-actions">
+            {boughtBtn ? (
+              <button
+                type="button"
+                className={`btn small${boughtBtn.done ? '' : ' primary'} quick-bought`}
+                disabled={boughtBtn.disabled}
+                title={`Record that you bought it on scrap.tf at ${fmtKeysMetal(result.price.costKeys, result.price.costScrap)}: a journal buy, shown in Holdings. Nothing is bought.`}
+                onClick={() => void boughtIt(result.price)}
+              >
+                <Icon name={boughtBtn.done ? 'check' : 'cart'} size={13} />
+                {boughtBtn.label}
+              </button>
+            ) : null}
             <button type="button" className="btn small" onClick={() => openInDashboard(result.price.sku)}>
               <Icon name="external" size={13} />
               Open in dashboard

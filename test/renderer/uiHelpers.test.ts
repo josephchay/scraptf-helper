@@ -1,7 +1,8 @@
 import { describe, expect, it, vi } from 'vitest';
 import { BRIDGE_MISSING_MESSAGE, isMock, resolveBridge } from '../../src/renderer/api';
 import { commitSucceeded } from '../../src/renderer/components/Controls';
-import { trapFocusTarget } from '../../src/renderer/components/Drawer';
+import { readFileSync } from 'node:fs';
+import { TOAST_FOCUSABLE, trapFocusTarget, trapFocusTargetIn } from '../../src/renderer/components/Drawer';
 import { UNUSED_BUDGET_IDS, snapshotUnavailableReason, visibleBudgets } from '../../src/renderer/format';
 import { REVENUE_ORDER_TITLES, exportQuery, filtersToQuery, isSearchShortcut, revenueOrderOf, DEFAULT_FILTERS } from '../../src/renderer/oppModel';
 import { chooseWatchFolder } from '../../src/renderer/pages/ImportPage';
@@ -59,6 +60,42 @@ describe('Drawer focus trap', () => {
 
   it('does nothing without focusable controls', () => {
     expect(trapFocusTarget([], null, false)).toBeNull();
+  });
+
+  // H3: a toast's Undo (Block buyer, Record trade) lives outside the panel; Tab must reach it.
+  describe('with toast buttons as a second group', () => {
+    const toasts = ['undo', 'dismiss'];
+    const groups = [items, toasts];
+
+    it("steps from the panel's last control to the first toast button and on, then wraps to the panel", () => {
+      expect(trapFocusTargetIn(groups, 'link', false)).toBe('undo');
+      // Inside the toast stack the browser's own order is right.
+      expect(trapFocusTargetIn(groups, 'undo', false)).toBeNull();
+      expect(trapFocusTargetIn(groups, 'dismiss', false)).toBe('close');
+      expect(trapFocusTargetIn(groups, 'close', false)).toBeNull();
+    });
+
+    it('goes back the same way with Shift+Tab', () => {
+      expect(trapFocusTargetIn(groups, 'close', true)).toBe('dismiss');
+      expect(trapFocusTargetIn(groups, 'dismiss', true)).toBeNull();
+      expect(trapFocusTargetIn(groups, 'undo', true)).toBe('link');
+      expect(trapFocusTargetIn(groups, 'refresh', true)).toBeNull();
+    });
+
+    it('starts from either end when focus is on the panel itself, and is plain trapFocusTarget without toasts', () => {
+      expect(trapFocusTargetIn(groups, null, false)).toBe('close');
+      expect(trapFocusTargetIn(groups, null, true)).toBe('dismiss');
+      for (const a of [null, ...items]) for (const shift of [false, true]) expect(trapFocusTargetIn([items, []], a, shift)).toBe(trapFocusTarget(items, a, shift));
+      expect(trapFocusTargetIn([['only']], 'only', false)).toBe('only');
+      expect(trapFocusTargetIn([[], toasts], 'dismiss', false)).toBe('undo');
+    });
+
+    it('is what the drawer traps with', () => {
+      const src = readFileSync(new URL('../../src/renderer/components/Drawer.tsx', import.meta.url), 'utf8');
+      expect(TOAST_FOCUSABLE).toBe('.toasts button:not([disabled])');
+      expect(src).toContain('document.querySelectorAll<HTMLElement>(TOAST_FOCUSABLE)');
+      expect(src).toContain('trapFocusTargetIn([items, toastItems], active, e.shiftKey)');
+    });
   });
 });
 

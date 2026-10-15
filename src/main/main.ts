@@ -405,9 +405,26 @@ async function runSmokeTest(rt: Runtime, reportPath: string): Promise<void> {
       errors.push(`live check failed: ${safeErrorMessage(err)}`);
     }
     const r = liveSummary(h2, s2, args.smokeWaitSec);
-    live = r.summary;
     errors.push(...r.errors);
     warnings.push(...r.warnings);
+    // The Live market index must fill from the same feed once its first build is done.
+    let market: unknown = null;
+    try {
+      const m = await rt.host.call('market.list', { sort: 'updated', dir: 'desc', limit: 3 });
+      market = {
+        total: m.total,
+        stats: m.stats,
+        counts: m.counts,
+        sample: m.rows.map((row) => ({ sku: row.sku, name: row.name, revenueScrap: row.revenueScrap, maxCostScrap: row.maxCostScrap, buyers: row.buyerCount, verdict: row.verdict })),
+      };
+      const buys = h2?.feed?.buyListings ?? 0;
+      if (m.stats.entries === 0 && buys > 0) {
+        (m.stats.building ? warnings : errors).push(`live market has no entries although ${buys} buy listings are stored${m.stats.building ? ' (still building)' : ''}`);
+      }
+    } catch (err) {
+      errors.push(`market.list failed: ${safeErrorMessage(err)}`);
+    }
+    live = r.summary === null ? null : { ...(r.summary as Record<string, unknown>), market };
     if (s2) status = s2;
     if (h2) health = h2;
   }

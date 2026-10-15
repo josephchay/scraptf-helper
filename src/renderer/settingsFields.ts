@@ -82,6 +82,15 @@ export function inputKindsHint(kinds: readonly InputKind[]): string {
   return 'Only profitable items from these inputs can notify.';
 }
 
+/** notifications.holdings (F11): the sell alert for what the journal says you hold. */
+export const HOLDINGS_NOTIFY_LABEL = 'Notify when something you hold can be sold at a profit';
+
+export function holdingsNotifyHint(notificationsOn: boolean): string {
+  const base =
+    'For items in Holdings (journal buys not sold yet): a backpack.tf buyer pays enough over your cost to clear your profit thresholds. Uses the minimum confidence and repeat time above.';
+  return notificationsOn ? base : `Desktop notifications are off, so this shows nothing until they are on. ${base}`;
+}
+
 export const HOTKEY_HINT_ERROR = 'Needs Ctrl, Alt or Win plus a key (an F-key works alone), e.g. CommandOrControl+Alt+F. Leave it empty to turn the shortcut off.';
 
 /** Empty turns the global shortcut off, as main and the schema allow. */

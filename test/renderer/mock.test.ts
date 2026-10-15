@@ -165,7 +165,7 @@ describe('mock journal FIFO', () => {
     ]);
     expect(s.realizedProfitScrap).toBe(15);
     expect(s.realizedTrades).toBe(1);
-    expect(s.open).toEqual([{ sku: 'a', name: 'A', qty: 1, costScrap: 20 }]);
+    expect(s.open).toEqual([{ sku: 'a', name: 'A', qty: 1, costScrap: 20, lots: [{ id: 2, ts: 2, costScrap: 20, keys: 0, scrap: 20, keyPriceScrap: 568 }] }]);
     expect(s.bySku).toEqual([{ sku: 'a', name: 'A', realizedProfitScrap: 15, trades: 1 }]);
   });
 });

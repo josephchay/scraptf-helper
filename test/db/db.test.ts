@@ -243,7 +243,7 @@ describe('migrations', () => {
     expect(repo.getOpportunity('378;6|price:1')!.maxCostScrap).toBe(99);
 
     const check = track(new DatabaseSync(path));
-    expect(userVersion(check)).toBe(2);
+    expect(userVersion(check)).toBe(SCHEMA_VERSION);
     const cols = check
       .prepare('PRAGMA table_info(opportunities)')
       .all()

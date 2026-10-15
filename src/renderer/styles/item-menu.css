@@ -1,4 +1,4 @@
-/* Row context menu (ItemMenu, F9); also the drawer's buyer actions menu. */
+/* Row context menu (ItemMenu, F9; Record buy / Record sale, F12); also the drawer's buyer actions menu. */
 
 .item-menu {
   position: fixed;
@@ -9,6 +9,8 @@
   padding: 4px;
   overflow-x: hidden;
   overflow-y: auto;
+  /* H4: the wheel at the end of a long menu must not scroll the page under it (that moves its row). */
+  overscroll-behavior: contain;
   border: 1px solid var(--border-strong);
   border-radius: 8px;
   background: var(--surface);

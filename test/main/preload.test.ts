@@ -101,6 +101,26 @@ describe('preload bridge', () => {
     expect(b).toHaveBeenCalledWith({ version: 'x' });
   });
 
+  it('accepts the Live market push (market.changed) and allows market.list', async () => {
+    const { bridge } = await load();
+    const l = vi.fn();
+    bridge.on('market.changed', l);
+    electron.pushListener!({}, 'market.changed', { changed: 3, total: 120, at: 1 });
+    expect(l).toHaveBeenCalledWith({ changed: 3, total: 120, at: 1 });
+    electron.invoke.mockResolvedValueOnce({ ok: true, result: { rows: [] } });
+    await expect(bridge.rpc('market.list', {})).resolves.toEqual({ rows: [] });
+  });
+
+  it('accepts the journal push (journal.changed) and allows holdings.list', async () => {
+    const { bridge } = await load();
+    const l = vi.fn();
+    bridge.on('journal.changed', l);
+    electron.pushListener!({}, 'journal.changed', { at: 5 });
+    expect(l).toHaveBeenCalledWith({ at: 5 });
+    electron.invoke.mockResolvedValueOnce({ ok: true, result: { rows: [] } });
+    await expect(bridge.rpc('holdings.list', {})).resolves.toEqual({ rows: [] });
+  });
+
   it('never hands the IPC event object to listeners', async () => {
     const { bridge } = await load();
     const l = vi.fn();

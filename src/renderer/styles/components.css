@@ -1023,6 +1023,19 @@ textarea.input {
   flex: 1;
 }
 
+/* A toast with an action (Undo, H3): the button sits on the text's line. */
+.toast.has-action {
+  align-items: center;
+}
+
+.toast.has-action > .icon {
+  margin-top: 0;
+}
+
+.toast-action {
+  flex: none;
+}
+
 /* ---------- tables ---------- */
 
 .table-wrap {

@@ -12,21 +12,25 @@ import { useNow } from './hooks/useTimers';
 import { serviceNotReady } from './serviceStateModel';
 import { AboutPage } from './pages/AboutPage';
 import { HealthPage } from './pages/HealthPage';
+import { HoldingsPage } from './pages/HoldingsPage';
 import { ImportPage } from './pages/ImportPage';
 import { ItemDrawer } from './pages/ItemDrawer';
 import { JournalPage } from './pages/JournalPage';
 import { LogPage } from './pages/LogPage';
+import { MarketPage } from './pages/MarketPage';
 import { OpportunitiesPage } from './pages/OpportunitiesPage';
 import { PricesPage } from './pages/PricesPage';
 import { QuickEntry } from './pages/QuickEntry';
 import { ShoppingPage } from './pages/ShoppingPage';
 import { SettingsPage } from './pages/SettingsPage';
 
-type RouteId = 'opportunities' | 'shopping' | 'log' | 'prices' | 'import' | 'journal' | 'health' | 'settings' | 'about';
+type RouteId = 'opportunities' | 'market' | 'shopping' | 'holdings' | 'log' | 'prices' | 'import' | 'journal' | 'health' | 'settings' | 'about';
 
 const NAV: { id: RouteId; label: string; icon: IconName }[] = [
   { id: 'opportunities', label: 'Opportunities', icon: 'opps' },
+  { id: 'market', label: 'Live market', icon: 'market' },
   { id: 'shopping', label: 'Shopping list', icon: 'cart' },
+  { id: 'holdings', label: 'Holdings', icon: 'holdings' },
   { id: 'log', label: 'Live log', icon: 'log' },
   { id: 'prices', label: 'Price sheet', icon: 'tag' },
   { id: 'import', label: 'Import', icon: 'import' },
@@ -38,7 +42,9 @@ const NAV: { id: RouteId; label: string; icon: IconName }[] = [
 
 const TITLES: Record<RouteId, string> = {
   opportunities: 'Opportunities',
+  market: 'Live market',
   shopping: 'Shopping list',
+  holdings: 'Holdings',
   log: 'Live log',
   prices: 'Price sheet',
   import: 'Import saved pages',
@@ -192,8 +198,12 @@ function RouteView({ route }: { route: RouteId }) {
   switch (route) {
     case 'opportunities':
       return <OpportunitiesPage />;
+    case 'market':
+      return <MarketPage />;
     case 'shopping':
       return <ShoppingPage />;
+    case 'holdings':
+      return <HoldingsPage />;
     case 'log':
       return <LogPage />;
     case 'prices':

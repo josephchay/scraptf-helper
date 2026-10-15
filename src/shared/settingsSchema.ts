@@ -108,6 +108,8 @@ const notificationsSchema = z.object({
   dedupMs: z.number().int().min(0).max(30 * DAY_MS),
   inputKinds: z.array(inputKind).max(3),
   silent: bool,
+  // A settings file from before v0.3 has no key: the lenient load falls back to the default (on).
+  holdings: bool,
 });
 
 const appSchema = z.object({

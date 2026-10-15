@@ -5,9 +5,13 @@
 import type { AppInfo, FlipdeskBridge, PushContract, PushEvent, RpcMethod, RpcParams, RpcResult } from '../shared/rpc';
 import { formatScrap } from '../shared/currency';
 import { DEFAULT_SETTINGS, mergeSettings } from '../shared/defaults';
-import { canonical, fromString, looksLikeSku } from '../shared/sku';
+import { HOLDINGS_CSV_COLUMNS, holdingRow, holdingsCsvCells, holdingsMatching, holdingsResult } from '../shared/holdings';
+import { MARKET_CSV_COLUMNS, MARKET_MAX_LIMIT, MARKET_MAX_SEARCH_CHARS, countCategories, marketCsvCells, scraptfCoverage } from '../shared/market';
+import { baseSku, canonical, fromString, looksLikeSku } from '../shared/sku';
 import type {
   AppStatus,
+  HoldingRow,
+  HoldingsQuery,
   BuyerCheck,
   ConnectorHealth,
   HealthReport,
@@ -18,6 +22,10 @@ import type {
   JournalEntry,
   KeyPriceQuote,
   KeyPriceState,
+  MarketListResult,
+  MarketQuery,
+  MarketRow,
+  MarketStats,
   Opportunity,
   OpportunityEvent,
   OpportunityEventKind,
@@ -35,6 +43,7 @@ import type {
 import { SECRET_NAMES } from '../shared/types';
 import {
   CATALOG,
+  MARKET_ONLY,
   MOCK_KEY_SCRAP,
   SEED_RULES,
   allSearchable,
@@ -42,9 +51,15 @@ import {
   evaluateOpportunity,
   findCatalogItem,
   makeBook,
+  marketSignature,
   mockJournalSummary,
+  mockKnownPrices,
   mockLinks,
+  mockHoldingBuySide,
+  mockMarketQuery,
+  mockMarketRow,
   mockParseBulk,
+  mockPrices,
   mockRevenue,
   mockRulesFromJson,
   mockRulesToJson,
@@ -67,6 +82,11 @@ export interface MockOptions {
   latencyMs?: number;
   /** Extra synthetic price inputs (defaults to the ?stress= URL parameter). */
   stressRows?: number;
+  /**
+   * How long the Live market's first index build appears to take (stats.building, rows filling in).
+   * Defaults to 6 s while the feed timer runs and 0 when it does not (tests).
+   */
+  marketBuildMs?: number;
 }
 
 function readStressParam(): number {
@@ -129,6 +149,11 @@ export function createMockBridge(opts: MockOptions = {}): MockBridge {
 
   const books = new Map<string, MockBook>();
   CATALOG.forEach((item, i) => books.set(item.sku, makeBook(rng, item, t0, i % 17 === 9)));
+  // Live market only: items with buyers and no price of yours. Their own RNG keeps the seeded mock unchanged.
+  const marketRng = createRng(((opts.seed ?? 20261014) ^ 0x5eed) >>> 0);
+  const marketBuildMs = Math.max(0, opts.marketBuildMs ?? (tickMs > 0 ? 6000 : 0));
+  const extraBooks = new Map<string, MockBook>();
+  for (const item of MARKET_ONLY) extraBooks.set(item.sku, makeBook(marketRng, item, t0));
 
   let prices: ScrapPrice[] = seedPrices(rng, t0);
   let priceSeq = prices.reduce((m, p) => Math.max(m, p.id), 0) + 1;
@@ -158,12 +183,18 @@ export function createMockBridge(opts: MockOptions = {}): MockBridge {
   let ruleSeq = rules.reduce((m, r) => Math.max(m, r.id), 0) + 1;
   let journal: JournalEntry[] = seedJournal(t0);
   let journalSeq = journal.length + 1;
+  // Saved pages for the Live market's coverage strip (F13): some minutes old, some hours, skins and items never.
+  // Each carries the categories it stored, as the service records them at import time (the seeded
+  // prices' batch ids are random, so the rows could not say).
   const batches: ImportBatch[] = [
-    { id: 3, fileName: 'scrap.tf - Unusuals.html', pageKind: 'unusuals', fileMtime: t0 - 70 * MIN, importedAt: t0 - 69 * MIN, itemCount: 6 },
-    { id: 2, fileName: 'scrap.tf - Buy Hats.html', pageKind: 'buy', fileMtime: t0 - 3 * HOUR, importedAt: t0 - 3 * HOUR + MIN, itemCount: 9 },
-    { id: 1, fileName: 'scrap.tf - Buy Stranges.html', pageKind: 'buy', fileMtime: t0 - 26 * HOUR, importedAt: t0 - 26 * HOUR + MIN, itemCount: 4 },
+    { id: 6, fileName: 'scrap.tf - Buy Hats.html', pageKind: 'buy', fileMtime: t0 - 4 * MIN, importedAt: t0 - 4 * MIN + 2_000, itemCount: 48, categories: { hats: 48 } },
+    { id: 5, fileName: 'scrap.tf - Unusuals.html', pageKind: 'unusuals', fileMtime: t0 - 12 * MIN, importedAt: t0 - 12 * MIN + 2_000, itemCount: 31, categories: { unusuals: 31 } },
+    { id: 4, fileName: 'scrap.tf - Buy Stranges.html', pageKind: 'buy', fileMtime: t0 - 70 * MIN, importedAt: t0 - 69 * MIN, itemCount: 22, categories: { stranges: 22 } },
+    { id: 3, fileName: 'scrap.tf - Items.html', pageKind: 'items-list', fileMtime: t0 - 2 * HOUR, importedAt: t0 - 2 * HOUR + MIN, itemCount: 140, categories: { other: 140 } },
+    { id: 2, fileName: 'scrap.tf - Buy Weapons.html', pageKind: 'buy', fileMtime: t0 - 5 * HOUR, importedAt: t0 - 5 * HOUR + MIN, itemCount: 64, categories: { weapons: 64 } },
+    { id: 1, fileName: 'scrap.tf - Buy Killstreaks.html', pageKind: 'buy', fileMtime: t0 - 26 * HOUR, importedAt: t0 - 26 * HOUR + MIN, itemCount: 17, categories: { killstreaks: 17 } },
   ];
-  let batchSeq = 4;
+  let batchSeq = 7;
 
   let opps = new Map<string, Opportunity>();
   let events: OpportunityEvent[] = [];
@@ -205,7 +236,7 @@ export function createMockBridge(opts: MockOptions = {}): MockBridge {
   }
 
   function bookFor(sku: string, name?: string): MockBook {
-    const existing = books.get(sku);
+    const existing = books.get(sku) ?? extraBooks.get(sku);
     if (existing) return existing;
     const item: CatalogItem = findCatalogItem(sku) ?? { sku, name: name ?? sku, category: guessCategory(sku), value: 0 };
     const book = makeBook(rng, { ...item, value: 0 }, now(), true);
@@ -347,7 +378,7 @@ export function createMockBridge(opts: MockOptions = {}): MockBridge {
     const all = [...opps.values()];
     const profitable = all.filter((o) => o.status === 'profitable');
     return {
-      version: '0.2.0',
+      version: '0.3.0',
       networkPaused: settings.networkPaused,
       feed: feedState(),
       keyPrice: keyPrice(),
@@ -525,9 +556,172 @@ export function createMockBridge(opts: MockOptions = {}): MockBridge {
     emit('prices.changed', { at: now() });
   }
 
+  // ---------------------------------------------------------------------------
+  // Live market (F10): every item with buyers or a price of yours
+  // ---------------------------------------------------------------------------
+
+  let marketSigs = new Map<string, string>();
+  let marketChangeAt: UnixMs | null = null;
+
+  /** 0..1 through the simulated first index build. */
+  function marketProgress(): number {
+    return marketBuildMs <= 0 ? 1 : Math.max(0, Math.min(1, (now() - t0) / marketBuildMs));
+  }
+
+  /**
+   * Every row the index would hold. One row per base SKU: painted copies are the same item (their
+   * prices join the base row, flagged has-extras). While the first build runs, books it has not
+   * reached yet are left out, as in the service.
+   */
+  function marketRows(known = mockKnownPrices(prices)): MarketRow[] {
+    const t = now();
+    const kp = keyPrice().valueScrap;
+    const all = [...books.values(), ...extraBooks.values()].filter((b) => !/;p\d/.test(b.item.sku));
+    const progress = marketProgress();
+    const reached = progress >= 1 ? all.length : Math.floor(all.length * progress);
+    const out: MarketRow[] = [];
+    const seen = new Set<string>();
+    all.forEach((book, i) => {
+      const sku = book.item.sku;
+      seen.add(sku);
+      if (i >= reached) return;
+      const row = mockMarketRow({ item: book.item, book, known: known.get(sku), rules, settings, keyScrap: kp, now: t });
+      if (row) out.push(row);
+    });
+    // Prices for items the mock has no book for: shown with no buyers.
+    for (const [sku, k] of known) {
+      if (seen.has(sku)) continue;
+      const item = findCatalogItem(sku) ?? { sku, name: k.typed?.name ?? k.page?.name ?? sku, category: guessCategory(sku) };
+      const row = mockMarketRow({ item, book: null, known: k, rules, settings, keyScrap: kp, now: t });
+      if (row) out.push(row);
+    }
+    return out;
+  }
+
+  function marketStats(entries: number): MarketStats {
+    const progress = marketProgress();
+    return {
+      entries,
+      building: progress < 1,
+      progress,
+      lastFullAt: progress < 1 ? null : t0 + marketBuildMs,
+      lastChangeAt: marketChangeAt,
+      pendingDirty: 0,
+      // The mock's book never fails to read (H1 is exercised by the service tests).
+      lastError: null,
+      retryAt: null,
+    };
+  }
+
+  function scraptfSide(known: ReturnType<typeof mockKnownPrices>): MarketListResult['scraptf'] {
+    let typed = 0;
+    let pages = 0;
+    let newestPageAt: UnixMs | null = null;
+    for (const k of known.values()) {
+      if (k.typed) typed++;
+      if (k.page) {
+        pages++;
+        if (newestPageAt === null || k.page.observedAt > newestPageAt) newestPageAt = k.page.observedAt;
+      }
+    }
+    const importEnabled = settings.import.enabled && settings.import.acknowledgedAt !== null;
+    // The service reports the watch as it runs; the mock has no file system, so a chosen folder counts as watched.
+    return { typed, pages, newestPageAt, importEnabled, watchFolder: importEnabled && !!settings.import.watchFolder, coverage: coverage() };
+  }
+
+  /** The same rule as the service (scraptfCoverage): a page counts for the bank page most of its items belong to. */
+  function coverage(): ReturnType<typeof scraptfCoverage> {
+    return scraptfCoverage(batches, (id) => prices.filter((p) => p.source === 'import' && p.importBatch === id).map((p) => findCatalogItem(p.sku)?.category ?? guessCategory(p.sku)));
+  }
+
+  // ---------------------------------------------------------------------------
+  // Holdings (F11): open journal lots against the mock books
+  // ---------------------------------------------------------------------------
+
+  /** Every held SKU, priced against its base SKU's book like the service reads the market entry. */
+  function holdingRows(): HoldingRow[] {
+    const t = now();
+    const kp = keyPrice().valueScrap;
+    return mockJournalSummary(journal).open.map((pos) => {
+      let base = pos.sku;
+      try {
+        base = baseSku(pos.sku);
+      } catch {
+        // an unparseable SKU is its own base
+      }
+      const book = books.get(base) ?? extraBooks.get(base) ?? null;
+      const category = (findCatalogItem(pos.sku) ?? findCatalogItem(base))?.category ?? guessCategory(base);
+      return holdingRow(pos, category, book ? mockHoldingBuySide(book, settings, kp, t) : null, settings.profit, kp);
+    });
+  }
+
+  function holdingsQuery(q: HoldingsQuery | undefined, method: string): HoldingsQuery {
+    if (q?.search !== undefined && (typeof q.search !== 'string' || q.search.length > MARKET_MAX_SEARCH_CHARS)) {
+      throw new Error(`Invalid parameters for ${method}: search: at most ${MARKET_MAX_SEARCH_CHARS} characters`);
+    }
+    return q?.search !== undefined ? { search: q.search } : {};
+  }
+
+  /** Like the service's ctx.journalChanged: the Journal and Holdings pages refresh. */
+  function journalChanged(): void {
+    emit('journal.changed', { at: now() });
+  }
+
+  function marketList(q: MarketQuery): MarketListResult {
+    const bad = (why: string): never => {
+      throw new Error(`Invalid parameters for market.list: ${why}`);
+    };
+    if (q.limit !== undefined && (!Number.isInteger(q.limit) || q.limit < 1 || q.limit > MARKET_MAX_LIMIT)) bad(`limit: must be 1 to ${MARKET_MAX_LIMIT}`);
+    if (q.offset !== undefined && (!Number.isInteger(q.offset) || q.offset < 0)) bad('offset: must be zero or more');
+    if (q.search !== undefined && q.search.length > MARKET_MAX_SEARCH_CHARS) bad(`search: at most ${MARKET_MAX_SEARCH_CHARS} characters`);
+    const known = mockKnownPrices(prices);
+    const all = marketRows(known);
+    const res = mockMarketQuery(all, q);
+    return {
+      rows: res.rows,
+      total: res.total,
+      counts: res.counts,
+      scraptf: scraptfSide(known),
+      stats: marketStats(all.filter((r) => r.buyerCount > 0).length),
+      keyPrice: keyPrice(),
+      generatedAt: now(),
+    };
+  }
+
+  /** Like the service's onChanged: entries (rows with buyers) added, removed, or moved in revenue, ceiling, buyers or revenue order. */
+  function emitMarketChanges(): void {
+    const next = new Map<string, string>();
+    for (const r of marketRows()) if (r.buyerCount > 0) next.set(r.sku, marketSignature(r));
+    let changed = 0;
+    for (const [sku, sig] of next) if (marketSigs.get(sku) !== sig) changed++;
+    for (const sku of marketSigs.keys()) if (!next.has(sku)) changed++;
+    marketSigs = next;
+    if (changed === 0) return;
+    marketChangeAt = now();
+    emit('market.changed', { changed, total: next.size, at: marketChangeAt });
+  }
+
+  /** A buyer re-prices the order a market row sells to, so the Live market visibly moves every few seconds. */
+  function repriceMarketOrder(t: UnixMs): void {
+    const candidates = [...extraBooks.values(), ...books.values()].filter((b) => !/;p\d/.test(b.item.sku) && b.buy.some((o) => o.eligible));
+    if (candidates.length === 0) return;
+    const book = marketRng.pick(candidates);
+    const target = mockPrices(book, settings, keyPrice().valueScrap, t).cons;
+    const order = target ? book.buy.find((o) => o.listingId === target.listingId) : undefined;
+    if (!order) return;
+    const step = Math.max(1, Math.round(order.valueScrap * (0.005 + marketRng.next() * 0.025)));
+    const v = Math.max(1, order.valueScrap + (marketRng.chance(0.5) ? step : -step));
+    order.keys = v >= MOCK_KEY_SCRAP ? Math.floor(v / MOCK_KEY_SCRAP) : 0;
+    order.metalScrap = v - order.keys * MOCK_KEY_SCRAP;
+    order.valueScrap = v;
+    order.lastEventAt = t;
+    book.buy.sort((a, b) => b.valueScrap - a.valueScrap);
+  }
+
   function changedAndEmit(): void {
     const diff = recompute();
     if (diff.appeared + diff.changed + diff.gone > 0) emit('opps.changed', diff);
+    emitMarketChanges();
     emit('status.changed', status());
   }
 
@@ -564,6 +758,7 @@ export function createMockBridge(opts: MockOptions = {}): MockBridge {
       const book = books.get(sku);
       if (book) book.buy = buy.map((o) => ({ ...o, lastEventAt: t }));
     }
+    if (marketRng.chance(0.85)) repriceMarketOrder(t);
     if (rng.chance(0.05)) keyDrift = Math.max(-4, Math.min(4, keyDrift + (rng.chance(0.5) ? 1 : -1)));
     const frames = rng.int(150, 260);
     feed.eventsToday += frames;
@@ -577,6 +772,7 @@ export function createMockBridge(opts: MockOptions = {}): MockBridge {
     }
     const diff = recompute();
     if (diff.appeared + diff.changed + diff.gone > 0) emit('opps.changed', diff);
+    emitMarketChanges();
     if (tickCount % 3 === 0) emit('status.changed', status());
   }
 
@@ -606,7 +802,7 @@ export function createMockBridge(opts: MockOptions = {}): MockBridge {
     return scored
       .sort((a, b) => a.s - b.s)
       .slice(0, limit)
-      .map(({ item }) => ({ sku: item.sku, name: item.name, category: item.category, source: books.has(item.sku) ? 'bptf' : 'schema' }));
+      .map(({ item }) => ({ sku: item.sku, name: item.name, category: item.category, source: books.has(item.sku) || extraBooks.has(item.sku) ? 'bptf' : 'schema' }));
   }
 
   function resolve(text: string): ResolvedItem | null {
@@ -636,7 +832,7 @@ export function createMockBridge(opts: MockOptions = {}): MockBridge {
   }
 
   function detail(sku: string): ItemDetail | null {
-    const known = books.get(sku) ?? (findCatalogItem(sku) || prices.some((p) => p.sku === sku) ? bookFor(sku) : null);
+    const known = books.get(sku) ?? extraBooks.get(sku) ?? (findCatalogItem(sku) || prices.some((p) => p.sku === sku) ? bookFor(sku) : null);
     if (!known) return null;
     const t = now();
     const scrapPrices = prices.filter((p) => p.sku === sku).sort((a, b) => b.observedAt - a.observedAt);
@@ -726,9 +922,21 @@ export function createMockBridge(opts: MockOptions = {}): MockBridge {
       if (q?.beforeId !== undefined) list = list.filter((e) => e.id < q.beforeId!);
       return [...list].sort((a, b) => b.id - a.id).slice(0, Math.max(1, Math.min(2000, q?.limit ?? 200)));
     },
-    'opps.exportCsv': ({ kind, query, shopping }) => {
+    'opps.exportCsv': ({ kind, query, shopping, market, holdings }) => {
       const t = now();
       const kp = keyPrice().valueScrap;
+      if (kind === 'holdings') {
+        const rows: unknown[][] = [[...HOLDINGS_CSV_COLUMNS]];
+        for (const r of holdingsMatching(holdingRows(), holdingsQuery(holdings, 'opps.exportCsv'))) rows.push(holdingsCsvCells(r, kp));
+        return { csv: csv(rows), suggestedName: `flipdesk-holdings-${stamp(t)}.csv` };
+      }
+      if (kind === 'market') {
+        // The page's filters and sort; paging does not apply to the file.
+        const { limit: _limit, offset: _offset, ...filters } = market ?? {};
+        const rows: unknown[][] = [[...MARKET_CSV_COLUMNS]];
+        for (const r of mockMarketQuery(marketRows(), filters).matched) rows.push(marketCsvCells(r, kp));
+        return { csv: csv(rows), suggestedName: `flipdesk-market-${stamp(t)}.csv` };
+      }
       if (kind === 'shopping') {
         const { limit: _limit, offset: _offset, ...filters } = shopping ?? {};
         const rows: unknown[][] = [['sku', 'name', 'category', 'pay_up_to', 'revenue', 'buyer', 'confidence', 'known_cost', 'under_ceiling', 'bank_page']];
@@ -751,6 +959,8 @@ export function createMockBridge(opts: MockOptions = {}): MockBridge {
       return { csv: csv(rows), suggestedName: `flipdesk-opportunities-${stamp(t)}.csv` };
     },
     'shopping.list': (q) => shoppingList(q ?? {}),
+    'market.list': (q) => marketList(q ?? {}),
+    'holdings.list': (q) => holdingsResult(holdingRows(), holdingsQuery(q, 'holdings.list'), keyPrice(), now()),
     'item.detail': ({ sku, history }) => {
       const d = detail(sku);
       // history: false is quick entry's local-only preview.
@@ -954,10 +1164,12 @@ export function createMockBridge(opts: MockOptions = {}): MockBridge {
         note: input.note ?? null,
       };
       journal = [...journal, row];
+      journalChanged();
       return row;
     },
     'journal.delete': ({ id }) => {
       journal = journal.filter((j) => j.id !== id);
+      journalChanged();
       return { ok: true };
     },
     'journal.summary': () => mockJournalSummary(journal),
@@ -985,7 +1197,7 @@ export function createMockBridge(opts: MockOptions = {}): MockBridge {
       return { evaluated: opps.size, ms: lastEngineMs ?? 1 };
     },
     'app.info': (): AppInfo => ({
-      version: '0.2.0',
+      version: '0.3.0',
       dataDir: 'C:\\Users\\you\\AppData\\Roaming\\TF2 Flip Desk',
       logDir: 'C:\\Users\\you\\AppData\\Roaming\\TF2 Flip Desk\\logs',
       platform: 'browser (mock)',
@@ -1075,7 +1287,7 @@ export function createMockBridge(opts: MockOptions = {}): MockBridge {
         ],
         warnings: ['2 cards had unparsed attributes; they were skipped rather than guessed.'],
       };
-      batches.unshift({ id: batchId, fileName: result.fileName, pageKind: 'buy', fileMtime: t - 30_000, importedAt: t, itemCount: picks.length });
+      batches.unshift({ id: batchId, fileName: result.fileName, pageKind: 'buy', fileMtime: t - 30_000, importedAt: t, itemCount: picks.length, categories: countCategories(picks.map((c) => c.category)) });
       pricesChanged();
       changedAndEmit();
       emit('import.done', result);
@@ -1090,6 +1302,8 @@ export function createMockBridge(opts: MockOptions = {}): MockBridge {
   };
 
   seedEvents();
+  // The starting index is not a change; only later feed moves are pushed as 'market.changed'.
+  for (const r of marketRows()) if (r.buyerCount > 0) marketSigs.set(r.sku, marketSignature(r));
 
   const delay = () => new Promise<void>((res) => setTimeout(res, latency > 0 ? 15 + Math.random() * latency : 0));
 

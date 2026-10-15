@@ -10,7 +10,7 @@ import type { KeyPriceQuote, UnixMs } from '../shared/types';
 import type { BptfApi, Clock, Engine, HttpClient, Logger, PriceDb, Repo, SchemaService } from './contracts';
 import { BptfCredentialError, BptfNotConfiguredError, BptfSnapshotUnavailableError } from './connectors/bptfApi';
 import { META_LOAD_ALL_AT } from './connectors/pricedb';
-import { runMaintenance } from './domain';
+import { runMaintenance, type MarketIndex } from './domain';
 import { HostBlockedError, NetworkPausedError, NetworkRequestError, RateLimitedError, type TimerApi } from './net';
 import type { Settings, SecretName } from '../shared/types';
 
@@ -240,9 +240,11 @@ export interface JobContext {
   pricedb: PriceDb;
   bptfApi: BptfApi;
   engine: Engine;
+  /** Live market index (F10): told about the same book and reference changes as the engine. */
+  market?: Pick<MarketIndex, 'markDirty' | 'markAllDirty'>;
   settings(): Settings;
   secret(name: SecretName): string | null;
-  /** Base SKUs that have a scrap.tf price (the watchlist). */
+  /** Base SKUs that have a scrap.tf price or an open journal lot (the watchlist; held SKUs since F11). */
   watchedBaseSkus(): string[];
   /** Next base SKU queued for a background snapshot (e.g. a price was just added), or null. */
   nextQueuedSnapshot(): string | null;
@@ -258,7 +260,7 @@ function hostBlocked(http: HttpClient, host: string): string | null {
 }
 
 export function buildJobs(ctx: JobContext): JobSpec[] {
-  const { repo, http, schema, pricedb, bptfApi, engine, log, clock } = ctx;
+  const { repo, http, schema, pricedb, bptfApi, engine, log, clock, market } = ctx;
   const bptfKeyBlocked = (): string | null => {
     if (!ctx.settings().connectors.bptfApi) return 'backpack.tf API turned off';
     if (!ctx.secret('bptfApiKey')) return 'no backpack.tf API key';
@@ -277,8 +279,12 @@ export function buildJobs(ctx: JobContext): JobSpec[] {
       retryMs: 15 * MIN,
       blockedReason: () => hostBlocked(http, 'sku.pricedb.io'),
       async run() {
+        const before = schema.isLoaded();
         await schema.refresh(false);
-        return schema.isLoaded();
+        const loaded = schema.isLoaded();
+        // A first download that failed at start: the market's names and categories were raw SKUs.
+        if (!before && loaded) market?.markAllDirty();
+        return loaded;
       },
     },
     {
@@ -289,7 +295,10 @@ export function buildJobs(ctx: JobContext): JobSpec[] {
       blockedReason: () => (ctx.settings().connectors.pricedb ? hostBlocked(http, 'pricedb.io') : 'PriceDB turned off'),
       async run() {
         const n = await pricedb.loadAll();
-        if (n > 0) engine.markAllDirty();
+        if (n > 0) {
+          engine.markAllDirty();
+          market?.markAllDirty();
+        }
         return n > 0 || repo.getMeta(META_LOAD_ALL_AT) !== null;
       },
     },
@@ -346,7 +355,10 @@ export function buildJobs(ctx: JobContext): JobSpec[] {
           repo.setMeta(META_PRICES_FETCHED_AT, String(clock.now()));
         });
         log.info(`backpack.tf community prices: ${rows.length} rows (${since === null ? 'full' : 'delta'})`);
-        if (rows.length > 0) engine.markAllDirty();
+        if (rows.length > 0) {
+          engine.markAllDirty();
+          market?.markAllDirty();
+        }
       },
     },
     {
@@ -403,7 +415,11 @@ export function buildJobs(ctx: JobContext): JobSpec[] {
         const watched = ctx.watchedBaseSkus();
         if (watched.length === 0) return;
         const rows = await pricedb.bulk(watched);
-        if (rows.length > 0) engine.markDirty(rows.map((r) => r.sku));
+        if (rows.length > 0) {
+          const skus = rows.map((r) => r.sku);
+          engine.markDirty(skus);
+          market?.markDirty(skus);
+        }
       },
     },
     {
@@ -415,6 +431,8 @@ export function buildJobs(ctx: JobContext): JobSpec[] {
         const r = runMaintenance(repo, clock.now());
         log.info(`maintenance: purged ${r.listings} listings, ${r.events} events, ${r.requests} request-log rows`);
         engine.markAllDirty();
+        // Purged listings were deleted without a markDirty: entries built on them must go.
+        market?.markAllDirty();
       },
     },
   ];
