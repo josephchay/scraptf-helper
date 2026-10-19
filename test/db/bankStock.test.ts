@@ -213,7 +213,7 @@ describe('bank stock repo', () => {
     };
     const kept = (bank: ScraptfBank) => new Set(repo.bankStockSaves(bank, 10_000).map((s) => s.batchId));
 
-    it('keeps every save of the last day, the newest per hour to 7 days and per day to 90 days, and nothing older', () => {
+    it('keeps the last 2 h, the newest per 10 minutes to a day, per hour to 7 days and per day to 90 days, and nothing older', () => {
       expect(BANK_STOCK_MAX_AGE_MS).toBe(90 * DAY);
       expect(BANK_STOCK_MAX_SAVES_PER_PAGE).toBe(300);
       const newest = save('hats', NOW - 5 * MIN);
@@ -258,7 +258,8 @@ describe('bank stock repo', () => {
       repo.pruneBankStock(NOW);
       const k = kept('list');
       expect(k.has(page2)).toBe(true);
-      // The last 24 h all stay (144 saves at 0..23 h 50 min), then the newest per clock hour for the 6 h before (7 hours touched).
+      // The last 24 h all stay (144 saves at 0..23 h 50 min: each alone in its 10 minutes, 0.7.1), then the
+      // newest per clock hour for the 6 h before (7 hours touched).
       const recent = items.filter((_, i) => i * 10 * MIN < DAY);
       for (const id of recent) expect(k.has(id)).toBe(true);
       expect([...k].filter((id) => items.includes(id))).toHaveLength(recent.length + 7);

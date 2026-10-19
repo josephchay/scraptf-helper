@@ -29,7 +29,7 @@ type Listener = (payload: unknown) => void;
 const listeners = new Map<string, Set<Listener>>();
 
 /** One-shot UI requests from main that may arrive before the page subscribed (window just created). */
-export const HELD_EVENTS: ReadonlySet<string> = new Set(['ui.openItem', 'ui.quickPrefill', 'ui.checkShow']);
+export const HELD_EVENTS: ReadonlySet<string> = new Set(['ui.openItem', 'ui.openBankStock', 'ui.quickPrefill', 'ui.checkShow']);
 /** The latest held request per event, delivered to the first listener. */
 const pending = new Map<string, { payload: unknown }>();
 

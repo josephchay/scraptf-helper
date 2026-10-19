@@ -4,6 +4,7 @@
 
 import type { PushContract, PushEvent, RpcResult } from '../shared/rpc';
 import { SCRAPTF_BANKS, SCRAPTF_HOME_URL } from '../shared/links';
+import { scraptfImportablePath } from '../shared/scraptfPaths';
 import {
   isAllowedWindowStart,
   READ_MANUAL_MIN_GAP_MS,
@@ -25,6 +26,8 @@ export interface MockScraptfWindowDeps {
   emit<E extends PushEvent>(event: E, payload: PushContract[E]): void;
   /** Fake item counts per page, so the demo's status line varies. */
   itemsOn?(url: string): number;
+  /** 0.7.1: the demo's best flip on a page (an item of the mock's own data), or null. */
+  bestFlipOn?(url: string): ScraptfWindowRead['bestFlip'];
 }
 
 export interface MockScraptfWindow {
@@ -58,23 +61,38 @@ export function createMockScraptfWindow(deps: MockScraptfWindowDeps): MockScrapt
   const current = (): string | null => (at >= 0 ? (history[at] ?? null) : null);
 
   function emitNav(): void {
-    deps.emit('scraptfWindow.nav', { url: windowDisplayUrl(current()), canGoBack: at > 0, canGoForward: at < history.length - 1, loading: false });
+    const url = current();
+    // Like main (F21-4): Read page now is offered only on pages the import reads.
+    deps.emit('scraptfWindow.nav', { url: windowDisplayUrl(url), canGoBack: at > 0, canGoForward: at < history.length - 1, loading: false, importable: url !== null && scraptfImportablePath(url), notice: null });
   }
 
   function takeRead(url: string): ScraptfWindowRead {
     const bank = SCRAPTF_BANKS.find((b) => b.url === url)?.bank ?? null;
     const items = deps.itemsOn?.(url) ?? (bank === null ? 0 : 24);
-    const read: ScraptfWindowRead = { at: deps.now(), path: scraptfPathOf(url), items, bank, newFlips: bank === null ? 0 : Math.min(3, Math.floor(items / 12)), warning: MOCK_WINDOW_READ_WARNING };
+    const newFlips = bank === null ? 0 : Math.min(3, Math.floor(items / 12));
+    // Made up like the rest: a few more flips on the page than new ones, and the mock's own best item.
+    const pageFlips = bank === null ? 0 : Math.min(items, newFlips + Math.floor(items / 8));
+    const read: ScraptfWindowRead = {
+      at: deps.now(),
+      path: scraptfPathOf(url),
+      items,
+      bank,
+      newFlips,
+      warning: MOCK_WINDOW_READ_WARNING,
+      stored: items,
+      pageFlips,
+      bestFlip: pageFlips > 0 ? (deps.bestFlipOn?.(url) ?? null) : null,
+    };
     lastRead = read;
     deps.emit('scraptfWindow.read', read);
     return read;
   }
 
-  /** Main reads after a load the user made when readOnLoad is on; the mock does the same, at once. */
+  /** Main reads after a load the user made when readOnLoad is on, on pages the import reads; the mock too, at once. */
   function loaded(): void {
     emitNav();
     const url = current();
-    if (url !== null && deps.settings().scraptfWindow.readOnLoad && shouldReadUrl(url)) takeRead(url);
+    if (url !== null && deps.settings().scraptfWindow.readOnLoad && shouldReadUrl(url) && scraptfImportablePath(url)) takeRead(url);
   }
 
   function navigate(url: string): void {
@@ -88,7 +106,8 @@ export function createMockScraptfWindow(deps: MockScraptfWindowDeps): MockScrapt
     open(p) {
       requireOn();
       const start = p && typeof p === 'object' && p.start !== undefined ? startUrl('scraptfWindow.open', 'start', p.start) : null;
-      if (start !== null) navigate(start);
+      // Like main (F21-7): the page already on screen is not loaded again.
+      if (start !== null && !(open && current() === start)) navigate(start);
       else if (!open) navigate(SCRAPTF_HOME_URL);
       return { ok: true };
     },
@@ -128,6 +147,7 @@ export function createMockScraptfWindow(deps: MockScraptfWindowDeps): MockScrapt
       const url = current();
       if (!open || url === null) return { read: null, reason: SCRAPTF_READ_REASONS.notOpen };
       if (!shouldReadUrl(url)) return { read: null, reason: SCRAPTF_READ_REASONS.notScraptf };
+      if (!scraptfImportablePath(url)) return { read: null, reason: SCRAPTF_READ_REASONS.notImportable };
       const t = deps.now();
       if (t - lastManualAt < READ_MANUAL_MIN_GAP_MS) return { read: null, reason: SCRAPTF_READ_REASONS.tooSoon };
       lastManualAt = t;
@@ -151,7 +171,8 @@ export function createMockScraptfWindow(deps: MockScraptfWindowDeps): MockScrapt
     openFromLink(url) {
       const s = deps.settings().scraptfWindow;
       if (!s.enabled || !s.openLinksInWindow || !isAllowedWindowStart(url)) return false;
-      navigate(url);
+      // Like main (F21-7): a link to the page on screen only brings the window up.
+      if (!(open && current() === url)) navigate(url);
       return true;
     },
   };

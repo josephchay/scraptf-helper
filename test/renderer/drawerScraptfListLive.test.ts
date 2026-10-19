@@ -118,7 +118,7 @@ describe('the drawer with a saved scrap.tf list', () => {
     const text = s!.textContent ?? '';
     expect(text).toContain('scrap.tf price list');
     expect(text).toMatch(/sells .+·pays .+·stock 2\/5·saved /);
-    expect(text).toContain('The app never visits scrap.tf; your browser does, and you choose when.');
+    expect(text).toContain('Flip Desk never loads scrap.tf on its own. Your browser does, and you choose when.');
 
     t.fire(t.button(s!, 'Use as my price')!, 'click', { bubbles: true });
     await settle();
@@ -200,12 +200,13 @@ describe('the drawer with a saved scrap.tf list', () => {
     const t = await mount('378;6');
     const s = t.section()!;
     t.fire(t.button(s, 'Open scrap.tf/items')!, 'click', { bubbles: true });
-    t.fire(t.button(s, 'Open bank page')!, 'click', { bubbles: true });
+    // UX-11: no second opener of the bank page here; the header's Open on scrap.tf is it.
+    expect(t.button(s, 'Open bank page')).toBeNull();
     const header = t.all().find((e) => e.getAttribute('class') === 'drawer-copy')!;
     t.fire(t.button(header, 'Open on scrap.tf (copies name)')!, 'click', { bubbles: true });
     await settle();
     const opened = t.calls.filter((c) => c.method === 'links.open').map((c) => (c.params as { url: string }).url);
-    expect(opened).toEqual([SCRAPTF_ITEMS_URL, scraptfPageFor('hats'), scraptfPageFor('hats')]);
+    expect(opened).toEqual([SCRAPTF_ITEMS_URL, scraptfPageFor('hats')]);
     for (const u of opened) expect(STATIC_EXTERNAL_URLS).toContain(u);
   });
 

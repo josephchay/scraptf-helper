@@ -230,7 +230,10 @@ describe('one toast per find at start-up, wired as core wires it (F17-C3)', () =
 
   it('is what core wires', () => {
     const core = readFileSync(new URL('../../src/service/core.ts', import.meta.url), 'utf8');
-    expect(core).toContain("toldElsewhere: (opp, at) => opp.inputKind === 'import' && newFlipNotifier.toldRecently(toBaseSku(opp.sku), at),");
+    // ACT-7 added the cases of a price the user just typed or saved (dated then, or new then); the F17 case is unchanged.
+    expect(core).toMatch(
+      /toldElsewhere: \(opp, at\) =>\s*\(opp\.inputKind === 'import' && newFlipNotifier\.toldRecently\(toBaseSku\(opp\.sku\), at\)\) \|\|\s*\(opp\.inputKind === 'user' && at - opp\.inputObservedAt < USER_PRICE_TOLD_MS\) \|\|\s*\(opp\.inputKind === 'user' && at - opp\.firstSeenAt < USER_PRICE_TOLD_MS\),/,
+    );
     expect(core).toMatch(/notified: \(opps, at\) => \{\s*for \(const o of opps\) \{\s*if \(o\.inputKind !== 'import'\) continue;\s*try \{\s*newFlipNotifier\.toastedElsewhere\(toBaseSku\(o\.sku\), at\);/);
   });
 });

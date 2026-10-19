@@ -13,6 +13,8 @@ import { importNoticeToastText, importWarningsView, NO_CARDS_SAVED_REASON, NO_CA
 import { itemMenuSections, SCRAPTF_NAME_COPIED, SCRAPTF_NAME_COPIED_WINDOW, scraptfOpenedToast, scraptfOpenTitle } from '../../src/renderer/itemMenuModel';
 import { marketBankLink, marketScraptfButton } from '../../src/renderer/marketModel';
 import { createMockBridge, type MockBridge } from '../../src/renderer/mock';
+import { SCRAPTF_WINDOW_LINKS_HINT } from '../../src/renderer/scraptfWindowModel';
+import { SCRAPTF_BOUNDARY_SHORT } from '../../src/shared/boundaryText';
 import { SCRAPTF_BANKS, scraptfPageFor } from '../../src/shared/links';
 import type { ImportResult, MarketRow } from '../../src/shared/types';
 
@@ -63,7 +65,8 @@ describe('the words of each scrap.tf open', () => {
     expect(link.title).toBe("Opens scrap.tf's Hats bank in the Flip Desk window, to look for these items there.");
     expect(marketBankLink(['hats'])!.ariaLabel).toBe('Open scrap.tf/buy/hats in your browser');
     expect(scraptfOpenTitle(HATS, 'Team Captain', true)).toBe(`Copies "Team Captain" for scrap.tf's search and opens ${HATS} in the Flip Desk window, where you browse it yourself.`);
-    expect(scraptfOpenTitle(HATS, 'Team Captain')).toContain('in your browser. The app never visits scrap.tf.');
+    // 0.7.1 (UX-7): the boundary sentence that stays true with the window on.
+    expect(scraptfOpenTitle(HATS, 'Team Captain')).toContain(`in your browser. ${SCRAPTF_BOUNDARY_SHORT}`);
     const item = (inWindow: boolean) =>
       itemMenuSections({ sku: '378;6', name: 'Team Captain', category: 'hats' }, { status: 'ready', links: [] }, null, inWindow)
         .flatMap((s) => s.items)
@@ -76,19 +79,23 @@ describe('the words of each scrap.tf open', () => {
 
   it('lets only the opens worded for the window ask for it (allowWindow); every open that promises the browser keeps to it', () => {
     const asks = (rel: string) => read(rel).includes('allowWindow: true');
-    // Worded through scraptfLinksInWindow (the market, drawer and menu) or the banks card's openTarget.
+    // Worded through scraptfLinksInWindow (the market, drawer, menu and, from 0.7.1 (F21-9), the Bank stock
+    // page's Open) or the banks card's openTarget.
     expect(read('components/ItemMenu.tsx')).toContain('const opened = await openLink(url, { allowWindow: true });');
     expect(read('pages/MarketPage.tsx')).toContain('openOrCopy(bankLink.url, toast, { allowWindow: true })');
     expect(read('pages/BanksPage.tsx')).toContain('onOpenBank={(c) => void openOrCopy(c.url, toast, { allowWindow: true })}');
-    // Their words say "your browser" or "never visits it": main sends their links to the browser.
-    for (const rel of ['pages/BankStockPage.tsx', 'pages/ShoppingPage.tsx', 'components/ScraptfListCard.tsx', 'pages/ItemDrawer.tsx', 'pages/HoldingsPage.tsx', 'pages/QuickEntry.tsx', 'components/ExternalLink.tsx']) {
+    expect(read('pages/BankStockPage.tsx')).toContain('openOrCopy(info.url, toast, { allowWindow: true })');
+    // Their words say "your browser": main sends their links to the browser.
+    for (const rel of ['pages/ShoppingPage.tsx', 'components/ScraptfListCard.tsx', 'pages/ItemDrawer.tsx', 'pages/HoldingsPage.tsx', 'pages/QuickEntry.tsx', 'components/ExternalLink.tsx']) {
       expect(asks(rel), rel).toBe(false);
     }
     const askers = readdirSync(new URL('../../src/renderer/', import.meta.url), { recursive: true, encoding: 'utf8' })
       .map((f) => f.split(sep).join('/'))
       .filter((f) => /\.tsx?$/.test(f) && f !== 'api.ts' && asks(f))
       .sort();
-    expect(askers).toEqual(['components/ItemMenu.tsx', 'pages/BanksPage.tsx', 'pages/MarketPage.tsx']);
+    expect(askers).toEqual(['components/ItemMenu.tsx', 'pages/BankStockPage.tsx', 'pages/BanksPage.tsx', 'pages/MarketPage.tsx']);
+    // The hint in Settings names the same opens.
+    expect(SCRAPTF_WINDOW_LINKS_HINT).toContain("the Bank stock page's Open");
   });
 
   it('wires the setting into the market, drawer and menu (scraptfLinksInWindow of the settings)', () => {

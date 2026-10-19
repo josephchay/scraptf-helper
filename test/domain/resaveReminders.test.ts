@@ -80,6 +80,27 @@ describe('re-save reminders: what is reminded and when', () => {
     expect(isScraptfBankUrl(h.sent[0]!.openUrl!) && isAllowedExternalUrl(h.sent[0]!.openUrl!)).toBe(true);
   });
 
+  it('tells a scrap.tf window user to open the page there (0.7.1, F21-9); the click still opens the static page', () => {
+    const windowOn = { ...ON, scraptfWindow: { enabled: true, acknowledgedAt: T0 - HOUR, openLinksInWindow: true } };
+    const h = setup(windowOn);
+    save(h.repo, 'hats', T0 - 90 * MIN);
+    expect(h.reminders.tick(T0)).toBe(1);
+    expect(h.sent[0]).toEqual({
+      title: 'Re-save scrap.tf/buy/hats',
+      body: 'Last saved 1 h 30 m ago. Open it in the Flip Desk window to refresh prices and see what changed',
+      sku: null,
+      openUrl: SCRAPTF_BANKS.find((b) => b.bank === 'hats')!.url,
+    });
+    // Links sent to the browser, or the window off: the Ctrl+S wording, as before.
+    for (const w of [
+      { enabled: true, acknowledgedAt: T0 - HOUR, openLinksInWindow: false },
+      { enabled: false, acknowledgedAt: T0 - HOUR, openLinksInWindow: true },
+    ]) {
+      expect(scraptfResaveNotice('hats', T0 - 90 * MIN, T0, w)!.body).toMatch(/Save it again \(Ctrl\+S/);
+    }
+    expect(scraptfResaveNotice('hats', T0 - 90 * MIN, T0, null)!.body).toMatch(/Save it again \(Ctrl\+S/);
+  });
+
   it('once per N minutes, and a new save starts the wait over', () => {
     const h = setup();
     save(h.repo, 'hats', T0 - 61 * MIN);

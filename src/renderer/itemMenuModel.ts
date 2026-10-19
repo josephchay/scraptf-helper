@@ -4,6 +4,7 @@
 // is unit-tested; the components only wire it up.
 
 import { bankStockPagePath } from '../shared/bankStock';
+import { SCRAPTF_BOUNDARY_SHORT } from '../shared/boundaryText';
 import { SCRAPTF_BANK_PAGES, SCRAPTF_ITEMS_URL, bankForCategory, scraptfBankInfo, scraptfPageFor } from '../shared/links';
 import { communityMaxAgeMs } from '../shared/referenceAge';
 import { bestExitOf, scraptfListFresh, scraptfListPriceSaved, scraptfListUsePrice } from '../shared/scraptfList';
@@ -620,8 +621,8 @@ export function isRuleCandidate(d: Pick<ItemDetail, 'scrapPrices' | 'opportuniti
 
 export function priceFormHeading(d: Pick<ItemDetail, 'scrapPrices' | 'opportunities'>): { title: string; hint: string } {
   if (isRuleCandidate(d))
-    return { title: 'Found it on scrap.tf? Record the real price', hint: "The rule's cost is an estimate. Type the price scrap.tf shows; the app never visits scrap.tf itself." };
-  return { title: 'Add / update scrap.tf price', hint: 'Type what you see on scrap.tf. The app never visits scrap.tf itself.' };
+    return { title: 'Found it on scrap.tf? Record the real price', hint: `The rule's cost is an estimate. Type the price scrap.tf shows. ${SCRAPTF_BOUNDARY_SHORT}` };
+  return { title: 'Add / update scrap.tf price', hint: `Type what you see on scrap.tf. ${SCRAPTF_BOUNDARY_SHORT}` };
 }
 
 /** The item's "pay up to": from ItemDetail.revenue, else the inputs' ceilings (they share one revenue). */
@@ -730,11 +731,36 @@ export function priceIsForSku(p: Pick<ScrapPrice, 'sku' | 'special'>, sku: strin
 }
 
 /**
+ * ACT-11: the exact copy a row shows (a bank stock row: ItemMenuTarget.copy), for Record buy only. The
+ * SKU is the copy's own (painted when the copy is painted); the price is the one its save listed, keys
+ * and metal as listed; absent for a gone row, which has nothing on sale to prefill.
+ */
+export interface RecordBuyCopy {
+  sku: string;
+  keys?: number;
+  scrap?: Scrap;
+  /** "from your save of scrap.tf/buy/hats", with the copy's extras; a gone row's names its last price. */
+  note: string;
+}
+
+/**
  * A buy on scrap.tf at your newest scrap.tf price for this very copy (keys and metal kept apart, as
  * typed). A painted or spelled copy's price is never borrowed: it would be recorded under this SKU
- * and give Holdings the wrong cost. Without one the dialog opens with the venue only.
+ * and give Holdings the wrong cost. Without one the dialog opens with the venue only. ACT-11 `copy`
+ * (a bank stock row): that copy's SKU and listed price, and its note, in place of the price sheet's.
  */
-export function recordBuyInit(item: { sku: string; name: string }, prices: readonly ScrapPrice[]): RecordTradeInit {
+export function recordBuyInit(item: { sku: string; name: string }, prices: readonly ScrapPrice[], copy: RecordBuyCopy | null = null): RecordTradeInit {
+  if (copy && typeof copy.sku === 'string' && copy.sku.trim()) {
+    const priced = typeof copy.keys === 'number' && Number.isFinite(copy.keys) && typeof copy.scrap === 'number' && Number.isFinite(copy.scrap);
+    return {
+      side: 'buy',
+      sku: copy.sku.trim(),
+      name: item.name,
+      venue: RECORD_BUY_VENUE,
+      ...(priced ? { keys: Math.max(0, Math.floor(copy.keys!)), scrap: Math.max(0, Math.round(copy.scrap!)) } : {}),
+      ...(copy.note.trim() ? { note: copy.note.trim() } : {}),
+    };
+  }
   const p = newestScrapPrice(prices.filter((x) => priceIsForSku(x, item.sku)));
   return { side: 'buy', sku: item.sku, name: item.name, venue: RECORD_BUY_VENUE, ...(p ? { keys: p.costKeys, scrap: p.costScrap } : {}) };
 }
@@ -787,13 +813,13 @@ export function recordInitTitle(init: RecordTradeInit): string {
  */
 export function recordTradeInit(
   side: 'buy' | 'sell',
-  target: Pick<ItemMenuTarget, 'sku' | 'name'>,
+  target: Pick<ItemMenuTarget, 'sku' | 'name'> & Partial<Pick<ItemMenuTarget, 'copy'>>,
   d: (Pick<ItemDetail, 'name' | 'scrapPrices' | 'revenue' | 'buyOrders'> & Partial<Pick<ItemDetail, 'scraptfList'>>) | null,
   p: PreviewSettings,
   now: UnixMs = Date.now(),
 ): RecordTradeInit {
   const item = { sku: target.sku, name: target.name.trim() || d?.name || target.sku };
-  if (side === 'buy') return recordBuyInit(item, d?.scrapPrices ?? []);
+  if (side === 'buy') return recordBuyInit(item, d?.scrapPrices ?? [], target.copy ?? null);
   return recordSaleInit(item, d ? previewRevenue(d, p).order : null, d?.scraptfList ? { list: d.scraptfList, now } : null);
 }
 
@@ -864,27 +890,36 @@ export function scraptfSearchName(item: { sku: string; name: string }): string {
 /** F21 `inWindow` (scraptfLinksInWindow): main opens the page in the user's scrap.tf window, not the browser. */
 export function scraptfOpenTitle(url: string, name: string, inWindow = false): string {
   if (inWindow) return `Copies "${truncate(name, 60)}" for scrap.tf's search and opens ${url} in the Flip Desk window, where you browse it yourself.`;
-  return `Copies "${truncate(name, 60)}" for scrap.tf's search and opens ${url} in your browser. The app never visits scrap.tf.`;
+  return `Copies "${truncate(name, 60)}" for scrap.tf's search and opens ${url} in your browser. ${SCRAPTF_BOUNDARY_SHORT}`;
 }
+
+/**
+ * UX-5: the toast's hint for a page main opened in the scrap.tf window that reads pages as they load
+ * (readOnLoad): the price found there comes back by itself, so the Live check's copy-a-price hint goes.
+ */
+export const SCRAPTF_WINDOW_READ_HINT = 'It is read when it loads; its price shows here by itself.';
 
 /**
  * The toast after "Open on scrap.tf": copied and opened is the usual case. The name is copied first
  * (a page loses clipboard access once the browser takes focus), so either step may fail alone.
  * F19: `back` (checkModel's scraptfBackHint) says how the price found there comes back through the
  * Live check; with it the toast names the page it opened. F21: `opened.openedIn === 'window'` (main sent the
- * page to the user's scrap.tf window) says so instead of "your browser".
+ * page to the user's scrap.tf window) says so instead of "your browser". UX-5 `readOnLoad` (the window's
+ * setting): a page opened there is read as it loads, so SCRAPTF_WINDOW_READ_HINT replaces `back`.
  */
 export function scraptfOpenedToast(
   copied: boolean,
   opened: { opened: boolean; reason: string | null; openedIn?: 'window' },
   url: string,
   back: string | null = null,
+  readOnLoad = false,
 ): { text: string; tone: 'good' | 'warn' } {
-  const tail = back ? ` ${back}` : '';
+  const hint = opened.opened && opened.openedIn === 'window' && readOnLoad ? SCRAPTF_WINDOW_READ_HINT : back;
+  const tail = hint ? ` ${hint}` : '';
   if (opened.opened) {
     const where = opened.openedIn === 'window' ? 'the Flip Desk window' : 'your browser';
     if (!copied) return { text: `scrap.tf is open in ${where}, but the name could not be copied. Type it into scrap.tf's search.${tail}`, tone: 'warn' };
-    if (back) return { text: `Opened ${bankStockPagePath(url)} in ${where}. The name is copied; paste it into scrap.tf's search.${tail}`, tone: 'good' };
+    if (hint) return { text: `Opened ${bankStockPagePath(url)} in ${where}. The name is copied; paste it into scrap.tf's search.${tail}`, tone: 'good' };
     return { text: opened.openedIn === 'window' ? SCRAPTF_NAME_COPIED_WINDOW : SCRAPTF_NAME_COPIED, tone: 'good' };
   }
   const why = opened.reason ?? 'The link could not be opened.';

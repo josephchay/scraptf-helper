@@ -2,13 +2,15 @@
 // book, plus every item you priced, compared live. The rows come from the
 // service's market index, which only reads the book the websocket already
 // fills, so this page adds no network traffic. The scrap.tf side is only what
-// you typed or saved (R1, R10): the app never visits scrap.tf. The coverage
-// strip (F13) shows when you last saved each scrap.tf page; a chip opens its card
-// on the scrap.tf banks page (F15), which hands the address to your own browser.
-// The scrap.tf price list (F14) is the card on top plus the "scrap.tf pays" and
-// Stock columns, all from the scrap.tf/items page the user saved themselves. A
-// bank card's "See all" lands here (#/market/bank/<bank>), filtered to its
-// categories and Not checked. The Recent checks panel (F16 Live check) lists
+// you typed, saved or read in the opt-in scrap.tf window (R1, R10): Flip Desk
+// never loads scrap.tf on its own. The coverage strip (F13) shows when you last
+// saved each scrap.tf page; a chip opens its card on the scrap.tf banks page (F15),
+// which hands the address to your own browser. The scrap.tf price list (F14) is
+// the card on top plus the "scrap.tf pays" and Stock columns, all from the
+// scrap.tf/items page the user saved themselves. A bank card's "See all" lands
+// here (#/market/bank/<bank>), filtered to its categories and Not checked; the
+// banks header's "View all" lands on #/market/flips (UX-1: every Flip priced from
+// a saved page, the freshest sighting first). The Recent checks panel (F16 Live check) lists
 // what the check hotkey, the opt-in clipboard watcher or its own box found;
 // only results reach it, never the copied text. F17: a "New" badge marks items
 // new on scrap.tf since the user's previous save of a bank page, and the Source
@@ -42,7 +44,7 @@ import { usePersistentState } from '../hooks/usePersistentState';
 import { createHiddenPushGate, usePush, useThrottled } from '../hooks/useRpc';
 import { useDebounced, useDocumentVisible, useInterval, useNow } from '../hooks/useTimers';
 import {
-  BOUNDARY_NOTE,
+  marketBoundaryNote,
   DEFAULT_MARKET_SORT,
   FLASH_MS,
   LISTED_ON_SCRAPTF_HINT,
@@ -113,7 +115,7 @@ import {
 } from '../marketModel';
 import { indexOfRow, isMenuKeyEcho, isSearchShortcut, menuAnchorRect, moveCursor } from '../oppModel';
 import { allItemsChip, listPaysCell, listStockCell } from '../scraptfListModel';
-import { scraptfLinksInWindow } from '../scraptfWindowModel';
+import { scraptfLinksInWindow, scraptfWindowOn } from '../scraptfWindowModel';
 import { MIN_CEILING_PRESETS, readMinCeiling } from '../shoppingModel';
 
 type MenuPoint = { x: number; y: number };
@@ -402,7 +404,7 @@ export function MarketPage() {
       {noteDismissed ? null : (
         <div className="market-note" role="note">
           <Icon name="shield" size={14} />
-          <span className="market-note-text">{BOUNDARY_NOTE}</span>
+          <span className="market-note-text">{marketBoundaryNote(scraptfWindowOn(settings))}</span>
           <button type="button" className="icon-btn" aria-label="Dismiss this note" title="Dismiss" onClick={() => setNoteDismissed(true)}>
             <Icon name="close" size={14} />
           </button>

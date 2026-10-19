@@ -442,7 +442,10 @@ describe('BanksPage against the mock', () => {
     expect(t.content()).toContain('D:\\saves');
     expect(t.card('hats').textContent).toContain('saved 4 min ago · 48 items (31 in stock)');
     expect(t.card('skins').textContent).toContain('Not saved yet');
-    expect(t.card('killstreaks').textContent).toMatch(/Flips from this page: 2 \(\+[\d.]+ ref\)/);
+    // UX-2(b): a card's flips are its stock page's Flips chip (the mock follows the service).
+    const ks = await t.b.rpc('scraptf.bankStock', { bank: 'killstreaks' });
+    expect(ks.counts.flips).toBeGreaterThan(0);
+    expect(t.card('killstreaks').textContent).toContain(`Flips from this page: ${ks.counts.flips} (+`);
   });
 
   it("opens a card's page only through links.open, by button or Enter, and only static pages", async () => {

@@ -1,7 +1,7 @@
 // F14 in the quick-entry window: "scrap.tf list: sells X · stock n, saved 3 min ago" under the
 // preview with a Use button that fills the price field, and a save of that price keeping the list's
 // date and note. Pure helpers, then the window rendered with react-dom/client into the minimal DOM
-// in domShim.ts against the browser mock. Local reads only; the app never visits scrap.tf (R1).
+// in domShim.ts against the browser mock. Local reads only; Flip Desk never loads scrap.tf on its own (R1).
 
 import { readFileSync } from 'node:fs';
 import { act, createElement, type ReactNode } from 'react';
@@ -29,7 +29,7 @@ describe('the list hint', () => {
     expect(quickListHint(listRow(), '378;6', T0)).toMatchObject({ text: 'sells 1.33 ref · stock 2, saved 3 min ago', price: '1.33 ref', tone: 'muted', observedAt: T0 - 3 * MIN });
     expect(quickListHint(listRow({ sellsKeys: 1, sellsScrap: 46 }), '378;6', T0)?.price).toBe('1 key 5.11 ref');
     expect(quickListHint(listRow({ stock: null }), '378;6', T0)?.text).toBe('sells 1.33 ref, saved 3 min ago');
-    expect(quickListHint(listRow(), '378;6', T0)?.title).toContain('The app never visits scrap.tf.');
+    expect(quickListHint(listRow(), '378;6', T0)?.title).toContain('Flip Desk never loads scrap.tf on its own.');
   });
 
   it('has nothing to use for a sold-out row, and warns once the save is over a day old', () => {

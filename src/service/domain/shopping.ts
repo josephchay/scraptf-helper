@@ -60,7 +60,22 @@ function isKnown(o: Opportunity): boolean {
   return o.inputKind !== 'rule' && finite(o.costScrap);
 }
 
-function rowFor(top: Opportunity, all: readonly Opportunity[]): ShoppingRow {
+/** 0.7.1 (ACT-9): what buildShoppingList may read besides the stored rows. */
+export interface ShoppingListOptions {
+  /**
+   * The stock scrap.tf showed with the price an input came from (its inputRef, 'price:<id>'), or null when
+   * unknown (a typed price). Asked only for the rows returned. Omitted: knownStock is null.
+   */
+  stockOf?(inputRef: string): number | null;
+}
+
+interface BuiltRow {
+  row: ShoppingRow;
+  /** The known price's inputRef, for knownStock once the page is cut. */
+  knownRef: string | null;
+}
+
+function rowFor(top: Opportunity, all: readonly Opportunity[]): BuiltRow {
   // Painted, spelled and plain copies share the SKU, so a cost is judged only against
   // its own row's ceiling: one copy's price against another copy's ceiling says nothing.
   let known: Opportunity | null = isKnown(top) ? top : null;
@@ -68,7 +83,7 @@ function rowFor(top: Opportunity, all: readonly Opportunity[]): ShoppingRow {
   const maxCostScrap = top.maxCostScrap as Scrap;
   const knownCostScrap = known ? known.costScrap : null;
   const knownMaxCostScrap = known && finite(known.maxCostScrap) ? known.maxCostScrap : null;
-  return {
+  const row: ShoppingRow = {
     sku: top.sku,
     name: top.name || top.sku,
     category: top.category,
@@ -85,7 +100,24 @@ function rowFor(top: Opportunity, all: readonly Opportunity[]): ShoppingRow {
     inputKinds: INPUT_KIND_ORDER.filter((k) => all.some((o) => o.inputKind === k)),
     flags: [...top.flags],
     updatedAt: top.updatedAt,
+    // ACT-9: how old "your price" is. Stale is the engine's own verdict on that row ('stale-input': older
+    // than profit.inputStaleMs at its last evaluation, at most a sweep ago), so the Opportunities page agrees.
+    knownObservedAt: known && finite(known.inputObservedAt) ? known.inputObservedAt : null,
+    knownStock: null,
+    knownStale: known !== null && known.flags.includes('stale-input'),
   };
+  return { row, knownRef: known ? known.inputRef : null };
+}
+
+/** The stock behind a known price; a failed or odd answer is unknown. */
+function stockFor(opts: ShoppingListOptions, ref: string | null): number | null {
+  if (ref === null || !opts.stockOf) return null;
+  try {
+    const n = opts.stockOf(ref);
+    return finite(n) && n >= 0 ? n : null;
+  } catch {
+    return null;
+  }
 }
 
 function matcher(q: ShoppingQuery): (r: ShoppingRow) => boolean {
@@ -111,7 +143,13 @@ function matcher(q: ShoppingQuery): (r: ShoppingRow) => boolean {
  * highest-confidence input wins), filtered by `q`, sorted by category order
  * then ceiling descending, and paged (`limit` omitted: every row).
  */
-export function buildShoppingList(rows: readonly Opportunity[], q: ShoppingQuery, keyPrice: KeyPriceState | null, now: UnixMs): ShoppingListResult {
+export function buildShoppingList(
+  rows: readonly Opportunity[],
+  q: ShoppingQuery,
+  keyPrice: KeyPriceState | null,
+  now: UnixMs,
+  opts: ShoppingListOptions = {},
+): ShoppingListResult {
   const query: ShoppingQuery = q && typeof q === 'object' ? q : {};
   const bySku = new Map<string, Opportunity[]>();
   for (const o of rows) {
@@ -122,15 +160,16 @@ export function buildShoppingList(rows: readonly Opportunity[], q: ShoppingQuery
   }
 
   const keep = matcher(query);
-  const matched: ShoppingRow[] = [];
+  const built: BuiltRow[] = [];
   for (const list of bySku.values()) {
     let top: Opportunity | null = null;
     for (const o of list) if (hasCeiling(o) && (top === null || betterInput(o, top))) top = o;
     if (top === null) continue;
-    const row = rowFor(top, list);
-    if (keep(row)) matched.push(row);
+    const b = rowFor(top, list);
+    if (keep(b.row)) built.push(b);
   }
-  matched.sort(compareRows);
+  built.sort((a, b) => compareRows(a.row, b.row));
+  const matched = built.map((b) => b.row);
 
   const counts = new Map<Category, number>();
   for (const r of matched) counts.set(r.category, (counts.get(r.category) ?? 0) + 1);
@@ -140,7 +179,9 @@ export function buildShoppingList(rows: readonly Opportunity[], q: ShoppingQuery
 
   const offset = finite(query.offset) ? Math.max(0, Math.floor(query.offset)) : 0;
   const limit = finite(query.limit) ? Math.min(MAX_LIST_LIMIT, Math.max(1, Math.floor(query.limit))) : matched.length;
-  return { rows: matched.slice(offset, offset + limit), total: matched.length, groups, keyPrice, generatedAt: now };
+  // The stock lookup costs a read per row, so only the rows returned ask for it.
+  const page = built.slice(offset, offset + limit).map((b) => ({ ...b.row, knownStock: stockFor(opts, b.knownRef) }));
+  return { rows: page, total: matched.length, groups, keyPrice, generatedAt: now };
 }
 
 /** Columns: sku, name, category, pay_up_to, revenue, buyer, confidence, known_cost, under_ceiling, bank_page. */

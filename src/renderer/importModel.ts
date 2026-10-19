@@ -7,9 +7,12 @@
 // first loaded, so those cards (or all of them) can be missing; "Webpage, Complete" and
 // "Webpage, Single File" write the page as shown. HTML only stays accepted. Nothing here reads a
 // saved file or opens anything (R1, R10). F21: a read of the opt-in scrap.tf window (origin 'window')
-// is no save, so its no-cards wording differs and the dashboard does not toast it.
+// is no save, so its no-cards wording differs and the dashboard does not toast it. 0.7.1: the skipped
+// items' true total and per-reason counts, refusals first (P5); the parser report the user copies (P4);
+// what turning import off also does to the scrap.tf window (UX-12).
 
-import type { ImportResult } from '../shared/types';
+import { BENIGN_SKIP_REASONS } from '../shared/importCodes';
+import type { ImportReport, ImportResult } from '../shared/types';
 
 /** The save type every instruction recommends. */
 export const SAVE_MODE = 'Webpage, Complete';
@@ -154,6 +157,86 @@ export function importNoticeToastText(r: Pick<ImportResult, 'warnings' | 'fileNa
   const noCards = noCardsToastText(r);
   if (noCards !== null || !r || !importTooLarge(r)) return noCards;
   return `${clipName(typeof r.fileName === 'string' ? r.fileName : '')}: ${TOO_LARGE_REASON}`;
+}
+
+// ---------------------------------------------------------------------------
+// 0.7.1: skipped items, the parser report, turning import off
+// ---------------------------------------------------------------------------
+
+export interface ImportSkipGroup {
+  /** The reason as the service gave it: a refusal code, or one of the benign texts. */
+  reason: string;
+  count: number;
+  /** A refusal (the item could not be read as a price), not a benign skip (out of stock, a cheaper copy). */
+  refusal: boolean;
+}
+
+export interface ImportSkipSummary {
+  /** Every skipped entry (ImportResult.skippedTotal), or the entries listed when the service gave no total. */
+  total: number;
+  /** The entries listed (ImportResult.skipped, cut at 500). */
+  listed: number;
+  /** Per reason, refusals first, then the most common; [] when the service gave no counts. */
+  groups: ImportSkipGroup[];
+}
+
+// Every reason but the benign ones, as the service orders the list ("refusals first"): a refusal code, and
+// the plain fallbacks ('no price', 'item not recognised') or a first warning of an item it could not store.
+function isRefusal(reason: string): boolean {
+  return !BENIGN_SKIP_REASONS.includes(reason);
+}
+
+/**
+ * P5: "1,240 skipped" from ImportResult.skippedTotal (the list holds at most 500, refusals first) and the
+ * per-reason counts (skippedCounts), refusals first, then by count. A result from an older service has
+ * neither: the list's length is the total, with no groups.
+ */
+export function importSkipSummary(r: Pick<ImportResult, 'skipped'> & Partial<Pick<ImportResult, 'skippedTotal' | 'skippedCounts'>>): ImportSkipSummary {
+  const listed = Array.isArray(r.skipped) ? r.skipped.length : 0;
+  const t = r.skippedTotal;
+  const total = typeof t === 'number' && Number.isFinite(t) ? Math.max(listed, Math.floor(t)) : listed;
+  const groups: ImportSkipGroup[] = [];
+  const counts = r.skippedCounts;
+  if (counts && typeof counts === 'object') {
+    for (const [reason, n] of Object.entries(counts)) {
+      if (typeof n !== 'number' || !Number.isFinite(n) || n <= 0) continue;
+      groups.push({ reason, count: Math.floor(n), refusal: isRefusal(reason) });
+    }
+  }
+  groups.sort((a, b) => Number(b.refusal) - Number(a.refusal) || b.count - a.count || a.reason.localeCompare(b.reason));
+  return { total, listed, groups };
+}
+
+/** P4: the button that copies the newest parser reports ('import.report'). */
+export const IMPORT_REPORT_LABEL = 'Copy parser report';
+/** P4: what the report holds and where it goes: the clipboard only. */
+export const IMPORT_REPORT_NOTE =
+  "Copies a summary of your newest page reads to the clipboard, to paste into a bug report: each file's name, counts, warning codes and the item fields the parser read, item titles included. No custom names, Steam IDs, asset IDs, links or gift text. Nothing is sent anywhere.";
+
+/** P4: the reports as the text the button copies (JSON, newest first); null when there is none yet. */
+export function importReportText(reports: readonly ImportReport[] | null | undefined): string | null {
+  if (!Array.isArray(reports) || reports.length === 0) return null;
+  return JSON.stringify(reports, null, 2);
+}
+
+/** The toast after Copy parser report. */
+export function importReportToast(copied: boolean, count: number): { text: string; tone: 'good' | 'warn' | 'bad' } {
+  if (count === 0) return { text: 'No page read yet in this session: import or read a page first, then copy the report.', tone: 'warn' };
+  if (!copied) return { text: 'Could not copy the parser report.', tone: 'bad' };
+  return { text: `Copied the parser report (${count} ${count === 1 ? 'read' : 'reads'}). Nothing was sent.`, tone: 'good' };
+}
+
+/**
+ * UX-12: the "Turn import off" card. Turning import off also turns the scrap.tf window off (it needs
+ * import) and closes it, and clears the watch folder; `windowOn` (settings.scraptfWindow.enabled) says so.
+ */
+export function importOffText(windowOn: boolean): { text: string; confirmLabel: string } {
+  const base = 'Turning it off stops the folder watch and hides the import buttons. Imported prices stay in your price sheet. Your watch folder choice is cleared.';
+  if (!windowOn) return { text: base, confirmLabel: 'Turn off import?' };
+  return {
+    text: `${base} This also turns off the scrap.tf window and closes it; turn it on again in Settings → scrap.tf window.`,
+    confirmLabel: 'Turn off import and the scrap.tf window?',
+  };
 }
 
 /** The size refusals of "Import saved page…": main's "larger than 20 MB" and the service's "too large". */

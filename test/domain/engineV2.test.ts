@@ -189,6 +189,19 @@ describe('F1: pay-up-to ceiling on opportunities', () => {
     }
   });
 
+  it('marks a 3 h old price stale on the shopping list, as the engine judged its row (ACT-9)', async () => {
+    const h = setup();
+    seedTeamCaptain(h.repo);
+    await h.engine.runNow();
+    const row = () => buildShoppingList(h.repo.allOpportunities(), {}, h.engine.keyPrice(), h.clock.t).rows.find((r) => r.sku === '378;6')!;
+    expect(row()).toMatchObject({ knownObservedAt: T0 - MIN, knownStale: false });
+    // Three hours on (profit.inputStaleMs is 2 h): the next sweep flags the row, and the list says so.
+    h.clock.advance(3 * 60 * MIN);
+    await h.engine.runNow();
+    expect(h.repo.allOpportunities()[0]!.flags).toContain('stale-input');
+    expect(row()).toMatchObject({ knownObservedAt: T0 - MIN, knownStale: true, knownCostScrap: 90 });
+  });
+
   it('finds the revenue order of a stored row without knowing useOrder', () => {
     for (const useOrder of ['conservative', 'best', 'instant'] as const) {
       const o = evaluateOpportunity(evalArgs({ listings: book() }, { useOrder }));

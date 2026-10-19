@@ -17,10 +17,15 @@ import {
   SCRAPTF_CHANGES_CSV_COLUMNS,
   SCRAPTF_CHANGES_DEFAULT_LIMIT,
   SCRAPTF_CHANGES_EXPORT_MAX,
+  SCRAPTF_ITEM_EVENTS,
+  SCRAPTF_ITEM_STOCK_EVENTS,
+  SCRAPTF_PRICE_KINDS,
   scraptfChangeEvent,
   scraptfEventsOf,
   scraptfItemHistoryOf,
+  scraptfKeyStatesOf,
   scraptfListedSinceOf,
+  scraptfMarkSuperseded,
   scraptfRunsOf,
   type ScraptfSaveRows,
 } from '../../src/shared/scraptfHistory';
@@ -438,12 +443,13 @@ describe('itemHistory (S3)', () => {
     expect(item.change.h24).toEqual({ fromScrap: 609, toScrap: 590, deltaScrap: -19, pct: -19 / 609, since: T[1] });
     expect(item.change.d7).toEqual({ fromScrap: 600, toScrap: 590, deltaScrap: -10, pct: -10 / 600, since: T[0] });
     expect(item.change.listed).toEqual({ fromScrap: 600, toScrap: 590, deltaScrap: -10, pct: -10 / 600, since: T[3] });
-    // The copy's feed, newest first, valued now and joined to the live buy side.
-    expect(item.events.map((e) => [e.kind, e.toValueScrap, e.flip])).toEqual([
-      ['cheaper', 590, true],
-      ['restocked', 600, true],
-      ['gone', null, false],
-      ['pricier', 609, true],
+    // The copy's feed, newest first, valued now and joined to the live buy side. 0.7.1 (ACT-10): only the
+    // newest event of a copy on sale keeps the Flip pill; the ones it superseded say they were one.
+    expect(item.events.map((e) => [e.kind, e.toValueScrap, e.flip, e.wasFlip === true])).toEqual([
+      ['cheaper', 590, true, false],
+      ['restocked', 600, false, true],
+      ['gone', null, false, false],
+      ['pricier', 609, false, true],
     ]);
     expect(item.keyPrice).toEqual(keyPrice(600));
   });
@@ -454,7 +460,9 @@ describe('itemHistory (S3)', () => {
     h.entries.set('1;6', { revenueScrap: 700, maxCostScrap: 620 });
     for (const K of [600, 650]) {
       h.key.v = K;
-      const events = h.repo.scraptfEventsForSku('1;6', 500).map((e) => scraptfChangeEvent(e, K, { revenueScrap: 700, maxCostScrap: 620 }));
+      const valued = h.repo.scraptfEventsForSku('1;6', 500).map((e) => scraptfChangeEvent(e, K, { revenueScrap: 700, maxCostScrap: 620 }));
+      // 0.7.1 (ACT-10): superseded flips by the same shared rule over the same saves.
+      const events = scraptfMarkSuperseded(valued, (bank) => scraptfKeyStatesOf(savesOf(h.repo, bank)));
       const expected = scraptfItemHistoryOf({
         sku: '1;6',
         specialKey: null,
@@ -504,10 +512,14 @@ describe('itemHistory (S3)', () => {
     const spy = vi.spyOn(h.repo, 'scraptfEvents');
     const painted = h.history.itemHistory('1;6;p15185211', null, NOW);
     expect(painted.events.map((e) => [e.specialKey, e.kind, e.toValueScrap])).toEqual([[PAINT, 'cheaper', 85]]);
-    // One read of that copy's events, at most SCRAPTF_ITEM_EVENTS.
-    expect(spy.mock.calls).toEqual([[{ sku: '1;6', specialKey: PAINT, limit: 50 }]]);
+    // Two reads of that copy's events (0.7.1, DM-6): at most SCRAPTF_ITEM_EVENTS price events and, apart
+    // from them, at most SCRAPTF_ITEM_STOCK_EVENTS stock moves.
+    expect(spy.mock.calls).toEqual([
+      [{ sku: '1;6', specialKey: PAINT, kinds: SCRAPTF_PRICE_KINDS, limit: SCRAPTF_ITEM_EVENTS }],
+      [{ sku: '1;6', specialKey: PAINT, kinds: ['stock'], limit: SCRAPTF_ITEM_STOCK_EVENTS }],
+    ]);
     const clean = h.history.itemHistory('1;6', null, NOW);
-    expect(clean.events).toHaveLength(50);
+    expect(clean.events).toHaveLength(SCRAPTF_ITEM_STOCK_EVENTS);
     expect(clean.events.every((e) => e.specialKey === '' && e.kind === 'stock')).toBe(true);
   });
 

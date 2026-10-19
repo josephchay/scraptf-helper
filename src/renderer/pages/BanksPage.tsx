@@ -2,11 +2,13 @@
 // /items price list), from 'scraptf.banks': when each was last saved, its flips and what to look
 // for there. Everything on it comes from pages the user saved with their own browser into the
 // opt-in watch folder (R10). "Open in browser" hands the static page to links.open (openOrCopy);
-// the app never visits scrap.tf (R1): no fetch, no embedded view, nothing polled. Pure helpers
+// Flip Desk never loads scrap.tf on its own (R1): no fetch, nothing polled. Pure helpers
 // live in banksModel.ts, styles in styles/banks.css. F17: each card says what changed since the
 // previous save and links to the bank's stock page (#/banks/<bank>/stock). F21: while the user has
 // the opt-in scrap.tf window on, each card also has "Open in Flip Desk window" ('scraptfWindow.open'
 // with the bank's static SCRAPTF_BANKS page, on a click only); main loads it there for the user.
+// 0.7.1 (UX-1): the header adds "N flips on your saves, newest 3 min ago · View all", which opens
+// the Live market's #/market/flips (every Flip from a saved page, the freshest sighting first).
 
 import { useCallback, useEffect, useId, useMemo, useRef, useState, type KeyboardEvent, type MouseEvent } from 'react';
 import { scraptfBankInfo } from '../../shared/links';
@@ -17,6 +19,7 @@ import {
   BANK_SAVE_TIP,
   LIST_SAVE_TIP,
   bankCards,
+  banksFlipsLine,
   bankGridMove,
   bankStockPath,
   banksHeadline,
@@ -37,8 +40,8 @@ import { useApp } from '../hooks/appContext';
 import { useThrottled, useVisiblePush } from '../hooks/useRpc';
 import { useNow } from '../hooks/useTimers';
 import { SAVE_MODE, SAVE_MODE_LIST_ONLY } from '../importModel';
-import { marketBankPath } from '../marketModel';
-import { LIST_BOUNDARY_NOTE, listSetupNote, listSetupState, listStatusLine } from '../scraptfListModel';
+import { MARKET_FLIPS_PATH, marketBankPath } from '../marketModel';
+import { listBoundaryNote, listSetupNote, listSetupState, listStatusLine } from '../scraptfListModel';
 import { bankWindowView, OPEN_IN_WINDOW_LABEL, windowOpenFailedText, windowOpenTitle, type BankWindowView } from '../scraptfWindowModel';
 
 type MenuPoint = { x: number; y: number };
@@ -108,7 +111,9 @@ export function BanksPage() {
         picking={folder.picking}
         focusBank={banksRouteBank(segments)}
         scraptfWindow={scraptfWindow}
+        inputStaleMs={settings?.profit.inputStaleMs ?? null}
         onRetry={banks.refresh}
+        onViewFlips={() => navigate(MARKET_FLIPS_PATH)}
         onPickFolder={folder.pick}
         onGoImport={() => navigate('import')}
         onCopyPath={(path) => copyFolderPath(path, toast)}
@@ -149,7 +154,11 @@ export interface BanksViewProps {
   focusBank: ScraptfBank | null;
   /** F21: the user's opt-in scrap.tf window (bankWindowView); null or absent while it is off. */
   scraptfWindow?: BankWindowView | null;
+  /** ACT-8: settings.profit.inputStaleMs, so a fresh save words "What to look for" as restocks to watch. */
+  inputStaleMs?: number | null;
   onRetry(): void;
+  /** UX-1: the header's "View all" flips (#/market/flips). */
+  onViewFlips?(): void;
   onPickFolder(): void;
   onGoImport(): void;
   onCopyPath(path: string): void;
@@ -168,7 +177,8 @@ export interface BanksViewProps {
 
 /** The page without its data hooks. Exported for the render tests only. */
 export function BanksView(p: BanksViewProps) {
-  const cards = useMemo(() => bankCards(p.result, p.keyScrap, p.now), [p.result, p.keyScrap, p.now]);
+  const stale = p.inputStaleMs ?? null;
+  const cards = useMemo(() => bankCards(p.result, p.keyScrap, p.now, stale), [p.result, p.keyScrap, p.now, stale]);
   // The list status says first (it is re-read on every settings change); the banks answer until then.
   const importOff = p.status ? !p.status.importEnabled : p.result ? !p.result.importEnabled : false;
   const listDetail = p.status ? listStatusLine(p.status, p.now).detail : null;
@@ -203,9 +213,11 @@ export function BanksView(p: BanksViewProps) {
 /** "3 of 8 scrap.tf pages saved in the last hour", what to fix before a save is read, the folder and the boundary. */
 function BanksHeader(p: BanksViewProps) {
   const head = banksHeadline(p.result, p.now);
+  const flips = banksFlipsLine(p.result, p.now);
+  const windowOn = (p.scraptfWindow ?? null) !== null;
   // Until (or unless) the list status is read, the banks answer says whether import is off, as the
   // disabled Open buttons do, so they are never disabled without the reason and its fix.
-  const setup = p.status ? listSetupState(p.status) : p.result && !p.result.importEnabled ? 'import-off' : null;
+  const setup = p.status ? listSetupState(p.status, windowOn) : p.result && !p.result.importEnabled ? 'import-off' : null;
   const note = setup ? listSetupNote(setup, 'banks', p.status?.watchError ?? null) : null;
   const folder = setup === 'ready' ? (p.status?.watchFolder ?? null) : null;
   return (
@@ -213,6 +225,21 @@ function BanksHeader(p: BanksViewProps) {
       <h2 id="banks-headline" className="banks-headline" title={head.title}>
         <Icon name="banks" size={15} /> {head.text}
       </h2>
+      {flips ? (
+        <p className="banks-flips" title={flips.title}>
+          <Icon name="bolt" size={13} />
+          <span className="tone-text-good">{flips.text}</span>
+          {p.onViewFlips ? (
+            <>
+              <span aria-hidden="true"> · </span>
+              <button type="button" className="link-btn small banks-view-flips" title="Opens the Live market on every Flip from your saved pages, the freshest first." onClick={p.onViewFlips}>
+                View all
+                <Icon name="chevronRight" size={12} />
+              </button>
+            </>
+          ) : null}
+        </p>
+      ) : null}
       {note ? <SetupNoteView note={note} picking={p.picking} onGoImport={p.onGoImport} onPickFolder={p.onPickFolder} /> : null}
       {folder ? (
         <p className="banks-folder">
@@ -236,7 +263,7 @@ function BanksHeader(p: BanksViewProps) {
       </p>
       <p className="sl-boundary">
         <Icon name="shield" size={13} />
-        <span>{LIST_BOUNDARY_NOTE}</span>
+        <span>{listBoundaryNote(windowOn)}</span>
       </p>
     </section>
   );
@@ -469,8 +496,8 @@ function BankCard(p: {
 
       {c.lookFor ? (
         <div className="bank-block" role="group" aria-labelledby={lookId}>
-          <h4 id={lookId} className="bank-block-title" title="Items with backpack.tf buyers in this page's categories that you have no scrap.tf price for yet, highest Pay up to first.">
-            What to look for
+          <h4 id={lookId} className="bank-block-title" title={c.lookFor.title.title}>
+            {c.lookFor.title.text}
           </h4>
           {c.lookFor.rows.length ? (
             <ul className="bank-rows">

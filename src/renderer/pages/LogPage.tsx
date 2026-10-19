@@ -10,6 +10,7 @@ import { CATEGORIES, CATEGORY_LABELS } from '../../shared/types';
 import { SCRAPTF_CHANGES_EXPORT_MAX } from '../../shared/scraptfHistory';
 import { rpc, saveCsv } from '../api';
 import {
+  CHANGES_LEGACY_PREF_KEY,
   CHANGES_MAX_KEPT,
   CHANGES_PAGE,
   CHANGES_PREF_KEY,
@@ -23,6 +24,7 @@ import {
   changeRowView,
   changesEmptyText,
   changesExportQuery,
+  changesViewFromLegacy,
   changesViewKey,
   createChangesFeed,
   logTabOf,
@@ -39,7 +41,7 @@ import { useItemMenu } from '../components/ItemMenu';
 import { ItemName, Money } from '../components/ItemName';
 import { DASH, EVENT_KIND_LABELS, confidenceLevelOf, errorMessage, fmtAgo, fmtDateTime, fmtInt, fmtTime } from '../format';
 import { useApp } from '../hooks/appContext';
-import { usePersistentState } from '../hooks/usePersistentState';
+import { readPref, usePersistentState } from '../hooks/usePersistentState';
 import { useThrottled, useVisiblePush } from '../hooks/useRpc';
 import { useNow } from '../hooks/useTimers';
 import { MAX_KEPT_EVENTS, fetchEventsAfter, mergeEvents, olderPageLimit } from '../eventFeed';
@@ -367,7 +369,9 @@ function useChangesFeed(view: ChangesView, shown: number, onOlderError: (message
 /** Every change between two of the user's saves of a bank page, newest first (F20 U3). */
 function ScraptfChangesView() {
   const { openItem, keyScrap, toast } = useApp();
-  const [view, setView] = usePersistentState<ChangesView>(CHANGES_PREF_KEY, DEFAULT_CHANGES_VIEW, sanitizeChangesView);
+  // DM-6: until the 0.7.1 key holds a view, start from 0.7.0's (its bank and picked kinds; not its default).
+  const [fromLegacy] = useState(() => changesViewFromLegacy(readPref<unknown>(CHANGES_LEGACY_PREF_KEY, null)));
+  const [view, setView] = usePersistentState<ChangesView>(CHANGES_PREF_KEY, fromLegacy, sanitizeChangesView);
   // The rows rendered, per view: a new filter starts again at CHANGES_SHOWN.
   const viewKey = changesViewKey(view);
   const [shownMax, setShownMax] = useState({ key: viewKey, n: CHANGES_SHOWN });
@@ -564,6 +568,10 @@ const ChangeRow = memo(function ChangeRow({
         {v.flip ? (
           <span className="pill tone-good stf-feed-flip" title={v.flip.title}>
             {v.flip.text}
+          </span>
+        ) : v.wasFlip ? (
+          <span className="pill tone-muted stf-feed-flip stf-feed-was-flip" title={v.wasFlip.title}>
+            {v.wasFlip.text}
           </span>
         ) : null}
       </td>

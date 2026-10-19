@@ -167,7 +167,115 @@ export const SCRAPTF_READ_REASONS = Object.freeze({
   busy: 'A read of this page is still running.',
   loading: 'The page is still loading. Read it once it has loaded.',
   failed: 'The page could not be read. Try Read page now again.',
+  /** 0.7.1 (F21-4): a scrap.tf page the import cannot read (the front page, raffles, settings, a profile). */
+  notImportable: 'Nothing to import on this page.',
+  /** 0.7.1 (F21-1): the import refused the read while the item data loads; nothing was stored. */
+  schemaLoading: 'Item data is still loading; press Read page now in a moment.',
 } as const);
+
+/**
+ * 0.7.1 (F21-10): the read warning code of a page shown again within READ_AUTO_MIN_GAP_MS. Nothing was read:
+ * the toolbar shows that page's last read (not another page's) and says how to read it again.
+ */
+export const SCRAPTF_NOT_READ_AGAIN = 'not-read-again';
+
+/**
+ * 0.7.1 (F21-3, F21-10): the fixed notices about the page on screen (ScraptfWindowNav.notice), set by main
+ * from the main frame's HTTP status, a failed load, a crash or a link it kept from opening; cleared at the
+ * next commit. Never page content or an address.
+ */
+export const SCRAPTF_WINDOW_NOTICES = Object.freeze({
+  challenge: 'Cloudflare check or error page on screen: solve it in the page; it is read once the real page loads.',
+  rateLimited: 'scrap.tf is rate-limiting this window: wait a minute before reloading.',
+  offline: 'scrap.tf could not be reached (no connection, or the site is down): press Reload.',
+  insecure: "The connection to scrap.tf could not be secured (check this computer's date and time): press Reload.",
+  badResponse: 'scrap.tf sent a page that could not be shown: press Reload.',
+  loadFailed: 'The page did not load: press Reload.',
+  crashed: 'The page stopped working: press Reload.',
+  blocked: 'Flip Desk kept a link from opening: only scrap.tf pages and Steam sign-in open in this window.',
+  popup: 'Flip Desk opens no new windows from a page: that link was not opened.',
+  needsClick: 'A page tried to open a link in your browser without your click: nothing was opened.',
+} as const);
+
+/** The link notices: about one link, not the page, so a page notice (a challenge, a failed load) outranks them. */
+export const SCRAPTF_LINK_NOTICES: ReadonlySet<string> = new Set([SCRAPTF_WINDOW_NOTICES.blocked, SCRAPTF_WINDOW_NOTICES.popup, SCRAPTF_WINDOW_NOTICES.needsClick]);
+
+/**
+ * The notices of a page that did not load or crashed: Chromium's error page, or nothing, is on screen, so a
+ * dashboard link to that page loads it again (the user's click) rather than only bringing the window up.
+ */
+export const SCRAPTF_FAILURE_NOTICES: ReadonlySet<string> = new Set([
+  SCRAPTF_WINDOW_NOTICES.offline,
+  SCRAPTF_WINDOW_NOTICES.insecure,
+  SCRAPTF_WINDOW_NOTICES.badResponse,
+  SCRAPTF_WINDOW_NOTICES.loadFailed,
+  SCRAPTF_WINDOW_NOTICES.crashed,
+]);
+
+/**
+ * The notice for a main-frame document's HTTP status: 403 and 503 are what Cloudflare's check and scrap.tf's
+ * error pages answer with, 429 its rate limit. Such a page is not read automatically (F21-3); null otherwise.
+ */
+export function responseNotice(httpStatus: unknown): string | null {
+  if (httpStatus === 429) return SCRAPTF_WINDOW_NOTICES.rateLimited;
+  if (httpStatus === 403 || httpStatus === 503) return SCRAPTF_WINDOW_NOTICES.challenge;
+  return null;
+}
+
+/**
+ * The notice for a main-frame load that failed (did-fail-load, never ERR_ABORTED), by Chromium's net error
+ * group (net_error_list.h): -100s connection, -200s certificate, -300s HTTP, -800s name resolution.
+ */
+export function loadFailureNotice(netError: unknown): string {
+  if (typeof netError !== 'number' || !Number.isFinite(netError)) return SCRAPTF_WINDOW_NOTICES.loadFailed;
+  // TIMED_OUT and NETWORK_CHANGED sit in the system group but are the connection's.
+  if ((netError <= -100 && netError > -200) || (netError <= -800 && netError > -900) || netError === -7 || netError === -21) return SCRAPTF_WINDOW_NOTICES.offline;
+  if (netError <= -200 && netError > -300) return SCRAPTF_WINDOW_NOTICES.insecure;
+  if (netError <= -300 && netError > -400) return SCRAPTF_WINDOW_NOTICES.badResponse;
+  return SCRAPTF_WINDOW_NOTICES.loadFailed;
+}
+
+/** A move of the view the user's own key press or mouse button asks for (F21-11): the toolbar's keys. */
+export type WindowKeyAction = 'back' | 'forward' | 'reload' | 'home';
+
+/** The parts of Electron's before-input-event `Input` the window reads. */
+export interface WindowKeyInput {
+  type?: unknown;
+  key?: unknown;
+  alt?: unknown;
+  control?: unknown;
+  meta?: unknown;
+  shift?: unknown;
+  isAutoRepeat?: unknown;
+}
+
+/**
+ * The toolbar's keys while the scrap.tf page has the focus (F21-11): F5 or Ctrl+R reload, Alt+Left back,
+ * Alt+Right forward, Alt+Home home. Only a key going down, never its repeats, so a held key is one move.
+ * Chromium raises before-input-event for the user's real input only; a page's script cannot.
+ */
+export function windowKeyAction(input: WindowKeyInput | null | undefined): WindowKeyAction | null {
+  if (!input || input.type !== 'keyDown' || input.isAutoRepeat === true) return null;
+  if (input.meta === true || input.shift === true || typeof input.key !== 'string') return null;
+  const alt = input.alt === true;
+  const ctrl = input.control === true;
+  if (alt && !ctrl) {
+    if (input.key === 'ArrowLeft') return 'back';
+    if (input.key === 'ArrowRight') return 'forward';
+    if (input.key === 'Home') return 'home';
+    return null;
+  }
+  if (!alt && !ctrl && input.key === 'F5') return 'reload';
+  if (ctrl && !alt && (input.key === 'r' || input.key === 'R')) return 'reload';
+  return null;
+}
+
+/** The window's app-command (Windows: the mouse's back and forward buttons, a keyboard's browser keys). */
+export function appCommandAction(command: unknown): WindowKeyAction | null {
+  if (command === 'browser-backward') return 'back';
+  if (command === 'browser-forward') return 'forward';
+  return null;
+}
 
 /**
  * The only code Flip Desk ever runs in the scrap.tf view, in isolated world READ_WORLD_ID: the DOM the

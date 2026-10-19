@@ -2,8 +2,11 @@
 // trades. It shows the saved scrap.tf/items list ('scraptf.listStatus') and the three
 // steps: open scrap.tf/items in the user's own browser (links.open, through
 // openOrCopy), save it with Ctrl+S into the watch folder, and Flip Desk picks it up.
-// The app never visits scrap.tf (R1); the browser does, when the user chooses. The
-// list only arrives through that save, behind the import acknowledgement (R10).
+// Flip Desk never loads scrap.tf on its own (R1); the browser does, when the user
+// chooses. The list only arrives through that save, behind the import acknowledgement
+// (R10). 0.7.1 (UX-5): with the opt-in scrap.tf window on, "Open in Flip Desk window"
+// ('scraptfWindow.open' with the static scrap.tf/items page, on a click only) comes
+// first, the watch folder is optional, and the steps no longer open by themselves.
 //
 // One component for the top of the Live market (compact: the steps fold away once the
 // sync works) and the Import page (steps always shown). Pure helpers live in
@@ -12,6 +15,7 @@
 // type line (F18) serves every "save it" instruction.
 
 import { useEffect, useId, useRef, useState } from 'react';
+import { SCRAPTF_BOUNDARY_SHORT } from '../../shared/boundaryText';
 import { SCRAPTF_ITEMS_URL } from '../../shared/links';
 import type { ScraptfListStatus, UnixMs } from '../../shared/types';
 import { rpc } from '../api';
@@ -22,11 +26,13 @@ import { usePersistentState } from '../hooks/usePersistentState';
 import { useRpcQuery, useVisiblePush } from '../hooks/useRpc';
 import { useDocumentVisible, useInterval, useNow } from '../hooks/useTimers';
 import { SAVE_MODE, SAVE_MODE_ALT, SAVE_MODE_HTML_ONLY_NOTE, SAVE_MODE_LIST_NOTE, SAVE_MODE_REASON } from '../importModel';
+import { bankWindowView, OPEN_IN_WINDOW_LABEL, windowOpenFailedText, windowOpenTitle, type BankWindowView } from '../scraptfWindowModel';
 import {
-  LIST_BOUNDARY_NOTE,
   LIST_OPEN_HINT,
   LIST_PICKUP_TEXT,
+  SCRAPTF_ITEMS_PATH,
   chooseWatchFolder,
+  listBoundaryNote,
   listPollMs,
   listSetupNote,
   listSetupState,
@@ -34,6 +40,7 @@ import {
   listStepsAutoOpen,
   listStepsDisabled,
   listStepsOpen,
+  listWindowOpenHint,
   sanitizeStepsPref,
   type ListCardPlacement,
   type ListSetupNote,
@@ -126,17 +133,24 @@ export function copyFolderPath(path: string, toast: (text: string, tone?: ToastT
 }
 
 export function ScraptfListCard({ placement, boundaryNote = true }: ScraptfListCardProps) {
-  const { navigate, toast } = useApp();
+  const { navigate, toast, settings } = useApp();
   const { status, error, reload } = useScraptfListStatus();
   const folder = useWatchFolderPicker();
   const now = useNow(15_000);
   const [pref, setPref] = usePersistentState<boolean | null>('scraptfList.stepsOpen', null, sanitizeStepsPref);
+  // UX-5: the user's opt-in scrap.tf window, null while it is off (no window button, folder required).
+  const scraptfWindow = bankWindowView(settings);
 
   // Without a toggle of the user's, the first status read decides, once per visit: steps the user is
   // following do not fold away the moment the sync starts working.
   const autoOpen = useRef<boolean | null>(null);
-  if (autoOpen.current === null && status) autoOpen.current = listStepsAutoOpen(status);
+  if (autoOpen.current === null && status) autoOpen.current = listStepsAutoOpen(status, scraptfWindow !== null);
   const open = listStepsOpen(placement, pref, autoOpen.current);
+
+  // The static scrap.tf/items page, on a click only: main loads it in the window for the user.
+  const openInWindow = () => {
+    rpc('scraptfWindow.open', { start: SCRAPTF_ITEMS_URL }).catch((e: unknown) => toast(windowOpenFailedText(errorMessage(e)), 'bad'));
+  };
 
   return (
     <ScraptfListCardView
@@ -147,8 +161,10 @@ export function ScraptfListCard({ placement, boundaryNote = true }: ScraptfListC
       now={now}
       stepsOpen={open}
       picking={folder.picking}
+      scraptfWindow={scraptfWindow}
       onToggleSteps={() => setPref(!open)}
       onOpenList={() => void openOrCopy(SCRAPTF_ITEMS_URL, toast)}
+      onOpenInWindow={openInWindow}
       onCopyPath={(path) => copyFolderPath(path, toast)}
       onPickFolder={folder.pick}
       onGoImport={() => navigate('import')}
@@ -167,8 +183,12 @@ export interface ScraptfListCardViewProps {
   stepsOpen: boolean;
   /** The folder dialog is open. */
   picking: boolean;
+  /** UX-5: the user's opt-in scrap.tf window (bankWindowView); null or absent while it is off. */
+  scraptfWindow?: BankWindowView | null;
   onToggleSteps(): void;
   onOpenList(): void;
+  /** UX-5: "Open in Flip Desk window" for scrap.tf/items (shown only with `scraptfWindow`). */
+  onOpenInWindow?(): void;
   onCopyPath(path: string): void;
   onPickFolder(): void;
   onGoImport(): void;
@@ -202,22 +222,41 @@ export function ScraptfListCardView(p: ScraptfListCardViewProps) {
   const titleId = `${ids}-title`;
   const stepsId = `${ids}-steps`;
   const { status, now } = p;
+  const w = p.scraptfWindow ?? null;
   const line = listStatusLine(status, now);
-  const setup = status ? listSetupState(status) : null;
+  const setup = status ? listSetupState(status, w !== null) : null;
   const note = setup ? listSetupNote(setup, p.placement, status?.watchError ?? null) : null;
   const disabled = listStepsDisabled(status);
   const folder = status?.watchFolder ?? null;
   const market = p.placement === 'market';
+  // UX-5: with the window on, its button comes first; "Open scrap.tf/items" (the browser) goes when main
+  // sends Flip Desk's scrap.tf links to the window anyway (linksHere), as on the banks cards.
   const openBtn = (primary: boolean) => (
-    <button
-      type="button"
-      className={`btn small${primary ? ' primary' : ''}`}
-      disabled={disabled}
-      onClick={p.onOpenList}
-      title={disabled ? 'Turn on saved-page import first' : `Opens ${SCRAPTF_ITEMS_URL} in your own browser; the app never visits it`}
-    >
-      <Icon name="external" size={13} /> Open scrap.tf/items
-    </button>
+    <>
+      {w ? (
+        <button
+          type="button"
+          className={`btn small sl-open-window${primary ? ' primary' : ''}`}
+          disabled={disabled}
+          onClick={() => p.onOpenInWindow?.()}
+          title={disabled ? 'Turn on saved-page import first' : windowOpenTitle(SCRAPTF_ITEMS_PATH, w.readOnLoad)}
+          aria-label={`${OPEN_IN_WINDOW_LABEL}: ${SCRAPTF_ITEMS_PATH}`}
+        >
+          <Icon name="window" size={13} /> {OPEN_IN_WINDOW_LABEL}
+        </button>
+      ) : null}
+      {w?.linksHere ? null : (
+        <button
+          type="button"
+          className={`btn small${primary && !w ? ' primary' : ''}`}
+          disabled={disabled}
+          onClick={p.onOpenList}
+          title={disabled ? 'Turn on saved-page import first' : `Opens ${SCRAPTF_ITEMS_URL} in your own browser. ${SCRAPTF_BOUNDARY_SHORT}`}
+        >
+          <Icon name="external" size={13} /> Open scrap.tf/items
+        </button>
+      )}
+    </>
   );
 
   return (
@@ -263,7 +302,7 @@ export function ScraptfListCardView(p: ScraptfListCardViewProps) {
                 1
               </span>
               <span className="sl-step-text">
-                {openBtn(true)} <span>{LIST_OPEN_HINT}</span>
+                {openBtn(true)} <span>{w ? listWindowOpenHint(w.readOnLoad) : LIST_OPEN_HINT}</span>
               </span>
             </li>
             <li>
@@ -272,7 +311,8 @@ export function ScraptfListCardView(p: ScraptfListCardViewProps) {
               </span>
               <span className="sl-step-text">
                 <span>
-                  Press <kbd>Ctrl</kbd>+<kbd>S</kbd>, <SaveModeChoice alt={false} />, and save it into your watch folder{folder ? ':' : '.'}
+                  {w ? 'Or, in your browser, press ' : 'Press '}
+                  <kbd>Ctrl</kbd>+<kbd>S</kbd>, <SaveModeChoice alt={false} />, and save it into your watch folder{folder ? ':' : '.'}
                 </span>
                 {folder ? (
                   <span className="sl-folder">
@@ -284,7 +324,7 @@ export function ScraptfListCardView(p: ScraptfListCardViewProps) {
                     </button>
                   </span>
                 ) : (
-                  <span className="muted">No watch folder chosen yet.</span>
+                  <span className="muted">{w ? 'No watch folder chosen: optional with the window.' : 'No watch folder chosen yet.'}</span>
                 )}
               </span>
             </li>
@@ -298,7 +338,7 @@ export function ScraptfListCardView(p: ScraptfListCardViewProps) {
           {p.boundaryNote ? (
             <p className="sl-boundary">
               <Icon name="shield" size={13} />
-              <span>{LIST_BOUNDARY_NOTE}</span>
+              <span>{listBoundaryNote(w !== null)}</span>
             </p>
           ) : null}
         </div>

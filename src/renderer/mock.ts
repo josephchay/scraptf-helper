@@ -8,10 +8,9 @@ import { blankCheckResult, CHECK_ARM_MS, CHECK_ARM_NAME_MAX, CHECK_HOTKEY_CONFLI
 import { formatScrap } from '../shared/currency';
 import { DEFAULT_SETTINGS, mergeSettings } from '../shared/defaults';
 import { HOLDINGS_CSV_COLUMNS, holdingRow, holdingsCsvCells, holdingsMatching, holdingsResult } from '../shared/holdings';
-import { NO_BANK_FLIPS, bankFlips, bankLookFor } from '../shared/banks';
+import { NO_BANK_FLIPS, bankFlips, bankLookFor, bankStockFlips } from '../shared/banks';
 import {
   BANK_STOCK_CSV_COLUMNS,
-  BANK_STOCK_KEEP_SAVES,
   BANK_STOCK_MAX_LIMIT,
   BANK_STOCK_MAX_SEARCH_CHARS,
   bankStockCounts,
@@ -19,6 +18,7 @@ import {
   bankStockItemOf,
   bankStockMatching,
   bankStockNewAt,
+  bankStockPagePairs,
   bankStockResult,
   bankStockRows,
   bankStockThinning,
@@ -27,7 +27,20 @@ import {
   type BankStockBankDiff,
 } from '../shared/bankStock';
 import { SCRAPTF_BANKS, bankForCategory, preferScraptfSeen, scraptfSeenOn, type ScraptfSeen } from '../shared/links';
-import { MARKET_CSV_COLUMNS, MARKET_MAX_LIMIT, MARKET_MAX_SEARCH_CHARS, batchSavedAt, countCategories, isEmptyBankSave, marketCsvCells, scraptfCoverage } from '../shared/market';
+import {
+  MARKET_CSV_COLUMNS,
+  MARKET_MAX_LIMIT,
+  MARKET_MAX_SEARCH_CHARS,
+  batchItemCounts,
+  batchSavedAt,
+  countCategories,
+  isEmptyBankSave,
+  marketCsvCells,
+  scraptfCoverage,
+  wholeLookNewestSaves,
+  type BankSave,
+  type WholeLookSave,
+} from '../shared/market';
 import {
   SCRAPTF_CHANGES_CSV_COLUMNS,
   SCRAPTF_CHANGES_EXPORT_MAX,
@@ -38,8 +51,12 @@ import {
   scraptfEventMatches,
   scraptfEventsOf,
   scraptfItemHistoryOf,
-  scraptfListedSinceOf,
+  scraptfKeyStatesOf,
+  scraptfListedOf,
+  scraptfMarkSuperseded,
   scraptfRunsOf,
+  type ScraptfKeyState,
+  type ScraptfListed,
   type ScraptfSaveRows,
 } from '../shared/scraptfHistory';
 import { scraptfListCoverage, scraptfListKeyOf, scraptfListPriceSaved, valueScraptfListRow } from '../shared/scraptfList';
@@ -95,7 +112,7 @@ import type {
   ShoppingQuery,
   UnixMs,
 } from '../shared/types';
-import { BANK_STOCK_FILTERS, BANK_STOCK_SORTS, KEY_SKU, SCRAPTF_BANK_IDS, SCRAPTF_CHANGE_KINDS, SECRET_NAMES } from '../shared/types';
+import { BANK_STOCK_FILTERS, BANK_STOCK_OPEN_FILTERS, BANK_STOCK_SORTS, KEY_SKU, SCRAPTF_BANK_IDS, SCRAPTF_CHANGE_KINDS, SECRET_NAMES } from '../shared/types';
 import {
   CATALOG,
   MARKET_ONLY,
@@ -113,6 +130,7 @@ import {
   mockLinks,
   mockHoldingBuySide,
   mockMarketQuery,
+  mockImportReport,
   mockMarketRow,
   mockParseBulk,
   mockPrices,
@@ -120,6 +138,7 @@ import {
   mockRulesFromJson,
   mockRulesToJson,
   mockShoppingList,
+  mockSkipTotals,
   ruleMatches,
   seedJournal,
   seedBankStock,
@@ -134,6 +153,7 @@ import {
 import { NO_CARDS_SAVED, NO_CARDS_SAVED_REASON } from './importModel';
 import { checkDemoFromHash, mockCheckDemo, mockCheckResult, mockHintedParse, mockParseCheck, type MockParsedCheck } from './mockCheck';
 import { gateScraptfWindow, IMPORT_HTML_ORIGIN_REFUSAL, SCRAPTF_BAR_HASH } from '../shared/scraptfWindowPolicy';
+import { IMPORT_REPORT_RING, SKIP_OUT_OF_STOCK } from '../shared/importCodes';
 import { createMockScraptfWindow } from './mockScraptfWindow';
 import { filterOpportunities, orderByGroup, sortOpportunities, summarizeGroups } from './oppModel';
 
@@ -449,26 +469,34 @@ export function createMockBridge(opts: MockOptions = {}): MockBridge {
       ids.add(p.importBatch);
       behind.set(bank, ids);
     }
-    const banks = SCRAPTF_BANKS.map((info): ScraptfBankSummary => {
+    const byBatch = new Map<ScraptfBank, BankSave>();
+    for (const info of SCRAPTF_BANKS) {
       // F18 S3, as scraptfBankSaves: a bank page saved without its cards dates nothing.
       const saves = batches.filter((b) => b.bank === info.bank && !isEmptyBankSave(b, info.bank));
-      const newest = saves.reduce<ImportBatch | null>((n, b) => (n === null || batchSavedAt(b) > batchSavedAt(n) ? b : n), null);
+      const n = saves.reduce<ImportBatch | null>((m, b) => (m === null || batchSavedAt(b) > batchSavedAt(m) ? b : m), null);
+      if (n) byBatch.set(info.bank, { at: batchSavedAt(n), id: n.id, items: n.itemCount });
+    }
+    // DC-2, as the service: a bank page by its newest whole look (its newest stock save).
+    const dated = wholeLookNewestSaves(byBatch, wholeLookOf, batchItemCounts(batches));
+    const banks = SCRAPTF_BANKS.map((info): ScraptfBankSummary => {
+      const newest = dated.get(info.bank) ?? null;
       const isList = info.bank === 'list';
       // As the service: the saved list, else (no rows: purged, or a 0.3 import) the list's own batches.
       const fromList = isList && list.items > 0;
-      const items = fromList ? list.items : (newest?.itemCount ?? 0);
+      const items = fromList ? list.items : (newest?.items ?? 0);
       const pages = new Set(behind.get(info.bank));
       if (newest) pages.add(newest.id);
       return {
         bank: info.bank,
         label: info.label,
         url: info.url,
-        lastSavedAt: fromList ? list.newestAt : newest ? batchSavedAt(newest) : null,
+        lastSavedAt: fromList ? list.newestAt : (newest?.at ?? null),
         pages: fromList ? list.batches : pages.size,
         items,
         // A list batch stores in-stock rows only.
         inStock: fromList ? listRows.filter((r) => (r.stock ?? 0) > 0).length : isList ? items : Math.round(items * 0.65),
-        ...(flips.get(info.bank) ?? NO_BANK_FLIPS),
+        // UX-2b, as the service: a bank page counts its stock page's flips; the list keeps the price rule.
+        ...(stockFlipsOf(info.bank, market) ?? flips.get(info.bank) ?? NO_BANK_FLIPS),
         ...bankLookFor(rows, info.categories),
         // F17: as the service, the change counts between the bank's two newest stock saves.
         whatsNew: whatsNewOf(info.bank, market),
@@ -492,13 +520,31 @@ export function createMockBridge(opts: MockOptions = {}): MockBridge {
     return stockSaves.filter((s) => s.bank === bank).sort((a, b) => b.savedAt - a.savedAt || b.batchId - a.batchId);
   }
 
-  /** Each saved bank's two newest saves, diffed at the key price (what the service caches). */
+  /** DC-2: a bank's newest whole look, as the service reads repo.bankStockSaves(bank, 1)[0]. */
+  function wholeLookOf(bank: ScraptfBank): WholeLookSave | null {
+    const s = stockSavesOf(bank)[0];
+    return s ? { batchId: s.batchId, savedAt: s.savedAt, items: s.rows.length } : null;
+  }
+
+  /**
+   * A bank's newest save and the saves it is compared with, as the service pairs them (bankStockPagePairs;
+   * the mock's banks have one page each): 0.7.1 (CQ-2) the session baseline for what the page shows, the
+   * save just before for one read at a time.
+   */
+  function stockPairOf(bank: ScraptfBank): { newest: MockStockSave; previous: MockStockSave | null; baseline: MockStockSave | null; saves: number } | null {
+    const saves = stockSavesOf(bank);
+    const pair = bankStockPagePairs(saves.map((s) => ({ batchId: s.batchId, savedAt: s.savedAt, page: '', items: s.rows.length, save: s })))[0];
+    if (!pair) return null;
+    return { newest: pair.newest.save, previous: pair.previous?.save ?? null, baseline: pair.baseline?.save ?? null, saves: pair.saves };
+  }
+
+  /** Each saved bank's newest save diffed against its session baseline at the key price (what the service caches). */
   function stockDiffs(keyScrap: Scrap): BankStockBankDiff[] {
     const out: BankStockBankDiff[] = [];
     for (const info of SCRAPTF_BANKS) {
-      const [newest, previous] = stockSavesOf(info.bank);
-      if (!newest) continue;
-      out.push({ bank: info.bank, savedAt: newest.savedAt, previousSavedAt: previous?.savedAt ?? null, diff: diffBankStock(newest.rows, previous?.rows ?? null, keyScrap) });
+      const p = stockPairOf(info.bank);
+      if (!p) continue;
+      out.push({ bank: info.bank, savedAt: p.newest.savedAt, previousSavedAt: p.baseline?.savedAt ?? null, diff: diffBankStock(p.newest.rows, p.baseline?.rows ?? null, keyScrap) });
     }
     return out;
   }
@@ -508,13 +554,14 @@ export function createMockBridge(opts: MockOptions = {}): MockBridge {
     bank: ScraptfBank,
     market?: ReadonlyMap<string, MarketRow>,
   ): { rows: BankStockRow[]; items: number; savedAt: UnixMs | null; previousSavedAt: UnixMs | null; saves: number } {
-    const saves = stockSavesOf(bank);
-    const [newest, previous] = saves;
-    if (!newest) return { rows: [], items: 0, savedAt: null, previousSavedAt: null, saves: 0 };
+    const p = stockPairOf(bank);
+    if (!p) return { rows: [], items: 0, savedAt: null, previousSavedAt: null, saves: 0 };
+    const { newest, baseline } = p;
     const byBase = market ?? new Map(marketRows().map((r) => [r.sku, r]));
     const rows = bankStockRows({
       newest: newest.rows,
-      previous: previous?.rows ?? null,
+      // CQ-2: since the save before the newest one's session, as the service.
+      previous: baseline?.rows ?? null,
       keyScrap: keyPrice().valueScrap,
       profit: settings.profit,
       categoryOf: (sku) => findCatalogItem(sku)?.category ?? guessCategory(sku),
@@ -526,7 +573,19 @@ export function createMockBridge(opts: MockOptions = {}): MockBridge {
       // F20: listed since, first seen and the change since listed, from the bank's runs.
       runOf: (key) => runsFor(bank).get(key) ?? null,
     });
-    return { rows, items: newest.rows.length, savedAt: newest.savedAt, previousSavedAt: previous?.savedAt ?? null, saves: Math.min(BANK_STOCK_KEEP_SAVES, saves.length) };
+    return { rows, items: newest.rows.length, savedAt: newest.savedAt, previousSavedAt: baseline?.savedAt ?? null, saves: p.saves };
+  }
+
+  /**
+   * UX-2b: a bank page's card flips as its stock page counts them (the Flips chip, most profit first), as
+   * the service; null for the list and a bank with no stock save (the opportunity count stands then).
+   */
+  function stockFlipsOf(bank: ScraptfBank, market: ReadonlyMap<string, MarketRow>): ReturnType<typeof bankStockFlips> | null {
+    if (bank === 'list') return null;
+    const s = bankStockAll(bank, market);
+    if (s.savedAt === null) return null;
+    const flips = bankStockMatching(s.rows, { filter: 'flips', sort: 'profit', dir: 'desc' }, now());
+    return bankStockFlips(flips, bankStockCounts(s.rows, s.items).flips);
   }
 
   function whatsNewOf(bank: ScraptfBank, market: ReadonlyMap<string, MarketRow>): ScraptfBankSummary['whatsNew'] {
@@ -639,13 +698,22 @@ export function createMockBridge(opts: MockOptions = {}): MockBridge {
     return out;
   }
 
-  /** Stored events valued now and joined to the Live market rows of their base SKUs (market.entryFor). */
+  /**
+   * Stored events valued now and joined to the Live market rows of their base SKUs (market.entryFor);
+   * 0.7.1 (ACT-10) a superseded flip gets wasFlip, by the service's rule over the kept saves.
+   */
   function valuedEvents(list: readonly ScraptfEventStored[]): ScraptfChangeEvent[] {
     const kp = keyPrice().valueScrap;
     const byBase = new Map(marketRows().map((r) => [r.sku, r]));
-    return list.map((e) => {
+    const valued = list.map((e) => {
       const r = byBase.get(e.sku);
       return scraptfChangeEvent(e, kp, r && r.buyerCount > 0 ? r : null);
+    });
+    const states = new Map<ScraptfBank, ReadonlyMap<string, ScraptfKeyState>>();
+    return scraptfMarkSuperseded(valued, (bank) => {
+      let s = states.get(bank);
+      if (!s) states.set(bank, (s = scraptfKeyStatesOf(stockSavesOf(bank).map(saveRows))));
+      return s;
     });
   }
 
@@ -828,7 +896,7 @@ export function createMockBridge(opts: MockOptions = {}): MockBridge {
     const all = [...opps.values()];
     const profitable = all.filter((o) => o.status === 'profitable');
     return {
-      version: '0.7.0',
+      version: '0.7.1',
       networkPaused: settings.networkPaused,
       feed: feedState(),
       keyPrice: keyPrice(),
@@ -1028,9 +1096,10 @@ export function createMockBridge(opts: MockOptions = {}): MockBridge {
   function marketRows(known = mockKnownPrices(prices)): MarketRow[] {
     const t = now();
     const kp = keyPrice().valueScrap;
-    // F17: "New on scrap.tf", joined per read like the service's bankStock.newAtFor.
+    // F17: "New on scrap.tf", joined per read like the service's bankStock.newAtFor (0.7.1: a bank saved
+    // over a day ago marks nothing new).
     const diffs = stockDiffs(kp);
-    const newAt = bankStockNewAt(diffs);
+    const newAt = bankStockNewAt(diffs, t);
     // F19: where each row's scrap.tf button points, joined per read like the service's.
     const sightings = scraptfSeenByBase(diffs);
     const all = [...books.values(), ...extraBooks.values()].filter((b) => !/;p\d/.test(b.item.sku));
@@ -1043,7 +1112,8 @@ export function createMockBridge(opts: MockOptions = {}): MockBridge {
       seen.add(sku);
       if (i >= reached) return;
       const seenAt = sightings.get(sku) ?? null;
-      const row = mockMarketRow({ item: book.item, book, known: known.get(sku), rules, settings, keyScrap: kp, now: t, list: listRowFor(sku, kp), newAt: newAt.get(sku) ?? null, seen: seenAt, listedSince: listedSinceOf(sku, seenAt) });
+      const listed = listedOf(sku, seenAt);
+      const row = mockMarketRow({ item: book.item, book, known: known.get(sku), rules, settings, keyScrap: kp, now: t, list: listRowFor(sku, kp), newAt: newAt.get(sku) ?? null, seen: seenAt, listedSince: listed?.since ?? null, lastSeenAt: listed?.lastSeenAt ?? null });
       if (row) out.push(row);
     });
     // Prices for items the mock has no book for: shown with no buyers.
@@ -1051,15 +1121,19 @@ export function createMockBridge(opts: MockOptions = {}): MockBridge {
       if (seen.has(sku)) continue;
       const item = findCatalogItem(sku) ?? { sku, name: k.typed?.name ?? k.page?.name ?? sku, category: guessCategory(sku) };
       const seenAt = sightings.get(sku) ?? null;
-      const row = mockMarketRow({ item, book: null, known: k, rules, settings, keyScrap: kp, now: t, list: listRowFor(sku, kp), newAt: newAt.get(sku) ?? null, seen: seenAt, listedSince: listedSinceOf(sku, seenAt) });
+      const listed = listedOf(sku, seenAt);
+      const row = mockMarketRow({ item, book: null, known: k, rules, settings, keyScrap: kp, now: t, list: listRowFor(sku, kp), newAt: newAt.get(sku) ?? null, seen: seenAt, listedSince: listed?.since ?? null, lastSeenAt: listed?.lastSeenAt ?? null });
       if (row) out.push(row);
     }
     return out;
   }
 
-  /** F20, MarketRow.scraptfListedSince: the runs of the bank the row was seen on (ScraptfHistory.listedSinceFor). */
-  function listedSinceOf(sku: string, seen: ScraptfSeen | null): UnixMs | null {
-    return seen ? scraptfListedSinceOf(runsFor(seen.bank), sku) : null;
+  /**
+   * F20, MarketRow.scraptfListedSince: the runs of the bank the row was seen on (ScraptfHistory.listedFor);
+   * 0.7.1 (DM-5) with that run's newest sighting (scraptfLastSeenAt).
+   */
+  function listedOf(sku: string, seen: ScraptfSeen | null): ScraptfListed | null {
+    return seen ? scraptfListedOf(runsFor(seen.bank), sku) : null;
   }
 
   /**
@@ -1129,7 +1203,12 @@ export function createMockBridge(opts: MockOptions = {}): MockBridge {
 
   /** The same rule as the service (scraptfCoverage): a page counts for the bank page most of its items belong to. */
   function coverage(): ReturnType<typeof scraptfCoverage> {
-    return scraptfCoverage(batches, (id) => prices.filter((p) => p.source === 'import' && p.importBatch === id).map((p) => findCatalogItem(p.sku)?.category ?? guessCategory(p.sku)));
+    return scraptfCoverage(
+      batches,
+      (id) => prices.filter((p) => p.source === 'import' && p.importBatch === id).map((p) => findCatalogItem(p.sku)?.category ?? guessCategory(p.sku)),
+      null,
+      wholeLookOf,
+    );
   }
 
   // ---------------------------------------------------------------------------
@@ -1377,7 +1456,14 @@ export function createMockBridge(opts: MockOptions = {}): MockBridge {
   }
 
   function shoppingList(q: ShoppingQuery): ShoppingListResult {
-    return mockShoppingList([...opps.values()], q, settings.profit.useOrder, keyPrice(), now());
+    // ACT-9, as the service: the known price's age and stock, stale past profit.inputStaleMs.
+    const byId = new Map(prices.map((p) => [p.id, p]));
+    const stockOf = (o: Opportunity): number | null => {
+      if (!o.inputRef.startsWith('price:')) return null;
+      const stock = byId.get(Number(o.inputRef.slice('price:'.length)))?.stock;
+      return typeof stock === 'number' && Number.isFinite(stock) ? stock : null;
+    };
+    return mockShoppingList([...opps.values()], q, settings.profit.useOrder, keyPrice(), now(), { staleMs: settings.profit.inputStaleMs, stockOf });
   }
 
   /** Fake but deterministic ban lookup; needs the token and the network like the service, cached 1 h. */
@@ -1432,13 +1518,16 @@ export function createMockBridge(opts: MockOptions = {}): MockBridge {
       return { ...r, batchId, observedAt: at };
     });
     const outOfStock = listRows.filter((r) => r.batchId === batchId && r.stock === 0);
+    const allSkipped = outOfStock.map((r) => ({ reason: SKIP_OUT_OF_STOCK, title: r.name }));
     const result: ImportResult = {
       batchId,
       fileName,
       pageKind: 'items-list',
       parsed: listRows.length,
       stored: stored - outOfStock.length,
-      skipped: outOfStock.slice(0, 500).map((r) => ({ reason: 'out of stock on scrap.tf', title: r.name })),
+      skipped: allSkipped.slice(0, 500),
+      // P5, as the service: the true total and the count per reason, before the list is cut.
+      ...mockSkipTotals(allSkipped),
       warnings: ['Mock mode: the saved list is not parsed in the browser preview; the seeded list was re-dated.'],
       listRows: stored,
       bank: 'list',
@@ -1461,7 +1550,7 @@ export function createMockBridge(opts: MockOptions = {}): MockBridge {
     const t = now();
     const at = Number.isFinite(mtimeMs) && mtimeMs > 0 ? Math.min(Math.round(mtimeMs), t) : t;
     const batchId = batchSeq++;
-    const result: ImportResult = { batchId, fileName, pageKind: 'buy', bank: 'hats', parsed: 0, stored: 0, skipped: [], warnings: [`${NO_CARDS_SAVED}: ${NO_CARDS_SAVED_REASON}`] };
+    const result: ImportResult = { batchId, fileName, pageKind: 'buy', bank: 'hats', parsed: 0, stored: 0, skipped: [], ...mockSkipTotals([]), warnings: [`${NO_CARDS_SAVED}: ${NO_CARDS_SAVED_REASON}`] };
     batches.unshift({ id: batchId, fileName, pageKind: 'buy', fileMtime: at, importedAt: t, itemCount: 0, categories: {}, bank: 'hats' });
     pricesChanged();
     emit('import.done', result);
@@ -1573,6 +1662,12 @@ export function createMockBridge(opts: MockOptions = {}): MockBridge {
     itemsOn: (url) => {
       const bank = SCRAPTF_BANKS.find((b) => b.url === url)?.bank;
       return bank ? (stockSavesOf(bank)[0]?.rows.length ?? 0) : 0;
+    },
+    // 0.7.1 (UX-3): the toolbar's best flip is the bank stock page's top Flips row, as the service's topFlips[0].
+    bestFlipOn: (url) => {
+      const bank = SCRAPTF_BANKS.find((b) => b.url === url)?.bank;
+      const top = bank ? bankStockList({ bank, filter: 'flips', sort: 'profit', limit: 1 }).rows[0] : undefined;
+      return top && top.profitScrap !== null ? { sku: top.sku, name: top.name, profitScrap: top.profitScrap } : null;
     },
   });
 
@@ -1875,11 +1970,19 @@ export function createMockBridge(opts: MockOptions = {}): MockBridge {
       if (/items/i.test(fileName)) return importList(fileName, mtimeMs);
       // F18 S3 in the preview: a hats page "saved without its cards" (a name with "empty" or "no cards").
       if (/\b(empty|no[ -]?cards)\b/i.test(fileName)) return importWithoutCards(fileName, mtimeMs);
-      const result: ImportResult = { batchId: batchSeq++, fileName, pageKind: 'unknown', bank: null, parsed: 0, stored: 0, skipped: [], warnings: ['Mock mode: saved pages are not parsed in the browser preview.'] };
+      const result: ImportResult = { batchId: batchSeq++, fileName, pageKind: 'unknown', bank: null, parsed: 0, stored: 0, skipped: [], ...mockSkipTotals([]), warnings: ['Mock mode: saved pages are not parsed in the browser preview.'] };
       batches.unshift({ id: result.batchId, fileName, pageKind: 'unknown', fileMtime: mtimeMs, importedAt: now(), itemCount: 0, bank: null });
       return result;
     },
     'import.batches': (p) => batches.slice(0, Math.max(1, p?.limit ?? 20)),
+    // 0.7.1 (P4): the preview parses nothing, so it answers one fixed, whitelisted sample report.
+    'import.report': (p) => {
+      const n = p?.limit;
+      if (n !== undefined && (typeof n !== 'number' || !Number.isInteger(n) || n < 1 || n > IMPORT_REPORT_RING)) {
+        throw new Error(`Invalid parameters for import.report: limit: must be 1 to ${IMPORT_REPORT_RING}`);
+      }
+      return [mockImportReport(t0)].slice(0, n ?? IMPORT_REPORT_RING);
+    },
     'scraptf.listStatus': () => listStatus(),
     'scraptf.banks': () => banksResult(),
     'scraptf.bankStock': (q) => bankStockList(bankStockQuery(q, 'scraptf.bankStock')),
@@ -1899,7 +2002,7 @@ export function createMockBridge(opts: MockOptions = {}): MockBridge {
       return { evaluated: opps.size, ms: lastEngineMs ?? 1 };
     },
     'app.info': (): AppInfo => ({
-      version: '0.7.0',
+      version: '0.7.1',
       dataDir: 'C:\\Users\\you\\AppData\\Roaming\\TF2 Flip Desk',
       logDir: 'C:\\Users\\you\\AppData\\Roaming\\TF2 Flip Desk\\logs',
       platform: 'browser (mock)',
@@ -1936,6 +2039,13 @@ export function createMockBridge(opts: MockOptions = {}): MockBridge {
       if (typeof location !== 'undefined' && location.hash.startsWith('#/quick')) location.hash = '#/opportunities';
       // Let the dashboard mount before it is asked to open the drawer.
       setTimeout(() => emit('ui.openItem', { sku }), 50);
+      return { ok: true };
+    },
+    // 0.7.1: as main, a known bank and chip only; held until the dashboard subscribes, as the preload holds it.
+    'app.showBankStock': (p) => {
+      if (!SCRAPTF_BANK_IDS.includes(p?.bank)) throw new Error('Invalid parameters for app.showBankStock: bank: not a scrap.tf bank');
+      if (!BANK_STOCK_OPEN_FILTERS.includes(p.filter)) throw new Error('Invalid parameters for app.showBankStock: filter: must be flips or new');
+      emitHeld('ui.openBankStock', { bank: p.bank, filter: p.filter });
       return { ok: true };
     },
     'settings.get': () => settings,
@@ -2010,6 +2120,10 @@ export function createMockBridge(opts: MockOptions = {}): MockBridge {
           { reason: 'Item name not in the schema', title: 'Unknown Festive Thing' },
           { reason: 'No price found on the card', title: 'Brigade Helm' },
         ],
+        ...mockSkipTotals([
+          { reason: 'Item name not in the schema', title: 'Unknown Festive Thing' },
+          { reason: 'No price found on the card', title: 'Brigade Helm' },
+        ]),
         warnings: ['2 cards had unparsed attributes; they were skipped rather than guessed.'],
       };
       batches.unshift({ id: batchId, fileName: result.fileName, pageKind: 'buy', fileMtime: t - 30_000, importedAt: t, itemCount: picks.length, categories: countCategories(picks.map((c) => c.category)), bank: 'hats' });

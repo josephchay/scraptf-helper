@@ -9,11 +9,13 @@ import { z } from 'zod';
 import type { Logger } from '../service/contracts';
 import { CHECK_ARM_NAME_MAX, CHECK_PRICE_TEXT_MAX } from '../shared/check';
 import { decodeHtmlBuffer } from '../shared/htmlDecode';
+import { isScraptfBank } from '../shared/links';
 import { MAIN_METHODS, SERVICE_METHODS, type AppInfo, type HotkeysStatus, type PushContract, type RpcMethod } from '../shared/rpc';
 import { IMPORT_HTML_ORIGIN_REFUSAL, isAllowedWindowStart, SCRAPTF_WINDOW_OFF } from '../shared/scraptfWindowPolicy';
 import { validateSettingsPatch } from '../shared/settingsSchema';
 import { isValidSku } from '../shared/sku';
-import type { CheckArm, ScraptfWindowState, SecretName, SecretsStatus, Settings, UnixMs } from '../shared/types';
+import { BANK_STOCK_OPEN_FILTERS } from '../shared/types';
+import type { BankStockOpenFilter, CheckArm, ScraptfBank, ScraptfWindowState, SecretName, SecretsStatus, Settings, UnixMs } from '../shared/types';
 import { isHttpsUrl, isTrustedSenderUrl, MAX_IMPORT_BYTES, safeErrorMessage, sanitizeFileName } from './paths';
 import type { ScraptfWindowManager } from './scraptfWindow';
 import { MAX_SECRET_LENGTH, secretNameSchema } from './secrets';
@@ -39,6 +41,11 @@ export interface MainRpcDeps {
   showQuickEntry(sku?: string, price?: string): void;
   /** Shows the dashboard and sends it push 'ui.openItem'. */
   openItemInDashboard(sku: string): void;
+  /**
+   * 0.7.1 'app.showBankStock' (validated): shows the dashboard and sends it push 'ui.openBankStock'. Loads
+   * nothing in the scrap.tf window. Optional, so a router without it (tests) answers with a fixed refusal.
+   */
+  showBankStock?(bank: ScraptfBank, filter: BankStockOpenFilter): void;
   appInfo(): AppInfo;
   /** The current 'service.state' push (serviceStatePush of the host's status), for a page that loaded after it was sent. */
   serviceState(): PushContract['service.state'] | null;
@@ -114,6 +121,15 @@ const checkArmParams = z
     { error: 'expected { sku, name } or null' },
   )
   .nullable();
+// 0.7.1. Fixed messages only, as above: a failed call's message reaches main's debug log, so no issue
+// may quote the params.
+const showBankStockParams = z.object(
+  {
+    bank: z.custom<ScraptfBank>((v) => isScraptfBank(v), { error: 'not a scrap.tf bank' }),
+    filter: z.enum(BANK_STOCK_OPEN_FILTERS as unknown as [BankStockOpenFilter, ...BankStockOpenFilter[]], { error: 'must be flips or new' }),
+  },
+  { error: 'expected { bank, filter }' },
+);
 const saveTextParams = z.object({
   suggestedName: z.string().max(255),
   text: z.string().max(MAX_SAVE_TEXT_CHARS),
@@ -135,6 +151,8 @@ export const CHECK_TEXT_HINT_REFUSAL = 'Invalid parameters for check.text: hint:
 export { IMPORT_HTML_ORIGIN_REFUSAL };
 /** F21: a router built without the scrap.tf window (tests). */
 export const SCRAPTF_WINDOW_UNAVAILABLE = 'The scrap.tf window is not available.';
+/** 0.7.1: a router built without showBankStock (tests). */
+export const SHOW_BANK_STOCK_UNAVAILABLE = 'The dashboard is not available.';
 // F21. Fixed text: the URL is never quoted (a failed call's message reaches main's debug log).
 const START_REFUSAL = 'not a scrap.tf page the window opens';
 const windowStartUrl = z
@@ -147,8 +165,9 @@ const CLOSED_WINDOW: ScraptfWindowState = { open: false, url: null, canGoBack: f
 
 function hasWindowImportKeys(params: unknown): boolean {
   if (typeof params !== 'object' || params === null) return false;
-  const p = params as { address?: unknown; origin?: unknown };
-  return p.address !== undefined || p.origin !== undefined;
+  // 0.7.1: `settled` too, which only main's window read sets (a page could otherwise skip a stock save).
+  const p = params as { address?: unknown; origin?: unknown; settled?: unknown };
+  return p.address !== undefined || p.origin !== undefined || p.settled !== undefined;
 }
 
 function isManualCheck(params: unknown): boolean {
@@ -241,6 +260,12 @@ export function createRpcRouter(deps: MainRpcDeps): RpcRouter {
       case 'app.openItem': {
         const { sku } = parseParams(openItemParams, params, method);
         deps.openItemInDashboard(sku);
+        return { ok: true };
+      }
+      case 'app.showBankStock': {
+        const { bank, filter } = parseParams(showBankStockParams, params, method);
+        if (!deps.showBankStock) throw new Error(SHOW_BANK_STOCK_UNAVAILABLE);
+        deps.showBankStock(bank, filter);
         return { ok: true };
       }
       case 'settings.get':

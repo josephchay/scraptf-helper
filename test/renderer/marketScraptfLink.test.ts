@@ -2,7 +2,7 @@
 // the selected row) arms the Live check, copies the name and hands the item's static bank page to the
 // user's browser through links.open; while the market shows one bank, a header button opens that bank
 // page. Back: the price copied there comes back through the check hotkey or watcher (checkMarketLink.test.ts).
-// Only SCRAPTF_BANKS pages are ever opened, never a URL from a row; the app never visits scrap.tf (R1).
+// Only SCRAPTF_BANKS pages are ever opened, never a URL from a row; Flip Desk never loads scrap.tf on its own (R1).
 // The model is pure; the table and the page render with react-dom/client into domShim.ts against fakes
 // and the browser mock. No network.
 
@@ -66,14 +66,14 @@ describe("a row's scrap.tf button (U1)", () => {
   it('names the bank page a save listed it on, and how long ago', () => {
     const b = marketScraptfButton(row('378;6', { name: 'Team Captain', scraptfLink: scraptfLinkFor('hats', { bank: 'hats', at: T0 - 12 * MIN }) }), T0);
     expect(b).toMatchObject({ bank: 'hats', url: 'https://scrap.tf/buy/hats', path: 'scrap.tf/buy/hats', label: 'Hats', name: 'Team Captain', seen: true });
-    expect(b.title).toBe('Seen on scrap.tf/buy/hats in your save 12 min ago. Opens it and copies the name (o). The app never visits scrap.tf.');
+    expect(b.title).toBe('Seen on scrap.tf/buy/hats in your save 12 min ago. Opens it and copies the name (o). Flip Desk never loads scrap.tf on its own.');
     expect(b.ariaLabel).toBe('Hats: open scrap.tf/buy/hats in your browser and copy the name');
   });
 
   it("else its category's bank, which is not in the user's saves yet", () => {
     const b = marketScraptfButton(row('30001;6', { name: 'Taunt: Conga', category: 'taunts' }), T0);
     expect(b).toMatchObject({ bank: 'items', url: 'https://scrap.tf/buy/items', label: 'Items', seen: false });
-    expect(b.title).toBe("scrap.tf's Items bank (not in your saves yet). Opens it and copies the name (o). The app never visits scrap.tf.");
+    expect(b.title).toBe("scrap.tf's Items bank (not in your saves yet). Opens it and copies the name (o). Flip Desk never loads scrap.tf on its own.");
     expect(marketScraptfButton(row('1;5;u13', { category: 'unusuals' }), T0)).toMatchObject({ bank: 'unusuals', path: 'scrap.tf/unusuals', label: 'Unusuals' });
   });
 
@@ -130,7 +130,7 @@ describe('the one-bank header button (U2)', () => {
       bank: 'hats',
       url: 'https://scrap.tf/buy/hats',
       text: 'Open scrap.tf/buy/hats',
-      title: "Opens scrap.tf's Hats bank in your browser, to look for these items there. The app never visits scrap.tf.",
+      title: "Opens scrap.tf's Hats bank in your browser, to look for these items there. Flip Desk never loads scrap.tf on its own.",
       ariaLabel: 'Open scrap.tf/buy/hats in your browser',
     });
   });

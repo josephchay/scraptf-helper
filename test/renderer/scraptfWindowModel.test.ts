@@ -8,7 +8,16 @@ import { describe, expect, it } from 'vitest';
 import { DEFAULT_SETTINGS } from '../../src/shared/defaults';
 import { SCRAPTF_BANKS } from '../../src/shared/links';
 import { applySettingsPatch } from '../../src/shared/settingsSchema';
-import { READ_AUTO_MIN_GAP_MS, READ_SETTLE_MS, SCRAPTF_READ_REASONS, SCRAPTF_WINDOW_NEEDS_ACK, SCRAPTF_WINDOW_NEEDS_IMPORT, isAllowedWindowStart } from '../../src/shared/scraptfWindowPolicy';
+import {
+  READ_AUTO_MIN_GAP_MS,
+  READ_SETTLE_MS,
+  SCRAPTF_NOT_READ_AGAIN,
+  SCRAPTF_READ_REASONS,
+  SCRAPTF_WINDOW_NEEDS_ACK,
+  SCRAPTF_WINDOW_NEEDS_IMPORT,
+  SCRAPTF_WINDOW_NOTICES,
+  isAllowedWindowStart,
+} from '../../src/shared/scraptfWindowPolicy';
 import { importBankText } from '../../src/renderer/banksModel';
 import type { ScraptfWindowRead, Settings } from '../../src/shared/types';
 import {
@@ -19,6 +28,7 @@ import {
   barFocusMove,
   barShortcut,
   bankWindowView,
+  bestFlipTitle,
   importOriginView,
   OPEN_IN_WINDOW_LABEL,
   readButtonView,
@@ -33,14 +43,17 @@ import {
   SCRAPTF_WINDOW_NEVER,
   SCRAPTF_WINDOW_READ_HINT,
   SCRAPTF_WINDOW_ORIGIN_LABEL,
+  SCRAPTF_WINDOW_PARTITION_NOTE,
   SCRAPTF_WINDOW_RISK,
   SCRAPTF_WINDOW_RISK_PILL,
   SCRAPTF_WINDOW_RISK_TEXT,
   SCRAPTF_WINDOW_RISK_TIP,
   scraptfLinksInWindow,
   scraptfWindowOn,
+  showFlipsView,
   windowAckText,
   windowEnableView,
+  windowNoticeText,
   windowOpenFailedText,
   windowOpenTitle,
   windowRefusalText,
@@ -115,24 +128,43 @@ describe('the risk, in scrap.tf\'s own words', () => {
     // A read follows the page's own reloads and replaceState too, which the app cannot tell from a click.
     expect(r3).not.toContain('only after a load the user made');
     expect(r3).toContain("what the page's own scripts do");
-    expect(r3).toContain("Cloudflare's challenge frame are never read; a check page served at a scrap.tf address is read and imports nothing");
+    // 0.7.1 (F21-3, F21-4): only pages the import reads, and a check or error page is read only on Read page now.
+    expect(r3).not.toContain('a check page served at a scrap.tf address is read and imports nothing');
+    expect(r3).toContain('`scraptfImportablePath`');
+    expect(r3).toContain(
+      "Cloudflare's challenge frame are never read; a check or error page served at a scrap.tf address (HTTP 403, 429 or 503), and Chromium's error page after a failed load, is not read when it loads, only on Read page now, and imports nothing",
+    );
     const about = root('src/renderer/pages/AboutPage.tsx');
     expect(about).not.toContain('injecting anything into websites.');
     expect(about).toContain("nothing of the app's runs in any website, with one exception: the opt-in scrap.tf window.");
   });
 
-  it('says a read follows the page as well as the user, and that a check page at a scrap.tf address is read', () => {
+  it('says a read follows the page as well as the user, only on pages it imports, and never on load of a check page', () => {
     // Main cannot tell the user's click from scrap.tf's own reload or replaceState: both start a read.
     expect(SCRAPTF_WINDOW_READ_HINT).toContain('whether it comes from your click or from the page itself');
     expect(SCRAPTF_WINDOW_READ_HINT).not.toContain('each scrap.tf page you open');
-    expect(SCRAPTF_WINDOW_READ_HINT).toContain("Cloudflare's check frame are never read; a check page shown at a scrap.tf address is read but imports nothing.");
+    // 0.7.1 (F21-3, F21-4): a challenge, error or rate-limit page is not read on load, nor a page nothing imports from.
+    expect(SCRAPTF_WINDOW_READ_HINT).toContain("Cloudflare's check frame are never read; a check or error page shown at a scrap.tf address is not read when it loads, and imports nothing if you read it.");
+    expect(SCRAPTF_WINDOW_READ_HINT).toContain('Only pages Flip Desk imports are read: the bank pages, the unusual pages and scrap.tf/items, not the front page, raffles or settings.');
+    expect(SCRAPTF_WINDOW_READ_HINT).not.toContain('is read but imports nothing');
     expect(SCRAPTF_WINDOW_READ_HINT).toContain('sends nothing');
     expect(SCRAPTF_WINDOW_DOES.join(' ')).not.toContain('scrap.tf page you opened');
+    expect(SCRAPTF_WINDOW_DOES[1]).toMatch(/^When a scrap\.tf page Flip Desk imports \(a bank page, the unusual pages, scrap\.tf\/items\) finishes loading/);
   });
 
   it("names exactly the opens that use the window, and keeps every other link in the browser", () => {
-    expect(SCRAPTF_WINDOW_LINKS_HINT).toContain("The Live market's scrap.tf button and bank link, Open on scrap.tf in the item drawer and the row menu, and the scrap.tf banks cards");
-    expect(SCRAPTF_WINDOW_LINKS_HINT).toContain('Every other link still opens in your browser, the Bank stock page and the scrap.tf/items card included.');
+    // 0.7.1 (F21-9): the Bank stock page's Open follows the setting too.
+    expect(SCRAPTF_WINDOW_LINKS_HINT).toContain(
+      "The Live market's scrap.tf button and bank link, Open on scrap.tf in the item drawer and the row menu, the scrap.tf banks cards and the Bank stock page's Open open their scrap.tf page here",
+    );
+    expect(SCRAPTF_WINDOW_LINKS_HINT).toMatch(/Every other link still opens in your browser\.$/);
+    expect(SCRAPTF_WINDOW_LINKS_HINT).not.toContain('the Bank stock page and the scrap.tf/items card included');
+  });
+
+  it('says a "Stay signed in" change waits for the window to be reopened (F21-6)', () => {
+    expect(SCRAPTF_WINDOW_KEEP_HINT).toMatch(/A change applies once you close the scrap\.tf window and open it again; you sign in to scrap\.tf again then\.$/);
+    expect(SCRAPTF_WINDOW_KEEP_HINT).not.toContain('the next time the window opens');
+    expect(SCRAPTF_WINDOW_PARTITION_NOTE).toBe('Stay signed in changes when you close and reopen this window; you will sign in to scrap.tf again then.');
   });
 });
 
@@ -277,6 +309,104 @@ describe('the toolbar', () => {
     expect(readStatusView(null, T0).title).toBe('scrap.tf pages are read when they finish loading in the window.');
     expect(readStatusView(null, T0, false).title).toMatch(/^Reading on load is off: press Read page now/);
     expect(readStatusText(null, T0)).toBe('Not read yet');
+  });
+});
+
+describe('the toolbar, 0.7.1 (UX-3, ACT-5, F21-2, F21-3, F21-4, F21-10)', () => {
+  const read: ScraptfWindowRead = { at: T0 - 3_000, path: '/buy/hats', items: 48, bank: 'hats', newFlips: 2, warning: null };
+
+  it('says how many prices it stored, the flips on the page and the best one', () => {
+    const full: ScraptfWindowRead = { ...read, stored: 46, pageFlips: 10, bestFlip: { sku: '378;6', name: 'Team Captain', profitScrap: 4 } };
+    expect(readStatusText(full, T0)).toBe('Read 48 items from /buy/hats · stored 46 · 10 flips (2 new) · best Team Captain +0.44 ref · just now');
+    const v = readStatusView(full, T0);
+    expect(v).toMatchObject({ tone: 'good', lead: 'Read 48 items from /buy/hats · stored 46 · 10 flips (2 new)', best: { sku: '378;6', name: 'Team Captain', profit: '+0.44 ref' }, tail: '' });
+    expect(`${v.lead} · best ${v.best!.name} ${v.best!.profit}${v.tail}`).toBe(v.main);
+    expect(v.title).toContain('46 stored as prices. 10 flips on sale on this page now, 2 of them new since your previous save. Best: Team Captain, +0.44 ref profit.');
+    expect(bestFlipTitle(v.best!)).toBe("Opens Team Captain in the dashboard (+0.44 ref profit at scrap.tf's price on this page).");
+    // Every price stored: no "stored" part (the tooltip still says it); one flip, none new; no best.
+    expect(readStatusText({ ...read, newFlips: 0, stored: 48, pageFlips: 1, bestFlip: null }, T0)).toBe('Read 48 items from /buy/hats · 1 flip · just now');
+    expect(readStatusView({ ...read, newFlips: 0, stored: 48, pageFlips: 1 }, T0).title).toContain('48 stored as prices. 1 flip on sale on this page now.');
+    // None stored (a newer save had them all) is said; flips on the page that main does not report: as before.
+    expect(readStatusText({ ...read, stored: 0 }, T0)).toBe('Read 48 items from /buy/hats · stored 0 · 2 new flips · just now');
+    expect(readStatusText({ ...read, newFlips: 0, pageFlips: 0, bestFlip: null }, T0)).toBe('Read 48 items from /buy/hats · just now');
+    expect(readStatusView({ ...read, newFlips: 0, pageFlips: 0 }, T0).tone).toBeNull();
+    // A warning goes after the best flip, and colours the line.
+    const warned = readStatusView({ ...full, warning: 'no-sku: 3 48' }, T0);
+    expect(warned.main).toBe('Read 48 items from /buy/hats · stored 46 · 10 flips (2 new) · best Team Captain +0.44 ref · 3 of 48 items not recognised');
+    expect(warned).toMatchObject({ tone: 'warn', tail: ' · 3 of 48 items not recognised' });
+  });
+
+  it('offers Show flips once a read found flips on a bank page, always on the Flips chip', () => {
+    expect(showFlipsView(null)).toBeNull();
+    expect(showFlipsView({ ...read, newFlips: 0 })).toBeNull();
+    expect(showFlipsView({ ...read, newFlips: 0, pageFlips: 0 })).toBeNull();
+    expect(showFlipsView({ ...read, bank: null, pageFlips: 10 })).toBeNull();
+    // UX-071-2: new flips too land on Flips, which lists every flip on sale with its New badge. The New chip
+    // counts new since the session's baseline and holds non-flips, so it could hold none of the 2 counted.
+    expect(showFlipsView({ ...read, pageFlips: 10 })).toEqual({
+      bank: 'hats',
+      filter: 'flips',
+      label: 'Show flips',
+      title: "Shows Hats in the dashboard's Bank stock, on Flips: 10 flips on sale on this page (2 new since your previous read). Nothing is loaded in this window.",
+    });
+    expect(showFlipsView({ ...read, newFlips: 0, pageFlips: 10 })).toMatchObject({ bank: 'hats', filter: 'flips' });
+    expect(showFlipsView({ ...read, newFlips: 0, pageFlips: 1 })!.title).toContain('on Flips: 1 flip on sale on this page.');
+    // An older main (no pageFlips) with new flips still offers it, counting those.
+    expect(showFlipsView(read)).toMatchObject({ filter: 'flips' });
+    expect(showFlipsView(read)!.title).toContain('on Flips: 2 flips on sale on this page (2 new since your previous read).');
+    expect(showFlipsView({ ...read, bank: 'list', newFlips: 0, pageFlips: 3 })).toMatchObject({ bank: 'list', filter: 'flips' });
+  });
+
+  it('words the import codes main picks for a page on screen, with their counts as digits only', () => {
+    expect(readWarningText('partial-read: 3 48')).toBe('only 3 of ~48 items were on screen, so no stock save: Read page now once every card shows');
+    expect(readWarningText('partial-read')).toBe('only part of the page was on screen, so no stock save: Read page now once every card shows');
+    expect(readWarningText('layout-changed')).toBe("scrap.tf changed this page's layout: its items could not be read");
+    expect(readWarningText('no-stock-limit: 5')).toBe('stock unreadable for 5 rows, so no stock save');
+    expect(readWarningText('no-stock-limit: 1')).toBe('stock unreadable for 1 row, so no stock save');
+    expect(readWarningText('no-sku: 2 48')).toBe('2 of 48 items not recognised');
+    expect(readWarningText('no-sku: <b>x</b>')).toBe('some items not recognised');
+    expect(readWarningText('no-price-column')).toBe('no "Price to buy" column found, so no prices were read');
+    expect(readWarningText('unknown-bank')).toBe('not a scrap.tf bank page Flip Desk knows');
+    expect(readWarningText('no-pays-column')).toBe('no "Price we pay" column found, so what scrap.tf pays was not read');
+    // A page not read again within the gap: its last read, and how to read it again, without a warning tone.
+    const again = readStatusView({ ...read, warning: SCRAPTF_NOT_READ_AGAIN }, T0);
+    expect(again.main).toBe('Read 48 items from /buy/hats · 2 new flips · Read page now to read it again');
+    expect(again.tone).toBe('good');
+    expect(readStatusView({ ...read, newFlips: 0, warning: SCRAPTF_NOT_READ_AGAIN }, T0).tone).toBeNull();
+  });
+
+  it("says a read was refused while item data loads, and a challenge page's read that found nothing, as failed reads", () => {
+    const failed = (warning: string) => ({ ...read, items: 0, newFlips: 0, bank: null, warning });
+    expect(readStatusText(failed(SCRAPTF_READ_REASONS.schemaLoading), T0)).toBe('Could not read /buy/hats · item data is still loading; press Read page now in a moment · just now');
+    expect(readStatusText({ ...failed(SCRAPTF_WINDOW_NOTICES.challenge), bank: 'hats' }, T0)).toBe(
+      'Could not read /buy/hats · a Cloudflare check or error page is on screen: solve it in the page · just now',
+    );
+    expect(readStatusText(failed(SCRAPTF_WINDOW_NOTICES.rateLimited), T0)).toBe(
+      'Could not read /buy/hats · scrap.tf is rate-limiting this window: wait a minute before reloading · just now',
+    );
+    expect(readStatusView(failed(SCRAPTF_READ_REASONS.schemaLoading), T0)).toMatchObject({ tone: 'warn', best: null });
+    // Read page now on Chromium's error page after a failed load: worded by the load's notice, never "Read 0 items".
+    expect(readStatusText({ ...failed(SCRAPTF_WINDOW_NOTICES.offline), bank: 'hats' }, T0)).toBe('Could not read /buy/hats · scrap.tf could not be reached: press Reload · just now');
+    for (const n of [SCRAPTF_WINDOW_NOTICES.insecure, SCRAPTF_WINDOW_NOTICES.badResponse, SCRAPTF_WINDOW_NOTICES.loadFailed]) {
+      expect(readStatusText(failed(n), T0)).toMatch(/^Could not read \/buy\/hats · .+: press Reload · just now$/);
+    }
+  });
+
+  it('disables Read page now on a scrap.tf page the import cannot read, and shows main notices as sent', () => {
+    expect(readButtonView('https://scrap.tf/raffles', false, false)).toEqual({
+      disabled: true,
+      label: 'Read page now',
+      title: 'Nothing to import on this page. Flip Desk reads bank pages, the unusual pages and scrap.tf/items.',
+    });
+    expect(readButtonView(HATS, false, true).disabled).toBe(false);
+    // An older main sends no importable: as before.
+    expect(readButtonView('https://scrap.tf/raffles', false).disabled).toBe(false);
+    expect(readButtonView('https://steamcommunity.com/login/home', false, false).title).toBe(SCRAPTF_READ_REASONS.notScraptf);
+    expect(windowNoticeText(SCRAPTF_WINDOW_NOTICES.challenge)).toBe(SCRAPTF_WINDOW_NOTICES.challenge);
+    expect(windowNoticeText('  ')).toBeNull();
+    expect(windowNoticeText(null)).toBeNull();
+    expect(windowNoticeText(undefined)).toBeNull();
+    expect(windowNoticeText('x'.repeat(500))!.length).toBeLessThanOrEqual(200);
   });
 });
 

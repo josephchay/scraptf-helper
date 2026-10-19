@@ -574,9 +574,10 @@ describe("the Live market's scrap.tf link opens only static pages (F19, R1)", ()
     const arming = urlOpens(FILES.filter((f) => f.rel.startsWith('renderer/')), 'openOnScraptf');
     expect(arming.map((o) => o.at.split(':')[0]).sort()).toEqual(['renderer/components/ItemMenu.tsx', 'renderer/pages/ItemDrawer.tsx', 'renderer/pages/MarketPage.tsx']);
     expect(nonStaticScraptfOpens(FILES.filter((f) => f.rel.startsWith('renderer/')))).toEqual([]);
-    // The plain opens these files make of a scrap.tf page: the header's bank, the drawer's list and bank page.
+    // The plain opens these files make of a scrap.tf page: the header's bank and the drawer's list (0.7.1, UX-11:
+    // the drawer's second "Open bank page" is gone; its header opener covers the bank).
     const plain = urlOpens(scoped(), 'openOrCopy|openLink').filter((o) => LOOKS_SCRAPTF.test(o.url) || LOOKS_SCRAPTF.test(o.trace.via));
-    expect(plain.map((o) => o.url).sort()).toEqual(['SCRAPTF_ITEMS_URL', 'bankLink.url', 'bankPage']);
+    expect(plain.map((o) => o.url).sort()).toEqual(['SCRAPTF_ITEMS_URL', 'bankLink.url']);
     expect(nonStaticScraptfOpens(scoped())).toEqual([]);
     // They reach main only through links.open's two helpers, never a 'links.open' call of their own.
     expect(offenders(/['"]links\.open['"]/, (r) => !SCRAPTF_OPEN_FILES.includes(r))).toEqual([]);
@@ -826,7 +827,7 @@ describe('scrap.tf history and re-save reminders send nothing and open only stat
     // There is one: the re-save reminder's, so the scan has something to see.
     const shared = FILES.find((f) => f.rel === 'shared/scraptfHistory.ts')!.code;
     const notice = shared.slice(shared.indexOf('function scraptfResaveNotice'));
-    expect(notice).toMatch(/^function scraptfResaveNotice\(bank: ScraptfBank,[^]*?const info = scraptfBankInfo\(bank\);[^]*?openUrl: info\.url,/);
+    expect(notice).toMatch(/^function scraptfResaveNotice\(\s*bank: ScraptfBank,[^]*?const info = scraptfBankInfo\(bank\);[^]*?openUrl: info\.url,/);
   });
 
   it('opens a notification link only after the click-time check, and only in the user browser', () => {
@@ -1074,17 +1075,70 @@ function windowNavigationProblems(f: SourceFile): string[] {
     if (deferred(m.index)) out.push(`${where}: userNavigate called in a deferred callback`);
   }
   // A user action reaches userNavigate too, so it may be called only by another user action (home and go
-  // open a closed window), never from a listener, a promise callback or any other function.
+  // open a closed window), never from a listener, a promise callback or any other function. The one other
+  // caller is pressKey (F21-11), and only of Back, Forward, Reload and Home (windowKeyProblems holds it).
   for (const m of f.code.matchAll(USER_ACTION_CALL)) {
     if (/function\s+$/.test(f.code.slice(Math.max(0, m.index - 12), m.index))) continue;
     if (isSignature(f.code, m.index + m[0].length - 1)) continue;
     const fn = enclosing(fns, m.index);
     const where = `${f.rel}:${lineAt(f.code, m.index)}: ${m[1]}()`;
     if (deferred(m.index)) out.push(`${where} called in a deferred callback`);
+    else if (fn?.name === KEY_ACTION && KEY_MOVES.has(m[1]!)) continue;
     else if (fn === null || !USER_ACTIONS.includes(fn.name)) out.push(`${where} called from ${fn?.name ?? 'the top level'}`);
   }
   const body = functionBody(f.code, 'userNavigate');
   if (body !== null && /\.\s*loadURL\s*\(/.test(body) && !/\bisAllowedWindowStart\s*\(/.test(body)) out.push('userNavigate loads a URL without isAllowedWindowStart');
+  return out;
+}
+
+/**
+ * F21-11: the user's own keys and mouse buttons in the window. pressKey is the one function besides the user
+ * actions that may call one, and only Back, Forward, Reload or Home. It may be called only from exactly two
+ * listeners, of the input Chromium and Windows raise for the user alone: the view's before-input-event, after
+ * windowKeyAction(input) chose the key and event.preventDefault() kept it from the page, and the window's
+ * app-command, after appCommandAction(command). Nowhere else: no other listener, function, timer or callback.
+ */
+const KEY_ACTION = 'pressKey';
+const KEY_MOVES: ReadonlySet<string> = new Set(['back', 'forward', 'reload', 'home']);
+// The initialiser is pinned whole, with only the current-window guard around the check: a fallback such as
+// `windowKeyAction(input) ?? 'reload'` would act on every key down, key up and auto-repeat in the page.
+const KEY_LISTENERS: readonly { event: string; handler: RegExp }[] = [
+  {
+    event: 'before-input-event',
+    handler: /^\(\s*event\s*,\s*input\s*\)\s*=>[^]*\bconst\s+action\s*=\s*(?:isCurrent\(\s*wc\s*\)\s*\?\s*)?windowKeyAction\(\s*input\s*\)(?:\s*:\s*null)?\s*;[^]*\bevent\.preventDefault\(\)[^]*\bpressKey\(\s*action\s*\)/,
+  },
+  {
+    event: 'app-command',
+    handler: /^\(\s*_event\s*,\s*command\s*\)\s*=>[^]*\bconst\s+action\s*=\s*(?:win\s*===\s*w\s*\?\s*)?appCommandAction\(\s*command\s*\)(?:\s*:\s*null)?\s*;[^]*\bpressKey\(\s*action\s*\)/,
+  },
+];
+
+function windowKeyProblems(f: SourceFile): string[] {
+  const out: string[] = [];
+  const later = deferredSpans(f.code);
+  const calls = new Map<string, number>();
+  for (const m of f.code.matchAll(/(?<![\w$.])pressKey\s*\(/g)) {
+    if (/function\s+$/.test(f.code.slice(Math.max(0, m.index - 12), m.index))) continue;
+    if (isSignature(f.code, m.index + m[0].length - 1)) continue;
+    const where = `${f.rel}:${lineAt(f.code, m.index)}: pressKey()`;
+    // The innermost deferred call holding it must be one of the two listeners (a timer inside one is not).
+    let span: Span | null = null;
+    for (const s of later) if (m.index > s.start && m.index < s.end && (span === null || s.start > span.start)) span = s;
+    const [event = '', handler = '', ...rest] = span === null ? [] : topLevelArgs(f.code.slice(span.start + 1, span.end));
+    const rule = span !== null && /^\.\s*on\s*\($/.test(span.name) && rest.length === 0 ? KEY_LISTENERS.find((k) => event === `'${k.event}'`) : undefined;
+    // The key it acts on is the one the check chose: `action` is assigned once.
+    if (rule === undefined || !rule.handler.test(handler) || [...handler.matchAll(/\baction\s*=(?![=>])/g)].length !== 1) {
+      out.push(`${where} outside the two input listeners`);
+      continue;
+    }
+    calls.set(rule.event, (calls.get(rule.event) ?? 0) + 1);
+  }
+  for (const [event, n] of calls) if (n > 1) out.push(`${n} ${event} listeners call pressKey (one allowed)`);
+  const body = functionBody(f.code, KEY_ACTION);
+  if (body !== null) {
+    if (new RegExp(NAV_CALL.source).test(body) || /\buserNavigate\s*\(/.test(body)) out.push('pressKey loads or steps the view itself');
+    for (const m of body.matchAll(USER_ACTION_CALL)) if (!KEY_MOVES.has(m[1]!)) out.push(`pressKey calls ${m[1]}()`);
+  }
   return out;
 }
 
@@ -1184,14 +1238,33 @@ function windowViewProblems(f: SourceFile): string[] {
   return out;
 }
 
-/** Dashboard lines that move or read the window outside a click: in an effect, a push listener or a timer. */
+/** Dashboard lines that move, read or clear the window outside a click: in an effect, a push listener or a timer. */
 function deferredWindowCalls(files: readonly SourceFile[]): string[] {
   const out: string[] = [];
   for (const f of files) {
     const later = deferredSpans(f.code);
-    for (const m of f.code.matchAll(/'scraptfWindow\.(?:open|back|forward|reload|home|go|read)'/g)) {
+    for (const m of f.code.matchAll(/'scraptfWindow\.(?:open|back|forward|reload|home|go|read|clear)'/g)) {
       // A push name ('scraptfWindow.read' is a push too) only subscribes; it calls nothing.
       if (/(?:usePush|(?<![\w$.])on)\s*\(\s*$/.test(f.code.slice(Math.max(0, m.index - 12), m.index))) continue;
+      if (later.some((s) => m.index > s.start && m.index < s.end)) out.push(`${f.rel}:${lineAt(f.code, m.index)}: ${m[0]}`);
+    }
+  }
+  return out;
+}
+
+/**
+ * 0.7.1 (F21-8): what else opens the window or shows the dashboard from a page: an open worded for the window
+ * (an `allowWindow` key, openOrCopy and openLink included), openOnScraptf (it always asks for the window) and
+ * the toolbar's Show flips ('app.showBankStock'). Each sits in a click or key handler, never in an effect, a
+ * push listener, a timer or a promise callback.
+ */
+const DEFERRED_WINDOW_OPEN = /\ballowWindow\b|(?<![\w$.])openOnScraptf\s*\(|'app\.showBankStock'/g;
+
+function deferredWindowOpens(files: readonly SourceFile[]): string[] {
+  const out: string[] = [];
+  for (const f of files) {
+    const later = deferredSpans(f.code);
+    for (const m of f.code.matchAll(DEFERRED_WINDOW_OPEN)) {
       if (later.some((s) => m.index > s.start && m.index < s.end)) out.push(`${f.rel}:${lineAt(f.code, m.index)}: ${m[0]}`);
     }
   }
@@ -1254,6 +1327,10 @@ describe('the scrap.tf window loads only what the user asks for and reads only t
   it('moves the view only from the user actions, never from a timer, an event or a promise callback', () => {
     expect(windowNavigationProblems(win())).toEqual([]);
     expect(windowTimerProblems(win())).toEqual([]);
+    // F21-11: the user's own keys and mouse buttons, through exactly the two input listeners.
+    expect(windowKeyProblems(win())).toEqual([]);
+    expect([...win().code.matchAll(/\.on\('before-input-event',/g)]).toHaveLength(1);
+    expect([...win().code.matchAll(/\.on\('app-command',/g)]).toHaveLength(1);
     // Nor from main's own code: the tray action and the router are clicks, nothing else calls the window.
     expect(mainWindowCallProblems(FILES)).toEqual([]);
     expect(FILES.some((f) => f.rel === 'main/main.ts' && /rt\.scraptfWindow\?\.open\(\)/.test(f.code))).toBe(true);
@@ -1291,7 +1368,13 @@ describe('the scrap.tf window loads only what the user asks for and reads only t
   });
 
   it('moves the window from the dashboard only on a click: never in an effect, a push listener or a timer', () => {
-    expect(deferredWindowCalls(FILES.filter((f) => f.rel.startsWith('renderer/') && !f.rel.startsWith('renderer/mock')))).toEqual([]);
+    const dashboard = FILES.filter((f) => f.rel.startsWith('renderer/') && !f.rel.startsWith('renderer/mock'));
+    expect(deferredWindowCalls(dashboard)).toEqual([]);
+    // 0.7.1 (F21-8): nor an open worded for the window, openOnScraptf or Show flips.
+    expect(deferredWindowOpens(dashboard)).toEqual([]);
+    // The scans see the real calls they hold to that.
+    expect(dashboard.some((f) => /\ballowWindow\b/.test(f.code))).toBe(true);
+    expect(dashboard.some((f) => /'app\.showBankStock'/.test(f.code))).toBe(true);
   });
 
   it('catches what it claims to', () => {
@@ -1338,6 +1421,56 @@ describe('the scrap.tf window loads only what the user asks for and reads only t
       'main/scraptfWindow.ts:3: home() called in a deferred callback',
       'main/scraptfWindow.ts:4: go() called from startAutoRead',
     ]);
+    // F21-11: pressKey moves the view only from the two input listeners, after their checks, and only by Back,
+    // Forward, Reload or Home. Any other listener, a listener without the check, a timer inside the listener,
+    // another function: flagged.
+    const keys = w(
+      [
+        'function pressKey(action) { if (action === "back") back(); else if (action === "forward") forward(); else if (action === "reload") reload(); else home(); }',
+        "wc.on('before-input-event', (event, input) => { const action = isCurrent(wc) ? windowKeyAction(input) : null; if (action === null) return; event.preventDefault(); pressKey(action); });",
+        "w.on('app-command', (_event, command) => { const action = appCommandAction(command); if (action !== null) pressKey(action); });",
+        "wc.on('did-finish-load', () => pressKey('reload'));",
+        "wc.on('before-input-event', (event, input) => { event.preventDefault(); pressKey('reload'); });",
+        "function readPage() { pressKey('back'); }",
+        "wc.on('before-input-event', (event, input) => { const action = windowKeyAction(input); if (action !== null) { event.preventDefault(); timers.setTimeout(() => pressKey(action), 10); } });",
+        "wc.on('before-input-event', (event, input) => { let action = windowKeyAction(input); event.preventDefault(); action = 'reload'; pressKey(action); });",
+        'pressKey("home");',
+        // BND-1: anything but the check's own choice in the initialiser acts when the check chose nothing
+        // (every key down, key up and auto-repeat), or acts on a key of its own.
+        "wc.on('before-input-event', (event, input) => { const action = windowKeyAction(input) ?? 'reload'; event.preventDefault(); pressKey(action); });",
+        "w.on('app-command', (_event, command) => { const action = appCommandAction(command) || 'back'; pressKey(action); });",
+        "wc.on('before-input-event', (event, input) => { const action = 'reload' || windowKeyAction(input); event.preventDefault(); pressKey(action); });",
+        "wc.on('before-input-event', (event, input) => { const action = windowKeyAction(input) ? 'reload' : null; if (action === null) return; event.preventDefault(); pressKey(action); });",
+      ].join('\n'),
+    );
+    expect(windowKeyProblems(keys)).toEqual([
+      'main/scraptfWindow.ts:4: pressKey() outside the two input listeners',
+      'main/scraptfWindow.ts:5: pressKey() outside the two input listeners',
+      'main/scraptfWindow.ts:6: pressKey() outside the two input listeners',
+      'main/scraptfWindow.ts:7: pressKey() outside the two input listeners',
+      'main/scraptfWindow.ts:8: pressKey() outside the two input listeners',
+      'main/scraptfWindow.ts:9: pressKey() outside the two input listeners',
+      'main/scraptfWindow.ts:10: pressKey() outside the two input listeners',
+      'main/scraptfWindow.ts:11: pressKey() outside the two input listeners',
+      'main/scraptfWindow.ts:12: pressKey() outside the two input listeners',
+      'main/scraptfWindow.ts:13: pressKey() outside the two input listeners',
+    ]);
+    // Its own moves are allowed to it alone; anything more is not.
+    expect(windowNavigationProblems(keys)).toEqual([]);
+    const greedy = w('function pressKey(action) { if (action === "back") back(); else go(SCRAPTF_HOME_URL); clear(); wc.reload(); }');
+    expect(windowKeyProblems(greedy)).toEqual(['pressKey loads or steps the view itself', 'pressKey calls go()', 'pressKey calls clear()']);
+    expect(windowNavigationProblems(greedy)).toEqual([
+      'main/scraptfWindow.ts:1: .reload( outside userNavigate',
+      'main/scraptfWindow.ts:1: go() called from pressKey',
+      'main/scraptfWindow.ts:1: clear() called from pressKey',
+    ]);
+    const twice = w(
+      [
+        "wc.on('before-input-event', (event, input) => { const action = windowKeyAction(input); if (action === null) return; event.preventDefault(); pressKey(action); });",
+        "v.on('before-input-event', (event, input) => { const action = windowKeyAction(input); if (action === null) return; event.preventDefault(); pressKey(action); });",
+      ].join('\n'),
+    );
+    expect(windowKeyProblems(twice)).toEqual(['2 before-input-event listeners call pressKey (one allowed)']);
     // In main's other files: the tray action and the router's cases are clicks; a timer, a listener, a
     // subscription or a promise callback is not.
     const mainCalls = [
@@ -1456,8 +1589,26 @@ describe('the scrap.tf window loads only what the user asks for and reads only t
         "setInterval(() => rpc('scraptfWindow.go', { url }), 5000);",
         "rpc('scraptfWindow.state').then(() => rpc('scraptfWindow.home'));",
         "usePush('scraptfWindow.read', (r) => setRead(r));",
+        "const id = setTimeout(() => void rpc('scraptfWindow.clear'), 5000);",
+        "onConfirm={() => rpc('scraptfWindow.clear').then(() => setRead(null))}",
       ].join('\n'),
     );
-    expect(deferredWindowCalls([page]).map((h) => h.split(':')[1])).toEqual(['1', '2', '4', '5']);
+    expect(deferredWindowCalls([page]).map((h) => h.split(':')[1])).toEqual(['1', '2', '4', '5', '7']);
+    // 0.7.1 (F21-8): an open worded for the window, openOnScraptf and Show flips, from a click only.
+    const opens = sourceFile(
+      'renderer/pages/BanksPage.tsx',
+      [
+        'useEffect(() => { void openOrCopy(url, toast, { allowWindow: true }); }, [url]);',
+        "usePush('scraptf.changed', () => void openOnScraptf(url, name, toast, arm));",
+        "rpc('scraptf.bankStock', q).then(() => rpc('app.showBankStock', { bank, filter: 'new' }));",
+        'setTimeout(() => void openLink(url, { allowWindow: true }), 100);',
+        'onOpenBank={(c) => void openOrCopy(c.url, toast, { allowWindow: true })}',
+        "onClick={() => void rpc('app.showBankStock', { bank, filter: 'flips' })}",
+        'onClick={() => void openOnScraptf(url, name, toast, arm)}',
+        'useEffect(() => { void openOrCopy(url, toast); }, [url]);',
+        "usePush('ui.openBankStock', (p) => navigate(p.bank));",
+      ].join('\n'),
+    );
+    expect(deferredWindowOpens([opens]).map((h) => h.split(':')[1])).toEqual(['1', '2', '3', '4']);
   });
 });

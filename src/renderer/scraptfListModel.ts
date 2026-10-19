@@ -5,11 +5,13 @@
 // it is handed.
 //
 // The list is only ever what the user saved from scrap.tf/items with their own
-// browser into the watch folder (R10). Nothing here, or anywhere in the app,
-// fetches scrap.tf (R1): its address is only handed to links.open.
+// browser into the watch folder, or read in the opt-in scrap.tf window (R10).
+// Nothing here, or anywhere in the app, fetches scrap.tf (R1): its address is only
+// handed to links.open or, on a click, to the user's scrap.tf window.
 
+import { SCRAPTF_BOUNDARY_SHORT } from '../shared/boundaryText';
 import { SCRAPTF_ITEMS_URL } from '../shared/links';
-import { SCRAPTF_LIST_FRESH_MS, scraptfListFresh } from '../shared/scraptfList';
+import { SCRAPTF_LIST_FRESH_MS, WATCH_WAITING_FOR_SCHEMA, scraptfListFresh } from '../shared/scraptfList';
 import type { DeepPartial, ImportResult, MarketListResult, MarketRow, Scrap, ScraptfListStatus, Settings, UnixMs } from '../shared/types';
 import { DASH, fmtAgo, fmtDateTime, fmtInt, fmtMoney } from './format';
 import { SAVE_MODE } from './importModel';
@@ -21,14 +23,41 @@ export type ListCardPlacement = 'market' | 'import';
 /** Where a setup note shows: the card, or the scrap.tf banks page header (F15), which is about every page. */
 export type ListNotePlacement = ListCardPlacement | 'banks';
 
-/** The card's one-line boundary note (R1): scrap.tf is only ever opened by the user's own browser. */
-export const LIST_BOUNDARY_NOTE = 'The app never visits scrap.tf; your browser does, and you choose when.';
+/** The card's one-line boundary note (R1): scrap.tf is only ever opened by the user, in their own browser. */
+export const LIST_BOUNDARY_NOTE = `${SCRAPTF_BOUNDARY_SHORT} Your browser does, and you choose when.`;
+
+/** The same note while the user has the opt-in scrap.tf window on (UX-7): they may browse it there too. */
+export const LIST_BOUNDARY_NOTE_WINDOW = `${SCRAPTF_BOUNDARY_SHORT} You open it, in your browser or the Flip Desk window, and you choose when.`;
+
+/** The boundary note for the user's settings (`windowOn`: scraptfWindowOn). */
+export function listBoundaryNote(windowOn: boolean): string {
+  return windowOn ? LIST_BOUNDARY_NOTE_WINDOW : LIST_BOUNDARY_NOTE;
+}
 
 /** Step 3: what one save updates. */
 export const LIST_PICKUP_TEXT = 'Flip Desk picks it up within seconds and updates prices, the Live market, Holdings and the key price.';
 
 /** Step 1's hint after the button. */
 export const LIST_OPEN_HINT = "in your own browser: scrap.tf's public price list of every item it trades.";
+
+/**
+ * UX-4: what a first run is told first (the setup checklist, the empty Opportunities page): one save of
+ * scrap.tf/items prices every item scrap.tf trades, far quicker than typing them.
+ */
+export const FIRST_PRICE_LEAD = 'Save scrap.tf/items once to price every item scrap.tf trades';
+
+/** The first-run lead as a sentence; `windowOn` (scraptfWindowOn) adds the window as the other way in. */
+export function firstPriceText(windowOn: boolean): string {
+  return `${FIRST_PRICE_LEAD}${windowOn ? ', or browse it in the Flip Desk window' : ''}.`;
+}
+
+/** "scrap.tf/items": the price list's page as the buttons name it. */
+export const SCRAPTF_ITEMS_PATH = SCRAPTF_ITEMS_URL.replace(/^https:\/\//, '');
+
+/** Step 1's hint with the opt-in scrap.tf window on (UX-5): its button is the whole routine there. */
+export function listWindowOpenHint(readOnLoad: boolean): string {
+  return `scrap.tf's public price list of every item it trades. In the Flip Desk window it is ${readOnLoad ? 'read as it loads' : 'read when you press Read page now'}; you browse it yourself.`;
+}
 
 /**
  * How often the card re-reads 'scraptf.listStatus' on its own while shown (IPC to the local service
@@ -44,13 +73,21 @@ export const LIST_STARTING_POLL_MS = 2_000;
 // The card
 // ---------------------------------------------------------------------------
 
-/** What stands between the user and a working one-save sync, in the order it has to be fixed. */
-export type ListSetupState = 'import-off' | 'no-folder' | 'watch-error' | 'watch-starting' | 'ready';
+/**
+ * What stands between the user and a working one-save sync, in the order it has to be fixed.
+ * 'window-only' (UX-5): no watch folder, but the user has the opt-in scrap.tf window on, which imports
+ * what it reads without one; the folder is optional then, and nothing needs fixing.
+ * 'watch-waiting' (0.7.1, P3): the service holds the watch until the item schema has loaded
+ * (WATCH_WAITING_FOR_SCHEMA); it starts by itself, so it is a wait, not an error to fix.
+ */
+export type ListSetupState = 'import-off' | 'no-folder' | 'window-only' | 'watch-error' | 'watch-waiting' | 'watch-starting' | 'ready';
 
-export function listSetupState(s: Pick<ScraptfListStatus, 'importEnabled' | 'watchFolder' | 'watchActive' | 'watchError'>): ListSetupState {
+/** `windowOn` (scraptfWindowOn): the user's scrap.tf window is on, so a missing folder is optional. */
+export function listSetupState(s: Pick<ScraptfListStatus, 'importEnabled' | 'watchFolder' | 'watchActive' | 'watchError'>, windowOn = false): ListSetupState {
   if (!s.importEnabled) return 'import-off';
-  if (!s.watchFolder) return 'no-folder';
+  if (!s.watchFolder) return windowOn ? 'window-only' : 'no-folder';
   if (s.watchActive) return 'ready';
+  if (s.watchError === WATCH_WAITING_FOR_SCHEMA) return 'watch-waiting';
   // The service always names why a configured watch is not running; the fallback covers a race at start.
   return s.watchError ? 'watch-error' : 'watch-starting';
 }
@@ -79,10 +116,22 @@ export function listSetupNote(state: ListSetupState, placement: ListNotePlacemen
         action: 'pick-folder',
         actionLabel: 'Choose a watch folder',
       };
+    case 'window-only': {
+      // Muted: the window already imports what it reads; a folder only adds pages saved with Ctrl+S.
+      const what = placement === 'banks' ? 'the scrap.tf pages you save' : 'scrap.tf/items when you save it';
+      return {
+        tone: 'muted',
+        text: `No watch folder: optional while you read pages in the Flip Desk window. Choose one to also import ${what} with Ctrl+S.`,
+        action: 'pick-folder',
+        actionLabel: 'Choose a watch folder',
+      };
+    }
     case 'watch-error': {
       const why = (watchError ?? '').trim() || 'the folder could not be watched';
       return { tone: 'bad', text: `Watch error: ${why}${/[.!?]$/.test(why) ? '' : '.'}`, action: 'pick-folder', actionLabel: 'Choose another folder' };
     }
+    case 'watch-waiting':
+      return { tone: 'muted', text: 'Waiting for item data to load; the folder watch starts by itself once it has.', action: null, actionLabel: null };
     case 'watch-starting':
       return { tone: 'muted', text: 'Starting the folder watch…', action: null, actionLabel: null };
     case 'ready':
@@ -95,7 +144,8 @@ export function listSetupNote(state: ListSetupState, placement: ListNotePlacemen
  * pushes nothing when it is up, else LIST_POLL_MS so a watch that fails later still shows.
  */
 export function listPollMs(s: Parameters<typeof listSetupState>[0] | null | undefined): number {
-  return s && listSetupState(s) === 'watch-starting' ? LIST_STARTING_POLL_MS : LIST_POLL_MS;
+  const state = s ? listSetupState(s) : null;
+  return state === 'watch-starting' || state === 'watch-waiting' ? LIST_STARTING_POLL_MS : LIST_POLL_MS;
 }
 
 /** The steps can be followed only once import is on (R10's acknowledgement). */
@@ -146,8 +196,11 @@ export function listStatusLine(s: Pick<ScraptfListStatus, 'items' | 'newestAt' |
  * The Live market's automatic choice: the steps are open until the sync works and a list was saved (a
  * working sync needs only the status line and the Open button). The card makes it once per visit, from
  * the first status it reads, so steps the user is following do not fold away as the sync starts working.
+ * `windowOn` (UX-5): the card head's "Open in Flip Desk window" is the whole routine then, so the save
+ * steps are not forced open (a setup note still shows outside them).
  */
-export function listStepsAutoOpen(s: Pick<ScraptfListStatus, 'items'> & Parameters<typeof listSetupState>[0]): boolean {
+export function listStepsAutoOpen(s: Pick<ScraptfListStatus, 'items'> & Parameters<typeof listSetupState>[0], windowOn = false): boolean {
+  if (windowOn) return false;
   return s.items === 0 || listSetupState(s) !== 'ready';
 }
 

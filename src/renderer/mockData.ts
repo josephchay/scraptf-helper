@@ -16,6 +16,7 @@ import {
   marketVerdict,
 } from '../shared/market';
 import type { HoldingBuySide } from '../shared/holdings';
+import { BENIGN_SKIP_REASONS, importWarningCode } from '../shared/importCodes';
 import { communityMaxAgeMs } from '../shared/referenceAge';
 import { marketListedSideMatches } from '../shared/scraptfHistory';
 import { marketListFields, marketListSideMatches } from '../shared/scraptfList';
@@ -27,6 +28,8 @@ import type {
   Category,
   ConfidenceLevel,
   HistoryPoint,
+  ImportReport,
+  ImportResult,
   InputKind,
   ItemRevenue,
   JournalEntry,
@@ -696,13 +699,19 @@ export function evaluateOpportunity(
 
 const INPUT_KINDS: readonly InputKind[] = ['user', 'import', 'rule'];
 
-/** One row per SKU with a ceiling, highest-confidence input first; filtered, sorted by category then ceiling, paged. */
+/**
+ * One row per SKU with a ceiling, highest-confidence input first; filtered, sorted by category then ceiling,
+ * paged. 0.7.1 (ACT-9), with `fresh`: each row's known price carries when it was observed (the known
+ * opportunity's inputObservedAt), its stock on that save (`fresh.stockOf`) and whether it is older than
+ * `fresh.staleMs` (profit.inputStaleMs), as the service's shopping list.
+ */
 export function mockShoppingList(
   opps: readonly Opportunity[],
   q: ShoppingQuery,
   useOrder: Settings['profit']['useOrder'],
   keyPrice: KeyPriceState | null,
   now: UnixMs,
+  fresh?: { staleMs: number; stockOf(o: Opportunity): number | null },
 ): ShoppingListResult {
   const bySku = new Map<string, Opportunity[]>();
   for (const o of opps) {
@@ -721,6 +730,7 @@ export function mockShoppingList(
     const maxCostScrap = top.maxCostScrap!;
     const knownCostScrap = known ? known.costScrap : null;
     const knownMaxCostScrap = known?.maxCostScrap ?? null;
+    const knownObservedAt = known && Number.isFinite(known.inputObservedAt) ? known.inputObservedAt : null;
     all.push({
       sku: top.sku,
       name: top.name,
@@ -738,6 +748,13 @@ export function mockShoppingList(
       inputKinds: INPUT_KINDS.filter((k) => list.some((o) => o.inputKind === k)),
       flags: top.flags,
       updatedAt: top.updatedAt,
+      ...(fresh
+        ? {
+            knownObservedAt,
+            knownStock: known ? fresh.stockOf(known) : null,
+            knownStale: knownObservedAt !== null && now - knownObservedAt > fresh.staleMs,
+          }
+        : {}),
     });
   }
   const rows = all
@@ -818,8 +835,10 @@ export function mockMarketRow(args: {
   newAt?: UnixMs | null;
   /** F19: the saved page that last listed the item (preferScraptfSeen), else the category's bank. */
   seen?: ScraptfSeen | null;
-  /** F20: MarketRow.scraptfListedSince (scraptfListedSinceOf over the seen bank's runs). */
+  /** F20: MarketRow.scraptfListedSince (scraptfListedOf over the seen bank's runs). */
   listedSince?: UnixMs | null;
+  /** 0.7.1 (DM-5): MarketRow.scraptfLastSeenAt, that run's newest sighting on sale; absent when not given. */
+  lastSeenAt?: UnixMs | null;
 }): MarketRow | null {
   const { item, book, known, settings, keyScrap, now } = args;
   if (MARKET_CURRENCY.has(item.sku)) return null;
@@ -885,6 +904,7 @@ export function mockMarketRow(args: {
     scraptfNewAt: args.newAt ?? null,
     scraptfLink: scraptfLinkFor(item.category, args.seen ?? null),
     scraptfListedSince: args.listedSince ?? null,
+    ...(args.listedSince != null && args.lastSeenAt != null ? { scraptfLastSeenAt: args.lastSeenAt } : {}),
   };
 }
 
@@ -1190,6 +1210,78 @@ export function seedBankStockHistory(saves: readonly MockStockSave[]): MockStock
     });
   });
   return out;
+}
+
+// ---------------------------------------------------------------------------
+// Import results (0.7.1): skip totals and a parser report, as the service shapes them
+// ---------------------------------------------------------------------------
+
+/** One ImportResult.skipped entry. */
+type ImportSkip = ImportResult['skipped'][number];
+
+/**
+ * P5, as the service: ImportResult.skippedTotal (every skipped entry, before the list is cut at 500) and
+ * skippedCounts (per reason: a benign skip's own text, else its warning code, as the service keys them).
+ * `all` defaults to the result's own list.
+ */
+export function mockSkipTotals(skipped: readonly ImportSkip[], all: readonly ImportSkip[] = skipped): Pick<ImportResult, 'skippedTotal' | 'skippedCounts'> {
+  const skippedCounts: Record<string, number> = {};
+  for (const s of all) {
+    const k = BENIGN_SKIP_REASONS.includes(s.reason) ? s.reason : importWarningCode(s.reason) || s.reason;
+    skippedCounts[k] = (skippedCounts[k] ?? 0) + 1;
+  }
+  return { skippedTotal: all.length, skippedCounts };
+}
+
+/**
+ * P4: one sanitized parser report as 'import.report' answers it (whitelisted fields only, made up: the
+ * preview parses nothing). A hats page with one card refused and one guessed.
+ */
+export function mockImportReport(now: UnixMs): ImportReport {
+  return {
+    id: 1,
+    at: now - 4 * 60_000,
+    origin: 'file',
+    name: 'scrap.tf - Buy Hats.html',
+    pageKind: 'buy',
+    bank: 'hats',
+    page: '/buy/hats',
+    format: 'html',
+    batchId: 6,
+    counts: { dataDefindex: 50, cards: 50, rows: 0, selectedSkipped: 0, duplicates: 0, lookalikes: 0 },
+    headerColumns: [],
+    warningCodes: { 'unknown-quality': 1, 'unusual-without-effect': 1 },
+    items: [
+      {
+        defindex: 378,
+        classTokens: ['item', 'app440', 'hoverable', 'quality6'],
+        title: 'Team Captain',
+        contentLines: ['Level 1 Hat'],
+        indicator: null,
+        itemValue: '1.33 ref',
+        numAvailable: null,
+        numSelected: null,
+        particleId: null,
+        warpaintId: null,
+        sku: '378;6',
+        warnings: ['unknown-quality: read as Unique'],
+      },
+      {
+        defindex: 30589,
+        classTokens: ['item', 'app440', 'hoverable', 'quality5'],
+        title: 'Unusual Le Sapeur',
+        contentLines: ['Level 1 Hat'],
+        indicator: null,
+        itemValue: '24 keys',
+        numAvailable: null,
+        numSelected: null,
+        particleId: null,
+        warpaintId: null,
+        sku: null,
+        warnings: ['unusual-without-effect: an Unusual card without its effect'],
+      },
+    ],
+  };
 }
 
 // ---------------------------------------------------------------------------

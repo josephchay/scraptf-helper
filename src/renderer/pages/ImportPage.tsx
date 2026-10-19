@@ -1,3 +1,7 @@
+// The Import page: the saved-page import's opt-in gate, its file and folder controls, the last import and
+// the recent batches. 0.7.1: the skipped items' true total and per-reason counts (P5), Copy parser report
+// (P4, the clipboard only), and what turning import off does to the scrap.tf window (UX-12).
+
 import { useState } from 'react';
 import type { ImportResult, PermissionRecord } from '../../shared/types';
 import { rpc } from '../api';
@@ -16,11 +20,17 @@ import { importBankText } from '../banksModel';
 import { importOriginView } from '../scraptfWindowModel';
 import {
   IMPORT_FILE_HINT,
+  IMPORT_REPORT_LABEL,
+  IMPORT_REPORT_NOTE,
   SAVE_MODE_FILES_NOTE,
   SAVE_MODE_HTML_ONLY_NOTE,
   SAVE_MODE_LIST_ONLY,
   importFailedToast,
+  importOffText,
+  importReportText,
+  importReportToast,
   importSavedWithoutCards,
+  importSkipSummary,
   importWarningsView,
 } from '../importModel';
 
@@ -66,7 +76,7 @@ function ImportGate() {
         </h2>
         <p>
           This optional feature reads scrap.tf pages that <strong>you</strong> saved from your own browser, so you don&apos;t have to type each price. The app parses the
-          file on your computer. It never opens scrap.tf, never logs in, and never runs scripts from the page.
+          file on your computer: importing it loads nothing from scrap.tf, never logs in, and never runs scripts from the page.
         </p>
         <Banner tone="warn" icon="warning">
           scrap.tf&apos;s Terms of Service forbid gaining an advantage through &quot;automation, scripts, user-scripts, auto-refreshers, external tools&quot;, and reusing
@@ -160,6 +170,24 @@ function ImportEnabled() {
 
   const ackAt = settings?.import.acknowledgedAt ?? null;
   const folder = settings?.import.watchFolder ?? null;
+  const off = importOffText(settings?.scraptfWindow?.enabled === true);
+  const [copying, setCopying] = useState(false);
+
+  // P4: the newest parser reports, from the service's memory, to the clipboard only.
+  const copyReport = async () => {
+    setCopying(true);
+    try {
+      const reports = await rpc('import.report', {});
+      const text = importReportText(reports);
+      const copied = text !== null && (await copyText(text));
+      const t = importReportToast(copied, text === null ? 0 : reports.length);
+      toast(t.text, t.tone);
+    } catch (e) {
+      toast(`Could not read the parser report: ${errorMessage(e)}`, 'bad');
+    } finally {
+      setCopying(false);
+    }
+  };
 
   return (
     <div className="import-grid">
@@ -211,6 +239,12 @@ function ImportEnabled() {
       <section className="card" aria-labelledby="import-last">
         <h2 id="import-last">Last import</h2>
         {last ? <ImportResultView r={last} /> : <p className="muted">Nothing imported in this session yet.</p>}
+        <div className="form-actions import-report">
+          <button type="button" className="btn small ghost" disabled={copying} title={IMPORT_REPORT_NOTE} onClick={() => void copyReport()}>
+            <Icon name="copy" size={13} /> {copying ? 'Copying…' : IMPORT_REPORT_LABEL}
+          </button>
+          <span className="muted small">{IMPORT_REPORT_NOTE}</span>
+        </div>
       </section>
 
       <section className="card span-2" aria-labelledby="import-batches">
@@ -276,10 +310,9 @@ function ImportEnabled() {
       <section className="card" aria-labelledby="import-off">
         <h2 id="import-off">Turn import off</h2>
         <p className="muted small">
-          You turned this on {ackAt ? `on ${fmtDateTime(ackAt)}` : 'earlier'}. Turning it off stops the folder watch and hides the import buttons. Imported prices stay
-          in your price sheet.
+          You turned this on {ackAt ? `on ${fmtDateTime(ackAt)}` : 'earlier'}. {off.text}
         </p>
-        <ConfirmButton className="btn small" confirmLabel="Turn off import?" onConfirm={() => void updateSettings({ import: { enabled: false, watchFolder: null } })}>
+        <ConfirmButton className="btn small" confirmLabel={off.confirmLabel} onConfirm={() => void updateSettings({ import: { enabled: false, watchFolder: null } })}>
           Turn off saved-page import
         </ConfirmButton>
       </section>
@@ -297,6 +330,8 @@ export function ImportResultView({ r }: { r: ImportResult }) {
   const warnings = importWarningsView(r);
   // F21: a read of the scrap.tf window names the window and its page, not a file.
   const from = importOriginView(r);
+  // P5: the true total (the list holds the first 500, refusals first) and the count per reason.
+  const skip = importSkipSummary(r);
   return (
     <div className="import-result">
       {warnings.noCards ? (
@@ -346,9 +381,20 @@ export function ImportResultView({ r }: { r: ImportResult }) {
           ))}
         </ul>
       ) : null}
-      {r.skipped.length ? (
-        <details open={r.skipped.length <= 6}>
-          <summary>{r.skipped.length} skipped</summary>
+      {skip.total > 0 ? (
+        <details open={skip.total <= 6}>
+          <summary>
+            {fmtInt(skip.total)} skipped{skip.total > skip.listed ? ` (the first ${fmtInt(skip.listed)} listed, refusals first)` : ''}
+          </summary>
+          {skip.groups.length > 1 || (skip.groups.length === 1 && skip.total > skip.listed) ? (
+            <ul className="plain-list import-skip-counts">
+              {skip.groups.map((g) => (
+                <li key={g.reason} className={g.refusal ? 'tone-text-warn' : 'muted'}>
+                  <span className="num">{fmtInt(g.count)}</span> {g.reason}
+                </li>
+              ))}
+            </ul>
+          ) : null}
           <table className="table compact-table">
             <thead>
               <tr>

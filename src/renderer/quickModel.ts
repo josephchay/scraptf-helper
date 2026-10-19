@@ -2,6 +2,7 @@
 // prefill (F8, with price text from the live check popup, F16) and "Bought it"
 // (F12). Kept out of QuickEntry.tsx so the rules are unit-tested.
 
+import { SCRAPTF_BOUNDARY_SHORT } from '../shared/boundaryText';
 import { frictionOf, maxCostFor, type CeilingSettings } from '../shared/ceiling';
 import { CHECK_PRICE_TEXT_MAX } from '../shared/check';
 import { parsePrice } from '../shared/currency';
@@ -324,7 +325,7 @@ export function quickListHint(row: ScraptfListRow | null | undefined, pickedSku:
         ? 'Out of stock on scrap.tf (stock 0 when you saved the list), so there is nothing to buy at this price.'
         : 'It shows no price to buy (sold out), so there is nothing to use.',
     fresh ? 'Stock may have changed since.' : 'Older than a day: check scrap.tf, or save scrap.tf/items again.',
-    'The app never visits scrap.tf.',
+    SCRAPTF_BOUNDARY_SHORT,
   ]
     .filter(Boolean)
     .join(' ');

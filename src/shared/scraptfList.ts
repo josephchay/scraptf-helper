@@ -17,6 +17,13 @@ export const SCRAPTF_LIST_LABEL = 'All items';
  */
 export const SCRAPTF_LIST_FRESH_MS = 24 * 60 * 60_000;
 
+/**
+ * 0.7.1 (P3): the folder watch's status (ScraptfListStatus.watchError, Data health) while the item schema
+ * has not loaded. Shared so the dashboard shows it as a wait, not as a watch error: the watch starts by
+ * itself once the schema has loaded.
+ */
+export const WATCH_WAITING_FOR_SCHEMA = 'Waiting for item data to load';
+
 function finite(v: unknown): v is number {
   return typeof v === 'number' && Number.isFinite(v);
 }

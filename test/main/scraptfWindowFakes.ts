@@ -128,9 +128,26 @@ export class FakeWin extends Emitter {
   focused = false;
   destroyed = false;
   minimized = false;
+  /** Its normal (not maximised) bounds: from the options, as Electron places it. */
+  normal = { x: 0, y: 0, width: 1280, height: 900 };
+  maximized = false;
+  maximizeCalls = 0;
   constructor(public opts: Record<string, any>) {
     super();
     FakeWin.all.push(this);
+    this.normal = { x: opts['x'] ?? 0, y: opts['y'] ?? 0, width: opts['width'] ?? 800, height: opts['height'] ?? 600 };
+  }
+  getNormalBounds() {
+    return { ...this.normal };
+  }
+  isMaximized() {
+    return this.maximized;
+  }
+  /** As on Windows: maximising a hidden window shows it. */
+  maximize() {
+    this.maximized = true;
+    this.visible = true;
+    this.maximizeCalls++;
   }
   loadURL(url: string) {
     return this.webContents.loadURL(url);
@@ -226,6 +243,23 @@ export const session = {
 
 export const fake = { FakeWin, FakeView, FakeSession, FakeContents, sessions, session, journal };
 
+type Rect = { x: number; y: number; width: number; height: number };
+
+/**
+ * A screen of displays (work areas), as the window bounds see it (0.7.1, F21-12): the cursor's display is the
+ * one whose work area holds the cursor, else the first.
+ */
+export function fakeScreen(areas: Rect[], cursor = { x: 10, y: 10 }) {
+  const holds = (a: Rect, p: { x: number; y: number }) => p.x >= a.x && p.x < a.x + a.width && p.y >= a.y && p.y < a.y + a.height;
+  return {
+    areas,
+    cursor,
+    getAllDisplays: () => areas.map((workArea) => ({ workArea })),
+    getCursorScreenPoint: () => ({ ...cursor }),
+    getDisplayNearestPoint: (p: { x: number; y: number }) => ({ workArea: areas.find((a) => holds(a, p)) ?? areas[0]! }),
+  };
+}
+
 /** The 'electron' module as the window module (and windows.ts) sees it. */
 export const fakeElectron = {
   BrowserWindow: FakeWin,
@@ -234,5 +268,6 @@ export const fakeElectron = {
   screen: {
     getCursorScreenPoint: () => ({ x: 0, y: 0 }),
     getDisplayNearestPoint: () => ({ workArea: { x: 0, y: 0, width: 1920, height: 1040 } }),
+    getAllDisplays: () => [{ workArea: { x: 0, y: 0, width: 1920, height: 1040 } }],
   },
 };

@@ -11,31 +11,37 @@
 //
 // Shape: refresh() reads, per SCRAPTF_BANKS bank, its kept saves (newest first) and
 // pairs them by page (bankStockPagePairs: /items/2 is only compared with an earlier
-// /items/2, never with /items), reading the rows of each page's newest save and the one
-// before it (the newest from an earlier time, so a page imported twice does not diff
-// against itself). It keeps diffBankStock of each pair at the engine's key price,
-// merged over the bank's pages (bankStockMergePages), plus bankStockNewAt over all
-// pages. A save's rows never change once
-// written, so they are cached by batch id and only a new save is read. list()/all()/
-// whatsNew() join each kept diff row to market.entryFor(base) per call, so verdicts
-// follow the live book with no query at all; newAtFor, detailFor and seenFor (F19)
-// read the kept diffs only. F20: the rows' time listed comes from the scrap.tf
+// /items/2, never with /items), reading the rows of each page's newest save, its session
+// baseline (0.7.1, CQ-2: the newest save from before the session of window reads the
+// newest belongs to) and the save just before it (the newest from an earlier time, so a
+// page imported twice does not diff against itself). Each page keeps two diffs at the
+// engine's key price: `diff` (newest vs baseline: the stock page, "What's new", New
+// badges, the drawer) and `stepDiff` (newest vs previous: S3's notifications, one read
+// at a time), merged over the bank's pages (bankStockMergePages). Pages far older than
+// the bank's newest (DM-5) are left out of the stock page and "What's new". A save's rows
+// never change once written, so they are cached by batch id and only a new save is read.
+// list()/all()/whatsNew() join each kept diff row to market.entryFor(base) per call, so
+// verdicts follow the live book with no query at all; newAtFor, detailFor and seenFor
+// (F19) read the kept diffs only. F20: the rows' time listed comes from the scrap.tf
 // history's runs index (deps.history.runsFor, one in-memory map per read).
 
 import {
   BANK_STOCK_CSV_COLUMNS,
-  BANK_STOCK_KEEP_SAVES,
   BANK_STOCK_MAX_NOTIFICATIONS,
   BANK_STOCK_MAX_PAGES,
+  BANK_STOCK_NEW_MAX_AGE_MS,
   BANK_STOCK_NOTIFY_DEDUP_MS,
+  BANK_STOCK_SESSION_READ,
   bankStockCounts,
   bankStockCsvCells,
+  bankStockCurrentPages,
   bankStockItemOf,
   bankStockMatching,
   bankStockMergePages,
   bankStockMoreNotice,
   bankStockNewAt,
   bankStockNewFlipNotice,
+  bankStockOldSaveNotice,
   bankStockPagePairs,
   bankStockResult,
   bankStockRow,
@@ -114,13 +120,23 @@ export interface BankStock {
    * read keeps the last good diffs and is logged once per failure streak.
    */
   refresh(): void;
-  /** 'scraptf.bankStock': one bank's rows (filter, search, sort, page) and counts. Never throws. */
+  /**
+   * 'scraptf.bankStock': one bank's rows (filter, search, sort, page) and counts. Never throws. 0.7.1: the
+   * changes are since the session baseline (previousSavedAt is its time), and pages far older than the
+   * bank's newest page are left out (BankStockResult.olderPages).
+   */
   list(q: BankStockQuery, now: UnixMs): BankStockResult;
   /** Every row matching q's filter and search in q's order, paging ignored (opps.exportCsv 'bankStock'). */
   all(q: BankStockQuery, now: UnixMs): BankStockRow[];
-  /** ScraptfBankSummary.whatsNew for the banks summary; null until a page of the bank has 2 saves. */
+  /**
+   * ScraptfBankSummary.whatsNew for the banks summary; null until a page of the bank has 2 saves. 0.7.1:
+   * since the session baseline, so window reads 30 s apart do not empty it.
+   */
   whatsNew(bank: ScraptfBank): ScraptfBankSummary['whatsNew'];
-  /** MarketRow.scraptfNewAt for a base SKU (bankStockNewAt), else null. */
+  /**
+   * MarketRow.scraptfNewAt for a base SKU (bankStockNewAt over the shown pages), else null. 0.7.1: a bank
+   * whose newest save is over BANK_STOCK_NEW_MAX_AGE_MS old marks nothing New.
+   */
   newAtFor(baseSku: string): UnixMs | null;
   /** ItemDetail.bankStock for a SKU (bankStockItemOf at the engine's key price), else null. */
   detailFor(sku: string): ItemDetail['bankStock'];
@@ -142,37 +158,66 @@ export interface BankStock {
    * imported late, or the newest page imported again notifies nothing). Judged by the look, not the batch
    * id, so a held start-up import still tells after the same file was imported again. A suspect margin
    * (F5's rule over the market entry: few orders, no usable reference) is left out, as the engine never
-   * toasts one.
+   * toasts one. New since the save just before (0.7.1: not the session baseline), so a read 30 s after
+   * another tells only what that read added.
    */
   newFlips(bank: ScraptfBank, batchId: number): BankStockRow[];
+  /**
+   * 0.7.1 (ACT-6): the save time of `batchId` when it is the newest look of a page (its first import or
+   * the newest save itself), from the kept saves in memory; else null.
+   */
+  savedAtOf(batchId: number): UnixMs | null;
+  /**
+   * 0.7.1: every row of `bank` on sale on the page's newest save that is a flip right now, most profit
+   * first, when `batchId` is the first import of that page's newest look (as newFlips); else none. Unlike
+   * newFlips it needs no previous save and keeps unchanged rows: the scrap.tf window toolbar's "N flips on
+   * this page". Reads the newest save's own rows only, so it does not depend on the save they are compared
+   * with. Suspect margins are left out, as in newFlips.
+   */
+  pageFlips(bank: ScraptfBank, batchId: number): BankStockRow[];
 }
 
-/** One page of a bank: its kept pair, diffed (`diff`: only the rows the bank shows, bankStockMergePages). */
+/**
+ * One page of a bank: its kept saves, diffed (only the rows the bank shows, bankStockMergePages). `diff`
+ * is against the session baseline (`previousSavedAt` is the baseline's time); `stepDiff` against the save
+ * just before (the same array when the two saves are one).
+ */
 interface PageState extends BankStockBankDiff {
   page: string;
   newest: BankStockSave;
   /** The page's newest kept save from before its newest one's time, or null: a first save of the page. */
   previous: BankStockSave | null;
+  /** 0.7.1 (CQ-2): the newest save from before the newest one's session, else `previous`. */
+  baseline: BankStockSave | null;
+  /** 0.7.1: newest vs previous, for S3 (newFlips): each read tells only what it added. */
+  stepDiff: readonly BankStockDiffRow[];
   /** The first import of the newest look (BankStockPagePair.firstBatchId): the one batch S3 tells of. */
   firstBatchId: number;
 }
 
 /** One bank: each page saved, and the rows they show together. */
 interface BankState {
-  /** Newest page first. */
+  /** Newest page first, merged over every page (newFlips, pageFlips, detailFor, seenFor). */
   pages: PageState[];
-  /** Every page's shown rows: the stock page, its counts and "What's new". */
+  /**
+   * 0.7.1 (DM-5): the pages the stock page shows (bankStockCurrentPages: not far older than the newest),
+   * merged over themselves only. `pages` when none is left out.
+   */
+  shown: PageState[];
+  /** The shown pages' rows: the stock page, its counts and "What's new". */
   diff: BankStockDiffRow[];
-  /** Rows listed on the pages' newest saves (each item once). */
+  /** Rows listed on the shown pages' newest saves (each item once). */
   items: number;
   /** The newest page's newest save. */
   savedAt: UnixMs;
-  /** The earliest previous save among the pages that have one (every change shown is since then), else null. */
+  /** The earliest baseline among the shown pages that have one (every change shown is since then), else null. */
   previousSavedAt: UnixMs | null;
-  /** The oldest of the pages' newest saves. */
+  /** The oldest of the shown pages' newest saves. */
   oldestSavedAt: UnixMs;
-  /** Kept saves read (<= BANK_STOCK_KEEP_SAVES per page). */
+  /** Kept saves counted over the shown pages (<= BANK_STOCK_KEEP_SAVES per page). */
   saves: number;
+  /** Pages left out of the stock page (BankStockResult.olderPages), or null. */
+  olderPages: { count: number; newestSavedAt: UnixMs } | null;
   /** The key value the diffs decided cheaper/pricier at. */
   diffKey: Scrap;
 }
@@ -226,18 +271,34 @@ function sameSave(a: BankStockSave | null, b: BankStockSave | null): boolean {
   return a.batchId === b.batchId && a.savedAt === b.savedAt && a.items === b.items && a.page === b.page;
 }
 
-/** The same pages with the same pair each: the kept diffs still stand (only firstBatchId may move). */
+/** The same pages with the same saves each: the kept diffs still stand (only firstBatchId may move). */
 function samePairs(old: readonly PageState[], pairs: readonly BankStockPagePair<BankStockSave>[]): boolean {
-  return old.length === pairs.length && pairs.every((p, i) => old[i]!.page === p.page && sameSave(old[i]!.newest, p.newest) && sameSave(old[i]!.previous, p.previous));
+  return (
+    old.length === pairs.length &&
+    pairs.every((p, i) => old[i]!.page === p.page && sameSave(old[i]!.newest, p.newest) && sameSave(old[i]!.previous, p.previous) && sameSave(old[i]!.baseline, p.baseline))
+  );
 }
 
 /**
- * Saves read per bank: each page's newest BANK_STOCK_KEEP_SAVES, for BANK_STOCK_MAX_PAGES pages. Read per
- * page (`perPage`): F20 keeps up to 300 saves a page, so the bank's newest saves overall could leave out a
- * quiet page, or the save it is compared with, that the history and the feed still read.
+ * Pages merged over each other (bankStockMergePages), both diffs: an item on several pages shows once, from
+ * the newest page that lists it. The step diffs merge the same way, so S3 reads what the page shows.
  */
-const SAVES_READ = BANK_STOCK_KEEP_SAVES * BANK_STOCK_MAX_PAGES;
-const SAVES_PER_PAGE = { perPage: BANK_STOCK_KEEP_SAVES } as const;
+function mergeBoth(pages: readonly PageState[]): PageState[] {
+  const merged = bankStockMergePages(pages);
+  if (pages.length <= 1) return merged;
+  const steps = bankStockMergePages(pages.map((p) => ({ diff: p.stepDiff })));
+  return merged.map((p, i) => ({ ...p, stepDiff: pages[i]!.stepDiff === pages[i]!.diff ? p.diff : steps[i]!.diff }));
+}
+
+/**
+ * Saves read per bank: each page's newest BANK_STOCK_SESSION_READ (0.7.1: the whole page as the thinning
+ * keeps it, so the session baseline is found behind any number of window reads), for BANK_STOCK_MAX_PAGES
+ * pages. Read per page (`perPage`): the bank's newest saves overall could leave out a quiet page, or the
+ * save it is compared with, that the history and the feed still read. Save rows are only read for the
+ * newest, previous and baseline save of each page.
+ */
+const SAVES_READ = BANK_STOCK_SESSION_READ * BANK_STOCK_MAX_PAGES;
+const SAVES_PER_PAGE = { perPage: BANK_STOCK_SESSION_READ } as const;
 
 export function createBankStock(deps: BankStockDeps): BankStock {
   const { log, repo } = deps;
@@ -293,9 +354,38 @@ export function createBankStock(deps: BankStockDeps): BankStock {
     return rows;
   }
 
-  /** Every page of every bank, each with its own save time (the market's New badge and the drawer). */
+  /** Every page of every bank, each with its own save time (the drawer and the market's link). */
   function allPages(): PageState[] {
     return [...banks.values()].flatMap((st) => st.pages);
+  }
+
+  /** The pages each bank's stock page shows (the market's New badge reads only these). */
+  function shownPages(): PageState[] {
+    return [...banks.values()].flatMap((st) => st.shown);
+  }
+
+  // 0.7.1 (DM-5): which banks are fresh enough to mark anything New moves with the clock, not only with a
+  // refresh; newAt is rebuilt (and `ver` moved, so the market's cached New pass re-filters) when it does.
+  let newAtFresh = '';
+  /** When the fresh set was last worked out, and until when it cannot change (a fresh bank's 24 h runs out). */
+  let freshCheck: { at: UnixMs; until: UnixMs } | null = null;
+  function syncNewAt(force: boolean): void {
+    const at = now();
+    // newAtFor runs per market row: a clock check only, until the next bank can go stale.
+    if (!force && freshCheck !== null && at >= freshCheck.at && at < freshCheck.until) return;
+    const fresh: string[] = [];
+    let until = Number.POSITIVE_INFINITY;
+    for (const [bank, st] of banks) {
+      if (at - st.savedAt > BANK_STOCK_NEW_MAX_AGE_MS) continue;
+      fresh.push(bank);
+      until = Math.min(until, st.savedAt + BANK_STOCK_NEW_MAX_AGE_MS + 1);
+    }
+    freshCheck = { at, until };
+    const sig = fresh.join(',');
+    if (!force && sig === newAtFresh) return;
+    newAtFresh = sig;
+    newAt = bankStockNewAt(shownPages(), at);
+    if (!force) ver++;
   }
 
   function load(): void {
@@ -307,6 +397,7 @@ export function createBankStock(deps: BankStockDeps): BankStock {
       for (const p of st.pages) {
         inUse.add(p.newest.batchId);
         if (p.previous) inUse.add(p.previous.batchId);
+        if (p.baseline) inUse.add(p.baseline.batchId);
       }
     };
     for (const info of SCRAPTF_BANKS) {
@@ -321,38 +412,50 @@ export function createBankStock(deps: BankStockDeps): BankStock {
           }
           continue;
         }
-        const saves = pairs.reduce((n, p) => n + p.saves, 0);
         if (old && samePairs(old.pages, pairs) && old.diffKey === K) {
-          old.saves = saves;
+          const shownKeys = new Set(old.shown.map((p) => p.page));
+          old.saves = pairs.reduce((n, p) => n + (shownKeys.has(p.page) ? p.saves : 0), 0);
           pairs.forEach((p, i) => (old.pages[i]!.firstBatchId = p.firstBatchId));
+          // `shown` holds its own merged copies when pages were left out; they carry the same look.
+          for (const s of old.shown) s.firstBatchId = pairs.find((p) => p.page === s.page)?.firstBatchId ?? s.firstBatchId;
           keep(old);
           continue;
         }
-        // Each page against its own previous save only, then shown together (an item once).
-        const pages = bankStockMergePages(
-          pairs.map(
-            (p): PageState => ({
-              bank: info.bank,
-              page: p.page,
-              savedAt: p.newest.savedAt,
-              previousSavedAt: p.previous?.savedAt ?? null,
-              diff: diffBankStock(rowsOf(p.newest.batchId), p.previous ? rowsOf(p.previous.batchId) : null, K),
-              newest: p.newest,
-              previous: p.previous,
-              firstBatchId: p.firstBatchId,
-            }),
-          ),
-        );
-        const diff = pages.flatMap((p) => p.diff);
-        const previousTimes = pages.flatMap((p) => (p.previous ? [p.previous.savedAt] : []));
+        // Each page against its own baseline (and previous save) only, then shown together (an item once).
+        const raw = pairs.map((p): PageState => {
+          const newestRows = rowsOf(p.newest.batchId);
+          const diff = diffBankStock(newestRows, p.baseline ? rowsOf(p.baseline.batchId) : null, K);
+          const same = (p.baseline?.batchId ?? null) === (p.previous?.batchId ?? null);
+          return {
+            bank: info.bank,
+            page: p.page,
+            savedAt: p.newest.savedAt,
+            previousSavedAt: p.baseline?.savedAt ?? null,
+            diff,
+            stepDiff: same ? diff : diffBankStock(newestRows, p.previous ? rowsOf(p.previous.batchId) : null, K),
+            newest: p.newest,
+            previous: p.previous,
+            baseline: p.baseline,
+            firstBatchId: p.firstBatchId,
+          };
+        });
+        const pages = mergeBoth(raw);
+        // DM-5: pages far older than the newest are not "the bank now"; merged among the rest only.
+        const current = bankStockCurrentPages(raw);
+        const shown = current.olderPages === null ? pages : mergeBoth(current.shown);
+        const diff = shown.flatMap((p) => p.diff);
+        const baselineTimes = shown.flatMap((p) => (p.baseline ? [p.baseline.savedAt] : []));
+        const shownPageKeys = new Set(shown.map((p) => p.page));
         const st: BankState = {
           pages,
+          shown,
           diff,
           items: diff.reduce((n, d) => n + (d.current !== null ? 1 : 0), 0),
           savedAt: pages[0]!.savedAt,
-          previousSavedAt: previousTimes.length > 0 ? Math.min(...previousTimes) : null,
-          oldestSavedAt: Math.min(...pages.map((p) => p.savedAt)),
-          saves,
+          previousSavedAt: baselineTimes.length > 0 ? Math.min(...baselineTimes) : null,
+          oldestSavedAt: Math.min(...shown.map((p) => p.savedAt)),
+          saves: pairs.reduce((n, p) => n + (shownPageKeys.has(p.page) ? p.saves : 0), 0),
+          olderPages: current.olderPages,
           diffKey: K,
         };
         banks.set(info.bank, st);
@@ -368,7 +471,7 @@ export function createBankStock(deps: BankStockDeps): BankStock {
     }
     for (const id of [...rowsByBatch.keys()]) if (!inUse.has(id)) rowsByBatch.delete(id);
     if (changed) {
-      newAt = bankStockNewAt(allPages());
+      syncNewAt(true);
       ver++;
     }
     // A schema loaded since the last refresh may file a SKU elsewhere (as the market re-reads on markAllDirty).
@@ -487,7 +590,8 @@ export function createBankStock(deps: BankStockDeps): BankStock {
       savedAt: st.savedAt,
       previousSavedAt: st.previousSavedAt,
       saves: st.saves,
-      pages: { count: st.pages.length, oldestSavedAt: st.oldestSavedAt },
+      pages: { count: st.shown.length, oldestSavedAt: st.oldestSavedAt },
+      olderPages: st.olderPages,
       keyPrice: kp,
       now,
     });
@@ -540,6 +644,7 @@ export function createBankStock(deps: BankStockDeps): BankStock {
     newAtFor(baseSku) {
       if (typeof baseSku !== 'string') return null;
       ensure();
+      syncNewAt(false);
       return newAt.get(baseSku) ?? null;
     },
 
@@ -566,6 +671,8 @@ export function createBankStock(deps: BankStockDeps): BankStock {
 
     version() {
       ensure();
+      // A bank going stale for the New badge (DM-5) moves the version, so a cached "New" pass re-filters.
+      syncNewAt(false);
       return ver;
     },
 
@@ -575,17 +682,55 @@ export function createBankStock(deps: BankStockDeps): BankStock {
         // Only the first import of a page's newest look tells: a page imported again (same time, a
         // higher batch id) is no new look, and an older page imported late is not the newest. Judged by
         // the look, so a held import still tells after the same file came in again. Only that page's
-        // own diff counts: another page of the bank is never what it is compared with.
-        const pg = typeof batchId === 'number' ? banks.get(bank)?.pages.find((p) => p.firstBatchId === batchId) : undefined;
+        // own diff counts: another page of the bank is never what it is compared with. Against the save
+        // just before (stepDiff), not the session baseline: each read tells only what it added (S3).
+        const pg = newestLookOf(bank, batchId);
         if (!pg || pg.previous === null) return [];
-        const rows = rowsFor(bank, pg.diff, readKeyPrice().valueScrap, profitSettings(), true).filter((r) => r.change === 'new' && r.verdict === 'flip' && !suspect(r));
-        return rows.sort((a, b) => (b.profitScrap ?? 0) - (a.profitScrap ?? 0) || a.name.localeCompare(b.name) || (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
+        const rows = rowsFor(bank, pg.stepDiff, readKeyPrice().valueScrap, profitSettings(), true).filter((r) => r.change === 'new' && r.verdict === 'flip' && !suspect(r));
+        return rows.sort(byProfitDesc);
       } catch (err) {
         log.warn('Bank stock could not read the new flips', { bank, error: errorText(err) });
         return [];
       }
     },
+
+    savedAtOf(batchId) {
+      if (typeof batchId !== 'number') return null;
+      try {
+        ensure();
+        const pg = allPages().find((p) => p.firstBatchId === batchId || p.newest.batchId === batchId);
+        return pg ? pg.newest.savedAt : null;
+      } catch {
+        return null;
+      }
+    },
+
+    pageFlips(bank, batchId) {
+      try {
+        ensure();
+        // The same look rule as newFlips, but a first save counts too, and every row on sale on the newest
+        // save (unchanged ones included; gone rows and stock 0 never) is a candidate.
+        const pg = newestLookOf(bank, batchId);
+        if (!pg) return [];
+        const onSale = pg.diff.filter((d) => d.onSale);
+        const rows = rowsFor(bank, onSale, readKeyPrice().valueScrap, profitSettings()).filter((r) => r.verdict === 'flip' && !suspect(r));
+        return rows.sort(byProfitDesc);
+      } catch (err) {
+        log.warn('Bank stock could not read the page flips', { bank, error: errorText(err) });
+        return [];
+      }
+    },
   };
+
+  /** The page whose newest look `batchId` first imported (S3's rule), else undefined. */
+  function newestLookOf(bank: ScraptfBank, batchId: number): PageState | undefined {
+    return typeof batchId === 'number' ? banks.get(bank)?.pages.find((p) => p.firstBatchId === batchId) : undefined;
+  }
+}
+
+/** Most profit first, then name, then key: newFlips' and pageFlips' order. */
+function byProfitDesc(a: BankStockRow, b: BankStockRow): number {
+  return (b.profitScrap ?? 0) - (a.profitScrap ?? 0) || a.name.localeCompare(b.name) || (a.key < b.key ? -1 : a.key > b.key ? 1 : 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -596,7 +741,11 @@ export interface BankStockNotifyDeps {
   log: Logger;
   /** The dedupe map lives in repo meta (BANK_STOCK_NOTIFY_META_KEY), so a restart notifies nothing twice. */
   repo: Pick<Repo, 'getMeta' | 'setMeta'>;
-  stock: Pick<BankStock, 'newFlips'>;
+  /**
+   * The rows to tell (newFlips) and, 0.7.1 (ACT-6), the told save's time (savedAtOf), so an old save is
+   * told as one dated summary. Without savedAtOf (older fakes) every save counts as just made.
+   */
+  stock: Pick<BankStock, 'newFlips'> & Partial<Pick<BankStock, 'savedAtOf'>>;
   settings(): Settings;
   keyPrice(): KeyPriceState;
   /** core: push('notify', n); main applies notifications.silent. */
@@ -647,6 +796,16 @@ function saveNotified(deps: BankStockNotifyDeps, map: Map<string, number>, now: 
   }
 }
 
+/** 0.7.1: the told save's age at `now` (0 when unknown: told as a fresh save, as before). */
+function savedAgoOf(deps: BankStockNotifyDeps, batchId: number, now: UnixMs): number {
+  try {
+    const at = deps.stock.savedAtOf?.(batchId) ?? null;
+    return finite(at) ? Math.max(0, now - at) : 0;
+  } catch {
+    return 0;
+  }
+}
+
 /**
  * S3, after an import wrote a save of `imported.bank` (and the stock was refreshed): notifies the rows
  * that save made new and that are flips. Gates: notifications.enabled, .newOnScraptf, 'import' in
@@ -654,7 +813,10 @@ function saveNotified(deps: BankStockNotifyDeps, map: Map<string, number>, now: 
  * BANK_STOCK_NOTIFY_DEDUP_MS across restarts; at most BANK_STOCK_MAX_NOTIFICATIONS, most profit first,
  * then one summary ("+N more new flips on scrap.tf/buy/hats", no SKU). A first save of a page, or an
  * older page imported late, notifies nothing (BankStock.newFlips), and an item another notification
- * already told of (deps.toldBefore) is only recorded. Returns the notifications sent; never throws.
+ * already told of (deps.toldBefore) is only recorded. 0.7.1 (ACT-6): a save older than
+ * profit.inputStaleMs (a catch-up of pages saved while the app was closed) is told as one dated summary
+ * ("3 new flips in your save of scrap.tf/buy/hats from 2 d ago") and no toast per item; one at least
+ * BANK_STOCK_NOTIFY_AGE_NOTE_MS old says its age on each body. Returns the notifications sent; never throws.
  */
 export function notifyNewBankFlips(deps: BankStockNotifyDeps, imported: { bank: ScraptfBank; batchId: number }, now: UnixMs): number {
   try {
@@ -711,8 +873,15 @@ export function notifyNewBankFlips(deps: BankStockNotifyDeps, imported: { bank: 
         deps.log.warn('Bank stock notification failed', { error: errorText(err) });
       }
     };
+    const ago = savedAgoOf(deps, imported.batchId, now);
+    const staleMs = deps.settings().profit?.inputStaleMs;
+    if (finite(staleMs) && staleMs > 0 && ago > staleMs) {
+      // An old save: its prices may have moved since, so one dated line beats a toast per item.
+      send({ ...bankStockOldSaveNotice(due.length, info.url, ago), sku: null });
+      return sent;
+    }
     const individual = due.slice(0, BANK_STOCK_MAX_NOTIFICATIONS);
-    for (const r of individual) send({ ...bankStockNewFlipNotice(info.label, r, K), sku: r.sku });
+    for (const r of individual) send({ ...bankStockNewFlipNotice(info.label, r, K, ago), sku: r.sku });
     const rest = due.length - individual.length;
     if (rest > 0) send({ title: bankStockMoreNotice(rest, info.url), body: 'From the page you saved. Open TF2 Flip Desk to see them.', sku: null });
     return sent;

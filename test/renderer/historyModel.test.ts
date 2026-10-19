@@ -6,13 +6,14 @@
 
 import { afterEach, describe, expect, it } from 'vitest';
 import { fmtSaveTime } from '../../src/renderer/changesModel';
-import { fmtDateTime } from '../../src/renderer/format';
+import { fmtAgo, fmtDateTime } from '../../src/renderer/format';
 import {
   HISTORY_EVENTS_SHOWN,
   STEP_BOX,
   historyBankPath,
   historyChartLabel,
   historyChips,
+  historyEventGroups,
   historyEventLines,
   historyListedLine,
   historyNote,
@@ -103,6 +104,19 @@ describe('listed since and stock now', () => {
     expect(historyBankPath(history({ bank: null }))).toBeNull();
   });
 
+  it('a run whose newest sighting is over 48 h old reads as an old sighting, its span ending there (DM-5)', () => {
+    const old = historyListedLine(history({ listedSince: NOW - 10 * DAY, lastSeenAt: NOW - 4 * DAY }), NOW)!;
+    expect(old.text).toBe(`Last on sale 4 d ago (your save on ${fmtSaveTime(NOW - 4 * DAY)}), after 6 d 0 h listed`);
+    expect(old.tone).toBe('muted');
+    expect(old.title).toContain('no newer save of it shows it, so it may be gone.');
+    // A page saved once, 60 days ago: one save, so no "after 0 m listed".
+    const once = historyListedLine(history({ listedSince: NOW - 60 * DAY, lastSeenAt: NOW - 60 * DAY }), NOW)!;
+    expect(once.text).toBe(`Last on sale ${fmtAgo(NOW - 60 * DAY, NOW)} (your save on ${fmtSaveTime(NOW - 60 * DAY)})`);
+    expect(once.title).toContain(`On sale on scrap.tf/buy/hats in your save of ${fmtDateTime(NOW - 60 * DAY)}; no newer save of it shows it`);
+    // A fresh sighting reads as before.
+    expect(historyListedLine(history({ listedSince: NOW - 51 * HOUR, lastSeenAt: NOW - HOUR }), NOW)!.text).toMatch(/^Listed since 2 d 3 h/);
+  });
+
   it('when it is not on sale now: when it last was; nothing without a bank', () => {
     const off = historyListedLine(history({ listedSince: null, current: null }), NOW)!;
     expect(off.text).toBe(`Not on sale in your newest save (last on sale in your save on ${fmtSaveTime(NOW - 2 * HOUR)})`);
@@ -117,6 +131,17 @@ describe('listed since and stock now', () => {
     expect(historyNowText(history({ current: null, points: [point(NOW - DAY, 12), point(NOW - HOUR, null, 0)] }), K)!.text).toBe('Sold out in your newest save');
     expect(historyNowText(history({ current: null, points: [point(NOW - DAY, 12), point(NOW - HOUR, null)] }), K)!.text).toBe('Not in your newest save');
     expect(historyNowText(history({ bank: null }), K)).toBeNull();
+  });
+});
+
+describe('price changes and stock moves apart (DM-6)', () => {
+  it('splits the events by kind, each newest first as sent', () => {
+    const e = (id: number, kind: ScraptfChangeEvent['kind']) => ({ id, kind }) as ScraptfChangeEvent;
+    const g = historyEventGroups([e(9, 'stock'), e(8, 'cheaper'), e(7, 'stock'), e(6, 'gone'), e(5, 'new'), e(4, 'restocked'), e(3, 'pricier')]);
+    expect(g.price.map((x) => x.id)).toEqual([8, 6, 5, 4, 3]);
+    expect(g.stock.map((x) => x.id)).toEqual([9, 7]);
+    expect(historyEventGroups([])).toEqual({ price: [], stock: [] });
+    expect(historyEventGroups(null as never)).toEqual({ price: [], stock: [] });
   });
 });
 
@@ -246,7 +271,7 @@ describe('change lines and the empty state', () => {
 
   it('never seen in a save: what to do; one save: save again later', () => {
     expect(historyNote(history({ bank: null, points: [] }))!.title).toBe('Not in your saved scrap.tf pages yet');
-    expect(historyNote(history({ bank: null, points: [] }))!.body).toContain('The app never visits scrap.tf.');
+    expect(historyNote(history({ bank: null, points: [] }))!.body).toContain('Flip Desk never loads scrap.tf on its own.');
     expect(historyNote(undefined)!.title).toBe('Not in your saved scrap.tf pages yet');
     expect(historyNote(history({ points: [point(NOW, 12)] }))!.title).toBe('One save so far');
     expect(historyNote(history())).toBeNull();

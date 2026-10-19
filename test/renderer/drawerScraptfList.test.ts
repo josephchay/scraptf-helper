@@ -2,7 +2,7 @@
 // price" (a typed price at the list's price to buy, dated when the list was saved), the pages handed
 // to the user's browser, and Record sale following Holdings' better-exit rule. Pure helpers, the
 // drawer's wiring read statically, and the price write against the browser mock. No network: the
-// app never visits scrap.tf (R1).
+// app never loads scrap.tf on its own (R1).
 
 import { readFileSync } from 'node:fs';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -270,7 +270,7 @@ describe('"Open on scrap.tf (copies name)"', () => {
     expect(refused).toEqual({ text: `Browser preview. The name was copied: open ${SCRAPTF_ITEMS_URL} in your browser and paste it into scrap.tf's search.`, tone: 'warn' });
     expect(scraptfOpenedToast(false, { opened: false, reason: null }, SCRAPTF_ITEMS_URL).text).toBe(`The link could not be opened. ${SCRAPTF_ITEMS_URL}`);
     expect(OPEN_ON_SCRAPTF_LABEL).toBe('Open on scrap.tf (copies name)');
-    expect(scraptfOpenTitle(SCRAPTF_ITEMS_URL, 'Team Captain')).toContain('The app never visits scrap.tf.');
+    expect(scraptfOpenTitle(SCRAPTF_ITEMS_URL, 'Team Captain')).toContain('Flip Desk never loads scrap.tf on its own.');
   });
 });
 
@@ -318,14 +318,15 @@ describe('item drawer wiring (F14)', () => {
     expect(drawer).toContain('const input = row ? listPriceInput(row, d) : null;');
     expect(drawer).toContain("await rpc('prices.upsert', input)");
     expect(drawer).toMatch(/if \(!row \|\| !input \|\| used \|\| savingRef\.current\) return;/);
-    expect(drawer).toContain('The app never visits scrap.tf; your browser does, and you choose when.');
+    // UX-7: the boundary note, true with the opt-in scrap.tf window on too.
+    expect(drawer).toContain('<p className="muted small stf-list-note">{listBoundaryNote(scraptfWindowOn(settings))}</p>');
   });
 
   it('opens scrap.tf pages only in the user browser (links.open), from the shared constants', () => {
     expect(drawer).toContain('openOrCopy(SCRAPTF_ITEMS_URL, toast)');
-    // F15: the bank page the item was last seen on, else its category's (bankPageUrl).
-    expect(drawer).toContain('const bankPage = bankPageUrl(d.seenOn, d.category);');
-    expect(drawer).toContain('openOrCopy(bankPage, toast)');
+    // UX-11: the price-list block offers scrap.tf/items only; the item's bank page is the header's Open on scrap.tf.
+    expect(drawer).not.toContain('bankPageUrl(');
+    expect(drawer).not.toContain('Open bank page');
     expect(drawer).toContain('const stfUrl = scraptfOpenUrl(d.category, null, d.seenOn) ?? SCRAPTF_ITEMS_URL;');
     // F19: armed with the drawer's SKU and exactly the name it copies, so a price copied there comes back.
     expect(drawer).toContain('openOnScraptf(stfUrl, scraptfSearchName(d), toast, { sku: d.sku, settings })');

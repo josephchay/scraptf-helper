@@ -8,6 +8,7 @@ import { formatScrap } from './currency';
 import { frictionOf, type CeilingSettings } from './ceiling';
 import { SCRAPTF_BANK_PAGES, isScraptfBank } from './links';
 import type {
+  BankNewestSave,
   Category,
   CategoryCounts,
   ImportBatch,
@@ -29,7 +30,7 @@ export const MARKET_MAX_SEARCH_CHARS = 200;
 /** Search words past this many are ignored (a pasted paragraph must not cost a scan per word). */
 const MAX_SEARCH_TOKENS = 20;
 
-export const MARKET_SORTS: readonly MarketSort[] = ['ceiling', 'revenue', 'buyers', 'profit', 'updated', 'name'];
+export const MARKET_SORTS: readonly MarketSort[] = ['ceiling', 'revenue', 'buyers', 'profit', 'updated', 'name', 'seen'];
 
 function finite(v: unknown): v is number {
   return typeof v === 'number' && Number.isFinite(v);
@@ -128,26 +129,41 @@ function sortValue(r: SortSide, sort: Exclude<MarketSort, 'name'>): number | nul
       return finite(r.profitScrap) ? r.profitScrap : null;
     case 'updated':
       return marketUpdatedAt(r);
+    case 'seen':
+      return finite(r.knownObservedAt) ? r.knownObservedAt : null;
   }
+}
+
+/**
+ * The 'seen' sort's tie-break (0.7.1): rows seen on the same save go most profit first, missing profit
+ * last, whatever the direction (like the name tie-break). Shared with the market index so both agree.
+ */
+export function marketProfitTie(a: Scrap | null, b: Scrap | null): number {
+  const pa = finite(a) ? a : null;
+  const pb = finite(b) ? b : null;
+  if (pa === null || pb === null) return pa === pb ? 0 : pa === null ? 1 : -1;
+  return pb - pa;
 }
 
 /**
  * Comparator for q.sort / q.dir (default: ceiling, descending; name defaults to ascending).
  * Missing values sort last in both directions; ties go by name, then SKU, so paging is stable.
+ * 'seen' ties go by profit first (marketProfitTie), then by name.
  */
 export function marketComparator(sort: MarketSort | undefined, dir: 'asc' | 'desc' | undefined): (a: SortSide, b: SortSide) => number {
   const key: MarketSort = sort && MARKET_SORTS.includes(sort) ? sort : 'ceiling';
   const sign = (dir ?? (key === 'name' ? 'asc' : 'desc')) === 'asc' ? 1 : -1;
   const byName = (a: SortSide, b: SortSide): number => a.name.localeCompare(b.name) || (a.sku < b.sku ? -1 : a.sku > b.sku ? 1 : 0);
   if (key === 'name') return (a, b) => sign * byName(a, b);
+  const tie = key === 'seen' ? (a: SortSide, b: SortSide): number => marketProfitTie(a.profitScrap, b.profitScrap) || byName(a, b) : byName;
   return (a, b) => {
     const va = sortValue(a, key);
     const vb = sortValue(b, key);
     if (va === null || vb === null) {
       if (va !== vb) return va === null ? 1 : -1;
-      return byName(a, b);
+      return tie(a, b);
     }
-    return sign * (va - vb) || byName(a, b);
+    return sign * (va - vb) || tie(a, b);
   };
 }
 
@@ -332,13 +348,79 @@ export function scraptfBankSaves(
 }
 
 /**
+ * 0.7.1 (DM-7, CQ-3): each bank's newest save over every batch (Repo.bankNewestSaves) folded into
+ * scraptfBankSaves' `newest`, the newer winning (ties to the higher id), so a bank saved before the newest
+ * COVERAGE_BATCHES batches is still dated, alike on the coverage strip and the banks cards. The batches
+ * read stay the only source for pre-0.5 batches without a recorded bank. Returns a new map.
+ */
+export function mergeBankNewestSaves(
+  newest: ReadonlyMap<ScraptfBank, BankSave>,
+  extra: readonly Pick<BankNewestSave, 'bank' | 'batchId' | 'savedAt' | 'itemCount'>[] | null | undefined,
+): Map<ScraptfBank, BankSave> {
+  const out = new Map(newest);
+  for (const s of extra ?? []) {
+    if (!isScraptfBank(s.bank) || !finite(s.savedAt) || !finite(s.batchId)) continue;
+    // As scraptfBankSaves: a bank page that stored nothing is no save (the repo skips it already).
+    if (isEmptyBankSave({ itemCount: s.itemCount }, s.bank)) continue;
+    const cur = out.get(s.bank);
+    if (!cur || s.savedAt > cur.at || (s.savedAt === cur.at && s.batchId > cur.id)) out.set(s.bank, { at: s.savedAt, id: s.batchId, items: finite(s.itemCount) ? s.itemCount : 0 });
+  }
+  return out;
+}
+
+/** A bank page's newest whole look: its newest bank stock save (Repo.bankStockSaves(bank, 1)[0]). */
+export type WholeLookSave = { batchId: number; savedAt: UnixMs; items: number };
+
+/**
+ * 0.7.1 (DC-2): a bank page is dated and counted by its newest whole look, its newest bank stock save, as
+ * its stock page and the engine's ACT-8 are. A partial look (DM-2) or an unsettled window snapshot (ACT-4)
+ * records a batch with cards but no stock save; it caught only some cards, so it must not date the bank,
+ * count its items or head "Not in your save N ago". `items` is that batch's itemCount (`itemCountOf`), else
+ * the save's own row count. The list, and a bank with no stock save (saved before 0.6, or its saves
+ * pruned), keep `newest`. Returns a new map.
+ */
+export function wholeLookNewestSaves(
+  newest: ReadonlyMap<ScraptfBank, BankSave>,
+  wholeLookOf: ((bank: ScraptfBank) => WholeLookSave | null | undefined) | null | undefined,
+  itemCountOf: (batchId: number) => number | null | undefined,
+): Map<ScraptfBank, BankSave> {
+  const out = new Map(newest);
+  if (!wholeLookOf) return out;
+  for (const page of SCRAPTF_BANK_PAGES) {
+    const s = wholeLookOf(page.bank);
+    if (!s || !finite(s.savedAt) || !finite(s.batchId)) continue;
+    const n = itemCountOf(s.batchId);
+    out.set(page.bank, { at: s.savedAt, id: s.batchId, items: finite(n) ? n : finite(s.items) ? s.items : 0 });
+  }
+  return out;
+}
+
+/** Each batch's itemCount by id, from the batches read and Repo.bankNewestSaves (wholeLookNewestSaves). */
+export function batchItemCounts(
+  batches: readonly Pick<CoverageBatch, 'id' | 'itemCount'>[],
+  extra?: readonly Pick<BankNewestSave, 'batchId' | 'itemCount'>[] | null,
+): (batchId: number) => number | null {
+  const counts = new Map<number, number>();
+  for (const s of extra ?? []) if (finite(s.batchId) && finite(s.itemCount)) counts.set(s.batchId, s.itemCount);
+  for (const b of batches) if (finite(b.itemCount)) counts.set(b.id, b.itemCount);
+  return (id) => counts.get(id) ?? null;
+}
+
+/**
  * One ScraptfCoverage per SCRAPTF_BANK_PAGES entry, in that order: the newest saved page counting
  * for it (scraptfBankSaves: the recorded bank, the majority rule only for a batch without one) and
  * that page's itemCount. The /items list counts for no bank page (it has its own "All items" chip).
  * Shared by the service (cached, refreshed on pricesChanged) and the mock, so both pick the same page.
+ * 0.7.1: `extra` (Repo.bankNewestSaves) dates banks saved before the batches read (mergeBankNewestSaves),
+ * and `wholeLookOf` (each bank's newest stock save) dates a bank by its newest whole look (DC-2).
  */
-export function scraptfCoverage(batches: readonly CoverageBatch[], categoriesOf: (batchId: number) => readonly Category[]): ScraptfCoverage[] {
-  const { newest } = scraptfBankSaves(batches, categoriesOf);
+export function scraptfCoverage(
+  batches: readonly CoverageBatch[],
+  categoriesOf: (batchId: number) => readonly Category[],
+  extra?: readonly Pick<BankNewestSave, 'bank' | 'batchId' | 'savedAt' | 'itemCount'>[] | null,
+  wholeLookOf?: ((bank: ScraptfBank) => WholeLookSave | null | undefined) | null,
+): ScraptfCoverage[] {
+  const newest = wholeLookNewestSaves(mergeBankNewestSaves(scraptfBankSaves(batches, categoriesOf).newest, extra), wholeLookOf, batchItemCounts(batches, extra));
   return SCRAPTF_BANK_PAGES.map((page) => {
     const save = newest.get(page.bank);
     return { category: page.category, label: page.label, url: page.url, lastSavedAt: save?.at ?? null, items: save?.items ?? 0 };

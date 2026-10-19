@@ -384,3 +384,16 @@ describe('importSavedPage: the saved scrap.tf price list (F14)', () => {
     expect(h.calls).toEqual([]);
   });
 });
+
+describe('importSavedPage: skipped counts (0.7.1, P5)', () => {
+  it('counts a skip by its code, never by the card text its warning quotes', () => {
+    const h = setup();
+    // A card whose indicator reads 0 ref is no price, and its first warning quotes its own tooltip.
+    const card = (line: string) =>
+      `<div data-appid="440" class="item hoverable quality6 app440" data-defindex="378" data-title="Team Captain" data-content="Level 1&lt;br/&gt;${line}"><div class="item-value-indicator">0 ref</div></div>`;
+    const html = `<!DOCTYPE html>\n<!-- saved from url=(0024)https://scrap.tf/buy/hats -->\n<html><head><title>Hats</title></head><body><div id="buy-container">${card('Glowing line one')}${card('Glowing line two')}</div></body></html>`;
+    const r = h.run(html, NOW - 60_000);
+    expect(r.skipped.map((s) => s.reason)).toEqual(['unparsed-modifier: "Glowing line one"', 'unparsed-modifier: "Glowing line two"']);
+    expect(r).toMatchObject({ skippedTotal: 2, skippedCounts: { 'unparsed-modifier': 2 } });
+  });
+});

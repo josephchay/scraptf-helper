@@ -4,6 +4,7 @@
 
 import type { BankStockThinSave } from '../shared/bankStock';
 import type {
+  BankNewestSave,
   BankStockSave,
   BankStockStored,
   Category,
@@ -338,6 +339,13 @@ export interface Repo {
   createImportBatch(b: NewImportBatch): number;
   /** Newest first (importedAt, then id); `bank` is null for batches from before 0.5. */
   listImportBatches(limit: number): ImportBatch[];
+  /**
+   * 0.7.1: each bank's newest save over every import batch with a recorded bank (not only the newest 500):
+   * save time as batchSavedAt (file mtime, else import time), ties to the higher id; a bank page that stored
+   * nothing is skipped, the list counts with none (isEmptyBankSave). One row per bank saved, in
+   * SCRAPTF_BANK_IDS order. One index seek per bank (schema V10), so it does not grow with the batches.
+   */
+  bankNewestSaves(): BankNewestSave[];
 
   // scrap.tf price list (F14): the user's saved scrap.tf/items, one row per canonical base SKU
   /**
@@ -388,9 +396,10 @@ export interface Repo {
   /** F20: the rows of several saves in one read (chunked), by batch id; a batch with no rows is absent. */
   bankStockRowsOf(batchIds: readonly number[]): Map<number, BankStockStored[]>;
   /**
-   * Retention (F20 S1, bankStockThinning): per bank page, every save of the last 24 h, the newest per UTC
-   * hour to 7 d, the newest per UTC day to 90 d, nothing older, at most `maxSaves` (300); a page's newest
-   * save and the save it is compared with are never deleted. `orphans` (default true; importSavedPage
+   * Retention (F20 S1, bankStockThinning; tiers from 0.7.1): per bank page, every save of the last 2 h (at
+   * most `maxSaves`, 300, in that tier only), the newest per 10 minutes to 24 h, per UTC hour to 7 d, per
+   * UTC day to 90 d, nothing older; a page's newest save, the save it is compared with and its session
+   * baseline are never deleted. `orphans` (default true; importSavedPage
    * passes false, maintenance true) also deletes rows whose batch is gone, which scans the table. Returns
    * the rows deleted. Maintenance and importSavedPage call it.
    */

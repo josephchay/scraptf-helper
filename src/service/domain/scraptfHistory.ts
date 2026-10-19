@@ -23,13 +23,20 @@ import {
   SCRAPTF_CHANGES_CSV_COLUMNS,
   SCRAPTF_CHANGES_EXPORT_MAX,
   SCRAPTF_ITEM_EVENTS,
+  SCRAPTF_ITEM_STOCK_EVENTS,
+  SCRAPTF_PRICE_KINDS,
   scraptfChangeCsvCells,
   scraptfChangeEvent,
   scraptfChangesLimit,
   scraptfEventsOf,
   scraptfItemHistoryOf,
+  scraptfKeyStatesOf,
+  scraptfListedPick,
+  scraptfMarkSuperseded,
   scraptfRunsOf,
   type ScraptfEventBuySide,
+  type ScraptfKeyState,
+  type ScraptfListed,
   type ScraptfSaveRows,
 } from '../../shared/scraptfHistory';
 import type {
@@ -78,9 +85,17 @@ export interface ScraptfHistory {
    * (rolling the import back), never for a missing previous save.
    */
   onImport(batchId: number): number;
-  /** S3 'scraptf.itemHistory': one copy's history (scraptfItemHistoryOf over the runs index's saves), events valued now. Never throws. */
+  /**
+   * S3 'scraptf.itemHistory': one copy's history (scraptfItemHistoryOf over the runs index's saves), events
+   * valued now. 0.7.1 (DM-6): its newest SCRAPTF_ITEM_EVENTS price events and, apart from them, its newest
+   * SCRAPTF_ITEM_STOCK_EVENTS stock moves, newest first in `events`. Never throws.
+   */
   itemHistory(sku: string, special: string | null | undefined, now: UnixMs): ScraptfItemHistory;
-  /** S4 'scraptf.changes': the feed newest first, valued at the key price now and joined to market.entryFor of each base SKU. Never throws. */
+  /**
+   * S4 'scraptf.changes': the feed newest first, valued at the key price now and joined to market.entryFor
+   * of each base SKU. 0.7.1 (ACT-10): `flip` only on a copy's newest event while it is on sale; a
+   * superseded one has wasFlip. Never throws.
+   */
   changes(q: ScraptfChangesQuery, now: UnixMs): ScraptfChangeEvent[];
   /**
    * S3 runs index of one bank (scraptfRunsOf over its retained saves, its pages read together), keyed by
@@ -91,9 +106,14 @@ export interface ScraptfHistory {
   /**
    * MarketRow.scraptfListedSince: scraptfListedSinceOf(runsFor(bank), baseSku), `bank` being the row's
    * scraptfLink bank when its source is 'seen'; without a bank, the bank a saved page lists it on now (a
-   * bank page before the list). Null when not listed now. In memory only.
+   * bank page before the list, then the newer sighting). Null when not listed now. In memory only.
    */
   listedSinceFor(baseSku: string, bank?: ScraptfBank | null): UnixMs | null;
+  /**
+   * 0.7.1 (DM-5): listedSinceFor with its newest sighting on sale (MarketRow.scraptfLastSeenAt), so the
+   * "Listed > 24 h" filter measures lastSeenAt - since. The same bank rule; null when not listed now.
+   */
+  listedFor(baseSku: string, bank?: ScraptfBank | null): ScraptfListed | null;
   /**
    * Brings the runs index up to the retained saves (core: after an import that wrote bank stock, after
    * maintenance thinned or pruned). A key price move needs none: runs hold raw keys + metal, valued per
@@ -176,22 +196,26 @@ function shareRows(rows: BankStockStored[], earlier: readonly BankStockStored[])
 interface BankHistory {
   saves: CachedSave[];
   runs: Map<string, ScraptfKeyRun>;
-  /** Per base SKU: the earliest listedSince among its copies listed now (scraptfListedSinceOf) and their newest sighting. */
-  listed: Map<string, { since: UnixMs; lastSeenAt: UnixMs }>;
+  /**
+   * Per base SKU: the run it is listed by (scraptfListedOf: the copy seen on sale last, then the earliest
+   * start), its start and its newest sighting.
+   */
+  listed: Map<string, ScraptfListed>;
+  /** 0.7.1 (ACT-10): each copy's current state (scraptfKeyStatesOf), built on the first feed read. */
+  states: Map<string, ScraptfKeyState> | null;
 }
 
-/** scraptfListedSinceOf for every base at once (one pass over the runs, so a market read is a Map lookup). */
-function listedOf(runs: ReadonlyMap<string, ScraptfKeyRun>): Map<string, { since: UnixMs; lastSeenAt: UnixMs }> {
-  const out = new Map<string, { since: UnixMs; lastSeenAt: UnixMs }>();
+/**
+ * scraptfListedOf for every base at once (one pass over the runs, so a market read is a Map lookup). 0.7.1
+ * (DM-5): start and sighting come from one run, so a copy last seen weeks ago never lends its start to a
+ * copy on today's save (the span is lastSeenAt - since).
+ */
+function listedOf(runs: ReadonlyMap<string, ScraptfKeyRun>): Map<string, ScraptfListed> {
+  const out = new Map<string, ScraptfListed>();
   for (const r of runs.values()) {
     if (r.listedSince === null) continue;
-    const seen = r.lastSeenAt ?? r.listedSince;
-    const cur = out.get(r.sku);
-    if (!cur) out.set(r.sku, { since: r.listedSince, lastSeenAt: seen });
-    else {
-      if (r.listedSince < cur.since) cur.since = r.listedSince;
-      if (seen > cur.lastSeenAt) cur.lastSeenAt = seen;
-    }
+    const next = { since: r.listedSince, lastSeenAt: r.lastSeenAt ?? r.listedSince };
+    if (scraptfListedPick(out.get(r.sku), next)) out.set(r.sku, next);
   }
   return out;
 }
@@ -204,11 +228,12 @@ function baseOf(sku: string): string {
 export function createScraptfHistory(deps: ScraptfHistoryDeps): ScraptfHistory {
   const { log, repo } = deps;
   const empty: ReadonlyMap<string, ScraptfKeyRun> = new Map();
+  const noStates: ReadonlyMap<string, ScraptfKeyState> = new Map();
   /** Every retained save's rows by batch id (only saves of SCRAPTF_BANKS banks). */
   const saves = new Map<number, CachedSave>();
   const banks = new Map<ScraptfBank, BankHistory>();
   /** listedSinceFor without a bank: per base, the bank listing it now (a bank page before the list, then newer). Rebuilt lazily. */
-  let anyBank: Map<string, { bank: ScraptfBank; since: UnixMs; lastSeenAt: UnixMs }> | null = null;
+  let anyBank: Map<string, ScraptfListed & { bank: ScraptfBank }> | null = null;
   // The same SKUs and names repeat on every save of a page: one string each keeps the cache small.
   const pool = new Map<string, string>();
   let ver = 0;
@@ -323,7 +348,7 @@ export function createScraptfHistory(deps: ScraptfHistoryDeps): ScraptfHistory {
       }
       // Only this bank's runs move: the others keep theirs.
       const runs = scraptfRunsOf(mine);
-      banks.set(bank, { saves: mine, runs, listed: listedOf(runs) });
+      banks.set(bank, { saves: mine, runs, listed: listedOf(runs), states: null });
     }
     anyBank = null;
     ver++;
@@ -350,9 +375,9 @@ export function createScraptfHistory(deps: ScraptfHistoryDeps): ScraptfHistory {
     }
   }
 
-  function anyBankMap(): Map<string, { bank: ScraptfBank; since: UnixMs; lastSeenAt: UnixMs }> {
+  function anyBankMap(): Map<string, ScraptfListed & { bank: ScraptfBank }> {
     if (anyBank !== null) return anyBank;
-    const out = new Map<string, { bank: ScraptfBank; since: UnixMs; lastSeenAt: UnixMs }>();
+    const out = new Map<string, ScraptfListed & { bank: ScraptfBank }>();
     for (const info of SCRAPTF_BANKS) {
       const b = banks.get(info.bank);
       if (!b) continue;
@@ -378,14 +403,39 @@ export function createScraptfHistory(deps: ScraptfHistoryDeps): ScraptfHistory {
     }
   }
 
-  /** Stored events valued at `K` and joined to the live buy side of their base SKU (one entryFor per base). */
+  /**
+   * ACT-10: a bank's copy states (scraptfKeyStatesOf over its cached saves), built once per runs rebuild;
+   * an empty map for a bank with no retained save (none of its events is current), null while the saves
+   * could not be read (events then stay as they are).
+   */
+  function statesOf(bank: ScraptfBank): ReadonlyMap<string, ScraptfKeyState> | null {
+    if (failing) return null;
+    const b = banks.get(bank);
+    if (!b) return noStates;
+    if (b.states === null) b.states = scraptfKeyStatesOf(b.saves);
+    return b.states;
+  }
+
+  /**
+   * Stored events valued at `K` and joined to the live buy side of their base SKU (one entryFor per base);
+   * 0.7.1 (ACT-10) a superseded flip keeps flip false and gets wasFlip (scraptfMarkSuperseded), from the
+   * saves in memory.
+   */
   function valued(list: readonly ScraptfEventStored[], K: Scrap): ScraptfChangeEvent[] {
     const buy = new Map<string, ScraptfEventBuySide | null>();
-    return list.map((e) => {
+    const out = list.map((e) => {
       let b = buy.get(e.sku);
       if (b === undefined) buy.set(e.sku, (b = entryOf(e.sku)));
       return scraptfChangeEvent(e, K, b);
     });
+    if (!out.some((e) => e.flip)) return out;
+    try {
+      ensure();
+      return scraptfMarkSuperseded(out, statesOf);
+    } catch (err) {
+      log.warn('scrap.tf history could not tell superseded flips', { error: errorText(err) });
+      return out;
+    }
   }
 
   function feedQuery(q: ScraptfChangesQuery | null | undefined): ScraptfEventQuery {
@@ -525,8 +575,13 @@ export function createScraptfHistory(deps: ScraptfHistoryDeps): ScraptfHistory {
           });
         }
         // Only this copy's newest events: a busy clean copy (a 'stock' event per save) must not push a
-        // painted copy's few events out of a per-base read.
-        const events = base ? valued(repo.scraptfEvents({ sku: base, specialKey: copy.specialKey, limit: SCRAPTF_ITEM_EVENTS }), kp.valueScrap) : [];
+        // painted copy's few events out of a per-base read. DM-6: price events and stock moves are read
+        // apart, so a page saved every few minutes cannot push its price drops out with stock moves.
+        const own = { sku: base, specialKey: copy.specialKey };
+        const stored = base
+          ? [...repo.scraptfEvents({ ...own, kinds: SCRAPTF_PRICE_KINDS, limit: SCRAPTF_ITEM_EVENTS }), ...repo.scraptfEvents({ ...own, kinds: ['stock'], limit: SCRAPTF_ITEM_STOCK_EVENTS })].sort((x, y) => y.id - x.id)
+          : [];
+        const events = valued(stored, kp.valueScrap);
         return scraptfItemHistoryOf({ sku: text, specialKey, ...(name ? { name } : {}), banks: list, events, keyPrice: kp, now: at });
       } catch (err) {
         log.warn('scrap.tf history could not read an item', { error: errorText(err) });
@@ -554,6 +609,13 @@ export function createScraptfHistory(deps: ScraptfHistoryDeps): ScraptfHistory {
       ensure();
       if (bank !== undefined && bank !== null) return banks.get(bank)?.listed.get(baseSku)?.since ?? null;
       return anyBankMap().get(baseSku)?.since ?? null;
+    },
+
+    listedFor(baseSku, bank) {
+      if (typeof baseSku !== 'string') return null;
+      ensure();
+      const l = bank !== undefined && bank !== null ? banks.get(bank)?.listed.get(baseSku) : anyBankMap().get(baseSku);
+      return l ? { since: l.since, lastSeenAt: l.lastSeenAt } : null;
     },
 
     refresh() {

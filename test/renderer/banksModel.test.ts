@@ -169,7 +169,7 @@ describe('one card', () => {
     expect(c.top.map((r) => r.sku)).toEqual(['1;6', '2;6', '3;6']);
     expect(c.lookFor!.rows.map((r) => r.sku)).toEqual(['1;6', '2;6', '3;6', '4;6', '5;6']);
     expect(c.lookFor!.seeAll).toBe('See all 9 not checked');
-    expect(c.openTitle).toBe(`Opens scrap.tf/buy/hats in your own browser; the app never visits it. ${BANK_SAVE_TIP}`);
+    expect(c.openTitle).toBe(`Opens scrap.tf/buy/hats in your own browser. Flip Desk never loads scrap.tf on its own. ${BANK_SAVE_TIP}`);
     // F18: which save type, the alternative and why.
     expect(BANK_SAVE_TIP).toBe(
       "Save it with Ctrl+S into your watch folder as 'Webpage, Complete' (or 'Webpage, Single File (.mhtml)') so cards scrap.tf added after the page loaded are included; it updates here within seconds.",
@@ -183,7 +183,7 @@ describe('the item drawer: "Seen on scrap.tf/buy/stranges · 12 min ago"', () =>
     expect(seenOnText({ bank: 'unusuals', at: NOW + MIN }, NOW)!.text).toBe('Seen on scrap.tf/unusuals · just now');
     expect(seenOnText({ bank: 'list', at: NOW - 2 * HOUR }, NOW)!.text).toBe('Seen on scrap.tf/items · 2 h ago');
     expect(seenOnText({ bank: 'hats', at: Number.NaN }, NOW)!.text).toBe('Seen on scrap.tf/buy/hats');
-    expect(seenOnText({ bank: 'hats', at: NOW }, NOW)!.title).toContain('The app never visits scrap.tf.');
+    expect(seenOnText({ bank: 'hats', at: NOW }, NOW)!.title).toContain('Flip Desk never loads scrap.tf on its own.');
     expect(seenOnText(null, NOW)).toBeNull();
     expect(seenOnText({ bank: '__proto__' as ScraptfBank, at: NOW }, NOW)).toBeNull();
   });

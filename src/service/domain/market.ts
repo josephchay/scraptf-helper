@@ -28,6 +28,7 @@ import {
   marketCsvCells,
   marketPage,
   marketProfit,
+  marketProfitTie,
   marketSearchTokens,
   marketUpdatedAt,
   marketUserSideMatches,
@@ -54,6 +55,7 @@ import type {
   RuleFilter,
   Scrap,
   ScrapPrice,
+  ScraptfBank,
   ScraptfCoverage,
   Settings,
   SkuObject,
@@ -175,9 +177,10 @@ export interface MarketIndexDeps extends ServiceDeps {
    * F20: the runs index of the user's saves (core's ScraptfHistory, late-bound like bankStock).
    * listedSinceFor(base, link bank) is joined per returned row as MarketRow.scraptfListedSince and filters
    * MarketQuery.listedOnScraptf; only that filtered pass is keyed on version() and the minute. Omitted: no
-   * row has a listed time (tests, 0.6).
+   * row has a listed time (tests, 0.6). 0.7.1 (DM-5): listedFor, when given, also brings the run's newest
+   * sighting (MarketRow.scraptfLastSeenAt); without it the row's 'seen' link time stands in for it.
    */
-  history?: Pick<ScraptfHistory, 'listedSinceFor' | 'version'>;
+  history?: Pick<ScraptfHistory, 'listedSinceFor' | 'version'> & Partial<Pick<ScraptfHistory, 'listedFor'>>;
   /** Injected in tests; defaults to unref'd real timers (realTimers). */
   timers?: TimerApi;
 }
@@ -1095,17 +1098,27 @@ export function createMarketIndex(deps: MarketIndexDeps): MarketIndex {
         // out (a bank page that stored nothing does not, F18 S3: scraptfBankSaves). Once per price
         // change (the cache), not per list().
         const batches = repo.listImportBatches(COVERAGE_BATCHES);
-        value = scraptfCoverage(batches, (id) => {
-          const cats: Category[] = [];
-          for (const b of kn.batchBases.get(id) ?? []) {
-            try {
-              cats.push(info(b).category);
-            } catch {
-              // an unreadable SKU counts for no page
+        // DM-7: each bank's newest save over every batch (one index seek per bank), so 500 window reads
+        // of one bank never date another as never saved. Guarded: a stand-in repo may not have it.
+        const newestSaves = typeof repo.bankNewestSaves === 'function' ? repo.bankNewestSaves() : null;
+        // DC-2: a bank page is dated by its newest whole look (its newest stock save), as the banks cards are.
+        const wholeLookOf = typeof repo.bankStockSaves === 'function' ? (bank: ScraptfBank) => repo.bankStockSaves(bank, 1)[0] : null;
+        value = scraptfCoverage(
+          batches,
+          (id) => {
+            const cats: Category[] = [];
+            for (const b of kn.batchBases.get(id) ?? []) {
+              try {
+                cats.push(info(b).category);
+              } catch {
+                // an unreadable SKU counts for no page
+              }
             }
-          }
-          return cats;
-        });
+            return cats;
+          },
+          newestSaves,
+          wholeLookOf,
+        );
       } catch (err) {
         // Once per failure streak: list() asks again on every page refresh until the read works.
         if (!coverageFailing) log.warn('Live market could not read the saved pages', { error: String(err) });
@@ -1133,6 +1146,8 @@ export function createMarketIndex(deps: MarketIndexDeps): MarketIndex {
         return finiteOrNull(profit);
       case 'updated':
         return marketUpdatedAt({ lastOrderChangeAt: e?.lastOrderChangeAt ?? null, knownObservedAt });
+      case 'seen':
+        return finiteOrNull(knownObservedAt);
       case 'name':
         return null;
     }
@@ -1192,13 +1207,23 @@ export function createMarketIndex(deps: MarketIndexDeps): MarketIndex {
   /**
    * F20, MarketRow.scraptfListedSince: since when the bank the row links to (a 'seen' link's bank, else
    * whichever bank lists it now) has had a copy of the base on sale, from the history's runs in memory.
-   * A failed read shows no listed time.
+   * 0.7.1 (DM-5): and its newest sighting on sale (scraptfLastSeenAt), from history.listedFor, else the
+   * 'seen' link's time (the newest saved page listing it). A failed read shows no listed time.
    */
-  function listedSinceOf(sku: string, link: Pick<MarketRow['scraptfLink'], 'bank' | 'source'>): UnixMs | null {
+  function listedOf(sku: string, link: Pick<MarketRow['scraptfLink'], 'bank' | 'source' | 'seenAt'>): { since: UnixMs | null; lastSeenAt: UnixMs | null } {
+    const bank = link.source === 'seen' ? link.bank : null;
     try {
-      return finiteOrNull(deps.history?.listedSinceFor(sku, link.source === 'seen' ? link.bank : null));
+      const h = deps.history;
+      if (h?.listedFor) {
+        const l = h.listedFor(sku, bank);
+        const since = finiteOrNull(l?.since);
+        return { since, lastSeenAt: since === null ? null : finiteOrNull(l?.lastSeenAt) };
+      }
+      const since = finiteOrNull(h?.listedSinceFor(sku, bank));
+      const seenAt = finiteOrNull(link.seenAt);
+      return { since, lastSeenAt: since !== null && link.source === 'seen' && seenAt !== null && seenAt >= since ? seenAt : null };
     } catch {
-      return null;
+      return { since: null, lastSeenAt: null };
     }
   }
 
@@ -1275,7 +1300,8 @@ export function createMarketIndex(deps: MarketIndexDeps): MarketIndex {
       // F20, the same place: the listed time toRow joins (the row's link bank).
       if (listedOnly) {
         const link = scraptfLinkFor(row.category, seenOf(row.sku, kn));
-        if (!marketListedSideMatches({ scraptfListedSince: listedSinceOf(row.sku, link) }, q, now)) return;
+        const listed = listedOf(row.sku, link);
+        if (!marketListedSideMatches({ scraptfListedSince: listed.since, scraptfLastSeenAt: listed.lastSeenAt }, q, now)) return;
       }
       const k = kn.byBase.get(row.sku) ?? null;
       const knownCost = k ? valueScrap(k.costKeys, k.costScrapRaw, K) : null;
@@ -1323,7 +1349,9 @@ export function createMarketIndex(deps: MarketIndexDeps): MarketIndex {
 
     // marketComparator's order, with the name tie-break read from the ranks where both rows have one.
     const sign = (q.dir ?? (key === 'name' ? 'asc' : 'desc')) === 'asc' ? 1 : -1;
-    const tie = (a: Cand, b: Cand): number => (a.r >= 0 && b.r >= 0 ? a.r - b.r : byName(a, b));
+    const nameTie = (a: Cand, b: Cand): number => (a.r >= 0 && b.r >= 0 ? a.r - b.r : byName(a, b));
+    // 0.7.1 'seen': rows seen on the same save tie by profit first, as marketComparator.
+    const tie = key === 'seen' ? (a: Cand, b: Cand): number => marketProfitTie(a.profit, b.profit) || nameTie(a, b) : nameTie;
     if (key === 'name') matched.sort((a, b) => sign * tie(a, b));
     else {
       matched.sort((a, b) => {
@@ -1366,6 +1394,7 @@ export function createMarketIndex(deps: MarketIndexDeps): MarketIndex {
     const link = scraptfLinkFor(c.category, seenOf(c.sku, kn));
     // The ceiling is for a clean copy; a price for a painted or spelled copy is still shown, but marked.
     if (c.known?.hasExtras && !flags.includes('has-extras')) flags.push('has-extras');
+    const listed = listedOf(c.sku, link);
     return {
       sku: c.sku,
       name: c.name,
@@ -1395,7 +1424,9 @@ export function createMarketIndex(deps: MarketIndexDeps): MarketIndex {
       scraptfNewAt: newAtOf(c.sku),
       scraptfLink: link,
       // F20: since when that bank's saves list it (the history's runs), joined at read time like scraptfNewAt.
-      scraptfListedSince: listedSinceOf(c.sku, link),
+      scraptfListedSince: listed.since,
+      // DM-5: and its newest sighting, so an old one is not read as listed now; absent when unknown.
+      ...(listed.lastSeenAt !== null ? { scraptfLastSeenAt: listed.lastSeenAt } : {}),
     };
   }
 

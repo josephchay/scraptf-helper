@@ -7,9 +7,10 @@ import { parse, parseFragment } from 'parse5';
 import type { DefaultTreeAdapterTypes } from 'parse5';
 import { z } from 'zod';
 import { parsePrice } from '../../shared/currency';
+import { IMPORT_REFUSAL_CODES, IMPORT_REPORT_MAX_ITEMS, LAYOUT_CHANGED, NO_PRICE_COLUMN, NO_STOCK_LIMIT, importWarningCode } from '../../shared/importCodes';
 import { fromObject, normalizeSkuObject } from '../../shared/sku';
 import { SCRAPTF_BANK_IDS } from '../../shared/types';
-import type { ImportPageKind, ParsedScrapItem, ScraptfBank, SkuObject, SpecialAttrs } from '../../shared/types';
+import type { ImportPageKind, ImportReport, ImportReportItem, ParsedScrapItem, ScraptfBank, SkuObject, SpecialAttrs } from '../../shared/types';
 import { SERIESLESS_CRATES } from '../connectors/schemaNames';
 import type { PaintkitRow, SchemaItemRow, SchemaService } from '../contracts';
 
@@ -54,6 +55,19 @@ export interface ScrapTfParseResult {
   page: string;
   items: ParsedScrapItem[];
   warnings: string[];
+  /**
+   * 0.7.1 (P4): what the parser saw, for the sanitized parser report ('import.report'); only with
+   * ParseOptions.diagnostics. Whitelisted card and row fields only, never the nav, scripts or avatar.
+   */
+  diagnostics?: ParseDiagnostics;
+}
+
+/** 0.7.1 (P4) ScrapTfParseResult.diagnostics: the report's counts, header and item records (reports.ts sanitizes the text). */
+export interface ParseDiagnostics {
+  counts: ImportReport['counts'];
+  headerColumns: string[];
+  /** At most IMPORT_REPORT_MAX_ITEMS: refused items and items with a guess or mismatch code. */
+  items: ImportReportItem[];
 }
 
 /**
@@ -64,10 +78,13 @@ export interface ScrapTfParseResult {
  * paintkit-inferred, wear-unresolved, wear-mismatch, killstreak-mismatch,
  * sheen-mismatch, needs-target, unparsed-modifier, reserved, not-tradable,
  * series-mismatch, series-unresolved, series-inferred, price-mismatch, unparsed-price, no-price,
- * no-pays-price, unparsed-pays-price, parse-error.
+ * no-pays-price, unparsed-pays-price, no-stock-limit (0.7.1: an /items row whose "Item Limits"
+ * could not be read), parse-error.
  * Page codes: not-scraptf, page-not-importable, page-kind-guessed,
  * page-kind-unknown, unknown-bank, schema-not-loaded, duplicate-cards, no-items,
  * no-cards-saved (F18: a bank page saved without its cards), no-sku, no-pays-column,
+ * layout-changed (0.7.1: item-like elements in no shape the parser knows), no-price-column (0.7.1:
+ * an /items table with headers but no "Price to buy"),
  * and from an .mhtml file (savedPage.ts): mhtml-invalid, mhtml-too-many-parts,
  * mhtml-no-html, mhtml-truncated (the file ends inside its page: nothing imported),
  * mhtml-charset; and too-large for a file the folder watch would not read
@@ -80,9 +97,13 @@ export function warningCode(warning: string): string {
   return i < 0 ? warning : warning.slice(0, i);
 }
 
-/** True when the item has a SKU and a usable price (the importer stores only these). */
+/**
+ * True when the item has a SKU and a usable price (the importer stores only these). 0.7.1 (P1): an /items
+ * row whose stock could not be read is not one either: a sold-out row would otherwise read as buyable.
+ */
 export function isImportableItem(item: ParsedScrapItem): boolean {
   if (item.sku === null) return false;
+  if (item.warnings.some((w) => warningCode(w) === NO_STOCK_LIMIT)) return false;
   return sellsPriceOf(item) !== null;
 }
 
@@ -487,10 +508,27 @@ interface DocScan {
   paysColumn: number | null;
   /** The /items "Item Limits" column (stock n of limit), found the same way. */
   limitsColumn: number | null;
+  /**
+   * 0.7.1 (P7): the header cells (th rows) of the table the price rows are in, or the row the price
+   * column was found in; null without one (a headerless table keeps the usual layout).
+   */
+  headerCells: Element[] | null;
+  /** 0.7.1 (P4): elements that carry a data-defindex (cards, rows and anything else). */
+  dataDefindex: number;
+  /**
+   * 0.7.1 (P7): item-like elements in no shape the parser knows (data-defindex and data-title but not an
+   * item app440 card; a tr with data-defindex but no data-quality), and the first few of them.
+   */
+  lookalikes: number;
+  lookalikeEls: Element[];
 }
 
 function isCard(classes: string[]): boolean {
   return classes.includes('item') && classes.includes('app440');
+}
+
+function cellsOf(row: Element): Element[] {
+  return row.childNodes.filter((c): c is Element => isElement(c) && (c.tagName === 'th' || c.tagName === 'td'));
 }
 
 function scanDocument(root: Node): DocScan {
@@ -506,13 +544,26 @@ function scanDocument(root: Node): DocScan {
     nameColumn: null,
     paysColumn: null,
     limitsColumn: null,
+    headerCells: null,
+    dataDefindex: 0,
+    lookalikes: 0,
+    lookalikeEls: [],
   };
-  const stack: { n: Node; selected: boolean }[] = [{ n: root, selected: false }];
+  // Each table's first header row, and the table the first price row is in (P7: a header there that
+  // lacks "Price to buy" means scrap.tf renamed or moved it, so no price is guessed by position).
+  const headerOf = new Map<Element | null, Element[]>();
+  let rowsTable: Element | null | undefined;
+  let priceHeader: Element[] | null = null;
+  const lookalike = (n: Element) => {
+    scan.lookalikes++;
+    if (scan.lookalikeEls.length < IMPORT_REPORT_MAX_ITEMS) scan.lookalikeEls.push(n);
+  };
+  const stack: { n: Node; selected: boolean; table: Element | null }[] = [{ n: root, selected: false, table: null }];
   while (stack.length) {
-    const { n, selected } = stack.pop()!;
+    const { n, selected, table } = stack.pop()!;
     if (!isElement(n)) {
       const kids = childNodesOf(n);
-      for (let i = kids.length - 1; i >= 0; i--) stack.push({ n: kids[i]!, selected });
+      for (let i = kids.length - 1; i >= 0; i--) stack.push({ n: kids[i]!, selected, table });
       continue;
     }
     const tag = n.tagName;
@@ -532,39 +583,57 @@ function scanDocument(root: Node): DocScan {
     }
     if (tag === 'body' && scan.bodyId === null) scan.bodyId = getAttr(n, 'id');
 
+    const hasDefindex = getAttr(n, 'data-defindex') !== null;
+    if (hasDefindex) scan.dataDefindex++;
     const classes = classesOf(n);
     if (isCard(classes)) {
       if (selected) scan.skippedCards++;
       else scan.cards.push(n);
       continue;
     }
+    if (hasDefindex && tag !== 'tr' && getAttr(n, 'data-title') !== null) lookalike(n);
     if (tag === 'tr') {
-      if (getAttr(n, 'data-quality') !== null && getAttr(n, 'data-defindex') !== null) {
+      if (getAttr(n, 'data-quality') !== null && hasDefindex) {
         scan.rows.push(n);
+        if (rowsTable === undefined) rowsTable = table;
         continue;
       }
+      if (hasDefindex) lookalike(n);
+      const cells = cellsOf(n);
+      if (!headerOf.has(table) && cells.some((c) => c.tagName === 'th')) headerOf.set(table, cells);
       if (scan.priceColumn === null) {
-        const cells = n.childNodes.filter((c): c is Element => isElement(c) && (c.tagName === 'th' || c.tagName === 'td'));
         const idx = cells.findIndex((c) => c.tagName === 'th' && /price to buy/i.test(textContent(c)));
         if (idx >= 0) {
           scan.priceColumn = idx;
-          const nameIdx = cells.findIndex((c) => c.tagName === 'th' && /^items?$/i.test(textContent(c)));
-          if (nameIdx >= 0) scan.nameColumn = nameIdx;
-          // By header text, not position: a layout change must not read stock or the price to buy as it.
-          const paysIdx = cells.findIndex((c) => c.tagName === 'th' && /price we pay/i.test(textContent(c)));
-          if (paysIdx >= 0) scan.paysColumn = paysIdx;
-          // Stock and limit decide "full" (then scrap.tf is no exit), so a moved column must still be read.
-          const limitsIdx = cells.findIndex((c) => c.tagName === 'th' && /item limits?/i.test(textContent(c)));
-          if (limitsIdx >= 0) scan.limitsColumn = limitsIdx;
+          priceHeader = cells;
+          const cols = headerColumnsOf(cells);
+          scan.nameColumn = cols.name;
+          scan.paysColumn = cols.pays;
+          scan.limitsColumn = cols.limits;
         }
       }
     }
     // Selected copies of bank items duplicate the cards in #buy-container.
     const sel = selected || getAttr(n, 'id') === 'buy-selected-container' || classes.includes('buy-selected-items');
+    const inTable = tag === 'table' ? n : table;
     const kids = n.childNodes;
-    for (let i = kids.length - 1; i >= 0; i--) stack.push({ n: kids[i]!, selected: sel });
+    for (let i = kids.length - 1; i >= 0; i--) stack.push({ n: kids[i]!, selected: sel, table: inTable });
   }
+  scan.headerCells = priceHeader ?? (rowsTable !== undefined ? (headerOf.get(rowsTable) ?? null) : null);
   return scan;
+}
+
+/**
+ * The /items columns a header row names, by header text, never by position: a layout change must not
+ * read stock or the price to buy as another column. Stock and limit decide "full" (then scrap.tf is no
+ * exit), so a moved "Item Limits" column must still be read.
+ */
+function headerColumnsOf(cells: readonly Element[]): { name: number | null; pays: number | null; limits: number | null } {
+  const find = (re: RegExp): number | null => {
+    const i = cells.findIndex((c) => c.tagName === 'th' && re.test(textContent(c)));
+    return i >= 0 ? i : null;
+  };
+  return { name: find(/^items?$/i), pays: find(/price we pay/i), limits: find(/item limits?/i) };
 }
 
 // ---------------------------------------------------------------------------
@@ -579,6 +648,8 @@ interface PreparedPaintkit {
 interface Ctx {
   schema: SchemaService;
   paintkits(): PreparedPaintkit[];
+  /** 0.7.1 (P4): build the parser report's item records (ParseOptions.diagnostics). */
+  diagnostics: boolean;
 }
 
 function safe<T>(fn: () => T, fallback: T): T {
@@ -590,10 +661,11 @@ function safe<T>(fn: () => T, fallback: T): T {
   }
 }
 
-function makeCtx(schema: SchemaService): Ctx {
+function makeCtx(schema: SchemaService, diagnostics = false): Ctx {
   let pks: PreparedPaintkit[] | null = null;
   return {
     schema,
+    diagnostics,
     paintkits() {
       if (pks === null) {
         const rows = safe(() => schema.paintkits(), [] as PaintkitRow[]);
@@ -930,6 +1002,38 @@ interface ContentInfo {
   unparsed: string[];
 }
 
+/** A custom description line (the owner's own words): never reported. */
+const CUSTOM_DESC_RE = /^(?:''|"|“).*(?:''|"|”)$/;
+/** Lines parseContent passes over: who crafted or gifted it, when it was received, craft numbers, tool inputs. */
+const PASSED_OVER_RE = [/^(?:Crafted|Gifted) by:/i, /^Date Received:/i, /^(?:Outputs?|Inputs?|Target):/i, /\bx\s*\d+$/, /^Holiday Restriction:/i, /^Craft #?\d+/i];
+
+/**
+ * P4: a line that names a person in any wording Steam or scrap.tf may use ("Gift from: …", "Crafted by …"
+ * without the colon parseContent expects). Never in a report, as a tooltip line or inside a warning that
+ * quotes one (unparsed-modifier).
+ */
+const PERSON_LINE_RE = /\b(?:(?:Crafted|Gifted|Created|Signed|Made|Owned)\s+by|Gift\s+from)\b/i;
+
+/** P4: an item's warnings as a report may hold them: none that quotes a line naming a person. */
+function reportWarnings(warnings: readonly string[]): string[] {
+  return warnings.filter((w) => !PERSON_LINE_RE.test(w));
+}
+
+/**
+ * 0.7.1 (P4): the tooltip lines the parser report may hold, as parseContent kept them: the gift, receipt,
+ * craft and tool lines and any custom description are dropped (a person's name or words), at most 20.
+ */
+function reportContentLines(lines: readonly string[]): string[] {
+  const out: string[] = [];
+  for (const raw of new Set(lines)) {
+    const line = raw.replace(/[’‘]/g, "'").trim();
+    if (!line || (CUSTOM_DESC_RE.test(line) && line.length > 2) || PERSON_LINE_RE.test(line) || PASSED_OVER_RE.some((re) => re.test(line))) continue;
+    out.push(line);
+    if (out.length >= 20) break;
+  }
+  return out;
+}
+
 function parseContent(lines: string[]): ContentInfo {
   const info: ContentInfo = {
     effectName: null,
@@ -1015,7 +1119,7 @@ function parseContent(lines: string[]): ContentInfo {
     if ((m = /^([A-Za-z][A-Za-z .'\-]*?)\s*:\s*[\d,]+$/.exec(line)) && BASE_STRANGE_COUNTERS.has(m[1]!.trim().toLowerCase())) {
       continue;
     }
-    if (/^(?:''|"|“).*(?:''|"|”)$/.test(line) && line.length > 2) {
+    if (CUSTOM_DESC_RE.test(line) && line.length > 2) {
       info.customDesc = true;
       continue;
     }
@@ -1025,16 +1129,7 @@ function parseContent(lines: string[]): ContentInfo {
       if (w) info.wear = WEAR_BY_NAME[w[1]!.toLowerCase()] ?? null;
       continue;
     }
-    if (
-      /^(?:Crafted|Gifted) by:/i.test(line) ||
-      /^Date Received:/i.test(line) ||
-      /^(?:Outputs?|Inputs?|Target):/i.test(line) ||
-      /\bx\s*\d+$/.test(line) ||
-      /^Holiday Restriction:/i.test(line) ||
-      /^Craft #?\d+/i.test(line)
-    ) {
-      continue;
-    }
+    if (PASSED_OVER_RE.some((re) => re.test(line))) continue;
     info.unparsed.push(line);
   }
   return info;
@@ -1232,7 +1327,13 @@ function qualityFromClasses(classes: string[]): { primary: number | null; all: n
   return { primary: nonStrange ?? 11, all };
 }
 
-function parseCard(el: Element, ctx: Ctx): { item: ParsedScrapItem; assetId: string | null } {
+/** A parsed card or row, and (ParseOptions.diagnostics) how to build its parser report record. */
+interface ParsedEntry {
+  item: ParsedScrapItem;
+  report: (() => ImportReportItem) | null;
+}
+
+function parseCard(el: Element, ctx: Ctx): ParsedEntry & { assetId: string | null } {
   const warnings: string[] = [];
   const parts = collectCard(el, warnings);
   const a = parts.attrs;
@@ -1265,7 +1366,7 @@ function parseCard(el: Element, ctx: Ctx): { item: ParsedScrapItem; assetId: str
     warnings.push(`quality-mismatch: card class says ${quality} but title says ${name.qualities.join('/')}`);
   }
 
-  const elevated =
+  let elevated =
     quality !== 11 && (q.all.includes(11) || name.strange || content.strangeStatClock);
 
   // Effect
@@ -1319,6 +1420,11 @@ function parseCard(el: Element, ctx: Ctx): { item: ParsedScrapItem; assetId: str
   // A Decorated card the title, class or tooltip calls Unusual has an effect this card does not show:
   // the plain skin's SKU would be a guess, so it stays Unusual and buildSku refuses it.
   else if (quality === 15 && effect === null && (name.qualities.includes(5) || q.all.includes(5) || content.effectName !== null)) quality = 5;
+  // P2: every skin keyed the way backpack.tf buyers key it, whichever quality class the card carries.
+  if (paintkit !== null && wear !== null) {
+    const skin = skinQuality(quality, effect, elevated || quality === 11 || q.all.includes(11) || name.strange);
+    if (skin) ({ quality, elevated } = skin);
+  }
 
   // Crate series: the title's, else the tooltip's.
   let crateSeries = name.crateSeries;
@@ -1408,7 +1514,56 @@ function parseCard(el: Element, ctx: Ctx): { item: ParsedScrapItem; assetId: str
       stock,
       warnings,
     },
+    // P4: the card's own fields as read; the title only when it holds no custom name.
+    report: ctx.diagnostics
+      ? () => ({
+          ...cardReportBase(el, parts.classes),
+          title: name.customName === null ? titleText : null,
+          contentLines: reportContentLines(contentLines),
+          indicator: parts.indicator,
+          particleId: effectImg,
+          warpaintId: warpaint?.paintkit ?? null,
+          sku: built.sku,
+          warnings: reportWarnings(warnings),
+        })
+      : null,
   };
+}
+
+/** P4: classes a report keeps (quality, killstreak tier, sheen/killstreaker, uncraftable) and the card's own flags. */
+const REPORT_CLASS_RE = /^(?:quality\d{1,3}|killstreak\d|fx\d{1,5}|uncraft[a-z]*|item|app440|hoverable)$/;
+
+/** P4: an element's report fields from its attributes, as text (raw, clipped later by reports.ts); never its asset id. */
+function cardReportBase(el: Element, classes: readonly string[]): ImportReportItem {
+  const raw = (name: string): string | null => getAttr(el, name);
+  const defindex = Number(raw('data-defindex') ?? '');
+  return {
+    defindex: Number.isSafeInteger(defindex) && defindex >= 0 && (raw('data-defindex') ?? '').trim() !== '' ? defindex : null,
+    classTokens: classes.filter((c) => REPORT_CLASS_RE.test(c)).slice(0, 20),
+    title: null,
+    contentLines: [],
+    indicator: null,
+    itemValue: raw('data-item-value'),
+    numAvailable: raw('data-num-available'),
+    numSelected: raw('data-num-selected'),
+    particleId: null,
+    warpaintId: null,
+    sku: null,
+    warnings: [],
+  };
+}
+
+/**
+ * 0.7.1 (P2): a skin's quality as backpack.tf keys it, whatever quality class scrap.tf gives the card. An
+ * unusual skin is Decorated (15) plus its effect, plus strange (quality2 11) when strange; a strange skin
+ * without an effect is Strange (11) with no second quality ("11;…;w2;pk14"); any other skin is Decorated.
+ * Killstreak and festive are separate SKU parts and stay. null (unchanged): an Unusual card that shows no
+ * effect stays 5, so buildSku refuses it rather than guess the plain skin.
+ */
+function skinQuality(quality: number, effect: number | null, strange: boolean): { quality: number; elevated: boolean } | null {
+  if (effect !== null) return { quality: 15, elevated: strange };
+  if (quality === 5) return null;
+  return strange ? { quality: 11, elevated: false } : { quality: 15, elevated: false };
 }
 
 function warPaintCheck(
@@ -1585,28 +1740,72 @@ function rowPays(cells: Element[], paysColumn: number | null, warnings: string[]
   return { keys: p.keys, scrap: p.scrap };
 }
 
-/** "Item Limits": title="n/limit" on the cell or inside it, stock n of at most `limit` (n >= limit: scrap.tf buys no more). */
-function limitsIn(cell: Element): { stock: number; limit: number } | null {
-  for (const h of [cell, ...descendants(cell)]) {
-    const m = /^\s*(\d{1,7})\s*\/\s*(\d{1,7})\s*$/.exec(getAttr(h, 'title') ?? '');
-    if (m) return { stock: Number(m[1]), limit: Number(m[2]) };
+/**
+ * Where the "Item Limits" bar keeps "n/limit". scrap.tf renders it in `title`; once its tooltip script
+ * has run on the live page (the scrap.tf window reads that DOM), Bootstrap 3 moves it to
+ * data-original-title (title left ""), Bootstrap 5 to data-bs-original-title (title removed), and a
+ * bar with no text may carry it as aria-label. Read in this order (P1).
+ */
+const LIMIT_ATTRS = ['title', 'data-original-title', 'data-bs-original-title', 'aria-label'] as const;
+const LIMIT_RE = /^\s*(\d{1,7})\s*\/\s*(\d{1,7})\s*$/;
+
+interface Limits {
+  stock: number;
+  limit: number;
+}
+
+/** "n/limit" from the bar's attributes on the cell or inside it (LIMIT_ATTRS order), else null. */
+function limitsByAttr(cell: Element): Limits | null {
+  const els = [cell, ...descendants(cell)];
+  for (const name of LIMIT_ATTRS) {
+    for (const h of els) {
+      const m = LIMIT_RE.exec(getAttr(h, name) ?? '');
+      if (m) return { stock: Number(m[1]), limit: Number(m[2]) };
+    }
   }
   return null;
 }
 
+/**
+ * The bar's own numbers when no attribute carries them: the first two leaf elements (no element
+ * children) whose text is a whole number, or one reading "n/limit". Never the whole cell's text, which
+ * runs the two together ("49" and "50" read "4950").
+ */
+function limitsByLeaves(cell: Element): Limits | null {
+  const nums: number[] = [];
+  for (const d of descendants(cell)) {
+    if (SKIP_TEXT_TAGS.has(d.tagName) || d.childNodes.some(isElement)) continue;
+    const t = textContent(d);
+    const pair = nums.length === 0 ? LIMIT_RE.exec(t) : null;
+    if (pair) return { stock: Number(pair[1]), limit: Number(pair[2]) };
+    if (/^\d{1,7}$/.test(t)) nums.push(Number(t));
+    if (nums.length === 2) return { stock: nums[0]!, limit: nums[1]! };
+  }
+  return null;
+}
+
+/** "Item Limits": stock n of at most `limit` (n >= limit: scrap.tf buys no more), from the attributes, else the bar's numbers. */
+function limitsIn(cell: Element): Limits | null {
+  return limitsByAttr(cell) ?? limitsByLeaves(cell);
+}
+
 /** Column indexes of a /items row, from the table header (price and name fall back to the usual layout). */
 interface RowColumns {
-  price: number;
+  /** null (P7): the table has headers but none says "Price to buy", so no price is read at all. */
+  price: number | null;
   name: number;
   pays: number | null;
   limits: number | null;
 }
 
-function parseRow(row: Element, cols: RowColumns, ctx: Ctx): ParsedScrapItem {
+/** P4: a report may hold this many of a row's cell texts. */
+const REPORT_MAX_CELLS = 12;
+
+function parseRow(row: Element, cols: RowColumns, ctx: Ctx): ParsedEntry {
   const { price: priceColumn, name: nameColumn, pays: paysColumn } = cols;
   const warnings: string[] = [];
   const a = validateAttrs(RowAttrsSchema, attrsOf(row), warnings);
-  const cells = row.childNodes.filter((c): c is Element => isElement(c) && (c.tagName === 'td' || c.tagName === 'th'));
+  const cells = cellsOf(row);
   const title = cells[nameColumn] ? textContent(cells[nameColumn]) : '';
   const defindex = a['data-defindex'] ?? null;
   const item = defindex !== null ? safe(() => ctx.schema.itemByDefindex(defindex), null) : null;
@@ -1619,28 +1818,47 @@ function parseRow(row: Element, cols: RowColumns, ctx: Ctx): ParsedScrapItem {
   }
   for (const l of name.leftover) warnings.push(`unparsed-name: "${clip(l, 60)}" in "${clip(name.plain, 60)}"`);
 
-  const priceText = cells[priceColumn] ? textContent(cells[priceColumn]) : '';
+  const priceCell = priceColumn !== null ? cells[priceColumn] : undefined;
+  const priceText = priceCell ? textContent(priceCell) : '';
   const parsed = priceText ? parsePrice(priceText, 'ref') : null;
-  if (!priceText) warnings.push('no-price: row has no "Price to buy" cell');
+  if (priceColumn === null) warnings.push('no-price: the list shows no "Price to buy" column');
+  else if (!priceText) warnings.push('no-price: row has no "Price to buy" cell');
   else if (!parsed) warnings.push(`unparsed-price: "${clip(priceText, 40)}"`);
   const pays = rowPays(cells, paysColumn, warnings);
 
-  // By its header when the page has one, else the first cell after the price that carries it (as before).
+  // By its header when the page has one, else the first cell after the price that carries it (as before):
+  // the attributes of every such cell first, then their bars' numbers.
   const limitsCell = cols.limits !== null ? cells[cols.limits] : undefined;
   let limits = limitsCell ? limitsIn(limitsCell) : null;
   if (!limits) {
-    for (const c of cells.slice(priceColumn + 1)) {
-      limits = limitsIn(c);
+    const rest = cells.slice(priceColumn !== null ? priceColumn + 1 : 0);
+    for (const read of [limitsByAttr, limitsByLeaves]) {
+      for (const c of rest) {
+        limits = read(c);
+        if (limits) break;
+      }
       if (limits) break;
     }
   }
+  // P1: the list has a limits column but this row's stock cannot be read: a sold-out row would read as
+  // buyable, so the row is no price (the saved list keeps it, its stock unknown).
+  if (!limits && cols.limits !== null) warnings.push(`${NO_STOCK_LIMIT}: the "Item Limits" cell shows no stock that can be read`);
   const stock = limits?.stock ?? null;
   const stockLimit = limits?.limit ?? null;
 
+  // P2: a skin keyed as backpack.tf keys it (skinQuality), as on a card.
+  const paintkit = name.paintkit?.id ?? null;
+  let elevated = quality !== 11 && name.strange;
+  let skuQuality = quality;
+  if (paintkit !== null && name.wear !== null) {
+    const skin = skinQuality(quality, name.effect, elevated || quality === 11);
+    if (skin) ({ quality: skuQuality, elevated } = skin);
+  }
+
   const built = buildSku(ctx, {
     defindex,
-    quality,
-    elevated: quality !== 11 && name.strange,
+    quality: skuQuality,
+    elevated,
     effect: name.effect,
     killstreak: name.killstreak,
     australium: name.australium,
@@ -1648,7 +1866,7 @@ function parseRow(row: Element, cols: RowColumns, ctx: Ctx): ParsedScrapItem {
     uncraftable: name.uncraftable,
     tradable: true,
     wear: name.wear,
-    paintkit: name.paintkit?.id ?? null,
+    paintkit,
     paintkitConflict: false,
     isCrate,
     crateSeries: name.crateSeries,
@@ -1658,18 +1876,43 @@ function parseRow(row: Element, cols: RowColumns, ctx: Ctx): ParsedScrapItem {
     warnings,
   });
   return {
-    title,
-    sku: built.sku,
-    skuObject: built.obj,
-    name: displayName(ctx, built.sku, name.plain || title),
-    costKeys: parsed?.keys ?? 0,
-    costScrap: parsed?.scrap ?? 0,
-    special: emptySpecial(),
-    assetId: null,
-    stock,
-    warnings,
-    pays,
-    stockLimit,
+    item: {
+      title,
+      sku: built.sku,
+      skuObject: built.obj,
+      name: displayName(ctx, built.sku, name.plain || title),
+      costKeys: parsed?.keys ?? 0,
+      costScrap: parsed?.scrap ?? 0,
+      special: emptySpecial(),
+      assetId: null,
+      stock,
+      warnings,
+      pays,
+      stockLimit,
+    },
+    // P4: the row's cells as text, and the attributes its stock was (or was not) read from.
+    report: ctx.diagnostics
+      ? () => {
+          const holder = limitsCell ?? cells.slice(priceColumn !== null ? priceColumn + 1 : 0).find((c) => limitsByAttr(c) !== null) ?? null;
+          const attrEl = holder ? ([holder, ...descendants(holder)].find((h) => LIMIT_ATTRS.some((n) => getAttr(h, n) !== null)) ?? holder) : null;
+          const classes = [...classesOf(row), ...descendants(row).filter((d) => classesOf(d).includes('item')).flatMap(classesOf)];
+          return {
+            ...cardReportBase(row, [...new Set(classes)]),
+            title: name.customName === null ? title : null,
+            cells: cells.slice(0, REPORT_MAX_CELLS).map((c, i) => (i === nameColumn && name.customName !== null ? '' : textContent(c))),
+            limitAttrs: attrEl
+              ? {
+                  title: getAttr(attrEl, 'title'),
+                  dataOriginalTitle: getAttr(attrEl, 'data-original-title'),
+                  dataBsOriginalTitle: getAttr(attrEl, 'data-bs-original-title'),
+                  ariaLabel: getAttr(attrEl, 'aria-label'),
+                }
+              : { title: null, dataOriginalTitle: null, dataBsOriginalTitle: null, ariaLabel: null },
+            sku: built.sku,
+            warnings: reportWarnings(warnings),
+          };
+        }
+      : null,
   };
 }
 
@@ -1730,6 +1973,11 @@ export interface ParseOptions {
    * read first, as the saved-from comment is. Only parsed as text by pageKindFromUrl, never fetched.
    */
   address?: string | null;
+  /**
+   * 0.7.1 (P4): also return ScrapTfParseResult.diagnostics for the parser report (importSavedPage asks).
+   * Off by default, so other callers parse exactly as before.
+   */
+  diagnostics?: boolean;
 }
 
 /** F18 S3: a recognised bank page (any /buy bank or unusuals) whose save holds no card. */
@@ -1753,6 +2001,38 @@ function bodyIdNamesCardBank(bodyId: string | null): boolean {
 }
 
 /**
+ * P4: item codes that mark a stored item as read by a guess or with a disagreement, so the report
+ * keeps it beside the refused ones.
+ */
+const REPORT_GUESS_CODES: ReadonlySet<string> = new Set([
+  'unknown-quality',
+  'paintkit-inferred',
+  'series-inferred',
+  'ambiguous-paint',
+  'effect-mismatch',
+  'price-mismatch',
+  'unparsed-modifier',
+  'unparsed-name',
+  NO_STOCK_LIMIT,
+  LAYOUT_CHANGED,
+]);
+const REFUSAL_CODES: ReadonlySet<string> = new Set(IMPORT_REFUSAL_CODES);
+
+/** P4: an item the report keeps: refused (no SKU, no usable price, a refusal code) or read with a guess. */
+function reportWorthy(item: ParsedScrapItem): boolean {
+  if (!isImportableItem(item)) return true;
+  return item.warnings.some((w) => {
+    const c = importWarningCode(w);
+    return REPORT_GUESS_CODES.has(c) || (REFUSAL_CODES.has(c) && c !== 'no-defindex');
+  });
+}
+
+/** P4: the report's header texts (the price list's header row), at most 20, each short. */
+function headerTexts(cells: readonly Element[] | null): string[] {
+  return (cells ?? []).slice(0, 20).map((c) => clip(textContent(c), 40));
+}
+
+/**
  * Parses a saved scrap.tf page into items with SKUs and prices. Throws
  * ImportTooLargeError above MAX_IMPORT_BYTES; everything else is reported as
  * warnings. Nothing in the page is executed or fetched.
@@ -1763,11 +2043,23 @@ export function parseScrapTfHtml(html: string, schema: SchemaService, opts: Pars
     throw new ImportTooLargeError(utf8Length(html));
   }
   const text = html.charCodeAt(0) === 0xfeff ? html.slice(1) : html;
-  const ctx = makeCtx(schema);
+  const ctx = makeCtx(schema, opts.diagnostics === true);
   const warnings: string[] = [];
 
   const doc = parse(text);
   const scan = scanDocument(doc);
+  // P4: what the parser saw, filled in below; only returned when asked for.
+  const counts: ImportReport['counts'] = {
+    dataDefindex: scan.dataDefindex,
+    cards: scan.cards.length,
+    rows: scan.rows.length,
+    selectedSkipped: scan.skippedCards,
+    duplicates: 0,
+    lookalikes: scan.lookalikes,
+  };
+  const reports: ImportReportItem[] = [];
+  const withDiagnostics = (r: ScrapTfParseResult): ScrapTfParseResult =>
+    ctx.diagnostics ? { ...r, diagnostics: { counts, headerColumns: headerTexts(scan.headerCells), items: reports } } : r;
 
   // Page kind: the file's own address (an .mhtml part's Content-Location), saved-from comment,
   // canonical link, og:url, then title/structure.
@@ -1789,7 +2081,7 @@ export function parseScrapTfHtml(html: string, schema: SchemaService, opts: Pars
     bank = hint.bank;
     if (pageKind === 'unknown') {
       warnings.push(`page-not-importable: scrap.tf${hint.path} does not list prices you can buy at; nothing imported`);
-      return { pageKind, bank, page, items: [], warnings };
+      return withDiagnostics({ pageKind, bank, page, items: [], warnings });
     }
     if (pageKind === 'buy' && bank === null) warnings.push(unknownBankWarning(buySlugOf(hint.path) ?? ''));
   } else if (hint) {
@@ -1810,6 +2102,13 @@ export function parseScrapTfHtml(html: string, schema: SchemaService, opts: Pars
   if (scan.skippedCards > 0) warnings.push(`duplicate-cards: ignored ${scan.skippedCards} selected-item copies`);
 
   const items: ParsedScrapItem[] = [];
+  const keep = (entry: ParsedEntry) => {
+    items.push(entry.item);
+    if (entry.report !== null && reports.length < IMPORT_REPORT_MAX_ITEMS && reportWorthy(entry.item)) reports.push(entry.report());
+  };
+  /** P4: a card or row that threw: its attributes only (its title could hold a custom name). */
+  const failedReport = (el: Element, item: ParsedScrapItem): ParsedEntry['report'] =>
+    ctx.diagnostics ? () => ({ ...cardReportBase(el, classesOf(el)), warnings: reportWarnings(item.warnings) }) : null;
   // F18 S4: one card can show in two containers (a "new items" strip and the main grid). By asset id;
   // a card without one by everything it parsed to: scrap.tf stacks identical copies on one card, so an
   // identical second card is the same card shown again (a reserved copy differs by its warning).
@@ -1818,12 +2117,13 @@ export function parseScrapTfHtml(html: string, schema: SchemaService, opts: Pars
   let dupes = 0;
   let unidentifiedDupes = 0;
   for (const el of scan.cards) {
-    let parsed: { item: ParsedScrapItem; assetId: string | null };
+    let parsed: ParsedEntry & { assetId: string | null };
     try {
       parsed = parseCard(el, ctx);
     } catch (err) {
       const title = getAttr(el, 'data-title') ?? '';
-      items.push(failedItem(title, `card could not be parsed (${err instanceof Error ? err.message : String(err)})`));
+      const item = failedItem(title, `card could not be parsed (${err instanceof Error ? err.message : String(err)})`);
+      keep({ item, report: failedReport(el, item) });
       continue;
     }
     if (parsed.assetId !== null) {
@@ -1841,26 +2141,49 @@ export function parseScrapTfHtml(html: string, schema: SchemaService, opts: Pars
       }
       seenUnidentified.add(key);
     }
-    items.push(parsed.item);
+    keep(parsed);
   }
+  counts.duplicates = dupes + unidentifiedDupes;
   if (dupes > 0) warnings.push(`duplicate-cards: ignored ${dupes} cards with an asset id already seen`);
   if (unidentifiedDupes > 0) warnings.push(`duplicate-cards: ignored ${unidentifiedDupes} cards without an asset id shown twice`);
 
-  const priceColumn = scan.priceColumn ?? 2;
-  const nameColumn = scan.nameColumn ?? 1;
-  if (scan.rows.length > 0 && scan.paysColumn === null) {
+  let cols: RowColumns;
+  if (scan.priceColumn !== null) {
+    cols = { price: scan.priceColumn, name: scan.nameColumn ?? 1, pays: scan.paysColumn, limits: scan.limitsColumn };
+  } else if (scan.rows.length > 0 && scan.headerCells !== null) {
+    // P7: the price list has headers, none of them "Price to buy" (renamed or moved): no column is
+    // guessed by position, so every row is no price. The other columns are still read by their headers,
+    // so the saved list keeps each row's stock and what scrap.tf pays, with no price to buy.
+    const named = headerColumnsOf(scan.headerCells);
+    cols = { price: null, name: named.name ?? 1, pays: named.pays, limits: named.limits };
+    warnings.push(`${NO_PRICE_COLUMN}: the price list has no "Price to buy" column; no price to buy was read`);
+  } else {
+    // A table with no header row at all: the usual layout, as before.
+    cols = { price: 2, name: 1, pays: null, limits: null };
+  }
+  if (scan.rows.length > 0 && cols.pays === null) {
     // Never guessed by position: a wrong column would read as what scrap.tf pays (Holdings' exit).
     warnings.push('no-pays-column: no "Price we pay" column found; what scrap.tf pays was not read');
   }
   for (const row of scan.rows) {
     try {
-      items.push(parseRow(row, { price: priceColumn, name: nameColumn, pays: scan.paysColumn, limits: scan.limitsColumn }, ctx));
+      keep(parseRow(row, cols, ctx));
     } catch (err) {
-      items.push(failedItem(textContent(row).slice(0, 80), `row could not be parsed (${err instanceof Error ? err.message : String(err)})`));
+      const item = failedItem(textContent(row).slice(0, 80), `row could not be parsed (${err instanceof Error ? err.message : String(err)})`);
+      keep({ item, report: failedReport(row, item) });
     }
   }
 
-  if (items.length === 0) {
+  if (items.length === 0 && scan.lookalikes > 0) {
+    // P7: item-like elements, none of them in a shape the parser knows: scrap.tf changed its page, so
+    // neither "saved without its items" nor "no items" is true. Digits only: no page text.
+    warnings.push(`${LAYOUT_CHANGED}: ${scan.lookalikes} item elements not recognised`);
+    if (ctx.diagnostics) {
+      for (const el of scan.lookalikeEls.slice(0, IMPORT_REPORT_MAX_ITEMS)) {
+        reports.push({ ...cardReportBase(el, classesOf(el)), warnings: [`${LAYOUT_CHANGED}: not an item card or price row`] });
+      }
+    }
+  } else if (items.length === 0) {
     // F18 S3: a bank page (/buy/<slug>, /unusuals) with no card. scrap.tf adds its cards after the page
     // has loaded, and "HTML only" writes the page as it first loaded. Coverage, the banks cards and bank
     // stock ignore such a save of a bank page (it stores nothing); a list page keeps 'no-items'.
@@ -1870,7 +2193,7 @@ export function parseScrapTfHtml(html: string, schema: SchemaService, opts: Pars
     const noSku = items.filter((i) => i.sku === null).length;
     if (noSku > 0) warnings.push(`no-sku: ${noSku} of ${items.length} items could not be identified`);
   }
-  return { pageKind, bank, page, items, warnings };
+  return withDiagnostics({ pageKind, bank, page, items, warnings });
 }
 
 function failedItem(titleHtml: string, reason: string): ParsedScrapItem {

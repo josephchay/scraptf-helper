@@ -64,7 +64,7 @@ describe('"Listed on scrap.tf > 24 h" (F20 U5)', () => {
     expect(LISTED_ON_SCRAPTF_LABEL).toBe('Listed on scrap.tf > 24 h');
     expect(LISTED_ON_SCRAPTF_HINT).toBe('in your saves');
     expect(LISTED_ON_SCRAPTF_TITLE).toMatch(/at least a day, without a break/);
-    expect(LISTED_ON_SCRAPTF_TITLE).toMatch(/the app never visits scrap\.tf\.$/);
+    expect(LISTED_ON_SCRAPTF_TITLE).toMatch(/Flip Desk never loads scrap\.tf on its own\.$/);
     const t = emptyFiltersText(filters({ listedOnScraptf: true }));
     expect(t).toMatch(/^Listed on scrap\.tf > 24 h \(under Source\) keeps only items your saves have listed on sale for a day or more\./);
     expect(t).toContain('or untick it.');
@@ -90,8 +90,10 @@ describe('against the mock', () => {
     const only = await b.rpc('market.list', marketListParams({ ...marketWindowQuery(filters({ listedOnScraptf: true }), null, DEFAULT_MARKET_SORT), limit: MARKET_MAX_LIMIT, offset: 0 }, 568));
     expect(only.rows.length).toBeGreaterThan(0);
     expect(only.rows.length).toBeLessThan(all.rows.length);
-    for (const r of only.rows) expect(T0 - r.scraptfListedSince!).toBeGreaterThanOrEqual(SCRAPTF_LONG_LISTED_MS);
-    const want = all.rows.filter((r) => r.scraptfListedSince !== null && T0 - r.scraptfListedSince >= SCRAPTF_LONG_LISTED_MS).map((r) => r.sku).sort();
+    // 0.7.1 (DM-5): the span ends at the run's newest sighting on sale (scraptfLastSeenAt), else now.
+    const span = (r: (typeof all.rows)[number]): number => (r.scraptfLastSeenAt ?? T0) - r.scraptfListedSince!;
+    for (const r of only.rows) expect(span(r)).toBeGreaterThanOrEqual(SCRAPTF_LONG_LISTED_MS);
+    const want = all.rows.filter((r) => r.scraptfListedSince !== null && span(r) >= SCRAPTF_LONG_LISTED_MS).map((r) => r.sku).sort();
     expect(only.rows.map((r) => r.sku).sort()).toEqual(want);
   });
 });

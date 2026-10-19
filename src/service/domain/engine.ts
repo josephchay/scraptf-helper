@@ -9,6 +9,8 @@
 import { z } from 'zod';
 import { categoryOfSkuOnly } from '../../shared/categories';
 import { formatScrap, valueScrap } from '../../shared/currency';
+import { DEFAULT_SETTINGS } from '../../shared/defaults';
+import { bankForCategory } from '../../shared/links';
 import { baseSku as toBaseSku, fromObject, fromString, isValidSku } from '../../shared/sku';
 import { CATEGORIES, CURRENCY_SKUS, EMPTY_SPECIAL } from '../../shared/types';
 import type {
@@ -25,6 +27,7 @@ import type {
   ReferencePrices,
   Scrap,
   ScrapPrice,
+  ScraptfBank,
   ScraptfListKey,
   Settings,
   SkuObject,
@@ -45,7 +48,10 @@ export const DEBOUNCE_MS = 1000;
 export const SWEEP_INTERVAL_MS = 60_000;
 /** A profitable row emits 'changed' when its profit moves by at least 1 ref. */
 export const CHANGE_PROFIT_DELTA: Scrap = 9;
-/** Repo meta key holding { opportunityKey: lastNotifiedAt }. */
+/**
+ * Repo meta key holding { opportunityKey: NotifyRecord } (0.7.1). Before 0.7.1 it held
+ * { opportunityKey: lastNotifiedAt }; such entries still parse, as records without a fingerprint.
+ */
 export const NOTIFY_META_KEY = 'engine.lastNotified';
 /** Individual toasts per run; the rest are folded into one summary toast. */
 export const MAX_NOTIFICATIONS_PER_RUN = 3;
@@ -449,11 +455,27 @@ export interface EngineDeps extends ServiceDeps {
   scraptfKey?(): ScraptfListKey | null;
   /**
    * F17: whether the user was already told about this opportunity's item by another notification (core:
-   * an imported item that a "New on scrap.tf" toast named moments ago, newFlipNotifier.toldRecently). Such
-   * an opportunity is recorded as notified, so it is not toasted later either, but sends no second toast.
-   * Omitted (tests): every qualifying opportunity is toasted, as before.
+   * an imported item that a "New on scrap.tf" toast named moments ago, newFlipNotifier.toldRecently; from
+   * 0.7.1 also a price the user typed or saved from the check popup minutes ago, ACT-7). Such an
+   * opportunity is recorded as notified, fingerprint included, so it is not toasted later either unless
+   * something changes, but sends no second toast. Omitted (tests): every qualifying opportunity is toasted.
    */
-  toldElsewhere?(opp: Pick<Opportunity, 'sku' | 'inputKind'>, now: UnixMs): boolean;
+  toldElsewhere?(opp: Pick<Opportunity, 'sku' | 'inputKind' | 'inputObservedAt' | 'firstSeenAt'>, now: UnixMs): boolean;
+  /**
+   * 0.7.1 (ACT-3): the user recorded a scrap.tf buy of this base SKU at or after `at` (the input's
+   * observedAt), so the toast would be about the item just bought (core: the journal's newest scrap.tf buy
+   * per base). For a rule candidate `at` is the later of the rule's time and now minus
+   * profit.inputStaleMs. Nothing is recorded, so a newer price of it toasts again; rows are unchanged.
+   * Omitted or failing: toasted as before.
+   */
+  boughtSince?(baseSku: string, at: UnixMs): boolean;
+  /**
+   * 0.7.1 (ACT-8): when the user last saw a bank page whole (core: its newest bank stock save, which a
+   * partial or unsettled look does not write), or null. A rule candidate is a base with no price of its
+   * own, so on a single-page bank seen whole within profit.inputStaleMs it was not on the page: no
+   * "Candidate:" toast (the row and verdict are unchanged). Omitted or failing: toasted as before.
+   */
+  recentBankSaveAt?(bank: ScraptfBank): UnixMs | null;
   /**
    * F17: every opportunity a run toasted, individually or in its summary (core: the import ones go to
    * newFlipNotifier.toastedElsewhere). At start-up the engine judges an import held for the Live market's
@@ -476,10 +498,24 @@ interface BaseWork {
 }
 
 const notifyMapSchema = z.record(z.string(), z.unknown());
+const notifyRecordSchema = z.union([
+  // Before 0.7.1: the time alone.
+  z.number(),
+  z.object({ t: z.number(), f: z.object({ obs: z.number(), lid: z.string().nullable(), p: z.number().nullable() }).nullable() }),
+]);
 
 /** Base SKU of an opportunity SKU without a full parse in the common (unpainted) case. */
 function baseOf(sku: string): string {
   return /;p\d/.test(sku) ? toBaseSku(sku) : sku;
+}
+
+/** DC-5: an australium SKU; an unreadable one is not (ACT-8 then judges it by its category, as before). */
+function isAustralium(sku: string): boolean {
+  try {
+    return fromString(sku).australium === true;
+  } catch {
+    return false;
+  }
 }
 
 export function createEngine(deps: EngineDeps): Engine {
@@ -514,7 +550,7 @@ export function createEngine(deps: EngineDeps): Engine {
   let indexLoaded = false;
 
   const infoCache = new Map<string, SkuInfo>();
-  let notified: Map<string, number> | null = null;
+  let notified: Map<string, NotifyRecord> | null = null;
 
   // Best raw buy-order value per base SKU, valid until the SKU is marked dirty. Lets a
   // sweep skip loading listings for rule-only SKUs whose orders cannot beat any rule cost.
@@ -656,30 +692,28 @@ export function createEngine(deps: EngineDeps): Engine {
     }
   }
 
-  function loadNotified(): Map<string, number> {
+  function loadNotified(): Map<string, NotifyRecord> {
     if (notified) return notified;
-    notified = new Map();
     try {
-      const raw = repo.getMeta(NOTIFY_META_KEY);
-      if (raw) {
-        const parsed = notifyMapSchema.safeParse(JSON.parse(raw));
-        if (parsed.success) {
-          for (const [k, v] of Object.entries(parsed.data)) if (typeof v === 'number' && Number.isFinite(v)) notified.set(k, v);
-        }
-      }
+      notified = parseNotifyRecords(repo.getMeta(NOTIFY_META_KEY));
     } catch (err) {
+      notified = new Map();
       log.warn('Could not read notification history; starting fresh', { error: String(err) });
     }
     return notified;
   }
 
   /**
-   * Expires entries by age only. A count cap would drop keys still inside the
-   * dedup window and re-notify them on the next sweep, forever. The map stays
-   * bounded: it only holds keys notified within the window.
+   * Never a count cap: it would drop keys still inside the dedup window and re-notify them on the next
+   * sweep, forever. Inside the window every record stays. Past it a record stays only while it has a
+   * fingerprint and its row is still stored (the fingerprint is what holds an unchanged row back, ACT-2),
+   * so the map is bounded by the stored rows plus the keys told within the window.
    */
-  function serializeNotified(map: Map<string, number>, now: UnixMs, dedupMs: number): string {
-    for (const [k, ts] of map) if (!(now - ts < dedupMs) || ts > now) map.delete(k);
+  function serializeNotified(map: Map<string, NotifyRecord>, now: UnixMs, dedupMs: number, stored: (key: string) => boolean): string {
+    for (const [k, r] of map) {
+      if (r.t > now) map.delete(k);
+      else if (now - r.t >= dedupMs && (r.f === null || !stored(k))) map.delete(k);
+    }
     return JSON.stringify(Object.fromEntries(map));
   }
 
@@ -966,6 +1000,7 @@ export function createEngine(deps: EngineDeps): Engine {
     if (n?.enabled) {
       const dedupMs = Number.isFinite(n.dedupMs) && n.dedupMs > 0 ? n.dedupMs : 0;
       const kinds = notifyKinds(n.inputKinds);
+      const staleMs = inputStaleMsOf(p);
       const last = loadNotified();
       let toldElsewhere = 0;
       for (const opp of results.values()) {
@@ -973,11 +1008,21 @@ export function createEngine(deps: EngineDeps): Engine {
         if (opp.confidence < n.minConfidence || opp.profitScrap < n.minProfitScrap) continue;
         // F6: input kinds the user muted; F5: a suspect margin is shown but never toasted.
         if (!kinds.has(opp.inputKind) || opp.flags.includes('suspect-margin')) continue;
-        const ts = last.get(opp.key);
-        if (ts !== undefined && now - ts < dedupMs && now >= ts) continue;
+        // ACT-2: a price this old may be long gone from scrap.tf. The row stays in the lists; it is not news.
+        if (opp.flags.includes('stale-input')) continue;
+        const print = notifyFingerprintOf(opp, p.useOrder);
+        const told = last.get(opp.key);
+        if (told !== undefined) {
+          if (now - told.t < dedupMs && now >= told.t) continue;
+          // ACT-2: past the window, only a new sighting, a new buyer or more profit is worth a toast.
+          if (!notifyWorthRepeating(told.f, print)) continue;
+        }
+        // ACT-3 and ACT-8: the item just bought, or a candidate a fresh save shows is not on its page. Not
+        // recorded: a newer price, or a save that has gone stale, toasts again.
+        if (safeBought(opp, now, staleMs) || absentFromFreshSave(opp, now, staleMs)) continue;
         // F17: the "New on scrap.tf" toast already named this item; one toast per find.
         if (deps.toldElsewhere && safeTold(opp, now)) {
-          last.set(opp.key, now);
+          last.set(opp.key, { t: now, f: print });
           toldElsewhere++;
           continue;
         }
@@ -986,11 +1031,15 @@ export function createEngine(deps: EngineDeps): Engine {
       if (toNotify.length > 0) {
         toNotify.sort((a, b) => (b.profitScrap ?? 0) - (a.profitScrap ?? 0) || a.key.localeCompare(b.key));
         toNotify.forEach((opp, i) => {
-          last.set(opp.key, now);
+          last.set(opp.key, { t: now, f: notifyFingerprintOf(opp, p.useOrder) });
           if (i < MAX_NOTIFIED_EVENTS_PER_RUN) evs.push(eventOf(opp, 'notified', notificationBody(opp, K, p.useOrder), now));
         });
       }
-      if (toNotify.length > 0 || toldElsewhere > 0) notifyMeta = serializeNotified(last, now, Math.max(dedupMs, 1));
+      if (toNotify.length > 0 || toldElsewhere > 0) {
+        // Rows this run keeps, so a record outlives the window only while its row exists.
+        const stored = (key: string): boolean => !deleting.has(key) && (results.has(key) || known.has(key));
+        notifyMeta = serializeNotified(last, now, Math.max(dedupMs, 1), stored);
+      }
     }
 
     // ----- write -----
@@ -1049,6 +1098,41 @@ export function createEngine(deps: EngineDeps): Engine {
   function safeTold(opp: Opportunity, now: UnixMs): boolean {
     try {
       return deps.toldElsewhere?.(opp, now) === true;
+    } catch (err) {
+      log.warn('Engine notification check failed', { error: String(err) });
+      return false;
+    }
+  }
+
+  /**
+   * ACT-3: a scrap.tf buy of this base recorded at or after the input was seen. A rule's time is when it
+   * was written, not a sighting of the item, so for a candidate only a buy within `staleMs` counts (else
+   * one buy would mute that base's candidates until the rule is edited). A failing check toasts.
+   */
+  function safeBought(opp: Opportunity, now: UnixMs, staleMs: number): boolean {
+    if (!deps.boughtSince) return false;
+    const at = opp.inputKind === 'rule' ? Math.max(opp.inputObservedAt, now - staleMs) : opp.inputObservedAt;
+    try {
+      return deps.boughtSince(baseOf(opp.sku), at) === true;
+    } catch (err) {
+      log.warn('Engine notification check failed', { error: String(err) });
+      return false;
+    }
+  }
+
+  /**
+   * ACT-8: a rule candidate whose bank is one page (every bank but /unusuals), seen whole within
+   * `staleMs`: the item was not on that save. Never an australium (DC-5): its category says 'stranges', but
+   * scrap.tf sells australiums on its items bank too (SCRAPTF_BANKS), so that page is no proof. A failing
+   * check toasts.
+   */
+  function absentFromFreshSave(opp: Opportunity, now: UnixMs, staleMs: number): boolean {
+    if (opp.inputKind !== 'rule' || !deps.recentBankSaveAt) return false;
+    const bank = bankForCategory(opp.category);
+    if (bank === 'unusuals' || isAustralium(opp.sku)) return false;
+    try {
+      const at = deps.recentBankSaveAt(bank);
+      return typeof at === 'number' && Number.isFinite(at) && now - at <= staleMs;
     } catch (err) {
       log.warn('Engine notification check failed', { error: String(err) });
       return false;
@@ -1150,6 +1234,59 @@ export function createEngine(deps: EngineDeps): Engine {
       return { ...runStats };
     },
   };
+}
+
+/**
+ * 0.7.1 (ACT-2): what a toast told the user about one opportunity. `obs` is the input's observedAt (a
+ * rule candidate's: the rule's update time), `lid` the revenue order's listing and `p` the profit.
+ */
+export interface NotifyFingerprint {
+  obs: UnixMs;
+  lid: string | null;
+  p: Scrap | null;
+}
+
+/** One NOTIFY_META_KEY entry: when the key was last told of, and what (null: a record from before 0.7.1). */
+export interface NotifyRecord {
+  t: UnixMs;
+  f: NotifyFingerprint | null;
+}
+
+export function notifyFingerprintOf(
+  o: Pick<Opportunity, 'inputObservedAt' | 'profitScrap' | 'bestOrder' | 'consOrder' | 'instantOrder'>,
+  useOrder: ProfitSettings['useOrder'],
+): NotifyFingerprint {
+  return { obs: o.inputObservedAt, lid: revenueOrderOf(o, useOrder)?.listingId ?? null, p: o.profitScrap };
+}
+
+/**
+ * Past notifications.dedupMs, whether a row told of before is worth another toast: the price was seen
+ * again (a new save or a re-typed price), another buy order pays, or the profit rose by
+ * CHANGE_PROFIT_DELTA or more since that toast. A record without a fingerprint always is.
+ */
+export function notifyWorthRepeating(told: NotifyFingerprint | null, now: NotifyFingerprint): boolean {
+  if (told === null) return true;
+  if (now.obs !== told.obs || now.lid !== told.lid) return true;
+  return now.p !== null && (told.p === null || now.p - told.p >= CHANGE_PROFIT_DELTA);
+}
+
+/** NOTIFY_META_KEY's value as records; entries of the pre-0.7.1 `{ key: ts }` form have no fingerprint. Throws on bad JSON. */
+export function parseNotifyRecords(raw: string | null): Map<string, NotifyRecord> {
+  const out = new Map<string, NotifyRecord>();
+  if (!raw) return out;
+  const parsed = notifyMapSchema.safeParse(JSON.parse(raw));
+  if (!parsed.success) return out;
+  for (const [k, v] of Object.entries(parsed.data)) {
+    const r = notifyRecordSchema.safeParse(v);
+    if (!r.success) continue;
+    out.set(k, typeof r.data === 'number' ? { t: r.data, f: null } : r.data);
+  }
+  return out;
+}
+
+/** profit.inputStaleMs as the confidence score reads it: 0 or a broken value means the default (2 h). */
+function inputStaleMsOf(p: Pick<ProfitSettings, 'inputStaleMs'>): number {
+  return Number.isFinite(p.inputStaleMs) && p.inputStaleMs > 0 ? p.inputStaleMs : DEFAULT_SETTINGS.profit.inputStaleMs;
 }
 
 /** settings.notifications.inputKinds as a set; a missing or broken value means every kind (the default). */

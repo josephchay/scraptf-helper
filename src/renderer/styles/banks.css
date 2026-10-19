@@ -52,6 +52,22 @@
   max-width: min(520px, 100%);
 }
 
+/* UX-1: "N flips on your saves, newest 3 min ago · View all" under the headline. */
+.banks-flips {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  margin: 0;
+  font-size: 12.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+.banks-flips > .icon {
+  flex-shrink: 0;
+  color: var(--good);
+}
+
 /* ---------- the grid ---------- */
 
 /* As many 300px columns as fit; one full-width column in a narrow window. */

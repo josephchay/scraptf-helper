@@ -6,12 +6,15 @@
 //
 // Hard limits (test/compliance/static.test.ts, the F21 block, checks this file):
 // - the view loads a page only through userNavigate(), called only from the user-action functions below
-//   (open, back, forward, reload, home, go, clear), never from a timer, an event handler or a promise
-//   callback; the only URLs it loads are isAllowedWindowStart pages (or history steps);
+//   (open, back, forward, reload, home, go, clear, and pressKey for the user's own keys and mouse buttons),
+//   never from a timer, an event handler or a promise callback; the only exceptions are the two input
+//   listeners (before-input-event, app-command), which Chromium and Windows raise for the user's real
+//   input only; the only URLs it loads are isAllowedWindowStart pages (or history steps);
 // - the one timer is the single READ_SETTLE_MS settle read, `timers.setTimeout(() => void readPage('settle'), READ_SETTLE_MS)`;
-// - the only code run in the view is READ_SCRIPT in isolated world READ_WORLD_ID, on scrap.tf pages only,
-//   and only on a document that has stopped loading (canRunNow): Electron would otherwise hold the script
-//   back and run it on whatever document comes next, such as Steam's sign-in;
+// - the only code run in the view is READ_SCRIPT in isolated world READ_WORLD_ID, on scrap.tf pages the
+//   import can read only (scraptfImportablePath), never automatically on a challenge, error or rate-limit
+//   page, and only on a document that has stopped loading (canRunNow): Electron would otherwise hold the
+//   script back and run it on whatever document comes next, such as Steam's sign-in;
 // - no setUserAgent, no cookies API, no header rewriting, no input events sent, no DOM writes, no trading;
 // - a page reaches the user's browser only right after the user's own input to the view (USER_ACTIVATION_MS);
 // - nothing about a page is logged but its origin and path (no query, no content, no cookie), and lines a
@@ -20,11 +23,15 @@
 import { createHash } from 'node:crypto';
 import { BrowserWindow, session, WebContentsView, type Session, type WebContents, type WebPreferences } from 'electron';
 import type { Logger } from '../service/contracts';
+import { IMPORT_SCHEMA_LOADING_CODE, LAYOUT_CHANGED, NO_PRICE_COLUMN, NO_STOCK_LIMIT, PARTIAL_READ } from '../shared/importCodes';
 import { SCRAPTF_HOME_URL } from '../shared/links';
 import type { PushContract, PushEvent } from '../shared/rpc';
+import { scraptfImportablePath } from '../shared/scraptfPaths';
 import {
+  appCommandAction,
   EXTERNAL_OPEN_MIN_GAP_MS,
   isAllowedWindowStart,
+  loadFailureNotice,
   READ_AUTO_MIN_GAP_MS,
   READ_DEDUPE_MS,
   READ_MANUAL_MIN_GAP_MS,
@@ -32,7 +39,12 @@ import {
   READ_SETTLE_MS,
   READ_WORLD_ID,
   readResultHtml,
+  responseNotice,
+  SCRAPTF_FAILURE_NOTICES,
+  SCRAPTF_LINK_NOTICES,
+  SCRAPTF_NOT_READ_AGAIN,
   SCRAPTF_READ_REASONS,
+  SCRAPTF_WINDOW_NOTICES,
   SCRAPTF_WINDOW_OFF,
   scraptfPathOf,
   shouldReadUrl,
@@ -40,11 +52,14 @@ import {
   topLevelNavigationDecision,
   USER_ACTIVATION_MS,
   windowDisplayUrl,
+  windowKeyAction,
   windowReadFileName,
+  type WindowKeyAction,
 } from '../shared/scraptfWindowPolicy';
 import type { ImportResult, ScraptfReadOutcome, ScraptfWindowNav, ScraptfWindowRead, ScraptfWindowState, Settings, UnixMs } from '../shared/types';
 import { createPageLog } from './pageLog';
 import { SCRAPTF_BAR_URL } from './paths';
+import { createWindowBounds, type BoundsScreen } from './windowBounds';
 import { DARK_BACKGROUND, hardenScraptfSession, windowWebPreferences } from './windows';
 
 /** keepLoggedIn false: an in-memory session, gone when the app quits. */
@@ -58,9 +73,34 @@ export const SCRAPTF_TOOLBAR_HEIGHT = 48;
 /** open/go refusal (fixed text: the URL is never quoted). */
 export const SCRAPTF_START_REFUSAL = 'Not a scrap.tf page the window opens.';
 /** A read of a page the import recognised nothing on (scrap.tf's front page, a profile). */
-export const SCRAPTF_NOTHING_TO_IMPORT = 'Nothing to import on this page.';
+export const SCRAPTF_NOTHING_TO_IMPORT = SCRAPTF_READ_REASONS.notImportable;
+/** The file in userData that remembers the window's size and place (F21-12). */
+export const SCRAPTF_WINDOW_BOUNDS_FILE = 'scraptf-window-bounds.json';
+/** The window's default size and its minimum (the remembered size is restored over it, F21-12). */
+export const SCRAPTF_WINDOW_SIZE = Object.freeze({ width: 1280, height: 900, minWidth: 640, minHeight: 480 });
 
 const MAX_WARNING_CHARS = 160;
+const MAX_FLIP_NAME_CHARS = 120;
+/** The SKU shape 'app.openItem' takes (ipc.ts openItemParams): a best flip's name opens its item. */
+const SKU_SHAPE = /^\d+;\d+(;[a-z0-9-]+)*$/i;
+/**
+ * The import's warning codes the toolbar shows, most important first (F21-10): a partial look, a page whose
+ * layout changed, unreadable stock, unknown items, a missing price column, an unknown bank, a missing pays
+ * column. Any other code follows them, but duplicate copies and a guessed page kind are no news on screen.
+ */
+const WARNING_ORDER: readonly string[] = [PARTIAL_READ, LAYOUT_CHANGED, NO_STOCK_LIMIT, 'no-sku', NO_PRICE_COLUMN, 'unknown-bank', 'no-pays-column'];
+const QUIET_WARNINGS: ReadonlySet<string> = new Set(['duplicate-cards', 'page-kind-guessed']);
+/**
+ * Codes whose counts the toolbar shows, and how many of them lead the service's own text ("3 of ~48 items",
+ * "5 rows"): digits only, never the page text around them.
+ */
+const COUNTED_WARNINGS: ReadonlyMap<string, number> = new Map([
+  [PARTIAL_READ, 2],
+  ['no-sku', 2],
+  [NO_STOCK_LIMIT, 1],
+]);
+/** The least time between two different link notices (a page alternating a blocked link and a popup). */
+const LINK_NOTICE_MIN_GAP_MS = 1_000;
 /** Pages whose read times are remembered for the gap and the dedupe (older entries go first). */
 const MAX_REMEMBERED_PAGES = 64;
 /** net::ERR_ABORTED: the user clicked on before the page finished, not a failure worth a warning. */
@@ -112,6 +152,11 @@ export interface WindowImportParams {
   /** The page's URL (isScraptfPageUrl), a page-address hint for the parser; never logged. */
   address: string;
   origin: 'window';
+  /**
+   * 0.7.1 (ACT-4): false for a load snapshot imported without its settle read (the cycle was cut short, or the
+   * settle read got nothing): the service stores its prices but no bank stock save. Absent: a settled look.
+   */
+  settled?: false;
 }
 
 export interface ScraptfWindowTimers {
@@ -138,6 +183,11 @@ export interface ScraptfWindowDeps {
   isQuitting(): boolean;
   /** After any change state() would show (the tray item, a dashboard that asks). */
   onStateChanged?(): void;
+  /**
+   * 0.7.1 (F21-12): where the window's size and place are remembered (a JSON file in userData) and Electron's
+   * screen, to restore them only onto a display that is there. Absent (tests): the default size, centred.
+   */
+  bounds?: { file: string; screen: BoundsScreen; readFile?(file: string): string; writeFile?(file: string, text: string): void };
   now?: () => UnixMs;
   timers?: ScraptfWindowTimers;
 }
@@ -148,9 +198,9 @@ export type UserNav = { kind: 'start'; url: string } | { kind: 'back' } | { kind
 export interface ScraptfWindowManager {
   /**
    * Creates the window or brings it to the front. `start` (isAllowedWindowStart, else it throws) is
-   * loaded when given; a new window without one loads Home. Throws SCRAPTF_WINDOW_OFF while the window
-   * is turned off (main checks too). A keepLoggedIn change since the view was made applies here: the
-   * view is rebuilt on the new partition and loads `start` or Home.
+   * loaded when given, unless it is the page already on screen (that only brings the window up); a new
+   * window without one loads Home. Throws SCRAPTF_WINDOW_OFF while the window is turned off (main checks
+   * too). A keepLoggedIn change applies to the next window only: an open one keeps its session.
    */
   open(start?: string): void;
   /** Brings an open window to the front; false when there is none. */
@@ -206,6 +256,8 @@ interface Snapshot {
   url: string;
   html: string;
   hash: string;
+  /** The document's challenge or error notice when read (Read page now on one, F21-3); null for a real page. */
+  notice: string | null;
 }
 
 /** A cycle's load snapshot, held for its settle read (one look at a page is one save of it). */
@@ -241,6 +293,29 @@ function count(n: unknown): number {
   return typeof n === 'number' && Number.isFinite(n) && n >= 0 ? Math.floor(n) : 0;
 }
 
+/** `code` with the first `n` counts its warning text names ('partial-read: 3 48'): digits only. */
+function withCounts(code: string, warning: string, n: number): string {
+  const at = warning.indexOf(':');
+  const digits = (at < 0 ? [] : (warning.slice(at + 1).match(/\d{1,9}/g) ?? [])).slice(0, n);
+  return digits.length > 0 ? `${code}: ${digits.join(' ')}` : code;
+}
+
+/**
+ * 0.7.1 (UX-3, ACT-5, F21-2): what the toolbar shows of an import's prices and flips: how many prices it
+ * stored, the flips on sale on the page, and the best of them (its SKU, so a click opens the item; its name
+ * from the app's own item data, cleaned and cut). Absent from an older service: left out.
+ */
+function readFlipsOf(r: ImportResult): Pick<ScraptfWindowRead, 'stored' | 'pageFlips' | 'bestFlip'> {
+  const out: Pick<ScraptfWindowRead, 'stored' | 'pageFlips' | 'bestFlip'> = { stored: count(r.stored) };
+  if (typeof r.pageFlips !== 'number') return out;
+  out.pageFlips = count(r.pageFlips);
+  const top = Array.isArray(r.topFlips) ? r.topFlips[0] : undefined;
+  const name = typeof top?.name === 'string' ? top.name.replace(/[\u0000-\u001f\u007f]/g, ' ').trim().slice(0, MAX_FLIP_NAME_CHARS) : '';
+  const ok = top !== undefined && typeof top.sku === 'string' && top.sku.length <= 200 && SKU_SHAPE.test(top.sku) && name !== '' && Number.isFinite(top.profitScrap);
+  out.bestFlip = ok ? { sku: top.sku, name, profitScrap: Math.round(top.profitScrap) } : null;
+  return out;
+}
+
 /**
  * The URL of the document the view's main frame shows (its last committed URL), which is what a read
  * sees. getURL() already names the next page while a toolbar load (back, a bank chip) is pending, so
@@ -267,6 +342,15 @@ function canRunNow(wc: WebContents): boolean {
     return wc.getURL() !== '' && !wc.isLoadingMainFrame();
   } catch {
     return false;
+  }
+}
+
+/** True while the view's main frame is loading another document (a load of the page shown is still under way). */
+function mainFrameLoading(wc: WebContents): boolean {
+  try {
+    return wc.isLoadingMainFrame();
+  } catch {
+    return true;
   }
 }
 
@@ -307,6 +391,15 @@ export function createScraptfWindowManager(deps: ScraptfWindowDeps): ScraptfWind
   let lastRead: ScraptfWindowRead | null = null;
   let disposed = false;
   const pageLog = createPageLog(log, now);
+  // One fixed-text notice about the page on screen (nav.notice), cleared when the next document commits. A
+  // page notice (a challenge, error or rate-limit status at did-navigate, a failed load, a crash) also keeps
+  // that document from being read automatically (F21-3): see pageNotice().
+  let notice: string | null = null;
+  // When a link notice last took the line (linkNotice's throttle).
+  let linkNoticeAt = Number.NEGATIVE_INFINITY;
+  // The remembered window was maximised: it is maximised again when first shown (F21-12).
+  let maximizeOnShow = false;
+  const bounds = deps.bounds ? createWindowBounds({ ...deps.bounds, log }) : null;
 
   function live(w: BrowserWindow | null): w is BrowserWindow {
     return w !== null && !w.isDestroyed();
@@ -360,6 +453,9 @@ export function createScraptfWindowManager(deps: ScraptfWindowDeps): ScraptfWind
         canGoForward: wc.navigationHistory.canGoForward(),
         loading: wc.isLoading(),
         reading: settleTimer !== null || held !== null || readingIn === wc,
+        // The document a read would see (F21-4): Read page now is offered only where the import reads.
+        importable: scraptfImportablePath(documentUrl(wc)),
+        notice,
       };
     } catch {
       return CLOSED_NAV;
@@ -368,6 +464,35 @@ export function createScraptfWindowManager(deps: ScraptfWindowDeps): ScraptfWind
 
   function pushNav(): void {
     deliver('scraptfWindow.nav', navState());
+  }
+
+  /** A notice about the page on screen; pushed only when it changes, so a page cannot flood the toolbar. */
+  function setNotice(next: string | null): void {
+    if (notice === next) return;
+    notice = next;
+    pushNav();
+  }
+
+  /**
+   * The notice about the document on screen, not about a link: a challenge, error or rate-limit page (its HTTP
+   * status), Chromium's error page after a failed load, or a crash. Such a document is not read automatically
+   * (F21-3; an error page imports nothing either), and a read the user asks for of it is worded by it.
+   */
+  function pageNotice(): string | null {
+    return notice !== null && !SCRAPTF_LINK_NOTICES.has(notice) ? notice : null;
+  }
+
+  /**
+   * A notice about one link (kept from opening, a popup, no click): never over a notice about the page. A page
+   * script can raise these at its own rate, alternating kinds too, so one link notice replaces another at most
+   * every LINK_NOTICE_MIN_GAP_MS: the toolbar is told at most about once a second.
+   */
+  function linkNotice(next: string): void {
+    if (pageNotice() !== null || notice === next) return;
+    const t = now();
+    if (notice !== null && t - linkNoticeAt < LINK_NOTICE_MIN_GAP_MS) return;
+    linkNoticeAt = t;
+    setNotice(next);
   }
 
   function pushRead(read: ScraptfWindowRead): void {
@@ -392,9 +517,20 @@ export function createScraptfWindowManager(deps: ScraptfWindowDeps): ScraptfWind
       wantShow = true;
       return;
     }
+    if (maximizeOnShow) {
+      // Maximised as it was left, once its first paint is ready (maximize() shows a hidden window).
+      maximizeOnShow = false;
+      w.maximize();
+    }
     if (w.isMinimized()) w.restore();
     w.show();
     w.focus();
+  }
+
+  /** Remembers the window's size and place for the next open (F21-12); before it closes, while it still has them. */
+  function rememberBounds(w: BrowserWindow): void {
+    if (bounds === null || win !== w) return;
+    bounds.remember(w);
   }
 
   // ----- the session, the view and its policy -----
@@ -422,6 +558,7 @@ export function createScraptfWindowManager(deps: ScraptfWindowDeps): ScraptfWind
     if (t - lastExternalAt < EXTERNAL_OPEN_MIN_GAP_MS) return;
     if (t - activationAt > USER_ACTIVATION_MS) {
       pageLog.line('info', 'external without input', 'scrap.tf window: a page tried to open a link outside without a click', { url: windowDisplayUrl(url) });
+      linkNotice(SCRAPTF_WINDOW_NOTICES.needsClick);
       return;
     }
     activationAt = Number.NEGATIVE_INFINITY;
@@ -434,7 +571,10 @@ export function createScraptfWindowManager(deps: ScraptfWindowDeps): ScraptfWind
     if (decision === 'allow') return;
     event.preventDefault();
     if (decision === 'external') openOutside(url);
-    else pageLog.line('info', 'blocked page', 'scrap.tf window: blocked a page outside scrap.tf and Steam sign-in', { url: windowDisplayUrl(url) });
+    else {
+      pageLog.line('info', 'blocked page', 'scrap.tf window: blocked a page outside scrap.tf and Steam sign-in', { url: windowDisplayUrl(url) });
+      linkNotice(SCRAPTF_WINDOW_NOTICES.blocked);
+    }
   }
 
   function applySubframe(event: { preventDefault(): void }, url: string): void {
@@ -451,7 +591,10 @@ export function createScraptfWindowManager(deps: ScraptfWindowDeps): ScraptfWind
     // Replaces hardenWebContents' handler (installed inside the constructor). Nothing opens in the app.
     wc.setWindowOpenHandler(({ url }) => {
       if (topLevelNavigationDecision(url) === 'external') openOutside(url);
-      else pageLog.line('info', 'dropped popup', 'scrap.tf window: dropped a popup', { url: windowDisplayUrl(url) });
+      else {
+        pageLog.line('info', 'dropped popup', 'scrap.tf window: dropped a popup', { url: windowDisplayUrl(url) });
+        if (isCurrent(wc)) linkNotice(SCRAPTF_WINDOW_NOTICES.popup);
+      }
       return { action: 'deny' };
     });
     wc.on('will-navigate', (event) => applyTopLevel(event, event.url));
@@ -460,6 +603,14 @@ export function createScraptfWindowManager(deps: ScraptfWindowDeps): ScraptfWind
     // Only noted, never sent: the user's own input is what lets a link leave for the browser (openOutside).
     wc.on('input-event', (_event, input) => {
       if (isCurrent(wc) && ACTIVATING_INPUTS.has(input.type)) activationAt = now();
+    });
+    // F21-11: the toolbar's keys while the page has the focus. Chromium raises this for the user's real key
+    // presses only (a page's script cannot), so it is the same user action as the toolbar's key or button.
+    wc.on('before-input-event', (event, input) => {
+      const action = isCurrent(wc) ? windowKeyAction(input) : null;
+      if (action === null) return;
+      event.preventDefault();
+      pressKey(action);
     });
 
     wc.on('did-start-loading', () => {
@@ -477,12 +628,15 @@ export function createScraptfWindowManager(deps: ScraptfWindowDeps): ScraptfWind
     // and its load snapshot is imported now. Ended at commit rather than at start, so a click the policy
     // blocks or sends to the browser (the page stays) keeps its page's cycle; until then reads see the old
     // page by documentUrl(), and none runs while the main frame loads (canRunNow).
-    wc.on('did-navigate', () => {
+    wc.on('did-navigate', (_event, _url, httpResponseCode) => {
       if (!isCurrent(wc)) return;
       docLoaded = false;
       waitingForStop = null;
       endCycle();
       pageLog.flush();
+      // A new document: the last one's notice goes; a scrap.tf challenge, error or rate-limit page brings its
+      // own (Steam's sign-in is never read, and its error statuses are no Cloudflare check).
+      notice = shouldReadUrl(documentUrl(wc)) ? responseNotice(httpResponseCode) : null;
       pushNav();
       changed();
     });
@@ -500,15 +654,17 @@ export function createScraptfWindowManager(deps: ScraptfWindowDeps): ScraptfWind
       pushNav();
       startAutoRead(true);
     });
-    // No automatic retry, ever: the user clicks Reload.
+    // No automatic retry, ever: the user clicks Reload (the notice says so).
     wc.on('did-fail-load', (_event, code, _description, _url, isMainFrame) => {
       if (!isMainFrame || code === ERR_ABORTED) return;
       log.warn(`scrap.tf window: a page did not load (${code})`);
-      // Chromium's error page replaced the document (did-navigate does not fire for it): nothing to settle.
+      // Chromium's error page replaced the document (did-navigate does not fire for it): nothing to settle,
+      // and its own did-finish-load reads nothing (the notice is a page notice until the next commit).
       if (isCurrent(wc)) {
         docLoaded = false;
         waitingForStop = null;
         endCycle();
+        setNotice(loadFailureNotice(code));
       }
     });
     wc.on('render-process-gone', (_event, details) => {
@@ -519,6 +675,7 @@ export function createScraptfWindowManager(deps: ScraptfWindowDeps): ScraptfWind
       // A read waiting on the dead renderer never answers; the next document may be read.
       if (readingIn === wc) readingIn = null;
       endCycle();
+      notice = SCRAPTF_WINDOW_NOTICES.crashed;
       pushNav();
     });
   }
@@ -530,6 +687,7 @@ export function createScraptfWindowManager(deps: ScraptfWindowDeps): ScraptfWind
     viewPartition = partition;
     docLoaded = false;
     waitingForStop = null;
+    notice = null;
     activationAt = Number.NEGATIVE_INFINITY;
     v.setBackgroundColor(DARK_BACKGROUND);
     wireView(v.webContents);
@@ -560,11 +718,12 @@ export function createScraptfWindowManager(deps: ScraptfWindowDeps): ScraptfWind
   }
 
   function createWindow(partition: string): void {
+    // Where the user left it, when a display still shows that place (F21-12); the default size otherwise.
+    const place = bounds?.place(SCRAPTF_WINDOW_SIZE) ?? { bounds: { width: SCRAPTF_WINDOW_SIZE.width, height: SCRAPTF_WINDOW_SIZE.height }, maximized: false };
     const w = new BrowserWindow({
-      width: 1280,
-      height: 900,
-      minWidth: 640,
-      minHeight: 480,
+      ...place.bounds,
+      minWidth: SCRAPTF_WINDOW_SIZE.minWidth,
+      minHeight: SCRAPTF_WINDOW_SIZE.minHeight,
       show: false,
       title: SCRAPTF_WINDOW_TITLE,
       backgroundColor: DARK_BACKGROUND,
@@ -576,6 +735,7 @@ export function createScraptfWindowManager(deps: ScraptfWindowDeps): ScraptfWind
     barLoaded = false;
     painted = false;
     wantShow = false;
+    maximizeOnShow = place.maximized;
     pending.clear();
 
     // The title stays the window's own, whatever the toolbar page calls itself.
@@ -585,7 +745,14 @@ export function createScraptfWindowManager(deps: ScraptfWindowDeps): ScraptfWind
       painted = true;
       if (wantShow) reveal();
     });
+    // The user closing it (or main's close()): its size and place, while it still has them.
+    w.on('close', () => rememberBounds(w));
     w.on('closed', () => teardown(w));
+    // F21-11: Windows' browser keys and the mouse's back and forward buttons, the user's own input only.
+    w.on('app-command', (_event, command) => {
+      const action = win === w ? appCommandAction(command) : null;
+      if (action !== null) pressKey(action);
+    });
     w.on('resize', () => layout());
     w.on('maximize', () => layout());
     w.on('unmaximize', () => layout());
@@ -627,17 +794,14 @@ export function createScraptfWindowManager(deps: ScraptfWindowDeps): ScraptfWind
     changed();
   }
 
-  /** True when a page must be loaded: a new window, or a view rebuilt for a keepLoggedIn change. */
+  /**
+   * True when a page must be loaded: a new window. The partition is chosen here only (F21-6): a keepLoggedIn
+   * change while the window is open applies when it is closed and opened again, so the view the user is
+   * signed in on is never rebuilt behind their back (state().pendingPartitionChange says it is waiting).
+   */
   function ensureWindow(): boolean {
-    const partition = scraptfPartition(deps.settings().scraptfWindow.keepLoggedIn);
-    if (live(win)) {
-      if (view !== null && viewPartition === partition) return false;
-      // A partition is fixed per view, so the next open after a keepLoggedIn change gets a new one.
-      dropView();
-      createView(win, partition);
-      return true;
-    }
-    createWindow(partition);
+    if (live(win)) return false;
+    createWindow(scraptfPartition(deps.settings().scraptfWindow.keepLoggedIn));
     return true;
   }
 
@@ -688,7 +852,10 @@ export function createScraptfWindowManager(deps: ScraptfWindowDeps): ScraptfWind
     const wc = viewContents();
     if (wc === null || !deps.settings().scraptfWindow.readOnLoad) return;
     const url = documentUrl(wc);
-    if (!shouldReadUrl(url)) return;
+    // Only a page the import can read (F21-4: not the front page, raffles or settings), and never a
+    // challenge, error or rate-limit page, nor Chromium's error page after a failed load (F21-3, F21-10);
+    // the page keeps its gap and autoEmpty for the real page.
+    if (!shouldReadUrl(url) || !scraptfImportablePath(url) || pageNotice() !== null) return;
     if (!canRunNow(wc)) {
       waitingForStop = { newDocument: newDocument || waitingForStop?.newDocument === true };
       return;
@@ -696,7 +863,11 @@ export function createScraptfWindowManager(deps: ScraptfWindowDeps): ScraptfWind
     const key = pageKey(url);
     const m = memo(key);
     const t = now();
-    if (m.autoAt !== null && t - m.autoAt < READ_AUTO_MIN_GAP_MS && !(newDocument && m.autoEmpty)) return;
+    if (m.autoAt !== null && t - m.autoAt < READ_AUTO_MIN_GAP_MS && !(newDocument && m.autoEmpty)) {
+      // Not read again so soon, but the toolbar shows this page's last read rather than another page's.
+      showMemoRead(m);
+      return;
+    }
     // A cycle still open (an in-page step to another page) ends here: what its load read took is imported.
     endCycle();
     m.autoAt = t;
@@ -716,47 +887,97 @@ export function createScraptfWindowManager(deps: ScraptfWindowDeps): ScraptfWind
     return { at: now(), path: scraptfPathOf(url), items: 0, bank: null, newFlips: 0, warning };
   }
 
-  function importWarning(r: ImportResult): string | null {
+  /**
+   * The one warning the toolbar shows for an import (F21-10): by priority (WARNING_ORDER), then any other code
+   * but the quiet ones; only the code, plus its counts as digits for the counted codes. `pageNotice` is the
+   * read document's challenge or error notice, which words a read of such a page that found nothing (F21-3).
+   */
+  function importWarning(r: ImportResult, pageNotice: string | null): string | null {
+    const warnings = Array.isArray(r.warnings) ? r.warnings.filter((w): w is string => typeof w === 'string') : [];
+    const find = (code: string) => warnings.find((w) => shortWarning(w) === code);
     if (r.batchId === 0 && count(r.parsed) === 0) {
-      // Nothing recognised, so the service recorded nothing (batchId 0). On a bank or list page that means its
-      // cards are not on screen yet (read again once they are); elsewhere, one plain sentence.
+      // Nothing recognised, so the service recorded nothing (batchId 0). Item-like elements in no shape the
+      // parser knows: scrap.tf changed the page (not "wait for the cards"). A challenge or error page: its
+      // notice. On a bank or list page otherwise its cards are not on screen yet (read again once they are);
+      // elsewhere, one plain sentence.
+      if (find(LAYOUT_CHANGED) !== undefined) return LAYOUT_CHANGED;
+      if (pageNotice !== null) return pageNotice;
       return r.bank != null ? NO_CARDS_YET : SCRAPTF_NOTHING_TO_IMPORT;
     }
-    const first = Array.isArray(r.warnings) ? shortWarning(r.warnings[0]) : null;
-    if (first !== null) return first;
-    return count(r.parsed) === 0 ? SCRAPTF_NOTHING_TO_IMPORT : null;
+    for (const code of WARNING_ORDER) {
+      const w = find(code);
+      if (w !== undefined) return withCounts(code, w, COUNTED_WARNINGS.get(code) ?? 0);
+    }
+    for (const w of warnings) {
+      const code = shortWarning(w);
+      if (code !== null && !QUIET_WARNINGS.has(code)) return code;
+    }
+    return count(r.parsed) === 0 ? (pageNotice ?? SCRAPTF_NOTHING_TO_IMPORT) : null;
+  }
+
+  /**
+   * A page shown again without a new read (within the gap, or unchanged within the dedupe): the toolbar shows
+   * that page's own last read, marked SCRAPTF_NOT_READ_AGAIN unless it has a warning of its own, instead of the
+   * last page's (F21-10). Nothing is pushed when it already shows it.
+   */
+  function showMemoRead(m: PageMemo | undefined): void {
+    const read = m?.read ?? null;
+    if (read === null || (lastRead !== null && lastRead.path === read.path && lastRead.at === read.at)) return;
+    pushRead(read.warning === null ? { ...read, warning: SCRAPTF_NOT_READ_AGAIN } : read);
   }
 
   /**
    * Hands one snapshot to the saved-page import as a window read at `mtimeMs`, unless the page's last
    * imported read had the same HTML within READ_DEDUPE_MS: another save of it would only diff the page
-   * against itself. It reads, loads and moves nothing.
+   * against itself. `settled` false marks a load snapshot imported without its settle read (ACT-4): the
+   * service stores its prices but no bank stock save. It reads, loads and moves nothing.
    */
-  async function importRead(snap: Snapshot, mtimeMs: UnixMs, trigger: ReadTrigger): Promise<ScraptfReadOutcome> {
+  async function importRead(snap: Snapshot, mtimeMs: UnixMs, trigger: ReadTrigger, settled = true): Promise<ScraptfReadOutcome> {
     const prev = pages.get(snap.key);
     const t = now();
+    // UX-071-1: no automatic read runs on a document with a page notice (startAutoRead), so one that ends
+    // while a notice is up is an earlier document's (another page, or this address before it reloaded into a
+    // 429 or a check): it is remembered, but never takes the toolbar's line from that notice. Read page now does.
+    const mayShow = (): boolean => trigger === 'manual' || pageNotice() === null;
     if (prev !== undefined && prev.hash === snap.hash && prev.readAt !== null && t - prev.readAt < READ_DEDUPE_MS) {
       // Read page now on an unchanged page: the toolbar shows that page's last read again.
       if (trigger === 'manual' && prev.read !== null) {
         pushRead(prev.read);
         return { read: prev.read, reason: SCRAPTF_READ_REASONS.unchanged };
       }
+      // Its last read is shown only while the page is on screen: not for a held snapshot imported after the
+      // user moved on (endCycle at the next page's commit), whose read would sit over the new page's.
+      const wc = viewContents();
+      if (wc !== null && pageKey(documentUrl(wc)) === snap.key && mayShow()) showMemoRead(prev);
       return skipped(SCRAPTF_READ_REASONS.unchanged);
     }
     let r: ImportResult;
     try {
-      r = await deps.importHtml({ html: snap.html, fileName: windowReadFileName(snap.url), mtimeMs, address: snap.url, origin: 'window' });
-    } catch {
-      // The cause stays out of the log: it can quote the page.
-      log.warn('scrap.tf window: a read could not be imported');
-      const read = failedRead(snap.url, SCRAPTF_READ_REASONS.failed);
-      if (viewContents() !== null) pushRead(read);
-      return { read, reason: SCRAPTF_READ_REASONS.failed };
+      r = await deps.importHtml({
+        html: snap.html,
+        fileName: windowReadFileName(snap.url),
+        mtimeMs,
+        address: snap.url,
+        origin: 'window',
+        ...(settled ? {} : { settled: false as const }),
+      });
+    } catch (err) {
+      // The cause stays out of the log: it can quote the page. Only the import's fixed code is matched: the
+      // item data still loading (F21-1) is said so, and nothing is remembered, so the next read imports.
+      const loading = err instanceof Error && typeof err.message === 'string' && err.message.includes(IMPORT_SCHEMA_LOADING_CODE);
+      log.warn(loading ? 'scrap.tf window: item data is still loading, so a read was not imported' : 'scrap.tf window: a read could not be imported');
+      const reason = loading ? SCRAPTF_READ_REASONS.schemaLoading : SCRAPTF_READ_REASONS.failed;
+      const read = failedRead(snap.url, reason);
+      if (viewContents() !== null && mayShow()) pushRead(read);
+      return { read, reason };
     }
-    // Only an imported read counts for the dedupe, so a failed import is tried again.
     const m = memo(snap.key);
-    m.hash = snap.hash;
-    m.readAt = t;
+    // Only an imported, settled read counts for the dedupe: a failed import is tried again, and so is the same
+    // HTML read settled after an unsettled import of it (which wrote no bank stock save).
+    if (settled) {
+      m.hash = snap.hash;
+      m.readAt = t;
+    }
     if (count(r.parsed) > 0) m.autoEmpty = false;
     const read: ScraptfWindowRead = {
       at: now(),
@@ -764,20 +985,24 @@ export function createScraptfWindowManager(deps: ScraptfWindowDeps): ScraptfWind
       items: count(r.parsed),
       bank: r.bank ?? null,
       newFlips: count(r.newFlips),
-      warning: importWarning(r),
+      warning: importWarning(r, snap.notice),
+      ...readFlipsOf(r),
     };
     m.read = read;
-    log.info(`scrap.tf window: read ${read.path} (${read.items} items, ${trigger})`);
-    pushRead(read);
+    log.info(`scrap.tf window: read ${read.path} (${read.items} items, ${trigger}${settled ? '' : ', unsettled'})`);
+    if (mayShow()) pushRead(read);
     return { read, reason: null };
   }
 
-  /** The held load snapshot, imported at its cycle's start (not while quitting or with the window off). */
+  /**
+   * The held load snapshot, imported at its cycle's start (not while quitting or with the window off). Its
+   * settle read never ran, so it is an unsettled look: prices, no bank stock save (ACT-4).
+   */
   function flushHeld(): void {
     const h = held;
     held = null;
     if (h === null || disposed || deps.isQuitting() || !deps.settings().scraptfWindow.enabled) return;
-    importRead(h, h.at, 'load').catch(() => log.warn('scrap.tf window: a read could not be imported'));
+    importRead(h, h.at, 'load', false).catch(() => log.warn('scrap.tf window: a read could not be imported'));
   }
 
   /**
@@ -796,6 +1021,8 @@ export function createScraptfWindowManager(deps: ScraptfWindowDeps): ScraptfWind
       // The page whose DOM the script will see (not a toolbar load still pending).
       const url = documentUrl(wc);
       if (!shouldReadUrl(url)) return skipped(SCRAPTF_READ_REASONS.notScraptf);
+      // F21-4: a scrap.tf page the import cannot read is not read at all (fewer reads, the same imports).
+      if (!scraptfImportablePath(url)) return skipped(SCRAPTF_READ_REASONS.notImportable);
       const key = pageKey(url);
       if (trigger === 'manual') {
         if (now() - lastManualAt < READ_MANUAL_MIN_GAP_MS) return skipped(SCRAPTF_READ_REASONS.tooSoon);
@@ -811,6 +1038,8 @@ export function createScraptfWindowManager(deps: ScraptfWindowDeps): ScraptfWind
       // (Steam's sign-in, say) once it stops loading. Nothing may await between this check and the call.
       if (!canRunNow(wc)) return skipped(SCRAPTF_READ_REASONS.loading);
       if (trigger === 'manual') lastManualAt = now();
+      // Read page now on a challenge or error page reads it; what it finds is worded by the notice (F21-3).
+      const noticeNow = pageNotice();
       readingIn = wc;
       locked = true;
       let value: unknown = null;
@@ -825,19 +1054,25 @@ export function createScraptfWindowManager(deps: ScraptfWindowDeps): ScraptfWind
       if (viewContents() !== wc) return skipped(failed ? SCRAPTF_READ_REASONS.notOpen : SCRAPTF_READ_REASONS.failed);
       if (!failed && documentUrl(wc) !== url) return skipped(SCRAPTF_READ_REASONS.failed);
       const html = failed ? null : readResultHtml(value);
-      const snap: Snapshot | null = html === null ? null : { key, url, html, hash: sha256(html) };
+      const snap: Snapshot | null = html === null ? null : { key, url, html, hash: sha256(html), notice: noticeNow };
       if (trigger === 'load' && settleTimer !== null && cycleKey === key) {
         // Held for the settle read (nothing to show yet: the toolbar says Reading…).
         held = snap === null ? null : { ...snap, wc, at: cycleAt ?? now() };
         return { read: null, reason: null };
       }
       let use: Snapshot | null = snap;
+      // The settle read's own snapshot, or Read page now: a settled look. A load read that gets here was not
+      // held: its cycle ended (a toolbar move, a failed load) or its settle read fired while the script still
+      // ran, so it is the load snapshot imported without its settle read (ACT-4), like flushHeld's.
+      let settled = trigger !== 'load';
       // An automatic read is imported at its cycle's start, whichever of its two snapshots it is.
       let mtimeMs = trigger === 'manual' ? now() : (cycleAt ?? now());
       if (trigger === 'settle') {
         const h = held !== null && held.wc === wc && held.key === key ? held : null;
         if (h !== null) held = null;
         use = snap ?? h;
+        // The settle read got nothing: the load snapshot is the look, cut before it settled (ACT-4).
+        settled = snap !== null;
         mtimeMs = h?.at ?? cycleAt ?? mtimeMs;
       } else if (trigger === 'manual' && snap !== null && cycleKey === key) {
         // Read page now during a cycle is the newest look at the page: the cycle ends with it.
@@ -850,7 +1085,7 @@ export function createScraptfWindowManager(deps: ScraptfWindowDeps): ScraptfWind
         pushRead(read);
         return { read, reason };
       }
-      return await importRead(use, mtimeMs, trigger);
+      return await importRead(use, mtimeMs, trigger, settled);
     } finally {
       if (locked && readingIn === wc) readingIn = null;
       // The cycle is over: a load snapshot its settle read did not import (skipped, or another page) goes now.
@@ -891,13 +1126,23 @@ export function createScraptfWindowManager(deps: ScraptfWindowDeps): ScraptfWind
     }
   }
 
+  /**
+   * The view already shows `url` (the same page, its hash aside) and is not loading another one. A page that
+   * did not load or crashed is not shown: the user's link to it loads it again, as before F21-7.
+   */
+  function showing(url: string): boolean {
+    const wc = viewContents();
+    return wc !== null && pageKey(documentUrl(wc)) === pageKey(url) && !mainFrameLoading(wc) && !(notice !== null && SCRAPTF_FAILURE_NOTICES.has(notice));
+  }
+
   function open(start?: string): void {
     if (start !== undefined && !isAllowedWindowStart(start)) throw new Error(SCRAPTF_START_REFUSAL);
     if (disposed || deps.isQuitting()) return;
     if (!deps.settings().scraptfWindow.enabled) throw new Error(SCRAPTF_WINDOW_OFF);
     const fresh = ensureWindow();
     reveal();
-    if (start !== undefined || fresh) userNavigate({ kind: 'start', url: start ?? SCRAPTF_HOME_URL });
+    // A dashboard link to the page already on screen only brings the window up (F21-7): no second load.
+    if (fresh || (start !== undefined && !showing(start))) userNavigate({ kind: 'start', url: start ?? SCRAPTF_HOME_URL });
   }
 
   function focus(): boolean {
@@ -909,6 +1154,8 @@ export function createScraptfWindowManager(deps: ScraptfWindowDeps): ScraptfWind
   function close(): void {
     const w = win;
     if (w === null) return;
+    // destroy() skips the 'close' event, so the size and place are remembered here.
+    rememberBounds(w);
     teardown(w);
     if (!w.isDestroyed()) w.destroy();
   }
@@ -936,6 +1183,17 @@ export function createScraptfWindowManager(deps: ScraptfWindowDeps): ScraptfWind
     else userNavigate({ kind: 'start', url });
   }
 
+  /**
+   * F21-11: the user's key press in the page (before-input-event) or the mouse's back and forward buttons
+   * (app-command): the toolbar's Back, Forward, Reload and Home, nothing else. Only those two listeners call it.
+   */
+  function pressKey(action: WindowKeyAction): void {
+    if (action === 'back') back();
+    else if (action === 'forward') forward();
+    else if (action === 'reload') reload();
+    else home();
+  }
+
   async function clear(): Promise<void> {
     // Both partitions: logging out must also drop a login kept on disk before keepLoggedIn was turned off.
     for (const partition of [SCRAPTF_MEMORY_PARTITION, SCRAPTF_PERSIST_PARTITION]) {
@@ -958,7 +1216,10 @@ export function createScraptfWindowManager(deps: ScraptfWindowDeps): ScraptfWind
 
   function state(): ScraptfWindowState {
     const nav = navState();
-    return { open: viewContents() !== null, url: nav.url, canGoBack: nav.canGoBack, canGoForward: nav.canGoForward, lastRead };
+    const isOpen = viewContents() !== null;
+    // F21-6: "Stay signed in" changed since this window was made; it applies when the window is reopened.
+    const pending = isOpen && viewPartition !== null && viewPartition !== scraptfPartition(deps.settings().scraptfWindow.keepLoggedIn);
+    return { open: isOpen, url: nav.url, canGoBack: nav.canGoBack, canGoForward: nav.canGoForward, lastRead, ...(pending ? { pendingPartitionChange: true } : {}) };
   }
 
   return {

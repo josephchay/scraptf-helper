@@ -5,7 +5,7 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { Repo } from '../../src/service/contracts';
 import { openRepo } from '../../src/service/db';
-import { BANK_STOCK_MAX_SAVES_PER_PAGE } from '../../src/shared/bankStock';
+import { BANK_STOCK_MAX_PAGES, BANK_STOCK_MAX_SAVES_PER_PAGE, BANK_STOCK_SESSION_READ } from '../../src/shared/bankStock';
 import type { BankStockStored, ScraptfBank } from '../../src/shared/types';
 import { tempDir } from './helpers';
 
@@ -51,9 +51,10 @@ beforeAll(() => {
   repo = openRepo(t.file());
   repo.transaction(() => {
     for (const [bank, page] of PAGES) {
-      // 300 saves of each page, 4 min apart: all inside the last day, so the thinning keeps every one.
+      // 300 saves of each page, 20 s apart (the scrap.tf window at its busiest): all inside the last 2 h,
+      // so the thinning keeps every one (0.7.1: only that tier is capped at 300).
       for (let s = 0; s < BANK_STOCK_MAX_SAVES_PER_PAGE; s++) {
-        const at = NOW - s * 4 * MIN;
+        const at = NOW - s * 20_000;
         const id = repo.createImportBatch({ fileName: `${bank}-${s}.html`, pageKind: bank === 'list' ? 'items-list' : 'buy', fileMtime: at, importedAt: at, itemCount: ROWS, bank });
         repo.insertBankStock(id, bank, rowsOf(s), page);
       }
@@ -105,7 +106,7 @@ describe('bank stock thinning at 300 saves x 8 pages x 300 rows', () => {
     console.info(`[perf] bankStockSaves x ${PAGES.length} banks (${total} saves): ${took.toFixed(1)} ms`);
     expect(total).toBe(PAGES.length * BANK_STOCK_MAX_SAVES_PER_PAGE);
     expect(took).toBeLessThan(2_000);
-    // What the F17 cache reads on each refresh: every page's 10 newest (F20-DC-1).
+    // Every page's 10 newest (F20-DC-1).
     let heads = 0;
     const perPage = ms(() => {
       for (const [bank] of PAGES) heads += repo.bankStockSaves(bank, 500, { perPage: 10 }).length;
@@ -113,6 +114,16 @@ describe('bank stock thinning at 300 saves x 8 pages x 300 rows', () => {
     console.info(`[perf] bankStockSaves perPage 10 x ${PAGES.length} banks (${heads} saves): ${perPage.toFixed(1)} ms`);
     expect(heads).toBe(PAGES.length * 10);
     expect(perPage).toBeLessThan(500);
+    // What the F17 cache reads on each refresh from 0.7.1: each page's saves as far back as its session
+    // baseline (BANK_STOCK_SESSION_READ, the whole page as the thinning keeps it). The window pass is the
+    // same; only more rows come back.
+    let deep = 0;
+    const deepMs = ms(() => {
+      for (const [bank] of PAGES) deep += repo.bankStockSaves(bank, BANK_STOCK_SESSION_READ * BANK_STOCK_MAX_PAGES, { perPage: BANK_STOCK_SESSION_READ }).length;
+    });
+    console.info(`[perf] bankStockSaves perPage ${BANK_STOCK_SESSION_READ} x ${PAGES.length} banks (${deep} saves): ${deepMs.toFixed(1)} ms`);
+    expect(deep).toBe(PAGES.length * BANK_STOCK_MAX_SAVES_PER_PAGE);
+    expect(deepMs).toBeLessThan(500);
   });
 
   it("maintenance's orphan sweep (a table scan, once a day) stays bounded", () => {

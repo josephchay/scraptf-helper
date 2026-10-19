@@ -184,11 +184,14 @@ describe('BankStockRow listed fields (F20 S3)', () => {
 // two busy pages of the list pushed a quiet page (or the save it is compared with) out of that window
 // while the history and the feed, which read every kept save, still had it.
 describe('a quiet page of a bank whose other pages are saved often', () => {
-  /** /items and /items/2 saved every 5 min for about 21 h (all kept: the last day keeps every save). */
+  /**
+   * /items and /items/2 read every 20 s for 100 minutes (the scrap.tf window at its busiest): 300 saves a
+   * page, all kept (0.7.1: the last 2 h keeps every save, up to 300 a page).
+   */
   function busy(repo: Repo): void {
-    for (let i = 0; i < 255; i++) {
-      save(repo, 'list', NOW - 10 * MIN - i * 5 * MIN, [r('1;6', 10)], '/items');
-      save(repo, 'list', NOW - 10 * MIN - i * 5 * MIN + 1_000, [r('2;6', 12)], '/items/2');
+    for (let i = 0; i < 300; i++) {
+      save(repo, 'list', NOW - 10 * MIN - i * 20_000, [r('1;6', 10)], '/items');
+      save(repo, 'list', NOW - 10 * MIN - i * 20_000 + 1_000, [r('2;6', 12)], '/items/2');
     }
   }
 

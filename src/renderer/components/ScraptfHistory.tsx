@@ -1,13 +1,14 @@
 // "scrap.tf history" block of the item drawer (F20, U1): the price on every save of the item's bank
 // the user kept (a step chart with gaps where it was not listed), how long it has been listed, the
-// 1 h / 24 h / 7 d / since-listed changes, stock now and its last change events, from
-// 'scraptf.itemHistory'. Everything comes from pages the user saved (R10); nothing here loads
-// scrap.tf (R1) or opens anything. Fetched lazily when the drawer opens and refetched on
+// 1 h / 24 h / 7 d / since-listed changes, stock now and its last change events (0.7.1, DM-6: price
+// changes and stock moves listed apart), from 'scraptf.itemHistory'. Everything comes from pages the
+// user saved (R10); nothing here loads scrap.tf (R1) or opens anything. Fetched lazily when the drawer opens and refetched on
 // 'scraptf.changed' and 'prices.changed' (every import pushes it: a first save or an unchanged one
 // writes no change event but still adds a point), throttled and only while the window is shown.
 // Pure helpers: historyModel.ts. Styles: styles/scraptf-history.css (classes stf-hist-*).
 
 import { useMemo, useState } from 'react';
+import { SCRAPTF_BOUNDARY_SHORT } from '../../shared/boundaryText';
 import type { Scrap, UnixMs } from '../../shared/types';
 import { fmtSaveTime } from '../changesModel';
 import { fmtMoney } from '../format';
@@ -17,6 +18,7 @@ import {
   historyBankPath,
   historyChartLabel,
   historyChips,
+  historyEventGroups,
   historyEventLines,
   historyListedLine,
   historyNote,
@@ -44,6 +46,7 @@ export function ScraptfHistory({ sku, special, keyScrap, now }: ScraptfHistoryPr
   useVisiblePush('scraptf.changed', reload);
   useVisiblePush('prices.changed', reload);
   const [allEvents, setAllEvents] = useState(false);
+  const [allStock, setAllStock] = useState(false);
 
   const h = q.data;
   const key = h?.keyPrice?.valueScrap ?? keyScrap;
@@ -53,6 +56,7 @@ export function ScraptfHistory({ sku, special, keyScrap, now }: ScraptfHistoryPr
   const sorted = useMemo(() => (h ? [...h.points].filter((p) => Number.isFinite(p.at)).sort((a, b) => a.at - b.at) : []), [h]);
   const path = historyBankPath(h);
   const note = h ? historyNote(h) : null;
+  const groups = useMemo(() => historyEventGroups(h?.events ?? []), [h]);
 
   let body;
   if (q.loading && !h) {
@@ -77,7 +81,8 @@ export function ScraptfHistory({ sku, special, keyScrap, now }: ScraptfHistoryPr
     const listed = historyListedLine(h, now);
     const current = historyNowText(h, key);
     const chips = historyChips(h, key);
-    const lines = historyEventLines(h.events, key, now, allEvents ? h.events.length : HISTORY_EVENTS_SHOWN, h.bank);
+    const lines = historyEventLines(groups.price, key, now, allEvents ? groups.price.length : HISTORY_EVENTS_SHOWN, h.bank);
+    const stockLines = historyEventLines(groups.stock, key, now, allStock ? groups.stock.length : HISTORY_EVENTS_SHOWN, h.bank);
     body = (
       <>
         {listed ? (
@@ -133,9 +138,34 @@ export function ScraptfHistory({ sku, special, keyScrap, now }: ScraptfHistoryPr
                 </li>
               ))}
             </ul>
-            {h.events.length > HISTORY_EVENTS_SHOWN ? (
+            {groups.price.length > HISTORY_EVENTS_SHOWN ? (
               <button type="button" className="link-btn small" onClick={() => setAllEvents((v) => !v)}>
-                {allEvents ? 'Show fewer' : `Show all ${h.events.length}`}
+                {allEvents ? 'Show fewer' : `Show all ${groups.price.length}`}
+              </button>
+            ) : null}
+          </>
+        ) : null}
+        {stockLines.length ? (
+          <>
+            <h4 className="stf-hist-sub" title="Same price in two saves, another stock count: kept apart so they never push a price change out of view.">
+              Stock moves
+            </h4>
+            <ul className="plain-list stf-hist-events stf-hist-stock">
+              {stockLines.map((l) => (
+                <li key={l.id} className="stf-hist-event">
+                  <span className="stf-hist-when num muted" title={l.whenTitle}>
+                    {l.when}
+                  </span>
+                  <span className="stf-hist-what muted" title={l.priceTitle}>
+                    {l.bank ? <span className="stf-hist-bank">{l.bank} · </span> : null}
+                    {l.text}
+                  </span>
+                </li>
+              ))}
+            </ul>
+            {groups.stock.length > HISTORY_EVENTS_SHOWN ? (
+              <button type="button" className="link-btn small" onClick={() => setAllStock((v) => !v)}>
+                {allStock ? 'Show fewer' : `Show all ${groups.stock.length}`}
               </button>
             ) : null}
           </>
@@ -152,7 +182,7 @@ export function ScraptfHistory({ sku, special, keyScrap, now }: ScraptfHistoryPr
         {q.reloading && h ? <span className="muted small">updating…</span> : null}
       </div>
       {body}
-      <p className="muted small stf-hist-note">From the pages you saved: one point per save, and nothing is known between two saves. The app never visits scrap.tf.</p>
+      <p className="muted small stf-hist-note">From the pages you saved: one point per save, and nothing is known between two saves. {SCRAPTF_BOUNDARY_SHORT}</p>
     </section>
   );
 }

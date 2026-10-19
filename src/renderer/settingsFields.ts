@@ -2,6 +2,7 @@
 // settings schema accepts, so a value that passes here is never rejected
 // there (a rejected value would otherwise look saved). Pure: unit tested.
 
+import { SCRAPTF_BOUNDARY_SHORT } from '../shared/boundaryText';
 import { isReservedAccelerator, isValidAccelerator, sameAccelerator } from '../shared/accelerator';
 import { BANK_STOCK_MAX_NOTIFICATIONS, BANK_STOCK_NOTIFY_DEDUP_MS } from '../shared/bankStock';
 import { CHECK_PRIVACY_SENTENCE } from '../shared/check';
@@ -108,7 +109,7 @@ export function newOnScraptfNotifyHint(a: { notificationsOn: boolean; importKind
   const base =
     `When a scrap.tf page you save has new items that are flips: "New on scrap.tf (Hats): <name>". ` +
     `At most ${BANK_STOCK_MAX_NOTIFICATIONS} per save, then one summary; each item once per page every ${dedupMin} minutes. A first save of a page notifies nothing. ` +
-    'Uses the minimum confidence and profit above. The app never visits scrap.tf.';
+    `Uses the minimum confidence and profit above. ${SCRAPTF_BOUNDARY_SHORT}`;
   const missing: string[] = [];
   if (!a.notificationsOn) missing.push('Desktop notifications are off');
   if (!a.importKind) missing.push('"Imported pages" is not ticked under Notify for');
@@ -284,9 +285,14 @@ export function checkWatchHint(on: boolean, networkPaused: boolean): string {
 
 export const CHECK_NOTIFY_LABEL = 'Notify me about flips the watcher finds';
 
-export function checkNotifyHint(notificationsOn: boolean): string {
-  const base = 'A desktop notification for flips only, at most once a minute per item. Silent notifications apply.';
-  return notificationsOn ? base : `Desktop notifications are off (Notifications above), so this shows nothing until they are on. ${base}`;
+/**
+ * ACT-7: the watcher sends one alert per check, so this notification is for when the check popup is off
+ * (`popupOn`: Show the check popup below); with it on, the popup is that alert.
+ */
+export function checkNotifyHint(notificationsOn: boolean, popupOn = false): string {
+  const base = 'A desktop notification for flips only, while the check popup is off, at most once a minute per item. Silent notifications apply.';
+  const popup = popupOn ? ' The check popup is on, so it shows each flip instead and this sends nothing.' : '';
+  return notificationsOn ? `${base}${popup}` : `Desktop notifications are off (Notifications above), so this shows nothing until they are on. ${base}${popup}`;
 }
 
 export const CHECK_POPUP_LABEL = 'Show the check popup';
@@ -454,7 +460,7 @@ export function scraptfListKeyView(list: ScraptfListKey | null | undefined, type
   if (src.pays === 'list') status += typed.mode === 'auto' ? ' What scrap.tf pays caps the automatic key price.' : ' In Manual mode your own key price is used as typed.';
   return {
     text,
-    title: `Read from the Mann Co. Supply Crate Key row of the scrap.tf/items page you saved ${fmtDateTime(list.observedAt)}. The app never visits scrap.tf.`,
+    title: `Read from the Mann Co. Supply Crate Key row of the scrap.tf/items page you saved ${fmtDateTime(list.observedAt)}. ${SCRAPTF_BOUNDARY_SHORT}`,
     inUse: fromList > 0,
     pill,
     status,

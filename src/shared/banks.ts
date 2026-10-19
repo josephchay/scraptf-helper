@@ -2,7 +2,7 @@
 // the dashboard and the mock, so all three count, order and cut the same way.
 // Pure functions over local data; nothing here fetches anything (R1).
 
-import type { Category, MarketRow, Opportunity, ScraptfBank, ScraptfBankFlip, ScraptfBankLookFor, ScraptfBankSummary } from './types';
+import type { BankStockRow, Category, MarketRow, Opportunity, ScraptfBank, ScraptfBankFlip, ScraptfBankLookFor, ScraptfBankSummary } from './types';
 
 /** ScraptfBankSummary.top holds at most this many flips. */
 export const BANK_TOP_FLIPS = 3;
@@ -53,6 +53,30 @@ export function bankFlips(rows: readonly Opportunity[], bankOf: (o: Opportunity)
 
 /** A bank with no flips. */
 export const NO_BANK_FLIPS: Readonly<BankFlips> = Object.freeze({ flips: 0, flipProfitScrap: 0, top: [] });
+
+/**
+ * 0.7.1 (UX-2b): a bank page's card flips from its stock page, so the two agree: `count` is the stock
+ * page's Flips chip (BankStockResult.counts.flips) and `rows` its Flips rows, most profit first
+ * (BankStockQuery filter 'flips', sort 'profit'). The profit is summed over the rows; `top` is the first
+ * BANK_TOP_FLIPS. Each row is a copy, so a painted and a clean copy of one item are two flips, as on the page.
+ */
+export function bankStockFlips(rows: readonly BankStockRow[], count: number = rows.length): BankFlips {
+  const flips = rows.filter((r) => r.change !== 'gone' && r.verdict === 'flip' && r.profitScrap !== null);
+  return {
+    flips: Number.isFinite(count) && count >= 0 ? Math.floor(count) : flips.length,
+    flipProfitScrap: flips.reduce((n, r) => n + (r.profitScrap ?? 0), 0),
+    top: flips.slice(0, BANK_TOP_FLIPS).map(
+      (r): ScraptfBankFlip => ({
+        sku: r.sku,
+        name: r.name,
+        profitScrap: r.profitScrap ?? 0,
+        costScrap: r.costScrap,
+        revenueScrap: r.revenueScrap ?? 0,
+        confidenceLevel: r.confidenceLevel ?? 'low',
+      }),
+    ),
+  };
+}
 
 /**
  * What to look for on a bank page: Live market rows of its categories with the verdict 'unchecked'

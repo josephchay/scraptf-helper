@@ -982,7 +982,7 @@ describe('header strip', () => {
   });
 
   it('states the boundary plainly', () => {
-    expect(BOUNDARY_NOTE).toBe('The app never visits scrap.tf. Browse it yourself; prices you type or pages you save show up here.');
+    expect(BOUNDARY_NOTE).toBe('Flip Desk never loads scrap.tf on its own. Browse it yourself: prices you type, pages you save show up here.');
   });
 
   it('counts the updates a freeze holds back', () => {

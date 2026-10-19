@@ -137,6 +137,9 @@ describe('importSavedPage writes the bank stock of a recognised page (F17)', () 
 
   it('prunes an old file imported late right after writing it, once newer saves of its page exist', () => {
     const h = setup();
+    // 0.7.1: a save from before the newest session (yesterday's) is the one the stock page compares with
+    // and is kept, so the late file is not needed by anything.
+    h.run(fixture('buy_hats.html'), NOW - 2 * 24 * 60 * MIN, 'yesterday.html');
     h.run(fixture('buy_hats.html'), NOW - 2 * MIN, 'newer.html');
     h.run(fixture('buy_hats.html'), NOW - MIN, 'newest.html');
     const r = h.run(fixture('buy_hats.html'), NOW - 91 * 24 * 60 * MIN, 'old.html');

@@ -8,9 +8,19 @@ import { MAX_IMPORT_BYTES, SCRAPTF_BAR_URL } from '../../src/main/paths';
 import { DEFAULT_SETTINGS } from '../../src/shared/defaults';
 import { SCRAPTF_BANKS, SCRAPTF_HOME_URL, SCRAPTF_ITEMS_URL, STATIC_EXTERNAL_URLS } from '../../src/shared/links';
 import {
+  appCommandAction,
   gateScraptfWindow,
   isAllowedWindowStart,
   isScraptfPageUrl,
+  loadFailureNotice,
+  responseNotice,
+  SCRAPTF_FAILURE_NOTICES,
+  SCRAPTF_LINK_NOTICES,
+  SCRAPTF_NOT_READ_AGAIN,
+  SCRAPTF_READ_REASONS,
+  SCRAPTF_WINDOW_NOTICES,
+  windowKeyAction,
+  type WindowKeyInput,
   READ_MAX_CHARS,
   READ_SCRIPT,
   READ_SCRIPT_FORBIDDEN,
@@ -304,5 +314,85 @@ describe('the settings gate', () => {
     expect(input.scraptfWindow.enabled).toBe(true);
     const disabled = base({ enabled: false, importOn: false, windowAck: null });
     expect(gateScraptfWindow(disabled, false)).toEqual({ ok: true, settings: disabled });
+  });
+});
+
+describe('0.7.1: notices, keys and the reasons', () => {
+  it('names a challenge, error or rate-limit page by its status, and nothing else', () => {
+    expect(responseNotice(403)).toBe(SCRAPTF_WINDOW_NOTICES.challenge);
+    expect(responseNotice(503)).toBe(SCRAPTF_WINDOW_NOTICES.challenge);
+    expect(responseNotice(429)).toBe(SCRAPTF_WINDOW_NOTICES.rateLimited);
+    for (const status of [200, 204, 301, 304, 404, 500, 502, 0, -1, null, undefined, '403']) expect(responseNotice(status), String(status)).toBeNull();
+    expect(SCRAPTF_WINDOW_NOTICES.challenge).toBe('Cloudflare check or error page on screen: solve it in the page; it is read once the real page loads.');
+    expect(SCRAPTF_WINDOW_NOTICES.rateLimited).toBe('scrap.tf is rate-limiting this window: wait a minute before reloading.');
+  });
+
+  it("groups a failed load by Chromium's net error, each ending in press Reload", () => {
+    const cases: [unknown, string][] = [
+      [-105, SCRAPTF_WINDOW_NOTICES.offline],
+      [-106, SCRAPTF_WINDOW_NOTICES.offline],
+      [-118, SCRAPTF_WINDOW_NOTICES.offline],
+      [-7, SCRAPTF_WINDOW_NOTICES.offline],
+      [-21, SCRAPTF_WINDOW_NOTICES.offline],
+      [-837, SCRAPTF_WINDOW_NOTICES.offline],
+      [-200, SCRAPTF_WINDOW_NOTICES.insecure],
+      [-202, SCRAPTF_WINDOW_NOTICES.insecure],
+      [-310, SCRAPTF_WINDOW_NOTICES.badResponse],
+      [-324, SCRAPTF_WINDOW_NOTICES.badResponse],
+      [-2, SCRAPTF_WINDOW_NOTICES.loadFailed],
+      [-501, SCRAPTF_WINDOW_NOTICES.loadFailed],
+      ['x', SCRAPTF_WINDOW_NOTICES.loadFailed],
+      [Number.NaN, SCRAPTF_WINDOW_NOTICES.loadFailed],
+    ];
+    for (const [code, notice] of cases) expect(loadFailureNotice(code), String(code)).toBe(notice);
+    for (const n of [SCRAPTF_WINDOW_NOTICES.offline, SCRAPTF_WINDOW_NOTICES.insecure, SCRAPTF_WINDOW_NOTICES.badResponse, SCRAPTF_WINDOW_NOTICES.loadFailed, SCRAPTF_WINDOW_NOTICES.crashed]) {
+      expect(n).toMatch(/: press Reload\.$/);
+    }
+    // Link notices are about one link; a page notice is not one of them.
+    expect([...SCRAPTF_LINK_NOTICES].sort()).toEqual([SCRAPTF_WINDOW_NOTICES.blocked, SCRAPTF_WINDOW_NOTICES.needsClick, SCRAPTF_WINDOW_NOTICES.popup].sort());
+    // A page that did not load or crashed (a dashboard link loads it again): exactly the "press Reload" ones,
+    // never a challenge or rate limit (solved or waited out on screen) and never a link notice.
+    expect([...SCRAPTF_FAILURE_NOTICES].sort()).toEqual(Object.values(SCRAPTF_WINDOW_NOTICES).filter((n) => n.endsWith(': press Reload.')).sort());
+    for (const n of SCRAPTF_FAILURE_NOTICES) expect(SCRAPTF_LINK_NOTICES.has(n)).toBe(false);
+    // Fixed text: no address, query or page content in any of them.
+    for (const n of Object.values(SCRAPTF_WINDOW_NOTICES)) expect(n).not.toMatch(/https?:|www\.|\?|#|\/\//);
+  });
+
+  it('takes the toolbar keys from a key going down in the page, never its repeats or a key up', () => {
+    const k = (input: WindowKeyInput) => windowKeyAction({ type: 'keyDown', alt: false, control: false, meta: false, shift: false, isAutoRepeat: false, ...input });
+    expect(k({ key: 'F5' })).toBe('reload');
+    expect(k({ key: 'r', control: true })).toBe('reload');
+    expect(k({ key: 'R', control: true })).toBe('reload');
+    expect(k({ key: 'ArrowLeft', alt: true })).toBe('back');
+    expect(k({ key: 'ArrowRight', alt: true })).toBe('forward');
+    expect(k({ key: 'Home', alt: true })).toBe('home');
+    for (const input of [
+      { key: 'F5', isAutoRepeat: true },
+      { key: 'F5', type: 'keyUp' },
+      { key: 'F5', type: 'rawKeyDown' },
+      { key: 'F5', shift: true },
+      { key: 'F5', control: true },
+      { key: 'r' },
+      { key: 'r', control: true, alt: true },
+      { key: 'ArrowLeft' },
+      { key: 'ArrowLeft', alt: true, meta: true },
+      { key: 'Home' },
+      { key: 'Enter', alt: true },
+      { key: 5 },
+    ] as WindowKeyInput[]) {
+      expect(k(input), JSON.stringify(input)).toBeNull();
+    }
+    expect(windowKeyAction(null)).toBeNull();
+    expect(windowKeyAction(undefined)).toBeNull();
+    // The window's app-command: the mouse's back and forward buttons only.
+    expect(appCommandAction('browser-backward')).toBe('back');
+    expect(appCommandAction('browser-forward')).toBe('forward');
+    for (const c of ['browser-refresh', 'browser-home', 'media-play-pause', '', null]) expect(appCommandAction(c)).toBeNull();
+  });
+
+  it('keeps the new read reasons and the gap code fixed text', () => {
+    expect(SCRAPTF_READ_REASONS.notImportable).toBe('Nothing to import on this page.');
+    expect(SCRAPTF_READ_REASONS.schemaLoading).toBe('Item data is still loading; press Read page now in a moment.');
+    expect(SCRAPTF_NOT_READ_AGAIN).toBe('not-read-again');
   });
 });

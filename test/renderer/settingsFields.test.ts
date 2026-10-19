@@ -326,7 +326,7 @@ describe('Key price: scrap.tf key prices from the saved list (F14)', () => {
     expect(v.text).toBe('From your saved scrap.tf list (3 min ago): scrap.tf sells a key for 64.77 ref, pays 63.77 ref.');
     expect(v.inUse).toBe(true);
     expect(v.status).toBe('No values are typed below, so these are used. What scrap.tf pays caps the automatic key price.');
-    expect(v.title).toContain('The app never visits scrap.tf.');
+    expect(v.title).toContain('Flip Desk never loads scrap.tf on its own.');
   });
 
   it('says why it is, or is not, in use against the typed values', () => {
@@ -529,6 +529,13 @@ describe('Live check (F16): the check hotkey and the watcher switch', () => {
     expect(checkWatchHint(false, true)).not.toContain('Paused now');
     expect(checkNotifyHint(false)).toMatch(/^Desktop notifications are off/);
     expect(checkNotifyHint(true)).not.toMatch(/are off/);
+    // ACT-7: one alert per check, so the notification is for when the check popup is off.
+    expect(checkNotifyHint(true)).toContain('while the check popup is off');
+    expect(checkNotifyHint(true, true)).toContain('The check popup is on, so it shows each flip instead and this sends nothing.');
+    expect(checkNotifyHint(true, false)).not.toContain('The check popup is on');
+    expect(checkNotifyHint(false, true)).toMatch(/^Desktop notifications are off[^]*The check popup is on/);
+    const page = readFileSync(new URL('../../src/renderer/pages/SettingsPage.tsx', import.meta.url), 'utf8');
+    expect(page).toContain('description={checkNotifyHint(s.notifications.enabled, c.popup)}');
   });
 
   it('Settings has the section, the fields, the toggles and the Test', () => {
@@ -569,7 +576,7 @@ describe('New flips on scrap.tf pages you save (F17): notifications.newOnScraptf
     expect(hint).toContain(`every ${BANK_STOCK_NOTIFY_DEDUP_MS / 60_000} minutes`);
     expect(hint).toContain('A first save of a page notifies nothing.');
     expect(hint).toContain('minimum confidence and profit above');
-    expect(hint).toMatch(/The app never visits scrap\.tf\.$/);
+    expect(hint).toMatch(/Flip Desk never loads scrap\.tf on its own\.$/);
     expect(hint).not.toMatch(/shows nothing/);
   });
 

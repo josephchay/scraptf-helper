@@ -5,9 +5,11 @@
 // live backpack.tf side by the service. Nothing here loads scrap.tf (R1) and nothing opens a URL: a
 // bank is named by its SCRAPTF_BANKS label and path, never by the event's own page.
 //
-// All pure except createChangesFeed, whose only effect is the call it is handed.
+// All pure except createChangesFeed, whose only effect is the call it is handed. 0.7.1: the feed hides
+// stock moves until the user picks them (DM-6), and a superseded flip gets a muted "was a flip" (ACT-10).
 
 import { bankStockPagePath } from '../shared/bankStock';
+import { SCRAPTF_BOUNDARY_SHORT } from '../shared/boundaryText';
 import { scraptfBankInfo, SCRAPTF_BANKS } from '../shared/links';
 import { SCRAPTF_CHANGES_DEFAULT_LIMIT, SCRAPTF_CHANGES_MAX_LIMIT } from '../shared/scraptfHistory';
 import { SCRAPTF_BANK_IDS, SCRAPTF_CHANGE_KINDS } from '../shared/types';
@@ -118,18 +120,52 @@ export interface ChangesView {
   kinds: ScraptfChangeKind[];
 }
 
-export const DEFAULT_CHANGES_VIEW: Readonly<ChangesView> = Object.freeze<ChangesView>({ bank: '', kinds: [] });
+/**
+ * DM-6: the kinds the tab shows until the user picks others: every kind but 'stock', so a run of stock
+ * moves (same price, another count) never pushes the price changes out of view.
+ */
+export const DEFAULT_CHANGE_KINDS: readonly ScraptfChangeKind[] = Object.freeze(SCRAPTF_CHANGE_KINDS.filter((k) => k !== 'stock'));
 
-/** usePersistentState key of the tab's filters. */
-export const CHANGES_PREF_KEY = 'log.scraptfChanges';
+export const DEFAULT_CHANGES_VIEW: Readonly<ChangesView> = Object.freeze<ChangesView>({ bank: '', kinds: [...DEFAULT_CHANGE_KINDS] });
 
-/** The saved view, from storage that may hold anything: known values only, each once, in the shared order. */
+/**
+ * usePersistentState key of the tab's filters. 0.7.1 (DM-6): a new key, because 0.7.0 wrote its default
+ * ({ kinds: [] }, every kind) under CHANGES_LEGACY_PREF_KEY on the tab's first render, and kept as a
+ * choice it would keep stock moves on screen for everyone who ever opened the tab.
+ */
+export const CHANGES_PREF_KEY = 'log.scraptfChanges.v2';
+/** The 0.7.0 key, read once to carry its bank and a real choice of kinds over (changesViewFromLegacy). */
+export const CHANGES_LEGACY_PREF_KEY = 'log.scraptfChanges';
+
+/**
+ * DM-6: the tab's starting view while CHANGES_PREF_KEY holds nothing, from what 0.7.0 kept. Its empty
+ * kinds were the default, not a choice: they get DEFAULT_CHANGE_KINDS. A bank and picked kinds stay.
+ */
+export function changesViewFromLegacy(v: unknown): ChangesView {
+  const o = v !== null && typeof v === 'object' ? (v as Record<string, unknown>) : {};
+  const kinds = o['kinds'];
+  return sanitizeChangesView({ bank: o['bank'], kinds: Array.isArray(kinds) && kinds.length > 0 ? kinds : undefined });
+}
+
+/**
+ * The saved view, from storage that may hold anything: known values only, each once, in the shared order.
+ * A saved choice of kinds is kept as it is ([] = every kind, "Show every change"); a view without one, or
+ * one whose kinds are all unknown, gets DEFAULT_CHANGE_KINDS.
+ */
 export function sanitizeChangesView(v: unknown): ChangesView {
   const o = v !== null && typeof v === 'object' ? (v as Record<string, unknown>) : {};
   const bank = SCRAPTF_BANK_IDS.find((b) => b === o['bank']) ?? '';
-  const raw = Array.isArray(o['kinds']) ? new Set<unknown>(o['kinds']) : new Set<unknown>();
+  const saved = o['kinds'];
+  if (!Array.isArray(saved)) return { bank, kinds: [...DEFAULT_CHANGE_KINDS] };
+  const raw = new Set<unknown>(saved);
   // Every kind ticked stays ticked on the chips; the query leaves such a filter out (changesQueryOf).
-  return { bank, kinds: SCRAPTF_CHANGE_KINDS.filter((k) => raw.has(k)) };
+  const kinds = SCRAPTF_CHANGE_KINDS.filter((k) => raw.has(k));
+  return { bank, kinds: saved.length > 0 && kinds.length === 0 ? [...DEFAULT_CHANGE_KINDS] : kinds };
+}
+
+/** The view's kinds are the default ones (every kind but stock moves): no filter of the user's. */
+export function changesKindsAreDefault(kinds: readonly ScraptfChangeKind[]): boolean {
+  return kinds.length === DEFAULT_CHANGE_KINDS.length && DEFAULT_CHANGE_KINDS.every((k) => kinds.includes(k));
 }
 
 /** 'scraptf.changes' params for the view: the newest `limit` (1..500), or those older than `beforeId`. */
@@ -528,6 +564,8 @@ export interface ChangeRowView {
   payTitle: string;
   /** The Flip pill: the new price is at or under Pay up to now. */
   flip: { text: string; title: string } | null;
+  /** ACT-10: the muted "was a flip" pill (ScraptfChangeEvent.wasFlip): a later save superseded it. */
+  wasFlip: { text: string; title: string } | null;
   extrasTitle: string | null;
 }
 
@@ -546,6 +584,14 @@ export function changeRowView(e: ScraptfChangeEvent, keyScrap: Scrap | null, now
       title: `${fmtMoney(to, keyScrap)} is ${under === 0 ? 'right at' : `${fmtMoney(under, keyScrap)} under`} Pay up to (${fmtMoney(pay, keyScrap)}) against today's backpack.tf buyers.${e.hasExtras ? ' Judged as a clean copy.' : ''} Check scrap.tf still has it: this is from your save ${fmtAgo(Math.min(e.at, now), now)}.`,
     };
   }
+  // A flip a later event of the same copy superseded (or the copy is no longer on sale): said, but muted.
+  const wasFlip: ChangeRowView['wasFlip'] =
+    flip === null && e.wasFlip === true
+      ? {
+          text: 'was a flip',
+          title: `A flip at this price against today's buyers, but a later save of ${bank.path} changed this copy again or no longer lists it on sale. Its newest change says where it stands now.`,
+        }
+      : null;
   return {
     time: fmtSaveTime(e.at),
     // A sub-page (/items/2) is named as text only; a file without a scrap.tf address has no path to name.
@@ -564,6 +610,7 @@ export function changeRowView(e: ScraptfChangeEvent, keyScrap: Scrap | null, now
           ? 'No scrap.tf price clears your thresholds against these buyers.'
           : 'No eligible buy orders, so there is no ceiling.',
     flip,
+    wasFlip,
     extrasTitle: extras,
   };
 }
@@ -574,9 +621,12 @@ function bankPathOnly(path: string): string {
   return at >= 0 ? path.slice(at) : path;
 }
 
-/** The empty list: nothing saved twice yet, or nothing under these filters. */
+/**
+ * The empty list: nothing saved twice yet, or nothing under these filters. The default kinds (every kind
+ * but stock moves) are no filter of the user's: with no bank either, the list is simply empty.
+ */
 export function changesEmptyText(view: ChangesView): { title: string; body: string; filtered: boolean } {
-  if (changesFilterCount(view) > 0) {
+  if (view.bank !== '' || (changesFilterCount(view) > 0 && !changesKindsAreDefault(view.kinds))) {
     const bank = view.bank ? changeBankText(view.bank).path : null;
     return {
       title: 'No changes match these filters',
@@ -586,7 +636,7 @@ export function changesEmptyText(view: ChangesView): { title: string; body: stri
   }
   return {
     title: 'No scrap.tf changes yet',
-    body: 'Changes appear when you save a scrap.tf bank page again: each save is compared with your previous save of that page (new, gone, cheaper, pricier, restocked, stock). A first save of a page has nothing to compare with. The app never visits scrap.tf.',
+    body: `Changes appear when you save a scrap.tf bank page again: each save is compared with your previous save of that page (new, gone, cheaper, pricier, restocked; stock moves show when you tick Stock). A first save of a page has nothing to compare with. ${SCRAPTF_BOUNDARY_SHORT}`,
     filtered: false,
   };
 }

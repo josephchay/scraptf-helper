@@ -241,6 +241,11 @@
   cursor: help;
 }
 
+/* ACT-10: a flip a later save superseded is still said, but muted. */
+.stf-feed-was-flip {
+  font-weight: 400;
+}
+
 /* ---------- Settings: re-save reminders ---------- */
 
 .stf-resave-help {

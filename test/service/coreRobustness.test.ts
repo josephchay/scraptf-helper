@@ -11,6 +11,7 @@ import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 import { resetBptfSocketGuard } from '../../src/service/connectors/bptfSocket';
 import type { PricedbSocketLike } from '../../src/service/connectors/pricedb';
+import { META_SCHEMA_CHECKED_AT, META_SCHEMA_EXTRAS, buildSchemaSnapshot } from '../../src/service/connectors/schema';
 import type { Clock } from '../../src/service/contracts';
 import { META_OPP_LOG_LAST_ID, META_WATCH_IMPORTING, createServiceCore, serviceTimers, type ServiceCore } from '../../src/service/core';
 import { openRepo } from '../../src/service/db';
@@ -173,11 +174,26 @@ interface SetupOptions {
   clock?: Clock;
   fastStatus?: boolean;
   watchFactory?: WatchFactory;
+  /** Item data cached by an earlier run, so the folder watch starts with the network paused (P3). */
+  cachedSchema?: boolean;
+}
+
+/** The item schema as an earlier run cached it in the data folder's database. */
+function seedCachedSchema(dataDir: string): void {
+  mkdirSync(dataDir, { recursive: true });
+  const repo = openRepo(path.join(dataDir, 'flipdesk.sqlite'));
+  const now = Date.now();
+  const built = buildSchemaSnapshot(schemaSubset, paintList, now, 'W/"fixture"');
+  repo.replaceSchema(built.snapshot);
+  repo.setMeta(META_SCHEMA_EXTRAS, JSON.stringify(built.extras));
+  repo.setMeta(META_SCHEMA_CHECKED_AT, String(now));
+  repo.close();
 }
 
 function setup(o: SetupOptions = {}) {
   const root = o.root ?? newRoot();
   const dataDir = path.join(root, 'data');
+  if (o.cachedSchema) seedCachedSchema(dataDir);
   const fetch = fakeFetch(o.extra);
   const ws = fakeWs();
   const logger = createLogger({ dataDir });
@@ -417,7 +433,7 @@ describe('saved-page folder watch', () => {
   it('reports a watch that failed as an error and restarts it once the folder is back', async () => {
     const clock = offsetClock();
     const fw = fakeWatch();
-    const h = setup({ patch: { networkPaused: true }, clock, fastStatus: true, watchFactory: fw.factory });
+    const h = setup({ patch: { networkPaused: true }, clock, fastStatus: true, watchFactory: fw.factory, cachedSchema: true });
     const folder = path.join(h.root, 'saved');
     mkdirSync(folder);
     await h.core.start();
@@ -447,7 +463,7 @@ describe('saved-page folder watch', () => {
   it('tells the Live market the folder watch is on only while it really runs', async () => {
     const clock = offsetClock();
     const fw = fakeWatch();
-    const h = setup({ patch: { networkPaused: true }, clock, fastStatus: true, watchFactory: fw.factory });
+    const h = setup({ patch: { networkPaused: true }, clock, fastStatus: true, watchFactory: fw.factory, cachedSchema: true });
     const folder = path.join(h.root, 'saved');
     await h.core.start();
     const side = async () => (await h.call<MarketListResult>('market.list', {})).scraptf;
@@ -486,6 +502,7 @@ describe('saved-page folder watch', () => {
     const h = setup({
       root,
       patch: { networkPaused: true, import: { enabled: true, acknowledgedAt: Date.now() - 60_000, watchFolder: folder } },
+      cachedSchema: true,
     });
     await h.core.start();
     const done = await waitFor('the good file', () => h.pushes.find((p) => p.event === 'import.done')?.payload as ImportResult | undefined);

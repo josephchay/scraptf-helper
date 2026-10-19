@@ -7,6 +7,7 @@
 
 import type {
   AppStatus,
+  BankStockOpen,
   BankStockQuery,
   BankStockResult,
   BulkPriceRow,
@@ -22,6 +23,7 @@ import type {
   HoldingsResult,
   ImportBatch,
   ImportOrigin,
+  ImportReport,
   ImportResult,
   ItemDetail,
   ItemSuggestion,
@@ -159,9 +161,19 @@ export interface RpcContract {
    * F21: `address` (an https URL on exactly scrap.tf, a page-address hint for bank and page detection, as an
    * MHTML Content-Location) and `origin` ('file' | 'window'; absent = 'file') are set by main only, for a
    * read of the scrap.tf window. Main's router refuses either on a call from a page.
+   * 0.7.1: `settled` (main only, like `origin`): false marks a window snapshot cut before its settle read,
+   * which stores prices but no bank stock save; absent or true, a settled look.
    */
-  'import.html': { params: { html: string; fileName: string; mtimeMs: number; address?: string; origin?: ImportOrigin }; result: ImportResult };
+  'import.html': {
+    params: { html: string; fileName: string; mtimeMs: number; address?: string; origin?: ImportOrigin; settled?: boolean };
+    result: ImportResult;
+  };
   'import.batches': { params: { limit?: number }; result: ImportBatch[] };
+  /**
+   * 0.7.1 (P4): the newest parser reports, newest first (at most `limit`), as sanitized summaries the user
+   * copies into a bug report. In memory only; nothing is stored or sent.
+   */
+  'import.report': { params: { limit?: number } | void; result: ImportReport[] };
   /**
    * F14: the user's saved scrap.tf/items price list (rows, age, pages) plus the import switches and the
    * folder watch as it runs, for the "scrap.tf price list" card. Local only; nothing contacts scrap.tf (R1).
@@ -241,6 +253,11 @@ export interface RpcContract {
   'app.hideWindow': { params: void; result: { ok: true } };
   /** Shows the dashboard and asks it to open an item (push 'ui.openItem'); used by the quick-entry window. */
   'app.openItem': { params: { sku: string }; result: { ok: true } };
+  /**
+   * 0.7.1: shows the dashboard and asks it to open a bank's stock page on one chip (push 'ui.openBankStock'):
+   * the scrap.tf window toolbar's "Show flips", on a click only. Loads nothing in the scrap.tf window.
+   */
+  'app.showBankStock': { params: BankStockOpen; result: { ok: true } };
   'settings.get': { params: void; result: Settings };
   'settings.set': { params: DeepPartial<Settings>; result: Settings };
   'secrets.status': { params: void; result: SecretsStatus };
@@ -295,6 +312,7 @@ export const MAIN_METHODS: readonly RpcMethod[] = [
   'app.showQuickEntry',
   'app.hideWindow',
   'app.openItem',
+  'app.showBankStock',
   'settings.get',
   'settings.set',
   'secrets.status',
@@ -348,6 +366,7 @@ export const SERVICE_METHODS: readonly RpcMethod[] = [
   'journal.exportCsv',
   'import.html',
   'import.batches',
+  'import.report',
   'scraptf.listStatus',
   'scraptf.banks',
   'scraptf.bankStock',
@@ -395,6 +414,11 @@ export interface PushContract {
   /** Main asks the dashboard to open an item (notification click, quick entry). */
   'ui.openItem': { sku: string };
   /**
+   * 0.7.1, main only: open a bank's stock page on one chip ('app.showBankStock'). Held by the preload until
+   * the dashboard subscribes, like 'ui.openItem'.
+   */
+  'ui.openBankStock': BankStockOpen;
+  /**
    * Main asks the quick-entry window to pick this item and focus the price ('app.showQuickEntry' with a SKU).
    * `price` (F16) is text for the price field (e.g. "1 key 5.33 ref"); quick entry fills it when given.
    */
@@ -437,6 +461,7 @@ export const PUSH_EVENTS: readonly PushEvent[] = [
   'notify',
   'settings.changed',
   'ui.openItem',
+  'ui.openBankStock',
   'ui.quickPrefill',
   'ui.checkShow',
   'service.state',

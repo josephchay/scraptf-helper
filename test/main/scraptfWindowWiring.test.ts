@@ -409,10 +409,15 @@ describe('reading a page the user loaded (F21)', () => {
     const done = w.pushes.find((p) => p.event === 'import.done')!.payload as ImportResult;
     expect(done).toMatchObject({ origin: 'window', bank: 'hats', batchId: batch!.id });
 
-    // The toolbar's status line: what was read, from where, never the query; of a warning, only its code
-    // (the fixture shows one card twice, which the import counts once).
+    // The toolbar's status line: what was read, from where, never the query; of the warnings, the one that
+    // matters most on screen, as its code and its counts in digits (0.7.1, F21-10: the fixture's unknown items
+    // come before its card shown twice, which the import counts once and is no news). The prices stored and
+    // the page's flips as the service reported them (UX-3).
     expect(done.warnings[0]).toMatch(/^duplicate-cards: /);
-    expect(w.reads()).toEqual([{ at: T, path: '/buy/hats', items: done.parsed, bank: 'hats', newFlips: 0, warning: 'duplicate-cards' }]);
+    expect(done.warnings.find((x) => x.startsWith('no-sku:'))).toMatch(/^no-sku: 3 of 38 items/);
+    const best = done.topFlips?.[0];
+    const flips = done.pageFlips === undefined ? {} : { pageFlips: done.pageFlips, bestFlip: best ? { sku: best.sku, name: best.name, profitScrap: best.profitScrap } : null };
+    expect(w.reads()).toEqual([{ at: T, path: '/buy/hats', items: done.parsed, bank: 'hats', newFlips: 0, warning: 'no-sku: 3 38', stored: done.stored, ...flips }]);
 
     // The same page saved by the user as a file, imported through the router as the Import page does.
     const f = world();
@@ -423,7 +428,8 @@ describe('reading a page the user loaded (F21)', () => {
     expect(fileBatch!.origin).toBe('file');
     expect(sansBatch(batch!)).toEqual(sansBatch(fileBatch!));
     expect(storedOf(w.repo, batch!.id)).toEqual(storedOf(f.repo, fileBatch!.id));
-    const { batchId: _a, fileName: _b, origin: _c, newFlips: _d, ...windowResult } = done;
+    // Window reads alone carry the flips for the toolbar (newFlips, 0.7.1 pageFlips and topFlips).
+    const { batchId: _a, fileName: _b, origin: _c, newFlips: _d, pageFlips: _h, topFlips: _i, ...windowResult } = done;
     const { batchId: _e, fileName: _f, origin: _g, ...fileResult } = file;
     expect(windowResult).toEqual(fileResult);
 

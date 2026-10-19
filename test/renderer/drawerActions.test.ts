@@ -270,6 +270,18 @@ describe('item drawer wiring (F12 entry points, H3 Undo on the toast)', () => {
     // Journal writes go through the dialog; the drawer itself writes nothing new and contacts nobody.
     expect(drawer).not.toMatch(/rpc\('journal\./);
   });
+
+  it('opens the bank page once, from the header: no second "Open bank page" in the price list block (UX-11)', () => {
+    expect(drawer).not.toContain('Open bank page');
+    expect(drawer).not.toContain('bankPageUrl');
+    // The header's opener and the price list's scrap.tf/items stay.
+    expect(drawer).toContain('{OPEN_ON_SCRAPTF_LABEL}');
+    expect(drawer).toContain('Open scrap.tf/items');
+  });
+
+  it('types a price with the boundary sentence that stays true with the window on (UX-7)', () => {
+    expect(priceFormHeading({ scrapPrices: [], opportunities: [] }).hint).toBe('Type what you see on scrap.tf. Flip Desk never loads scrap.tf on its own.');
+  });
 });
 
 describe('blocklist edits', () => {

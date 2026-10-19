@@ -18,6 +18,7 @@ import { cleanCategoryCounts } from '../../shared/market';
 import { SCRAPTF_CHANGES_DEFAULT_LIMIT, SCRAPTF_EVENTS_MAX_AGE_MS, SCRAPTF_ITEM_EVENTS } from '../../shared/scraptfHistory';
 import { CATEGORIES, IMPORT_ORIGINS, SCRAPTF_BANK_IDS, SCRAPTF_CHANGE_KINDS } from '../../shared/types';
 import type {
+  BankNewestSave,
   BankStockSave,
   BankStockStored,
   CommunityRow,
@@ -750,6 +751,9 @@ const BANK_STOCK_INSERT =
   'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(batch_id, sku, special_key) DO NOTHING';
 /** bank_stock.page longer than this is clipped (the parser clips it already: a page key is a short path). */
 const BANK_STOCK_PAGE_MAX_CHARS = 200;
+// The save queries below read bank_stock_saves first and seek each batch: CROSS JOIN keeps that order
+// (SQLite never reorders it). The V10 index covers a batch's save time, so a plain JOIN would let the
+// planner walk every batch ever written through it instead (0.7.1).
 /** A save's time, as batchSavedAt (src/shared/market.ts): the file's mtime when known, else the import time. `ib` is import_batches. */
 const BANK_STOCK_SAVED_AT = '(CASE WHEN ib.file_mtime > 0 THEN ib.file_mtime ELSE ib.imported_at END)';
 /**
@@ -759,16 +763,25 @@ const BANK_STOCK_SAVED_AT = '(CASE WHEN ib.file_mtime > 0 THEN ib.file_mtime ELS
  */
 const BANK_STOCK_SAVE_INDEX =
   `SELECT s.batch_id AS batch_id, ${BANK_STOCK_SAVED_AT} AS saved_at, s.bank AS bank, s.page AS page ` +
-  'FROM bank_stock_saves s JOIN import_batches ib ON ib.id = s.batch_id ' +
+  'FROM bank_stock_saves s CROSS JOIN import_batches ib ON ib.id = s.batch_id ' +
   'ORDER BY saved_at ASC, s.batch_id ASC';
 /** bank_stock_saves kept with bank_stock: a second write to the same batch only adds its rows (first bank and page stay). */
 const BANK_STOCK_SAVE_UPSERT =
   'INSERT INTO bank_stock_saves (batch_id, bank, page, items) VALUES (?, ?, ?, ?) ' +
   'ON CONFLICT(batch_id) DO UPDATE SET items = bank_stock_saves.items + excluded.items';
+/**
+ * 0.7.1 Repo.bankNewestSaves: one bank's newest batch that stored items (the list counts with none, as
+ * isEmptyBankSave), by save time then the higher id. A seek on the V10 index (bank, save time): the
+ * expression is the index's, so no batch but the ones walked past is read. Exported for the query-plan test.
+ */
+export const BANK_NEWEST_SAVE =
+  `SELECT ib.id AS id, ${BANK_STOCK_SAVED_AT} AS saved_at, ib.item_count AS item_count FROM import_batches ib ` +
+  "WHERE ib.bank = ? AND (ib.item_count > 0 OR ib.bank = 'list') " +
+  `ORDER BY ${BANK_STOCK_SAVED_AT} DESC, ib.id DESC LIMIT 1`;
 /** One bank's saves with rows, newest first (Repo.bankStockSaves). */
 const BANK_STOCK_SAVES =
   `SELECT s.batch_id AS batch_id, ${BANK_STOCK_SAVED_AT} AS saved_at, s.items AS items, s.page AS page ` +
-  'FROM bank_stock_saves s JOIN import_batches ib ON ib.id = s.batch_id WHERE s.bank = ? ' +
+  'FROM bank_stock_saves s CROSS JOIN import_batches ib ON ib.id = s.batch_id WHERE s.bank = ? ' +
   'ORDER BY saved_at DESC, s.batch_id DESC LIMIT ?';
 /**
  * F20: one bank's newest `?` saves of each page, page by page (the page saved last first), each page's
@@ -782,7 +795,7 @@ const BANK_STOCK_PAGE_HEADS =
   'ROW_NUMBER() OVER w AS rn, FIRST_VALUE(' +
   BANK_STOCK_SAVED_AT +
   ') OVER w AS top_at, FIRST_VALUE(s.batch_id) OVER w AS top_id ' +
-  'FROM bank_stock_saves s JOIN import_batches ib ON ib.id = s.batch_id WHERE s.bank = ? ' +
+  'FROM bank_stock_saves s CROSS JOIN import_batches ib ON ib.id = s.batch_id WHERE s.bank = ? ' +
   `WINDOW w AS (PARTITION BY s.page ORDER BY ${BANK_STOCK_SAVED_AT} DESC, s.batch_id DESC)` +
   ') WHERE rn <= ? ORDER BY top_at DESC, top_id DESC, saved_at DESC, batch_id DESC LIMIT ?';
 const SCRAPTF_EVENT_INSERT =
@@ -1549,6 +1562,16 @@ export function createRepo(db: SqliteDb): Repo {
     listImportBatches(limit) {
       const lim = clampLimit(limit, 50, GENERIC_MAX_LIMIT);
       return all('SELECT * FROM import_batches ORDER BY imported_at DESC, id DESC LIMIT ?', lim).map(rowToImportBatch);
+    },
+
+    bankNewestSaves() {
+      // Per bank, so each read is one index seek; a window-function pass would sort every batch ever written.
+      const out: BankNewestSave[] = [];
+      for (const bank of SCRAPTF_BANK_IDS) {
+        const r = get(BANK_NEWEST_SAVE, bank);
+        if (r) out.push({ bank, batchId: num(r['id']), savedAt: num(r['saved_at']), itemCount: num(r['item_count']) });
+      }
+      return out;
     },
 
     // ----- scrap.tf price list (F14) -----

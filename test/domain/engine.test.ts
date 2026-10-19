@@ -399,7 +399,7 @@ describe('notes keywords in the engine', () => {
 });
 
 describe('notifications', () => {
-  it('deduplicates per key across a restart, then notifies again after the window', async () => {
+  it('deduplicates per key across a restart, then past the window notifies again only what changed (ACT-2)', async () => {
     const repo = newRepo();
     const clock = new FakeClock();
     seedTeamCaptain(repo);
@@ -408,7 +408,8 @@ describe('notifications', () => {
     await first.engine.runNow();
     expect(first.events.notified).toHaveLength(1);
     first.engine.stop();
-    expect(JSON.parse(repo.getMeta(NOTIFY_META_KEY)!)).toEqual({ [repo.allOpportunities()[0]!.key]: T0 });
+    // When, and what was told: the price's observedAt, the revenue order and the profit.
+    expect(JSON.parse(repo.getMeta(NOTIFY_META_KEY)!)).toEqual({ [repo.allOpportunities()[0]!.key]: { t: T0, f: { obs: T0 - MIN, lid: 'tc-bot', p: 18 } } });
 
     // Restart: a fresh engine on the same database must not re-announce.
     const second = setup({ repo, clock });
@@ -417,7 +418,14 @@ describe('notifications', () => {
     expect(second.events.notified).toHaveLength(0);
     expect(second.events.changed.every((c) => c.appeared === 0)).toBe(true);
 
+    // Past the window but unchanged: still nothing.
     clock.advance(20 * MIN);
+    await second.engine.runNow();
+    expect(second.events.notified).toHaveLength(0);
+
+    // The bot raises its order by 1 ref: the profit rose by CHANGE_PROFIT_DELTA, worth a toast.
+    repo.upsertListings([makeListing({ id: 'tc-bot', steamid: 'S1', metalScrap: 117, isBot: true, uaLastPulse: Math.floor(clock.t / 1000), userOnline: true, lastEventAt: clock.t })]);
+    second.engine.markDirty(['378;6']);
     await second.engine.runNow();
     expect(second.events.notified).toHaveLength(1);
     expect(repo.listEvents({ kinds: ['notified'] })).toHaveLength(2);

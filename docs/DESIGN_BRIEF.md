@@ -600,7 +600,7 @@ Examples: `5021;6`, `378;5;u13`, `378;5;u13;strange`, `205;11;australium;kt-3`, 
   1. legacy;
   2. v3;
   3. swapped `w`/`pk` order (pricedb holds 179 `pk..;w..` SKUs and 2,988 `w`-first ones);
-  4. for strange skins: the 11-primary form `{d};11;w;pk[;kt]`, then `{d};15;w;pk[;kt];strange` (the stale fallback);
+  4. for strange skins: the 11-primary form `{d};11;w;pk[;kt]`, then `{d};15;w;pk[;kt];strange` (the stale fallback). From 0.7.1 the saved-page parser itself emits the 11-primary form for a strange skin without an effect (`15000;11;w2;pk14`, whatever quality class scrap.tf gives the card), and `{d};15;u{e};w;pk;strange` for an unusual strange skin, so imported prices already match the buyers' SKUs (ARCHITECTURE, "0.7.1 round", P2);
   5. for crates: a defindex alias (5022 ↔ 5041 and similar) from the schema.
 - **Defindex aliases:** use the `defindex[]` array from IGetPrices (stock vs upgradeable, crate defindexes) to build `defindex_aliases`. Matching treats aliases as equal.
 - **"The" prefix:** schema items with `proper_name:true` map "The X" and "X" to the same defindex. bp.tf names include "The" inconsistently ("The Festivized Huntsman" vs "Strange Festivized ..."), so **never synthesise bp.tf names** when a learned name exists.

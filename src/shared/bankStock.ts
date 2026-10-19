@@ -35,24 +35,68 @@ import type {
 import { BANK_STOCK_FILTERS, BANK_STOCK_SORTS } from './types';
 
 /**
- * Saves per page the F17 diff reads and counts (bankStockPagePairs, BankStockResult.saves): only a page's
- * newest save and the one before it are compared. Retention is the F20 thinning below, not this.
+ * Saves per page the F17 diff counts (BankStockResult.saves): a page's newest save is compared with its
+ * session baseline (below) and with the save just before it. Retention is the F20 thinning below, not this.
  */
 export const BANK_STOCK_KEEP_SAVES = 10;
-/** Pages of one bank read (newest first); with BANK_STOCK_KEEP_SAVES, bounds the saves read per bank. */
+/** Pages of one bank read (newest first); with BANK_STOCK_SESSION_READ, bounds the saves read per bank. */
 export const BANK_STOCK_MAX_PAGES = 50;
 
 // F20 S1 retention ("thinning", per bank page): enough saves stay for price history and time listed.
-const HOUR_MS = 60 * 60_000;
+const MIN_MS = 60_000;
+const HOUR_MS = 60 * MIN_MS;
 const DAY_MS = 24 * HOUR_MS;
-/** Every save of a page from the last 24 h is kept. */
-export const BANK_STOCK_KEEP_ALL_MS = DAY_MS;
+/**
+ * 0.7.1: every save of a page from the last 2 h is kept (at most BANK_STOCK_MAX_SAVES_PER_PAGE of them).
+ * The scrap.tf window reads a page at most once per READ_AUTO_MIN_GAP_MS (30 s, scraptfWindowPolicy.ts) on
+ * its own, so 2 h of browsing one page writes up to 240 saves: the cap is never what thins them.
+ */
+export const BANK_STOCK_KEEP_ALL_MS = 2 * HOUR_MS;
+/** 0.7.1: from 2 h to BANK_STOCK_RECENT_TIER_MS, the newest save per clock-aligned 10-minute bucket is kept. */
+export const BANK_STOCK_RECENT_BUCKET_MS = 10 * MIN_MS;
+/** 0.7.1: where the 10-minute tier ends and the hourly one starts. */
+export const BANK_STOCK_RECENT_TIER_MS = DAY_MS;
 /** From 24 h to 7 d, the newest save per clock hour (UTC) is kept. */
 export const BANK_STOCK_HOURLY_MS = 7 * DAY_MS;
 /** From 7 d to 90 d the newest save per UTC day; older saves go (but see bankStockThinning's protected saves). */
 export const BANK_STOCK_MAX_AGE_MS = 90 * DAY_MS;
-/** Hard cap per page, newest kept (a page saved every minute would otherwise keep 1,440 saves a day). */
+/**
+ * Cap per page on the saves of the last BANK_STOCK_KEEP_ALL_MS, newest kept (0.7.1: only that tier; the
+ * bucket tiers are bounded by their buckets, so heavy browsing can never evict hourly or daily history).
+ */
 export const BANK_STOCK_MAX_SAVES_PER_PAGE = 300;
+
+/**
+ * 0.7.1 (CQ-2): saves of a page less than this far apart are one session (the scrap.tf window reads a page
+ * every 30 s or so while it is browsed). "What's new" compares the newest save with the newest one from
+ * before its session (bankStockBaselineOf), not with the read 30 s earlier.
+ */
+export const BANK_STOCK_SESSION_GAP_MS = 30 * MIN_MS;
+/**
+ * 0.7.1: saves read per page to find the session baseline. Above what the thinning keeps a page (300 recent,
+ * 132 ten-minute, 144 hourly and 83 daily buckets, the protected saves), so the read is the whole page.
+ */
+export const BANK_STOCK_SESSION_READ = 1000;
+
+/**
+ * 0.7.1 (CQ-2): the save a page's newest save is compared with for "What's new", New badges and the New
+ * filter: the newest save from before the newest save's session (a run of saves each less than
+ * BANK_STOCK_SESSION_GAP_MS after the one before), else the save just before the newest (the newest from
+ * strictly before its time), else null (a first save). For daily file saves that is the previous save, as
+ * before. `groupNewestFirst`: one page's saves, newest first (save time, then batch id). Pure.
+ */
+export function bankStockBaselineOf<S extends { savedAt: UnixMs }>(groupNewestFirst: readonly S[]): S | null {
+  const newest = groupNewestFirst[0];
+  if (!newest) return null;
+  let at = newest.savedAt;
+  for (let i = 1; i < groupNewestFirst.length; i++) {
+    const s = groupNewestFirst[i]!;
+    if (at - s.savedAt >= BANK_STOCK_SESSION_GAP_MS) return s;
+    at = s.savedAt;
+  }
+  // One session holds every save read: compare with the save before the newest, as F17 did.
+  return groupNewestFirst.find((s) => s.savedAt < newest.savedAt) ?? null;
+}
 
 /** One save as the thinning reads it (Repo.pruneBankStock lists every save with rows). */
 export interface BankStockThinSave {
@@ -63,14 +107,48 @@ export interface BankStockThinSave {
   page: string;
 }
 
+/** A save's thinning bucket at `age`: null in the keep-all tier and past `maxAge` (callers tell those apart). */
+function thinBucket(savedAt: UnixMs, age: number, maxAge: number): string | null {
+  if (age < BANK_STOCK_KEEP_ALL_MS || age > maxAge) return null;
+  if (age < BANK_STOCK_RECENT_TIER_MS) return `m${Math.floor(savedAt / BANK_STOCK_RECENT_BUCKET_MS)}`;
+  if (age < BANK_STOCK_HOURLY_MS) return `h${Math.floor(savedAt / HOUR_MS)}`;
+  return `d${Math.floor(savedAt / DAY_MS)}`;
+}
+
 /**
- * F20 S1: the batch ids to delete, per bank page (bank + page). Keeps every save of the last 24 h, the
- * newest per UTC hour up to 7 d, the newest per UTC day up to 90 d, nothing older, and at most
- * BANK_STOCK_MAX_SAVES_PER_PAGE (the newest). A page's newest save and the save it is compared with (the
- * newest from strictly before it, previousOf) are never deleted, whatever their age or the cap: they are
- * what the stock page, its change chips and the change feed read. Buckets are clock-aligned, so a kept
- * save stays the newest of its bucket at the next run (no creeping deletes). Order: savedAt, then batch
- * id (as Repo.bankStockSaves). Pure; O(n log n).
+ * 0.7.1 (DC-3): saves of the newest session (newest first, down to the save just after `baseline`) that keep it
+ * one session whatever the tiers drop: each kept save less than BANK_STOCK_SESSION_GAP_MS after the next
+ * kept one. Without them an idle page's session, re-tiered to one save an hour past 24 h (or cut by the
+ * 2 h cap), opens a gap inside itself, and its baseline silently moves into it. Walks from the newest and
+ * keeps a save only when the next older one would be a gap away from the last kept: about two per 30 minutes
+ * of session, and the same saves again on a run over what it kept. The session's oldest save is not needed
+ * (dropping it only widens the gap to the baseline), so an older copy of a re-imported file still goes.
+ */
+function sessionChainOf<S extends { batchId: number; savedAt: UnixMs }>(groupNewestFirst: readonly S[], baseline: S | null): number[] {
+  const end = baseline === null ? -1 : groupNewestFirst.indexOf(baseline);
+  const out: number[] = [];
+  let lastKept = groupNewestFirst[0];
+  for (let i = 1; lastKept !== undefined && i < end - 1; i++) {
+    const s = groupNewestFirst[i]!;
+    if (lastKept.savedAt - groupNewestFirst[i + 1]!.savedAt >= BANK_STOCK_SESSION_GAP_MS) {
+      out.push(s.batchId);
+      lastKept = s;
+    }
+  }
+  return out;
+}
+
+/**
+ * F20 S1 (tiers 0.7.1): the batch ids to delete, per bank page (bank + page). Keeps every save of the last
+ * 2 h (at most `maxSaves`, BANK_STOCK_MAX_SAVES_PER_PAGE: the newest), the newest per clock-aligned
+ * 10 minutes up to 24 h, the newest per UTC hour up to 7 d, the newest per UTC day up to 90 d, and nothing
+ * older. The cap only ever applies to the 2 h tier, so a page read every few seconds in the scrap.tf window
+ * keeps its hourly and daily history. A page's newest save, the save before it (previousOf) and its session
+ * baseline (bankStockBaselineOf) are never deleted, whatever their age or the cap: they are what the stock
+ * page, its change chips and the change feed read; nor are the few saves that keep its newest session one
+ * session (sessionChainOf, DC-3), so that baseline stays put as the session ages. Buckets are clock-aligned, so a kept save stays the
+ * newest of its bucket at the next run (no creeping deletes). Order: savedAt, then batch id (as
+ * Repo.bankStockSaves). Pure; O(n log n).
  */
 export function bankStockThinning(
   saves: readonly BankStockThinSave[],
@@ -91,29 +169,33 @@ export function bankStockThinning(
     group.sort((a, b) => b.savedAt - a.savedAt || b.batchId - a.batchId);
     const newest = group[0]!;
     const previous = group.find((s) => s.savedAt < newest.savedAt) ?? null;
+    const baseline = bankStockBaselineOf(group);
     const protectedIds = new Set<number>([newest.batchId]);
     if (previous) protectedIds.add(previous.batchId);
+    if (baseline) protectedIds.add(baseline.batchId);
+    for (const id of sessionChainOf(group, baseline)) protectedIds.add(id);
     const seenBucket = new Set<string>();
-    let kept = 0;
+    let keptRecent = 0;
     for (const s of group) {
       const age = now - s.savedAt;
+      const recent = age < BANK_STOCK_KEEP_ALL_MS;
       // Newest first, so the first save met in a bucket is its newest (a protected one included).
-      const bucket = age < BANK_STOCK_KEEP_ALL_MS || age > maxAge ? null : age < BANK_STOCK_HOURLY_MS ? `h${Math.floor(s.savedAt / HOUR_MS)}` : `d${Math.floor(s.savedAt / DAY_MS)}`;
+      const bucket = thinBucket(s.savedAt, age, maxAge);
       if (protectedIds.has(s.batchId)) {
         if (bucket !== null) seenBucket.add(bucket);
-        kept++;
+        if (recent) keptRecent++;
         continue;
       }
       let keep: boolean;
-      if (age < BANK_STOCK_KEEP_ALL_MS) keep = true;
-      else if (bucket === null) keep = false;
+      if (recent) {
+        keep = keptRecent < maxSaves;
+        if (keep) keptRecent++;
+      } else if (bucket === null) keep = false;
       else {
         keep = !seenBucket.has(bucket);
         seenBucket.add(bucket);
       }
-      if (keep && kept >= maxSaves) keep = false;
-      if (keep) kept++;
-      else drop.add(s.batchId);
+      if (!keep) drop.add(s.batchId);
     }
   }
   return drop;
@@ -267,29 +349,36 @@ export interface BankStockPageSave {
   items?: number;
 }
 
-/** One page of a bank: its newest kept save and the one it is compared with. */
+/** One page of a bank: its newest kept save and the saves it is compared with. */
 export interface BankStockPagePair<S extends BankStockPageSave> {
   page: string;
   newest: S;
   /** The page's newest kept save from strictly before `newest` (a save at its own time is it imported again); null: a first save. */
   previous: S | null;
   /**
+   * 0.7.1 (CQ-2): the newest save from before `newest`'s session (bankStockBaselineOf), else `previous`.
+   * "What's new", the change chips and New badges compare with it; S3's notifications and the change
+   * events still compare with `previous` (one read at a time).
+   */
+  baseline: S | null;
+  /**
    * The first import of the newest look: the lowest batch id among the page's saves at `newest`'s time.
    * Only that import notifies (S3): a page imported again (same file, same time) tells nothing twice.
    */
   firstBatchId: number;
-  /** Kept saves of the page read (at most BANK_STOCK_KEEP_SAVES). */
+  /** Kept saves of the page counted (at most BANK_STOCK_KEEP_SAVES). */
   saves: number;
 }
 
 /**
  * A bank's kept saves (newest first, as Repo.bankStockSaves orders them) by page, newest page first, at
- * most BANK_STOCK_KEEP_SAVES per page and BANK_STOCK_MAX_PAGES pages. Several pages give one bank
- * (/items and /items/2, /unusuals and /unusuals/378), and a save is only compared with an earlier save
- * of its own page: two different pages would read as everything new on one and gone from the other.
- * A save known to hold no row is no look at the page (F18 S3: a page saved before scrap.tf added its
- * cards), so it is neither a page's newest save, which would read as everything gone, nor its previous.
- * importSavedPage writes no rows for such a save; this keeps the rule if a caller ever lists one.
+ * most BANK_STOCK_SESSION_READ per page (read for the session baseline) and BANK_STOCK_MAX_PAGES pages.
+ * Several pages give one bank (/items and /items/2, /unusuals and /unusuals/378), and a save is only
+ * compared with an earlier save of its own page: two different pages would read as everything new on one
+ * and gone from the other. A save known to hold no row is no look at the page (F18 S3: a page saved
+ * before scrap.tf added its cards), so it is neither a page's newest save, which would read as everything
+ * gone, nor its previous. importSavedPage writes no rows for such a save; this keeps the rule if a caller
+ * ever lists one.
  */
 export function bankStockPagePairs<S extends BankStockPageSave>(saves: readonly S[]): BankStockPagePair<S>[] {
   const byPage = new Map<string, S[]>();
@@ -302,16 +391,35 @@ export function bankStockPagePairs<S extends BankStockPageSave>(saves: readonly 
       group = [];
       byPage.set(page, group);
     }
-    if (group.length < BANK_STOCK_KEEP_SAVES) group.push(s);
+    if (group.length < BANK_STOCK_SESSION_READ) group.push(s);
   }
   const out: BankStockPagePair<S>[] = [];
   for (const [page, group] of byPage) {
     const newest = group[0]!;
     let firstBatchId = newest.batchId;
     for (const s of group) if (s.savedAt === newest.savedAt && s.batchId < firstBatchId) firstBatchId = s.batchId;
-    out.push({ page, newest, previous: group.find((s) => s.savedAt < newest.savedAt) ?? null, firstBatchId, saves: group.length });
+    const previous = group.find((s) => s.savedAt < newest.savedAt) ?? null;
+    out.push({ page, newest, previous, baseline: bankStockBaselineOf(group), firstBatchId, saves: Math.min(group.length, BANK_STOCK_KEEP_SAVES) });
   }
   return out;
+}
+
+/** 0.7.1 (DM-5): a page whose newest save is this much older than its bank's newest page is left out of the stock page. */
+export const BANK_STOCK_OLDER_PAGE_MS = 48 * HOUR_MS;
+
+/**
+ * 0.7.1 (DM-5): a bank's pages split into the ones its stock page shows (counts, chips, "What's new") and
+ * the older ones: pages whose newest save is more than BANK_STOCK_OLDER_PAGE_MS older than the bank's
+ * newest page. The newest page is always shown. `olderPages` reports what was left out (null: nothing).
+ * History and the change feed keep every page.
+ */
+export function bankStockCurrentPages<P extends { savedAt: UnixMs }>(pages: readonly P[]): { shown: P[]; older: P[]; olderPages: { count: number; newestSavedAt: UnixMs } | null } {
+  if (pages.length === 0) return { shown: [], older: [], olderPages: null };
+  const newestAt = Math.max(...pages.map((p) => p.savedAt));
+  const shown: P[] = [];
+  const older: P[] = [];
+  for (const p of pages) (newestAt - p.savedAt > BANK_STOCK_OLDER_PAGE_MS ? older : shown).push(p);
+  return { shown, older, olderPages: older.length > 0 ? { count: older.length, newestSavedAt: Math.max(...older.map((p) => p.savedAt)) } : null };
 }
 
 /**
@@ -380,7 +488,8 @@ export function bankStockVerdict(profitScrap: Scrap | null, costScrap: Scrap, p:
  * buyer). Null for an entry the page does not show: not on sale now and not gone (sold out in both).
  * A gone row shows its last price (the previous save's) and the newest save's stock (0 when still listed).
  * F20: `run` (the runs index's entry for this key in this bank, ScraptfHistory.runsFor) fills listedSince,
- * firstSeenAt and changeSinceListed; without it they are null. A gone row has no current run.
+ * firstSeenAt and changeSinceListed; without it they are null. A gone row has no current run. 0.7.1
+ * (DM-5): a current run also fills lastSeenAt (its newest save on sale); absent otherwise.
  */
 export function bankStockRow(
   d: BankStockDiffRow,
@@ -424,6 +533,8 @@ export function bankStockRow(
     firstSeenAt: run && finite(run.firstSeenAt) ? run.firstSeenAt : null,
     changeSinceListed:
       listedSince !== null && run?.runStart ? scraptfPriceChange(run.runStart, { keys: costKeys, scrap: costScrapRaw }, listedSince, a.keyScrap) : null,
+    // Only with a current run, so rows without history keep their shape.
+    ...(listedSince !== null && run && finite(run.lastSeenAt) ? { lastSeenAt: run.lastSeenAt } : {}),
   };
 }
 
@@ -459,9 +570,24 @@ export function bankStockMinListedMs(q: Pick<BankStockQuery, 'minListedMs'> | nu
   return finite(v) && v >= 0 ? v : SCRAPTF_LONG_LISTED_MS;
 }
 
-/** F20 'long-listed': on sale (not gone) and listed since at least `minListedMs` before `now`. */
-export function bankStockLongListed(r: Pick<BankStockRow, 'change' | 'listedSince'>, now: UnixMs, minListedMs: number = SCRAPTF_LONG_LISTED_MS): boolean {
-  return r.change !== 'gone' && finite(r.listedSince) && finite(now) && now - r.listedSince >= minListedMs;
+/**
+ * How long a row has been listed: from listedSince to its newest save on sale (lastSeenAt, 0.7.1 DM-5),
+ * else to `now` (a row without lastSeenAt, as before). A page saved once 60 days ago lists for 0, not 60 d.
+ */
+function listedSpan(r: Pick<BankStockRow, 'listedSince' | 'lastSeenAt'>, now: UnixMs): number | null {
+  if (!finite(r.listedSince)) return null;
+  const end = finite(r.lastSeenAt) ? r.lastSeenAt : now;
+  return finite(end) ? end - r.listedSince : null;
+}
+
+/**
+ * F20 'long-listed': on sale (not gone) and listed for at least `minListedMs`, measured to its newest save
+ * on sale (0.7.1: lastSeenAt - listedSince; to `now` without lastSeenAt).
+ */
+export function bankStockLongListed(r: Pick<BankStockRow, 'change' | 'listedSince' | 'lastSeenAt'>, now: UnixMs, minListedMs: number = SCRAPTF_LONG_LISTED_MS): boolean {
+  if (r.change === 'gone' || !finite(now)) return false;
+  const span = listedSpan(r, now);
+  return span !== null && span >= minListedMs;
 }
 
 /** F20 'dropped': on sale (not gone) and cheaper now than when its current run began. */
@@ -475,7 +601,7 @@ export function bankStockDropped(r: Pick<BankStockRow, 'change' | 'changeSinceLi
  * under 'gone' only.
  */
 export function bankStockFilterMatches(
-  r: Pick<BankStockRow, 'change' | 'verdict' | 'listedSince' | 'changeSinceListed'>,
+  r: Pick<BankStockRow, 'change' | 'verdict' | 'listedSince' | 'changeSinceListed' | 'lastSeenAt'>,
   filter: BankStockFilter,
   opts: { now?: UnixMs; minListedMs?: number } = {},
 ): boolean {
@@ -512,7 +638,7 @@ export function bankStockDefaultDir(sort: BankStockSort): 'asc' | 'desc' {
   return sort === 'name' || sort === 'cost' || sort === 'sinceListed' ? 'asc' : 'desc';
 }
 
-function sortValue(r: BankStockRow, sort: Exclude<BankStockSort, 'name'>): number | null {
+function sortValue(r: BankStockRow, sort: Exclude<BankStockSort, 'name'>, now: UnixMs | undefined): number | null {
   switch (sort) {
     case 'profit':
       return finite(r.profitScrap) ? r.profitScrap : null;
@@ -523,8 +649,10 @@ function sortValue(r: BankStockRow, sort: Exclude<BankStockSort, 'name'>): numbe
     case 'payUpTo':
       return finite(r.maxCostScrap) ? r.maxCostScrap : null;
     case 'listed':
-      // Time listed without `now`: an earlier start is a longer listing, so it sorts higher.
-      return finite(r.listedSince) ? -r.listedSince : null;
+      // 0.7.1: the time listed as the filter measures it (to the newest sighting). Without `now`, an
+      // earlier start is a longer listing for every row alike, so the order never mixes the two scales.
+      if (!finite(r.listedSince)) return null;
+      return now === undefined || !finite(now) ? -r.listedSince : listedSpan(r, now);
     case 'sinceListed': {
       const c = r.changeSinceListed;
       if (!c) return null;
@@ -535,16 +663,17 @@ function sortValue(r: BankStockRow, sort: Exclude<BankStockSort, 'name'>): numbe
 
 /**
  * Comparator for q.sort / q.dir (default profit, highest first). Missing values sort last in both
- * directions; ties go by name, then key, so paging is stable.
+ * directions; ties go by name, then key, so paging is stable. `now` (0.7.1) lets 'listed' measure each
+ * row to its newest sighting, as the 'long-listed' filter does.
  */
-export function bankStockComparator(sort: BankStockSort | undefined, dir: 'asc' | 'desc' | undefined): (a: BankStockRow, b: BankStockRow) => number {
+export function bankStockComparator(sort: BankStockSort | undefined, dir: 'asc' | 'desc' | undefined, now?: UnixMs): (a: BankStockRow, b: BankStockRow) => number {
   const key: BankStockSort = sort !== undefined && BANK_STOCK_SORTS.includes(sort) ? sort : 'profit';
   const sign = (dir ?? bankStockDefaultDir(key)) === 'asc' ? 1 : -1;
   const byName = (a: BankStockRow, b: BankStockRow): number => a.name.localeCompare(b.name) || (a.key < b.key ? -1 : a.key > b.key ? 1 : 0);
   if (key === 'name') return (a, b) => sign * byName(a, b);
   return (a, b) => {
-    const va = sortValue(a, key);
-    const vb = sortValue(b, key);
+    const va = sortValue(a, key, now);
+    const vb = sortValue(b, key, now);
     if (va === null || vb === null) {
       if (va !== vb) return va === null ? 1 : -1;
       return byName(a, b);
@@ -568,7 +697,7 @@ export function bankStockMatching(rows: readonly BankStockRow[], q: Omit<BankSto
   const filter = bankStockFilterOf(q);
   const tokens = marketSearchTokens(q.search);
   const opts = { ...(now !== undefined ? { now } : {}), minListedMs: bankStockMinListedMs(q) };
-  return rows.filter((r) => bankStockFilterMatches(r, filter, opts) && bankStockSearchMatches(r, tokens)).sort(bankStockComparator(q.sort, q.dir));
+  return rows.filter((r) => bankStockFilterMatches(r, filter, opts) && bankStockSearchMatches(r, tokens)).sort(bankStockComparator(q.sort, q.dir, now));
 }
 
 export function emptyBankStockCounts(): BankStockCounts {
@@ -619,6 +748,8 @@ export function bankStockResult(a: {
   saves: number;
   /** Pages the rows come from and the oldest of their newest saves; left out of the answer with one page. */
   pages?: { count: number; oldestSavedAt: UnixMs | null };
+  /** 0.7.1 (DM-5, bankStockCurrentPages): pages left out for being far older than the newest; left out when none. */
+  olderPages?: { count: number; newestSavedAt: UnixMs } | null;
   keyPrice: KeyPriceState | null;
   now: UnixMs;
 }): BankStockResult {
@@ -633,6 +764,7 @@ export function bankStockResult(a: {
     previousSavedAt: a.previousSavedAt,
     saves: a.saves,
     ...(a.pages && a.pages.count > 1 ? { pages: a.pages.count, oldestSavedAt: a.pages.oldestSavedAt } : {}),
+    ...(a.olderPages && a.olderPages.count > 0 ? { olderPages: { count: a.olderPages.count, newestSavedAt: a.olderPages.newestSavedAt } } : {}),
     counts: bankStockCounts(a.rows, a.items, { now: a.now, minListedMs: bankStockMinListedMs(a.q) }),
     rows: matched.slice(offset, offset + limit),
     total: matched.length,
@@ -651,8 +783,9 @@ export function emptyBankStockResult(bank: ScraptfBank, keyPrice: KeyPriceState 
 // ---------------------------------------------------------------------------
 
 /**
- * One page of a bank, its newest save diffed against its previous one (what the service caches per page;
- * the mock's banks have one page each). `savedAt` is that page's newest save.
+ * One page of a bank, its newest save diffed against its session baseline (0.7.1; what the service caches
+ * per page; the mock's banks have one page each). `savedAt` is that page's newest save, `previousSavedAt`
+ * the baseline's.
  */
 export interface BankStockBankDiff {
   bank: ScraptfBank;
@@ -661,10 +794,24 @@ export interface BankStockBankDiff {
   diff: readonly BankStockDiffRow[];
 }
 
-/** MarketRow.scraptfNewAt per base SKU: the newest save of a bank in which any copy of it is 'new'. */
-export function bankStockNewAt(banks: readonly BankStockBankDiff[]): Map<string, UnixMs> {
+/** 0.7.1 (DM-5): a bank whose newest save is older than this marks nothing New (bankStockNewAt with `now`). */
+export const BANK_STOCK_NEW_MAX_AGE_MS = DAY_MS;
+
+/**
+ * MarketRow.scraptfNewAt per base SKU: the newest save of a bank in which any copy of it is 'new'. With
+ * `now` (0.7.1, DM-5), a bank whose newest save is more than BANK_STOCK_NEW_MAX_AGE_MS old counts for
+ * nothing: a page saved once weeks ago is not news.
+ */
+export function bankStockNewAt(banks: readonly BankStockBankDiff[], now?: UnixMs): Map<string, UnixMs> {
   const out = new Map<string, UnixMs>();
+  const stale = new Set<ScraptfBank>();
+  if (now !== undefined && finite(now)) {
+    const newest = new Map<ScraptfBank, UnixMs>();
+    for (const b of banks) newest.set(b.bank, Math.max(newest.get(b.bank) ?? b.savedAt, b.savedAt));
+    for (const [bank, at] of newest) if (now - at > BANK_STOCK_NEW_MAX_AGE_MS) stale.add(bank);
+  }
   for (const b of banks) {
+    if (stale.has(b.bank)) continue;
     for (const d of b.diff) {
       if (d.change !== 'new') continue;
       const cur = out.get(d.sku);
@@ -715,20 +862,47 @@ export function bankStockPagePath(url: string): string {
   return url.replace(/^https?:\/\//, '').replace(/\/$/, '');
 }
 
-/** "New on scrap.tf (<Bank>): <name>" / "<cost>, sells for <revenue> to <buyer>, +<profit>". */
-export function bankStockNewFlipNotice(label: string, r: BankStockRow, keyScrap: Scrap | null): { title: string; body: string } {
+/** 0.7.1 (ACT-6): a save at least this old says how old it is on each "New on scrap.tf" body. */
+export const BANK_STOCK_NOTIFY_AGE_NOTE_MS = 15 * MIN_MS;
+
+/** 0.7.1: a save's age in a notification: "12 min", "3 h", "2 d" (whole units, rounded down). */
+export function bankStockSaveAgeText(ms: number): string {
+  const m = Math.max(0, Math.floor((finite(ms) ? ms : 0) / MIN_MS));
+  if (m < 60) return `${m} min`;
+  const h = Math.floor(m / 60);
+  if (h < 48) return `${h} h`;
+  return `${Math.floor(h / 24)} d`;
+}
+
+/**
+ * "New on scrap.tf (<Bank>): <name>" / "<cost>, sells for <revenue> to <buyer>, +<profit>". 0.7.1
+ * (ACT-6): `savedAgoMs` of BANK_STOCK_NOTIFY_AGE_NOTE_MS or more adds "; in your save 3 h ago".
+ */
+export function bankStockNewFlipNotice(label: string, r: BankStockRow, keyScrap: Scrap | null, savedAgoMs?: number | null): { title: string; body: string } {
   const key = finite(keyScrap) && keyScrap > 0 ? keyScrap : null;
   const o = r.revenueOrder;
   const buyer = o ? o.userName || o.steamid : 'a buyer';
+  const age = finite(savedAgoMs) && savedAgoMs >= BANK_STOCK_NOTIFY_AGE_NOTE_MS ? `; in your save ${bankStockSaveAgeText(savedAgoMs)} ago` : '';
   return {
     title: `New on scrap.tf (${label}): ${r.name}`,
-    body: `${formatScrap(r.costScrap, key)}, sells for ${formatScrap(r.revenueScrap, key)} to ${buyer}, +${formatScrap(r.profitScrap, key)}`,
+    body: `${formatScrap(r.costScrap, key)}, sells for ${formatScrap(r.revenueScrap, key)} to ${buyer}, +${formatScrap(r.profitScrap, key)}${age}`,
   };
 }
 
 /** The one summary after BANK_STOCK_MAX_NOTIFICATIONS: "+N more new flips on scrap.tf/buy/hats". */
 export function bankStockMoreNotice(more: number, url: string): string {
   return `+${more} more new flip${more === 1 ? '' : 's'} on ${bankStockPagePath(url)}`;
+}
+
+/**
+ * 0.7.1 (ACT-6): the one notification for a save older than profit.inputStaleMs, instead of a toast per
+ * item: "3 new flips in your save of scrap.tf/buy/hats from 2 d ago".
+ */
+export function bankStockOldSaveNotice(n: number, url: string, savedAgoMs: number): { title: string; body: string } {
+  return {
+    title: `${n} new flip${n === 1 ? '' : 's'} in your save of ${bankStockPagePath(url)} from ${bankStockSaveAgeText(savedAgoMs)} ago`,
+    body: 'From a page you saved a while ago; prices may have moved since. Open TF2 Flip Desk to see them.',
+  };
 }
 
 export const BANK_STOCK_CSV_COLUMNS: readonly string[] = [

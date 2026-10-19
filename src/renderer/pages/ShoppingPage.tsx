@@ -1,9 +1,11 @@
 // Shopping list (feature F1): every tracked SKU with a "pay up to" ceiling,
 // grouped by scrap.tf bank page. The user browses scrap.tf in their own
-// browser with this list; the app never contacts scrap.tf (R1, R10). The bank
-// page links only go to links.open, which hands them to the user's browser.
+// browser with this list; Flip Desk never loads scrap.tf on its own (R1, R10). The
+// bank page links only go to links.open, which hands them to the user's browser.
+// 0.7.1 (ACT-9): Your price says how old it is, and a stale one is not counted as a flip.
 
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent, type MouseEvent } from 'react';
+import { SCRAPTF_BOUNDARY_SHORT } from '../../shared/boundaryText';
 import type { Category, Scrap, ShoppingRow } from '../../shared/types';
 import { CATEGORIES, CATEGORY_LABELS } from '../../shared/types';
 import { rpc, saveCsv } from '../api';
@@ -40,6 +42,7 @@ import {
   shoppingExportQuery,
   shoppingQuery,
   thresholdSummary,
+  yourPriceAge,
   yourPriceTitle,
   yourPriceTone,
   type EmptyShoppingReason,
@@ -133,7 +136,7 @@ export function ShoppingPage() {
         <strong>Browse scrap.tf yourself: anything priced at or under Pay up to is a flip.</strong>{' '}
         <span className="muted">
           Each ceiling is the most you can pay and still make {settings ? thresholdSummary(settings.profit, keyScrap) : 'your minimum profit'}, from live backpack.tf buy
-          orders. The app never visits scrap.tf; the page links open in your browser.
+          orders. {SCRAPTF_BOUNDARY_SHORT} The page links open in your browser.
         </span>{' '}
         <button type="button" className="link-btn" onClick={() => navigate('settings')}>
           Change thresholds
@@ -221,7 +224,7 @@ export function ShoppingPage() {
                 {loaded < total ? <span className="muted"> (showing {fmtInt(loaded)})</span> : null}
               </span>
               <span className="sep" aria-hidden="true" />
-              <span title="Items whose latest typed or imported scrap.tf price is at or under the ceiling">
+              <span title="Items whose latest typed or imported scrap.tf price is at or under the ceiling and not stale (Settings, Profit: stale-input limit)">
                 <strong className="num tone-text-good">{fmtInt(underCount)}</strong> already at or under it at your last price
               </span>
             </>
@@ -588,7 +591,7 @@ const GroupRow = memo(function GroupRow({
           type="button"
           className="link-btn shop-bank"
           tabIndex={-1}
-          title={`Open ${page} in your browser (o). The app never loads it itself.`}
+          title={`Open ${page} in your browser (o). ${SCRAPTF_BOUNDARY_SHORT}`}
           onClick={(e) => {
             e.stopPropagation();
             onSelect(row.id);
@@ -653,6 +656,7 @@ const ItemRow = memo(function ItemRow({
 }) {
   const order = r.revenueOrder;
   const tone = yourPriceTone(r);
+  const age = yourPriceAge(r, now);
   // Flags that should stop a purchase get an icon; the drawer explains every flag.
   const bad = r.flags.map(flagInfo).filter((f) => f.tone === 'bad');
   return (
@@ -702,8 +706,9 @@ const ItemRow = memo(function ItemRow({
           <span className="input-kind">rule</span>
         ) : (
           <>
-            <Icon name={tone === 'good' ? 'check' : 'warning'} size={12} />
+            {age?.stale ? null : <Icon name={tone === 'good' ? 'check' : 'warning'} size={12} />}
             <Money scrap={r.knownCostScrap} keyScrap={keyScrap} title={yourPriceTitle(r, keyScrap)} />
+            {age ? <span className={`s-yours-age${age.stale ? ' tone-text-warn' : ' muted'}`}>{age.stale ? ` · stale, ${age.text}` : ` · ${age.text}`}</span> : null}
           </>
         )}
       </div>

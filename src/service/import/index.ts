@@ -44,3 +44,6 @@ export {
   type WatchHandle,
   type WatchSkipReason,
 } from './folderWatch';
+
+// 0.7.1 (P4): the in-memory ring of sanitized parser reports behind 'import.report' (never persisted).
+export { clearImportReports, importReports, recordImportReport, scrubReportText, type ImportReportInput } from './reports';

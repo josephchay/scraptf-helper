@@ -3,12 +3,16 @@
 // pricier) and each item's backpack.tf side, from 'scraptf.bankStock'. F20 adds how long each item has
 // been listed across the user's saves and its price since (Listed, Since listed, two chips). Everything on it comes from
 // pages the user saved with their own browser into the opt-in watch folder (R10); "Open in browser"
-// hands the static page to links.open (openOrCopy). The app never visits scrap.tf (R1): no fetch, no
-// embedded view, nothing polled. Pure helpers live in bankStockModel.ts, styles in
-// styles/bank-stock.css (classes bs-*).
+// hands the static page to links.open (openOrCopy). Flip Desk never loads scrap.tf on its own (R1): no
+// fetch, nothing polled. Pure helpers live in bankStockModel.ts, styles in styles/bank-stock.css
+// (classes bs-*). 0.7.1: with the opt-in scrap.tf window on, "Open in Flip Desk window"
+// ('scraptfWindow.open' with the bank's static SCRAPTF_BANKS page, on a click only) sits by Open, which
+// follows openLinksInWindow (F21-9); #/banks/<bank>/stock/<flips|new> (the toolbar's Show flips, F21-2)
+// opens the page on that chip once; Record buy books the row's exact copy at its price (ACT-11).
 
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent, type MouseEvent, type RefObject } from 'react';
 import { bankStockDefaultDir } from '../../shared/bankStock';
+import { SCRAPTF_BOUNDARY_SHORT } from '../../shared/boundaryText';
 import { scraptfBankInfo } from '../../shared/links';
 import type { BankStockQuery, BankStockResult, BankStockRow, BankStockSort, Scrap, ScraptfBank, ScraptfListStatus, UnixMs } from '../../shared/types';
 import { rpc, saveCsv } from '../api';
@@ -19,6 +23,7 @@ import {
   BANK_STOCK_PICKER_SORTS,
   BANK_STOCK_SORT_LABELS,
   DEFAULT_BANK_STOCK_VIEW,
+  bankStockBuyCopy,
   bankStockBuyer,
   bankStockChangeTag,
   bankStockChips,
@@ -33,6 +38,7 @@ import {
   bankStockListedCell,
   bankStockLoadingMore,
   bankStockMore,
+  bankStockOlderPages,
   bankStockPayTitle,
   bankStockPrefKey,
   bankStockPriceTitle,
@@ -50,7 +56,7 @@ import {
   type BankStockLoader,
   type BankStockView,
 } from '../bankStockModel';
-import { banksPath } from '../banksModel';
+import { bankStockPath, bankStockRouteFilter, banksPath } from '../banksModel';
 import { openOrCopy } from '../components/ExternalLink';
 import { Banner, EmptyState, ErrorBanner, LoadingBlock } from '../components/Feedback';
 import { Icon } from '../components/Icon';
@@ -67,7 +73,8 @@ import { useDebounced, useNow } from '../hooks/useTimers';
 import { SAVE_MODE } from '../importModel';
 import { anchoredScrollTop } from '../marketModel';
 import { isMenuKeyEcho, isSearchShortcut, menuAnchorRect, moveCursor } from '../oppModel';
-import { LIST_BOUNDARY_NOTE, listSetupNote, listSetupState } from '../scraptfListModel';
+import { listBoundaryNote, listSetupNote, listSetupState } from '../scraptfListModel';
+import { bankWindowView, OPEN_IN_WINDOW_LABEL, windowOpenFailedText, windowOpenTitle, type BankWindowView } from '../scraptfWindowModel';
 
 type MenuPoint = { x: number; y: number };
 
@@ -125,10 +132,33 @@ function useBankStock(query: BankStockQuery): { answer: BankStockAnswer | null; 
 }
 
 export function BankStockPage({ bank }: { bank: ScraptfBank }) {
-  const { keyScrap: statusKey, settings, navigate, openItem, toast, itemSku } = useApp();
+  const { keyScrap: statusKey, settings, navigate, openItem, toast, itemSku, segments } = useApp();
   // Keyed per bank (App remounts this page per bank), so each bank keeps its own view.
   const [view, setView] = usePersistentState<BankStockView>(bankStockPrefKey(bank), DEFAULT_BANK_STOCK_VIEW, sanitizeBankStockView);
-  const search = useDebounced(view.search, 200);
+  // F21-2: #/banks/<bank>/stock/<flips|new> (Show flips in the scrap.tf window) opens the page on that chip,
+  // with no search hiding its rows, while rendering (so the first read already asks for it), once per
+  // navigation; the route then goes back to #/banks/<bank>/stock, so the next Show flips applies again.
+  const routeFilter = bankStockRouteFilter(segments);
+  const routeKey = routeFilter === null ? null : `${bank}/${routeFilter}`;
+  const [appliedRoute, setAppliedRoute] = useState<string | null>(null);
+  // The view the last landing set; kept once the route is gone.
+  const [routedView, setRoutedView] = useState<BankStockView | null>(null);
+  if (routeKey !== appliedRoute) {
+    setAppliedRoute(routeKey);
+    if (routeFilter !== null) {
+      const next: BankStockView = { ...view, filter: routeFilter, search: '' };
+      setView(next);
+      setRoutedView(next);
+    }
+  }
+  useEffect(() => {
+    const stockRoute = bankStockPath(bank);
+    if (routeKey !== null && stockRoute) replaceRoute(stockRoute);
+  }, [routeKey, bank]);
+  const typedSearch = useDebounced(view.search, 200);
+  // Until the user types, a landing's cleared search counts at once: the debounced value still holds the
+  // remembered one, and would reach the first read (or the read after a first-save fallback to All).
+  const search = routedView !== null && view.search === routedView.search ? view.search : typedSearch;
   const settled = useMemo<BankStockView>(() => ({ filter: view.filter, sort: view.sort, dir: view.dir, search }), [view.filter, view.sort, view.dir, search]);
   const queryKey = bankStockQueryKey(bankStockQueryOf(bank, settled));
   // "Load more" grows the page size of this query only; a new filter, search or order starts at one page.
@@ -178,11 +208,22 @@ export function BankStockPage({ bank }: { bank: ScraptfBank }) {
   const menuRef = useRef(menu.open);
   menuRef.current = menu.open;
   const onOpen = useCallback((r: BankStockRow) => openItem(r.sku), [openItem]);
-  const onMenu = useCallback((r: BankStockRow, at: MenuPoint) => menuRef.current({ sku: r.sku, name: r.name, category: r.category, bank }, at), [bank]);
+  // ACT-11: Record buy books this row's exact copy (a painted one as painted) at the price the save showed.
+  const onMenu = useCallback(
+    (r: BankStockRow, at: MenuPoint) => menuRef.current({ sku: r.sku, name: r.name, category: r.category, bank, copy: bankStockBuyCopy(r, bank) }, at),
+    [bank],
+  );
 
   const info = scraptfBankInfo(bank);
+  const scraptfWindow = bankWindowView(settings);
+  // F21-9: worded for openLinksInWindow (bankStockHeader), so main may show it in the user's scrap.tf window.
   const openPage = () => {
-    if (info) void openOrCopy(info.url, toast);
+    if (info) void openOrCopy(info.url, toast, { allowWindow: true });
+  };
+  // The bank's static page, on a click only: main loads it in the window for the user.
+  const openInWindow = () => {
+    if (!info) return;
+    rpc('scraptfWindow.open', { start: info.url }).catch((e: unknown) => toast(windowOpenFailedText(errorMessage(e)), 'bad'));
   };
 
   const exportCsv = async () => {
@@ -212,9 +253,11 @@ export function BankStockPage({ bank }: { bank: ScraptfBank }) {
         selectedKey={selectedKey}
         picking={folder.picking}
         searchRef={searchRef}
+        scraptfWindow={scraptfWindow}
         onView={(patch) => setView((v) => ({ ...v, ...patch }))}
         onRetry={stock.refresh}
         onOpenPage={openPage}
+        onOpenInWindow={openInWindow}
         onBack={() => navigate(banksPath(bank))}
         onGoImport={() => navigate('import')}
         onPickFolder={folder.pick}
@@ -259,10 +302,14 @@ export interface BankStockPageViewProps {
   /** The folder dialog is open. */
   picking: boolean;
   searchRef?: RefObject<HTMLInputElement | null>;
+  /** UX-5: the user's opt-in scrap.tf window (bankWindowView); null or absent while it is off. */
+  scraptfWindow?: BankWindowView | null;
   onView(patch: Partial<BankStockView>): void;
   onRetry(): void;
-  /** Hands the bank's static SCRAPTF_BANKS page to the user's browser. */
+  /** Hands the bank's static SCRAPTF_BANKS page to links.open (the browser, or the window by openLinksInWindow). */
   onOpenPage(): void;
+  /** UX-5: "Open in Flip Desk window" (shown only with `scraptfWindow`). */
+  onOpenInWindow?(): void;
   onBack(): void;
   onGoImport(): void;
   onPickFolder(): void;
@@ -276,7 +323,8 @@ export interface BankStockPageViewProps {
 
 /** Exported for the render tests only. */
 export function BankStockPageView(p: BankStockPageViewProps) {
-  const head = bankStockHeader(p.bank, p.result, p.now);
+  const w = p.scraptfWindow ?? null;
+  const head = bankStockHeader(p.bank, p.result, p.now, w?.linksHere === true);
   const chips = bankStockChips(p.result);
   const importOff = p.status ? !p.status.importEnabled : false;
   const r = p.result;
@@ -354,7 +402,18 @@ export function BankStockPageView(p: BankStockPageViewProps) {
           {!r || dropping ? (
             <LoadingBlock label={`Reading your saves of ${head.path}…`} />
           ) : empty ? (
-            <StockEmpty reason={empty} head={head} filter={answeredFilter} folder={p.status?.watchFolder ?? null} importOff={importOff} onView={p.onView} onOpenPage={p.onOpenPage} onGoImport={p.onGoImport} />
+            <StockEmpty
+              reason={empty}
+              head={head}
+              filter={answeredFilter}
+              folder={p.status?.watchFolder ?? null}
+              importOff={importOff}
+              scraptfWindow={w}
+              onView={p.onView}
+              onOpenPage={p.onOpenPage}
+              onOpenInWindow={p.onOpenInWindow}
+              onGoImport={p.onGoImport}
+            />
           ) : (
             <BankStockTable
               rows={r.rows}
@@ -392,8 +451,10 @@ export function BankStockPageView(p: BankStockPageViewProps) {
 /** Bank name and saves, what to fix before a save is read, Open in browser with the save tip, and the boundary. */
 function BankStockHeader(p: BankStockPageViewProps & { head: BankStockHeaderView; importOff: boolean }) {
   const h = p.head;
+  const w = p.scraptfWindow ?? null;
+  const older = bankStockOlderPages(p.result, p.now);
   // Until (or unless) the list status is read, nothing is assumed off.
-  const setup = p.status ? listSetupState(p.status) : null;
+  const setup = p.status ? listSetupState(p.status, w !== null) : null;
   const note = setup ? listSetupNote(setup, 'banks', p.status?.watchError ?? null) : null;
   const folder = setup === 'ready' ? (p.status?.watchFolder ?? null) : null;
   return (
@@ -425,23 +486,32 @@ function BankStockHeader(p: BankStockPageViewProps & { head: BankStockHeaderView
               </span>
             </>
           ) : null}
+          {/* DM-5: pages saved long before the bank's newest page are left out of the counts. */}
+          {older ? (
+            <>
+              {' · '}
+              <span className="muted" title={older.title}>
+                {older.text}
+              </span>
+            </>
+          ) : null}
         </p>
       ) : null}
       {note ? <SetupNoteView note={note} picking={p.picking} onGoImport={p.onGoImport} onPickFolder={p.onPickFolder} /> : null}
       <div className="bank-open">
-        <button
-          type="button"
-          className={`btn small${h.freshness.tone === 'good' ? '' : ' primary'}`}
-          disabled={p.importOff}
-          title={p.importOff ? IMPORT_OFF_TIP : h.openTitle}
-          aria-label={`Open in browser: ${h.path}`}
-          onClick={p.onOpenPage}
-        >
-          <Icon name="external" size={13} /> Open in browser
-        </button>
+        <OpenButtons head={h} importOff={p.importOff} scraptfWindow={w} onOpenPage={p.onOpenPage} onOpenInWindow={p.onOpenInWindow} />
         {/* F18: one page, so the whole save tip: which save type, and why. */}
         <span className="bank-tip muted small">
-          Save it with <kbd>Ctrl</kbd>+<kbd>S</kbd> into your watch folder and <SaveModeChoice alt={p.bank !== 'list'} />; it updates here within seconds.
+          {w ? (
+            <>
+              In the Flip Desk window it is {w.readOnLoad ? 'read as it loads' : 'read when you press Read page now'}; or save it with <kbd>Ctrl</kbd>+<kbd>S</kbd> into your watch folder and{' '}
+              <SaveModeChoice alt={p.bank !== 'list'} />.
+            </>
+          ) : (
+            <>
+              Save it with <kbd>Ctrl</kbd>+<kbd>S</kbd> into your watch folder and <SaveModeChoice alt={p.bank !== 'list'} />; it updates here within seconds.
+            </>
+          )}
         </span>
       </div>
       {folder ? (
@@ -459,7 +529,7 @@ function BankStockHeader(p: BankStockPageViewProps & { head: BankStockHeaderView
       <p className="sl-boundary">
         <Icon name="shield" size={13} />
         <span>
-          {LIST_BOUNDARY_NOTE} {BANK_STOCK_SNAPSHOT_NOTE}
+          {listBoundaryNote(w !== null)} {BANK_STOCK_SNAPSHOT_NOTE}
         </span>
       </p>
     </section>
@@ -500,6 +570,56 @@ function SortPicker({ sort, dir, onChange }: { sort: BankStockSort; dir: 'asc' |
   );
 }
 
+/**
+ * Open in browser, and with the opt-in scrap.tf window on "Open in Flip Desk window" (UX-5). When main
+ * sends Flip Desk's scrap.tf links to the window anyway (linksHere), the browser button goes, as on the
+ * banks cards. Both are clicks only; the page is always the bank's static SCRAPTF_BANKS one.
+ */
+function OpenButtons({
+  head: h,
+  importOff,
+  scraptfWindow: w,
+  primary = h.freshness.tone !== 'good',
+  onOpenPage,
+  onOpenInWindow,
+}: {
+  head: BankStockHeaderView;
+  importOff: boolean;
+  scraptfWindow: BankWindowView | null;
+  primary?: boolean;
+  onOpenPage(): void;
+  onOpenInWindow?(): void;
+}) {
+  return (
+    <>
+      {w?.linksHere ? null : (
+        <button
+          type="button"
+          className={`btn small${primary && !w ? ' primary' : ''}`}
+          disabled={importOff}
+          title={importOff ? IMPORT_OFF_TIP : h.openTitle}
+          aria-label={`Open in browser: ${h.path}`}
+          onClick={onOpenPage}
+        >
+          <Icon name="external" size={13} /> Open in browser
+        </button>
+      )}
+      {w ? (
+        <button
+          type="button"
+          className={`btn small bank-open-window${primary ? ' primary' : ''}`}
+          disabled={importOff}
+          title={importOff ? IMPORT_OFF_TIP : windowOpenTitle(h.path, w.readOnLoad)}
+          aria-label={`${OPEN_IN_WINDOW_LABEL}: ${h.path}`}
+          onClick={() => onOpenInWindow?.()}
+        >
+          <Icon name="window" size={13} /> {OPEN_IN_WINDOW_LABEL}
+        </button>
+      ) : null}
+    </>
+  );
+}
+
 /** Why the table is empty, with the one thing to do about it. */
 function StockEmpty({
   reason,
@@ -507,8 +627,10 @@ function StockEmpty({
   filter,
   folder,
   importOff,
+  scraptfWindow = null,
   onView,
   onOpenPage,
+  onOpenInWindow,
   onGoImport,
 }: {
   reason: BankStockEmptyReason;
@@ -516,8 +638,10 @@ function StockEmpty({
   filter: BankStockView['filter'];
   folder: string | null;
   importOff: boolean;
+  scraptfWindow?: BankWindowView | null;
   onView(patch: Partial<BankStockView>): void;
   onOpenPage(): void;
+  onOpenInWindow?(): void;
   onGoImport(): void;
 }) {
   switch (reason) {
@@ -540,19 +664,28 @@ function StockEmpty({
         <EmptyState
           icon="banks"
           title={`No save of ${head.path} yet`}
-          actions={
-            <button type="button" className="btn primary" disabled={importOff} onClick={onOpenPage} aria-label={`Open in browser: ${head.path}`}>
-              <Icon name="external" size={13} /> Open in browser
-            </button>
-          }
+          actions={<OpenButtons head={head} importOff={importOff} scraptfWindow={scraptfWindow} primary onOpenPage={onOpenPage} onOpenInWindow={onOpenInWindow} />}
         >
-          <ol className="bs-steps">
-            <li>Open {head.path} in your own browser; Flip Desk never visits it.</li>
-            <li>
-              Press <kbd>Ctrl</kbd>+<kbd>S</kbd>, <SaveModeChoice alt={head.bank !== 'list'} />, and save it into your watch folder{folder ? <span className="mono"> ({folder})</span> : null}.
-            </li>
-            <li>Every item on it shows up here within seconds. Save it again later to see what is new, gone or repriced.</li>
-          </ol>
+          {scraptfWindow ? (
+            <ol className="bs-steps">
+              <li>
+                Open {head.path} in the Flip Desk window and browse it yourself. {scraptfWindow.readOnLoad ? 'It is read as it loads' : 'Press Read page now there to read it'}, and every item on it shows up here.
+              </li>
+              <li>
+                Or open it in your own browser, press <kbd>Ctrl</kbd>+<kbd>S</kbd>, <SaveModeChoice alt={head.bank !== 'list'} />, and save it into your watch folder
+                {folder ? <span className="mono"> ({folder})</span> : null}.
+              </li>
+              <li>Read or save it again later to see what is new, gone or repriced. {SCRAPTF_BOUNDARY_SHORT}</li>
+            </ol>
+          ) : (
+            <ol className="bs-steps">
+              <li>Open {head.path} in your own browser. {SCRAPTF_BOUNDARY_SHORT}</li>
+              <li>
+                Press <kbd>Ctrl</kbd>+<kbd>S</kbd>, <SaveModeChoice alt={head.bank !== 'list'} />, and save it into your watch folder{folder ? <span className="mono"> ({folder})</span> : null}.
+              </li>
+              <li>Every item on it shows up here within seconds. Save it again later to see what is new, gone or repriced.</li>
+            </ol>
+          )}
         </EmptyState>
       );
     case 'search':
@@ -985,3 +1118,16 @@ const StockRow = memo(function StockRow({
     </div>
   );
 });
+
+/**
+ * Swaps the current route without a history entry (as the Live market does for its one-shot routes), so
+ * Back skips #/banks/<bank>/stock/<chip>; hashchange tells the route hook (replaceState fires none).
+ */
+function replaceRoute(path: string): void {
+  try {
+    window.history.replaceState(window.history.state, '', `#/${path}`);
+    window.dispatchEvent(new Event('hashchange'));
+  } catch {
+    // The chip is already applied; only the address stays as it was.
+  }
+}

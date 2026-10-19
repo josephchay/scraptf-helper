@@ -259,7 +259,7 @@ describe('the header', () => {
     for (const b of SCRAPTF_BANKS) expect(STATIC_EXTERNAL_URLS).toContain(bankStockHeader(b.bank, null, NOW)!.url);
     expect(bankStockHeader('list', null, NOW)!.title).toBe('All items stock');
     expect(bankStockHeader('__proto__' as never, null, NOW)).toBeNull();
-    expect(h.openTitle).toContain("the app never visits it");
+    expect(h.openTitle).toContain('in your own browser. Flip Desk never loads scrap.tf on its own.');
   });
 
   it('says when the newest and the previous save were made', () => {
@@ -297,9 +297,10 @@ describe('the header', () => {
     // F20: more saves are kept (thinned, up to 90 days); the count is what the change columns read.
     expect(h.saved.title).toContain('2 recent saves read for changes (the 10 newest of each page).');
     expect(h.saved.title).toContain(RETENTION_NOTE);
-    // F20-C3: the note names the saves the thinning always keeps (a page's newest and its compare save).
+    // F20-C3: the note names the saves the thinning always keeps (a page's newest and its compare saves).
+    // 0.7.1 (DM-3, CQ-1): B's tiers, word for word.
     expect(RETENTION_NOTE).toBe(
-      "For price history your saves are kept up to 90 days: every save from the last day, then one an hour for a week, then one a day; a page's newest save and the one it is compared with always stay.",
+      "For price history your saves are kept up to 90 days: every save from the last 2 hours, then one every 10 minutes for the rest of the day, then one an hour for a week, then one a day; a page's newest save and the ones it is compared with always stay.",
     );
     expect(h.saved.title).not.toContain('30 days');
     expect(h.previous!.title).toMatch(/^Changes are counted page by page/);

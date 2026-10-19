@@ -8,7 +8,7 @@
 import { readFileSync } from 'node:fs';
 import { act, createElement, type ReactNode } from 'react';
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
-import { historyChips, historyListedLine, historyNowText } from '../../src/renderer/historyModel';
+import { historyChips, historyEventGroups, historyListedLine, historyNowText } from '../../src/renderer/historyModel';
 import { createMockBridge, type MockBridge } from '../../src/renderer/mock';
 import type { FlipdeskBridge, PushContract, PushEvent } from '../../src/shared/rpc';
 import { installDomShim, ShimElement, ShimEvent, type ShimDocument } from './domShim';
@@ -123,8 +123,12 @@ async function mount(sku: string) {
   const all = () => container.descendants();
   const block = () => all().find((e) => e.tagName === 'SECTION' && (e.getAttribute('class') ?? '').includes('stf-hist')) ?? null;
   const within = (cls: string) => block()!.descendants().filter((e) => (e.getAttribute('class') ?? '').split(' ').includes(cls));
+  // DM-6: the price changes' list and the stock moves' list (class stf-hist-stock), each of its own lines.
+  const lists = () => within('stf-hist-events');
+  const priceLines = () => (lists().find((l) => !(l.getAttribute('class') ?? '').split(' ').includes('stf-hist-stock'))?.descendants() ?? []).filter((e) => e.tagName === 'LI');
+  const stockLines = () => (lists().find((l) => (l.getAttribute('class') ?? '').split(' ').includes('stf-hist-stock'))?.descendants() ?? []).filter((e) => e.tagName === 'LI');
   const historyCalls = () => calls.filter((c) => c.method === 'scraptf.itemHistory');
-  return { b, all, block, within, emit, calls, historyCalls };
+  return { b, all, block, within, priceLines, stockLines, emit, calls, historyCalls };
 }
 
 describe('the scrap.tf history block in the drawer (F20 U1)', () => {
@@ -147,9 +151,13 @@ describe('the scrap.tf history block in the drawer (F20 U1)', () => {
     expect(svg.getAttribute('role')).toBe('img');
     expect(svg.getAttribute('aria-label')).toMatch(/^scrap\.tf price in \d+ saves from /);
     expect(block.descendants().some((e) => (e.getAttribute('class') ?? '') === 'stf-hist-step')).toBe(true);
-    const events = t.within('stf-hist-event');
-    expect(events.length).toBe(Math.min(5, h.events.length));
-    expect(block.textContent).toContain('The app never visits scrap.tf.');
+    // DM-6: price changes and stock moves are listed apart, five of each until "Show all".
+    const groups = historyEventGroups(h.events);
+    expect(t.priceLines().length).toBe(Math.min(5, groups.price.length));
+    expect(t.stockLines().length).toBe(Math.min(5, groups.stock.length));
+    expect(t.within('stf-hist-event')).toHaveLength(Math.min(5, groups.price.length) + Math.min(5, groups.stock.length));
+    if (groups.stock.length) expect(block.textContent).toContain('Stock moves');
+    expect(block.textContent).toContain('Flip Desk never loads scrap.tf on its own.');
     // Text only: nothing in the block is a link or loads anything.
     expect(block.descendants().some((e) => e.tagName === 'A' || e.tagName === 'IMG' || e.tagName === 'IFRAME')).toBe(false);
     expect(t.calls.filter((c) => c.method === 'links.open')).toEqual([]);
@@ -159,15 +167,18 @@ describe('the scrap.tf history block in the drawer (F20 U1)', () => {
     const sku = await listedSku();
     const t = await mount(sku);
     const h = await t.b.rpc('scraptf.itemHistory', { sku });
-    const more = t.block()!.descendants().find((e) => e.tagName === 'BUTTON' && /^Show all \d+$/.test(e.textContent));
-    if (h.events.length <= 5) {
+    const groups = historyEventGroups(h.events);
+    const more = t.block()!.descendants().find((e) => e.tagName === 'BUTTON' && e.textContent === `Show all ${groups.price.length}`);
+    if (groups.price.length <= 5) {
       expect(more).toBeUndefined();
       return;
     }
     act(() => {
       more!.dispatchEvent(new ShimEvent('click', { bubbles: true }));
     });
-    expect(t.within('stf-hist-event')).toHaveLength(h.events.length);
+    expect(t.priceLines()).toHaveLength(groups.price.length);
+    // The stock moves keep their own "Show all".
+    expect(t.stockLines().length).toBe(Math.min(5, groups.stock.length));
   });
 
   it('an item no kept save lists: the empty state, no chart', async () => {

@@ -215,6 +215,8 @@ export interface ServiceHost {
 export const MAIN_ONLY_PUSH_EVENTS: readonly PushEvent[] = [
   'settings.changed',
   'ui.openItem',
+  // 0.7.1: the toolbar's "Show flips" lands the dashboard on a bank's stock page (app.showBankStock).
+  'ui.openBankStock',
   'ui.quickPrefill',
   'ui.checkShow',
   'service.state',

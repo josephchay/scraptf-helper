@@ -176,11 +176,13 @@ describe('bank stock in the core (F17)', () => {
     expect(again).toMatchObject({ savedAt: NOW - MIN, previousSavedAt: NOW - 3 * HOUR, saves: 3, total: 1 });
     expect((await h.call<MarketListResult>('market.list', { newOnScraptf: true })).rows.map((r) => r.sku)).toEqual(['378;6']);
 
-    // The same page saved again: nothing new since the save before it, so no second notification.
+    // The same page saved again a minute later: nothing new since the save before it, so no second
+    // notification (S3 reads one save at a time). 0.7.1 (CQ-2): it is the same session, so the stock
+    // page, the banks card and the New badge still show what is new since the save 3 h ago.
     await h.importPage([CARDS.teamCaptain, CARDS.billsHat], NOW);
     expect(h.newOnScraptf()).toHaveLength(1);
-    expect((await h.call<BankStockResult>('scraptf.bankStock', { bank: 'hats' })).counts.new).toBe(0);
-    expect((await h.call<MarketListResult>('market.list', { newOnScraptf: true })).rows).toEqual([]);
+    expect(await h.call<BankStockResult>('scraptf.bankStock', { bank: 'hats' })).toMatchObject({ savedAt: NOW, previousSavedAt: NOW - 3 * HOUR, counts: { new: 1 } });
+    expect((await h.call<MarketListResult>('market.list', { newOnScraptf: true })).rows.map((r) => [r.sku, r.scraptfNewAt])).toEqual([['378;6', NOW]]);
     expect(requested).toEqual([]);
   }, 30_000);
 });

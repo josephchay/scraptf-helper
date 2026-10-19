@@ -27,7 +27,9 @@ describe('wiring', () => {
 
   it('reads scraptf.listStatus and opens the folder dialog, nothing else: no new traffic', () => {
     const methods = new Set([...card.matchAll(/(?:rpc|useRpcQuery)\('([a-zA-Z.]+)'/g)].map((m) => m[1]));
-    expect([...methods].sort()).toEqual(['import.pickWatchFolder', 'scraptf.listStatus']);
+    // 0.7.1 (UX-5): and 'scraptfWindow.open' with the static scrap.tf/items page, from its button's click only.
+    expect([...methods].sort()).toEqual(['import.pickWatchFolder', 'scraptf.listStatus', 'scraptfWindow.open']);
+    expect([...card.matchAll(/rpc\('scraptfWindow\.open', \{ start: ([^}]+) \}\)/g)].map((m) => m[1]!.trim())).toEqual(['SCRAPTF_ITEMS_URL']);
     for (const m of methods) expect([...SERVICE_METHODS, ...MAIN_METHODS]).toContain(m);
     expect(card).not.toMatch(/https?:\/\//);
     expect(card).not.toMatch(/\bfetch\(|XMLHttpRequest|WebSocket|<webview|<iframe|window\.open/);

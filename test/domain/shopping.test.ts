@@ -100,6 +100,9 @@ describe('buildShoppingList', () => {
       inputKinds: ['user'],
       flags: [],
       updatedAt: T0,
+      knownObservedAt: T0,
+      knownStock: null,
+      knownStale: false,
     } satisfies ShoppingRow);
   });
 
@@ -219,6 +222,41 @@ describe('buildShoppingList', () => {
     expect(pick(140)).toBe('bot');
     expect(buildShoppingList([{ ...base, revenueScrap: 140 }], { onlyBotBuyers: true }, KP, T0).rows).toHaveLength(1);
     expect(buildShoppingList([{ ...base, revenueScrap: 150 }], { onlyBotBuyers: true }, KP, T0).rows).toHaveLength(0);
+  });
+
+  it("says how old the known price is, whether it is stale, and its stock (ACT-9)", () => {
+    const HOUR = 60 * 60_000;
+    const rows = [
+      // A rule wins the ceiling; the known price is the newest typed or imported one, a 3 h old import.
+      opp('60;6', { inputRef: 'rule:1', confidence: 95, maxCostScrap: 140 }),
+      opp('60;6', { inputRef: 'price:7', inputKind: 'import', inputObservedAt: T0 - 3 * HOUR, flags: ['stale-input'] }),
+      opp('61;6', { inputRef: 'price:8', inputObservedAt: T0 - 5 * 60_000 }),
+      opp('62;6', { inputRef: 'rule:2' }),
+    ];
+    const asked: string[] = [];
+    const stock: Record<string, number | null> = { 'price:7': 2, 'price:8': null };
+    const r = buildShoppingList(rows, {}, KP, T0, { stockOf: (ref) => (asked.push(ref), stock[ref] ?? null) });
+    const by = (sku: string) => r.rows.find((x) => x.sku === sku)!;
+    expect(by('60;6')).toMatchObject({ maxCostScrap: 140, knownCostScrap: 100, knownObservedAt: T0 - 3 * HOUR, knownStale: true, knownStock: 2 });
+    expect(by('61;6')).toMatchObject({ knownObservedAt: T0 - 5 * 60_000, knownStale: false, knownStock: null });
+    // Only rules: nothing known, so nothing old and nothing asked.
+    expect(by('62;6')).toMatchObject({ knownCostScrap: null, knownObservedAt: null, knownStale: false, knownStock: null });
+    expect(asked.sort()).toEqual(['price:7', 'price:8']);
+
+    // Only the rows returned are asked for their stock; a failing or odd answer is unknown.
+    asked.length = 0;
+    const page = buildShoppingList(rows, { limit: 1 }, KP, T0, { stockOf: (ref) => (asked.push(ref), 3) });
+    expect(page.rows).toHaveLength(1);
+    expect(asked).toHaveLength(1);
+    const broken = buildShoppingList(rows, {}, KP, T0, {
+      stockOf: () => {
+        throw new Error('db gone');
+      },
+    });
+    expect(broken.rows.map((x) => x.knownStock)).toEqual([null, null, null]);
+    expect(buildShoppingList(rows, {}, KP, T0, { stockOf: () => -1 }).rows.map((x) => x.knownStock)).toEqual([null, null, null]);
+    // Without a lookup (the default), stock is unknown.
+    expect(buildShoppingList(rows, {}, KP, T0).rows.map((x) => x.knownStock)).toEqual([null, null, null]);
   });
 
   it('copes with an empty or missing query', () => {

@@ -49,7 +49,9 @@ describe('the page', () => {
 
   it('reads scraptf.bankStock and exports through opps.exportCsv, nothing else: no new traffic', () => {
     const methods = new Set([...page.matchAll(/rpc\('([a-zA-Z.]+)'/g)].map((m) => m[1]));
-    expect([...methods].sort()).toEqual(['opps.exportCsv', 'scraptf.bankStock']);
+    // 0.7.1 (UX-5): and 'scraptfWindow.open' with the bank's static page, from its button's click only.
+    expect([...methods].sort()).toEqual(['opps.exportCsv', 'scraptf.bankStock', 'scraptfWindow.open']);
+    expect([...page.matchAll(/rpc\('scraptfWindow\.open', \{ start: ([^}]+) \}\)/g)].map((m) => m[1]!.trim())).toEqual(['info.url']);
     for (const m of methods) expect([...SERVICE_METHODS, ...MAIN_METHODS]).toContain(m);
     expect(page).toContain("kind: 'bankStock', bankStock: bankStockExportQuery(bank, view)");
     expect(page).toContain('saveCsv(');
@@ -62,8 +64,11 @@ describe('the page', () => {
   it("hands only the bank's static page to the user's browser, through links.open (openOrCopy)", () => {
     expect([...page.matchAll(/openOrCopy\(([^,]+),/g)].map((m) => m[1])).toEqual(['info.url']);
     expect(page).toContain('const info = scraptfBankInfo(bank);');
-    // Never the address the service sent: label and URL come from SCRAPTF_BANKS.
-    expect(page).not.toMatch(/rpc\('links\.open'|openLink\(|result\.url|\.url\b(?!, toast)/);
+    // F21-9: worded for openLinksInWindow, so main may show it in the user's scrap.tf window.
+    expect(page).toContain('void openOrCopy(info.url, toast, { allowWindow: true });');
+    // Never the address the service sent: label and URL come from SCRAPTF_BANKS (info), nothing else's url.
+    expect(page).not.toMatch(/rpc\('links\.open'|openLink\(|result\.url/);
+    expect([...page.matchAll(/([\w$]+)\s*\.url\b/g)].map((m) => m[1])).toEqual(['info', 'info']);
   });
 
   it('refreshes on scraptf.banksChanged and market.changed, throttled and only while shown, never showing an older answer', () => {
@@ -77,7 +82,8 @@ describe('the page', () => {
   it('remembers the filter, search and order per bank; opens the drawer by base SKU and the menu with the bank', () => {
     expect(page).toContain('usePersistentState<BankStockView>(bankStockPrefKey(bank), DEFAULT_BANK_STOCK_VIEW, sanitizeBankStockView)');
     expect(page).toContain('(r: BankStockRow) => openItem(r.sku)');
-    expect(page).toContain('menuRef.current({ sku: r.sku, name: r.name, category: r.category, bank }, at)');
+    // ACT-11: with the row's exact copy, for Record buy.
+    expect(page).toContain('menuRef.current({ sku: r.sku, name: r.name, category: r.category, bank, copy: bankStockBuyCopy(r, bank) }, at)');
   });
 });
 
@@ -381,7 +387,7 @@ describe('BankStockPageView, rendered', () => {
     const never: BankStockResult = { ...RESULT, bank: 'skins', savedAt: null, previousSavedAt: null, saves: 0, counts: counts(), rows: [], total: 0 };
     const h = html({ bank: 'skins', result: never });
     expect(h).toContain('No save of scrap.tf/buy/skins yet');
-    expect(h).toContain('Open scrap.tf/buy/skins in your own browser; Flip Desk never visits it.');
+    expect(h).toContain('Open scrap.tf/buy/skins in your own browser. Flip Desk never loads scrap.tf on its own.');
     expect(h).toMatch(
       /Press <kbd>Ctrl<\/kbd>\+<kbd>S<\/kbd>, <span class="save-mode"[^>]*>choose <strong>Webpage, Complete<\/strong> \(or <strong>Webpage, Single File \(\.mhtml\)<\/strong>\) so cards scrap\.tf added after the page loaded are included<\/span>, and save it into your watch folder<span class="mono"> \(D:\\saves\)<\/span>\./,
     );

@@ -352,6 +352,14 @@ const V9_BATCH_ORIGIN = `
 ALTER TABLE import_batches ADD COLUMN origin TEXT;
 `;
 
+// 0.7.1: each bank's newest save over every batch (Repo.bankNewestSaves) is one index seek per bank, not a
+// scan of import_batches, which is never purged and gains a row with every window read. The expression is
+// a save's time as batchSavedAt reads it (repo.ts BANK_STOCK_SAVED_AT), so that query's ORDER BY walks it.
+const V10_BATCH_BANK_SAVED = `
+CREATE INDEX IF NOT EXISTS idx_import_batches_bank_saved
+  ON import_batches(bank, (CASE WHEN file_mtime > 0 THEN file_mtime ELSE imported_at END));
+`;
+
 export const MIGRATIONS: readonly Migration[] = Object.freeze([
   { version: 1, name: 'initial schema', sql: V1_INITIAL },
   { version: 2, name: 'opportunity pay-up-to ceiling', sql: V2_MAX_COST },
@@ -362,6 +370,7 @@ export const MIGRATIONS: readonly Migration[] = Object.freeze([
   { version: 7, name: 'scrap.tf change events', sql: V7_SCRAPTF_EVENTS },
   { version: 8, name: 'scrap.tf feed by bank and kept saves', sql: V8_SCRAPTF_SAVES },
   { version: 9, name: 'saved-page batch origin', sql: V9_BATCH_ORIGIN },
+  { version: 10, name: 'saved-page batch bank and save time', sql: V10_BATCH_BANK_SAVED },
 ]);
 
 export const SCHEMA_VERSION: number = MIGRATIONS.reduce((max, m) => Math.max(max, m.version), 0);

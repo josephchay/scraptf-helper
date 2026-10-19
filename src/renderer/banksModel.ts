@@ -6,14 +6,28 @@
 // "What's new" line (bankWhatsNew) and the route of its stock page (#/banks/<bank>/stock).
 //
 // Labels and URLs always come from SCRAPTF_BANKS, whatever the service sent: the page only
-// hands them to links.open (the user's own browser). Nothing here, or anywhere in the app,
-// fetches scrap.tf (R1); its data only arrives through pages the user saves into the watch
-// folder (R10).
+// hands them to links.open (the user's own browser) or, on a click, to the user's scrap.tf
+// window. Nothing here, or anywhere in the app, fetches scrap.tf (R1); its data only arrives
+// through pages the user saves into the watch folder or reads in that window (R10). 0.7.1 adds
+// the header's cross-bank flips line (UX-1) and the stock page's chip routes (F21-2).
 
+import { SCRAPTF_BOUNDARY_SHORT } from '../shared/boundaryText';
 import { BANK_LOOK_FOR, BANK_TOP_FLIPS } from '../shared/banks';
 import { SCRAPTF_BANKS, scraptfBankInfo, type ScraptfBankInfo } from '../shared/links';
 import { isEmptyBankSave } from '../shared/market';
-import type { ConfidenceLevel, Scrap, ScraptfBank, ScraptfBankFlip, ScraptfBankLookFor, ScraptfBankSummary, ScraptfBanksResult, ScraptfSeenOn, UnixMs } from '../shared/types';
+import { BANK_STOCK_OPEN_FILTERS } from '../shared/types';
+import type {
+  BankStockOpenFilter,
+  ConfidenceLevel,
+  Scrap,
+  ScraptfBank,
+  ScraptfBankFlip,
+  ScraptfBankLookFor,
+  ScraptfBankSummary,
+  ScraptfBanksResult,
+  ScraptfSeenOn,
+  UnixMs,
+} from '../shared/types';
 import { CONFIDENCE_LABELS, errorMessage, fmtAgo, fmtDateTime, fmtInt, fmtMoney, fmtSignedMoney } from './format';
 import { SAVE_MODE, SAVE_MODE_ALT, SAVE_MODE_LIST_NOTE, SAVE_MODE_REASON } from './importModel';
 import { coverageTone, type CoverageTone } from './marketModel';
@@ -104,6 +118,39 @@ export function banksHeadline(result: Pick<ScraptfBanksResult, 'banks'> | null |
   if (!result) return { text: `… of ${total} scrap.tf pages saved in the last hour`, title };
   const n = banksSavedRecently(banksInOrder(result).map((b) => b.summary), now);
   return { text: `${fmtInt(n)} of ${fmtInt(total)} scrap.tf pages saved in the last hour`, title };
+}
+
+export interface BanksFlipsLine {
+  count: number;
+  /** "12 flips on your saves, newest 3 min ago". */
+  text: string;
+  title: string;
+}
+
+/**
+ * UX-1: the header's "12 flips on your saves, newest 3 min ago" (with "View all", the Live market's
+ * #/market/flips): the sum of the cards' flip counts (each equal to its stock page's Flips chip), dated
+ * by the newest save of a page that has flips. null before an answer and while there are none.
+ */
+export function banksFlipsLine(result: Pick<ScraptfBanksResult, 'banks'> | null | undefined, now: UnixMs): BanksFlipsLine | null {
+  if (!result) return null;
+  let n = 0;
+  let newest: UnixMs | null = null;
+  for (const { summary: s } of banksInOrder(result)) {
+    const flips = count(s.flips);
+    if (flips === 0) continue;
+    n += flips;
+    const at = timeOf(s.lastSavedAt);
+    if (at !== null && (newest === null || at > newest)) newest = at;
+  }
+  if (n === 0) return null;
+  // A file time a little ahead of the clock reads "just now", not "in 2 min".
+  const ago = newest === null ? '' : `, newest ${fmtAgo(Math.min(newest, now), now)}`;
+  return {
+    count: n,
+    text: `${fmtInt(n)} ${n === 1 ? 'flip' : 'flips'} on your saves${ago}`,
+    title: `Flips on the newest saves of your scrap.tf pages, added up over the cards below${newest === null ? '' : ` (the newest save ${fmtDateTime(newest)})`}. View all lists them in the Live market, freshest price first. An item on two pages counts on each.`,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -322,7 +369,7 @@ export interface BankCardView {
   flips: { text: string; profit: string | null; title: string };
   top: BankFlipRow[];
   /** null for the list card. */
-  lookFor: { rows: BankLookForRow[]; empty: string | null; seeAll: string | null; seeAllTitle: string } | null;
+  lookFor: { title: { text: string; title: string }; rows: BankLookForRow[]; empty: string | null; seeAll: string | null; seeAllTitle: string } | null;
   openTitle: string;
 }
 
@@ -330,8 +377,29 @@ function validRow(r: unknown): r is { sku: string; name: string } {
   return typeof r === 'object' && r !== null && typeof (r as { sku?: unknown }).sku === 'string' && typeof (r as { name?: unknown }).name === 'string';
 }
 
-/** The page's cards, one per SCRAPTF_BANKS entry in that order. */
-export function bankCards(result: Pick<ScraptfBanksResult, 'banks'> | null | undefined, keyScrap: Scrap | null, now: UnixMs): BankCardView[] {
+const LOOK_FOR_TITLE = "Items with backpack.tf buyers in this page's categories that you have no scrap.tf price for yet, highest Pay up to first.";
+
+/**
+ * The "What to look for" block's heading. ACT-8: a page saved within `inputStaleMs` (profit.inputStaleMs)
+ * showed what is on sale there now, and these items were not on it, so they are worth watching for a
+ * restock rather than looking for: "Not in your save 12 min ago: watch for restocks".
+ */
+export function bankLookForTitle(lastSavedAt: UnixMs | null | undefined, now: UnixMs, inputStaleMs: number | null | undefined, path = 'this page'): { text: string; title: string } {
+  const at = timeOf(lastSavedAt);
+  const stale = typeof inputStaleMs === 'number' && Number.isFinite(inputStaleMs) && inputStaleMs > 0 ? inputStaleMs : null;
+  if (at === null || stale === null || now - at > stale) return { text: 'What to look for', title: LOOK_FOR_TITLE };
+  const ago = fmtAgo(Math.min(at, now), now);
+  return {
+    text: `Not in your save ${ago}: watch for restocks`,
+    title: `Items with backpack.tf buyers in this page's categories that your save of ${path} ${ago} did not list on sale, highest Pay up to first. Save it again later to see whether one came back.`,
+  };
+}
+
+/**
+ * The page's cards, one per SCRAPTF_BANKS entry in that order. `inputStaleMs` (profit.inputStaleMs, when
+ * known) words the "What to look for" heading of a page saved within it (bankLookForTitle).
+ */
+export function bankCards(result: Pick<ScraptfBanksResult, 'banks'> | null | undefined, keyScrap: Scrap | null, now: UnixMs, inputStaleMs: number | null = null): BankCardView[] {
   return banksInOrder(result).map(({ info, summary: s }) => {
     const isList = info.categories.length === 0;
     const path = bankPath(info.url);
@@ -350,8 +418,16 @@ export function bankCards(result: Pick<ScraptfBanksResult, 'banks'> | null | und
       stockTitle: `Every item on your newest save of ${path}, with what changed since your previous save and its backpack.tf buyers.`,
       flips: bankFlipsText(s, keyScrap, isList),
       top: top.map((f) => bankFlipRow(f, keyScrap)),
-      lookFor: isList ? null : { rows: look.map((l) => bankLookForRow(l, keyScrap)), ...bankLookForText({ unchecked: s.unchecked, lookFor: look }) },
-      openTitle: `Opens ${path} in your own browser; the app never visits it. ${isList ? LIST_SAVE_TIP : BANK_SAVE_TIP}`,
+      lookFor: isList
+        ? null
+        : {
+            // /unusuals spans many pages and one save shows some of them, so an item missing there is not
+            // known to be off sale: "What to look for" as before (the engine's ACT-8 rule skips it too).
+            title: bankLookForTitle(s.lastSavedAt, now, info.bank === 'unusuals' ? null : inputStaleMs, path),
+            rows: look.map((l) => bankLookForRow(l, keyScrap)),
+            ...bankLookForText({ unchecked: s.unchecked, lookFor: look }),
+          },
+      openTitle: `Opens ${path} in your own browser. ${SCRAPTF_BOUNDARY_SHORT} ${isList ? LIST_SAVE_TIP : BANK_SAVE_TIP}`,
     };
   });
 }
@@ -373,7 +449,7 @@ export function seenOnText(seenOn: Pick<ScraptfSeenOn, 'bank' | 'at'> | null | u
   const at = timeOf(seenOn?.at);
   return {
     text: at === null ? `Seen on ${path}` : `Seen on ${path} · ${fmtAgo(Math.min(at, now), now)}`,
-    title: `The newest scrap.tf price imported for this item (for a painted item with none of its own, for another copy of it) came from your saved copy of ${path}${at === null ? '' : ` (${fmtDateTime(at)})`}. The app never visits scrap.tf.`,
+    title: `The newest scrap.tf price imported for this item (for a painted item with none of its own, for another copy of it) came from your saved copy of ${path}${at === null ? '' : ` (${fmtDateTime(at)})`}. ${SCRAPTF_BOUNDARY_SHORT}`,
   };
 }
 
@@ -498,6 +574,26 @@ export function bankStockPath(bank: ScraptfBank | null | undefined): string | nu
 export function bankStockRouteBank(segments: readonly string[]): ScraptfBank | null {
   if (segments[0] !== BANKS_ROUTE || segments[2] !== BANK_STOCK_SEGMENT) return null;
   return scraptfBankInfo(segments[1])?.bank ?? null;
+}
+
+/**
+ * F21-2: the chip a #/banks/<bank>/stock/<flips|new> route opens the stock page on (the toolbar's Show
+ * flips, through 'ui.openBankStock'); null for a plain stock route or anything else.
+ */
+export function bankStockRouteFilter(segments: readonly string[]): BankStockOpenFilter | null {
+  if (bankStockRouteBank(segments) === null) return null;
+  return BANK_STOCK_OPEN_FILTERS.find((f) => f === segments[3]) ?? null;
+}
+
+/**
+ * The route a 'ui.openBankStock' push asks for ("banks/hats/stock/flips"), from a known bank and chip
+ * only; null for anything else (the push comes from main, but its payload is still checked).
+ */
+export function bankStockOpenPath(p: unknown): string | null {
+  const o = typeof p === 'object' && p !== null ? (p as { bank?: unknown; filter?: unknown }) : {};
+  const stock = bankStockPath(scraptfBankInfo(o.bank)?.bank);
+  const filter = BANK_STOCK_OPEN_FILTERS.find((f) => f === o.filter);
+  return stock && filter ? `${stock}/${filter}` : null;
 }
 
 // ---------------------------------------------------------------------------

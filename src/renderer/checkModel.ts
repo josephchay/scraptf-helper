@@ -6,6 +6,7 @@
 // copied never reaches the renderer (main reads the clipboard, the service parses it). Nothing
 // here contacts scrap.tf (R1).
 
+import { SCRAPTF_BOUNDARY_SHORT } from '../shared/boundaryText';
 import {
   CHECK_ARM_NAME_MAX,
   CHECK_EXTRAS_NOTE,
@@ -123,7 +124,7 @@ export function checkPriceLine(r: CheckResult, now: UnixMs): CheckPriceLine {
   if (stock) parts.push(`Stock ${stock}${full ? ' (full: scrap.tf may not buy more)' : outOfStock ? ' (none to buy)' : ''}.`);
   if (pays) parts.push(`scrap.tf pays ${pays}.`);
   if (finite(r.listAt)) parts.push(`List saved ${fmtAgo(r.listAt, now)}; stock may have changed since.`);
-  parts.push('The app never visits scrap.tf.');
+  parts.push(SCRAPTF_BOUNDARY_SHORT);
   return { price, source, stock, full, outOfStock, pays, matched, title: parts.join(' ') };
 }
 

@@ -42,6 +42,8 @@ export interface SavedPageOptions {
    * detection, read first, only parsed as text, never fetched. An .mhtml file keeps its own part's address.
    */
   address?: string | null;
+  /** 0.7.1 (P4): also return the parse's diagnostics for the parser report (ParseOptions.diagnostics). */
+  diagnostics?: boolean;
 }
 
 /** A file that is no page at all: imported as nothing, with one clear warning (the batch keeps its name). */
@@ -61,10 +63,12 @@ function unreadable(warning: string): SavedPageParse {
 export function parseSavedPage(text: string, fileName: string, schema: SchemaService, opts: SavedPageOptions = {}): SavedPageParse {
   if (typeof text !== 'string') throw new TypeError('parseSavedPage expects the file as a string');
   const named = isMhtmlFileName(fileName);
+  // Passed on only when asked, so a parse without it is exactly as before (no diagnostics key).
+  const diagnostics = opts.diagnostics === true ? { diagnostics: true } : {};
   if (!looksLikeMhtml(text)) {
     if (named && !startsLikeHtml(text)) return unreadable('mhtml-invalid: the file does not start with MIME headers; save the page again');
     const address = typeof opts.address === 'string' ? opts.address : null;
-    return { format: 'html', ...parseScrapTfHtml(text, schema, { address }) };
+    return { format: 'html', ...parseScrapTfHtml(text, schema, { address, ...diagnostics }) };
   }
   const r = readMhtml(text, { maxBytes: MAX_IMPORT_BYTES });
   if (!r.ok) {
@@ -73,6 +77,6 @@ export function parseSavedPage(text: string, fileName: string, schema: SchemaSer
     if (r.reason === 'mhtml-too-many-parts') return unreadable(`${r.reason}: ${r.detail}; ${SAVE_AS_COMPLETE}`);
     return unreadable(`${r.reason}: ${r.detail}; save the page again`);
   }
-  const parsed = parseScrapTfHtml(r.html, schema, { address: r.contentLocation });
+  const parsed = parseScrapTfHtml(r.html, schema, { address: r.contentLocation, ...diagnostics });
   return { format: 'mhtml', ...parsed, warnings: [...r.notes, ...parsed.warnings] };
 }

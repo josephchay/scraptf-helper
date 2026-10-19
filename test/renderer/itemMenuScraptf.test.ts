@@ -1,7 +1,7 @@
 // F14 in the row context menu: "Open on scrap.tf (copies name)" copies the item name for scrap.tf's
 // own search box and hands the item's static bank page to the user's browser through links.open.
-// The menu content is pure; the action runs against a fake bridge and clipboard. The app never
-// visits scrap.tf (R1): the only call is links.open, which main checks against its allowlist.
+// The menu content is pure; the action runs against a fake bridge and clipboard. Flip Desk never
+// loads scrap.tf on its own (R1): the only call is links.open, which main checks against its allowlist.
 // F19: armed, it first tells main the item ('check.arm', before the copy) and its toast says how
 // the price found there comes back through the Live check.
 
@@ -12,6 +12,8 @@ import type { LinkSpec } from '../../src/shared/types';
 import {
   OPEN_ON_SCRAPTF_LABEL,
   SCRAPTF_NAME_COPIED,
+  SCRAPTF_NAME_COPIED_WINDOW,
+  SCRAPTF_WINDOW_READ_HINT,
   flattenSections,
   isEnabledItem,
   itemMenuSections,
@@ -52,7 +54,7 @@ describe('menu content', () => {
     expect(isEnabledItem(item)).toBe(true);
     expect(item.action).toEqual({ kind: 'scraptf', url: scraptfPageFor('hats'), name: 'Team Captain' } satisfies ItemMenuAction);
     expect(item.hint).toBe('scrap.tf');
-    expect(item.title).toContain('The app never visits scrap.tf.');
+    expect(item.title).toContain('Flip Desk never loads scrap.tf on its own.');
   });
 
   it('needs no links when the row knows the category, and waits for them otherwise', () => {
@@ -140,6 +142,29 @@ describe('the toast with the way back (F19)', () => {
     expect(refused.text).toBe(`Browser preview. The name was copied: open ${scraptfPageFor('hats')} in your browser and paste it into scrap.tf's search. ${BACK}`);
     // Nothing worked: the address only, no instructions for a page that is not open.
     expect(scraptfOpenedToast(false, { opened: false, reason: null }, scraptfPageFor('hats'), BACK).text).toBe(`The link could not be opened. ${scraptfPageFor('hats')}`);
+  });
+
+  it('opened in the Flip Desk window that reads pages as they load: the price comes back by itself (UX-5)', () => {
+    const win = { opened: true, reason: null, openedIn: 'window' as const };
+    expect(SCRAPTF_WINDOW_READ_HINT).toBe('It is read when it loads; its price shows here by itself.');
+    // The Live check's copy-a-price hint gives way to it.
+    expect(scraptfOpenedToast(true, win, scraptfPageFor('hats'), BACK, true)).toEqual({
+      text: `Opened scrap.tf/buy/hats in the Flip Desk window. The name is copied; paste it into scrap.tf's search. ${SCRAPTF_WINDOW_READ_HINT}`,
+      tone: 'good',
+    });
+    // Unarmed too: it is still read on load.
+    expect(scraptfOpenedToast(true, win, scraptfPageFor('hats'), null, true).text).toContain(SCRAPTF_WINDOW_READ_HINT);
+    expect(scraptfOpenedToast(false, win, scraptfPageFor('hats'), BACK, true).text).toMatch(/could not be copied. Type it into scrap.tf's search. It is read when it loads/);
+    // Reading on load off, or the browser: as before.
+    expect(scraptfOpenedToast(true, win, scraptfPageFor('hats'), BACK, false).text).toContain(BACK);
+    expect(scraptfOpenedToast(true, win, scraptfPageFor('hats'), null, false)).toEqual({ text: SCRAPTF_NAME_COPIED_WINDOW, tone: 'good' });
+    expect(scraptfOpenedToast(true, { opened: true, reason: null }, scraptfPageFor('hats'), BACK, true).text).toContain(BACK);
+    expect(scraptfOpenedToast(true, { opened: true, reason: null }, scraptfPageFor('hats'), BACK, true).text).not.toContain(SCRAPTF_WINDOW_READ_HINT);
+  });
+
+  it("passes the window's readOnLoad from the opener's settings", () => {
+    const menu = readFileSync(new URL('../../src/renderer/components/ItemMenu.tsx', import.meta.url), 'utf8');
+    expect(menu).toContain('scraptfOpenedToast(copied, opened, url, back, arm?.settings?.scraptfWindow?.readOnLoad !== false)');
   });
 
   it('without a way back it is the F14 toast, word for word', () => {

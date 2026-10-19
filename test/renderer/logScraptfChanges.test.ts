@@ -8,7 +8,7 @@
 import { readFileSync } from 'node:fs';
 import { act, createElement, type ReactNode } from 'react';
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
-import { changeRowView } from '../../src/renderer/changesModel';
+import { CHANGES_LEGACY_PREF_KEY, CHANGES_PREF_KEY, DEFAULT_CHANGE_KINDS, changeRowView } from '../../src/renderer/changesModel';
 import { createMockBridge, type MockBridge } from '../../src/renderer/mock';
 import { MAIN_METHODS, SERVICE_METHODS } from '../../src/shared/rpc';
 import type { ScraptfChangeEvent, ScraptfChangesQuery } from '../../src/shared/types';
@@ -16,6 +16,11 @@ import { installDomShim, ShimElement, ShimEvent, type ShimDocument } from './dom
 
 const T0 = Date.UTC(2026, 9, 15, 12, 0, 0);
 const read = (rel: string) => readFileSync(new URL(`../../src/renderer/${rel}`, import.meta.url), 'utf8');
+/** DM-6: the tab's default kinds (every kind but stock moves), as its first read asks for them. */
+const KINDS = [...DEFAULT_CHANGE_KINDS];
+/** Where the tab remembers its view (usePersistentState's prefix), and where 0.7.0 did. */
+const PREF = `flipdesk.ui.${CHANGES_PREF_KEY}`;
+const LEGACY_PREF = `flipdesk.ui.${CHANGES_LEGACY_PREF_KEY}`;
 
 let doc: ShimDocument;
 let createRoot: typeof import('react-dom/client').createRoot;
@@ -150,9 +155,11 @@ describe('the Live log tabs', () => {
 describe('the scrap.tf changes tab against the mock', () => {
   it('lists the newest changes first, each with its time, bank, item, price change, live side and Flip pill', async () => {
     const t = await mountLog();
-    expect(t.queries()).toEqual([{ limit: 100 }]);
-    const list = await t.b.rpc('scraptf.changes', { limit: 100 });
+    expect(t.queries()).toEqual([{ kinds: KINDS, limit: 100 }]);
+    const list = await t.b.rpc('scraptf.changes', { kinds: KINDS, limit: 100 });
     expect(t.rows()).toHaveLength(list.length);
+    // DM-6: no stock moves until the user ticks Stock.
+    expect(list.some((e) => e.kind === 'stock')).toBe(false);
     const key = (await t.b.rpc('status.get', undefined)).keyPrice?.valueScrap ?? null;
     list.forEach((e, i) => {
       const r = t.rows()[i]!;
@@ -172,23 +179,38 @@ describe('the scrap.tf changes tab against the mock', () => {
   });
 
   it('a kind chip filters, remembered; a remembered bank is read from the start', async () => {
-    const store = new Map<string, string>();
+    // From "every kind" (the user's Show every change), one chip is one kind.
+    const store = new Map<string, string>([[PREF, JSON.stringify({ bank: '', kinds: [] })]]);
     const t = await mountLog({ store });
+    expect(t.queries()).toEqual([{ limit: 100 }]);
     fire(t.button(/^Cheaper$/)!, 'click');
     await settle();
     expect(t.queries().at(-1)).toEqual({ kinds: ['cheaper'], limit: 100 });
     expect(t.rows().length).toBeGreaterThan(0);
     expect(t.rows().every((r) => r.textContent.includes('Cheaper'))).toBe(true);
-    expect(JSON.parse(store.get('flipdesk.ui.log.scraptfChanges')!)).toEqual({ bank: '', kinds: ['cheaper'] });
+    expect(JSON.parse(store.get(PREF)!)).toEqual({ bank: '', kinds: ['cheaper'] });
     unmounts.pop()!();
-    const w = await mountLog({ store: new Map([['flipdesk.ui.log.scraptfChanges', JSON.stringify({ bank: 'weapons', kinds: [] })]]) });
+    const w = await mountLog({ store: new Map([[PREF, JSON.stringify({ bank: 'weapons', kinds: [] })]]) });
     expect(w.queries()).toEqual([{ bank: 'weapons', limit: 100 }]);
     expect(w.rows().length).toBeGreaterThan(0);
     expect(w.rows().every((r) => r.descendants().filter((c) => c.tagName === 'TD')[1]!.textContent === 'Weapons')).toBe(true);
   });
 
+  it("DM-6 upgrade: 0.7.0's remembered default hides stock moves now; its bank carries over", async () => {
+    // 0.7.0 wrote { kinds: [] } (its default) on the tab's first render: no choice of the user's.
+    const store = new Map<string, string>([[LEGACY_PREF, JSON.stringify({ bank: 'hats', kinds: [] })]]);
+    const t = await mountLog({ store });
+    expect(t.queries()).toEqual([{ bank: 'hats', kinds: KINDS, limit: 100 }]);
+    expect(JSON.parse(store.get(PREF)!)).toEqual({ bank: 'hats', kinds: KINDS });
+    unmounts.pop()!();
+    // Once the new key holds a view, the old one is not read again.
+    store.set(LEGACY_PREF, JSON.stringify({ bank: 'weapons', kinds: ['stock'] }));
+    const again = await mountLog({ store });
+    expect(again.queries()).toEqual([{ bank: 'hats', kinds: KINDS, limit: 100 }]);
+  });
+
   it('a filter with nothing in it says so, with the way back', async () => {
-    const t = await mountLog({ store: new Map([['flipdesk.ui.log.scraptfChanges', JSON.stringify({ bank: 'skins', kinds: [] })]]) });
+    const t = await mountLog({ store: new Map([[PREF, JSON.stringify({ bank: 'skins', kinds: [] })]]) });
     expect(t.rows()).toHaveLength(0);
     expect(t.content()).toContain('No changes match these filters');
     fire(t.button(/^Show every change$/)!, 'click');
@@ -200,10 +222,10 @@ describe('the scrap.tf changes tab against the mock', () => {
   it('"Load older" reads the page before the oldest shown', async () => {
     const t = await mountLog();
     const shown = t.rows().length;
-    const first = await t.b.rpc('scraptf.changes', { limit: 100 });
+    const first = await t.b.rpc('scraptf.changes', { kinds: KINDS, limit: 100 });
     fire(t.button(/^Load older changes$/)!, 'click');
     await settle();
-    expect(t.queries().at(-1)).toEqual({ beforeId: first[first.length - 1]!.id, limit: 100 });
+    expect(t.queries().at(-1)).toEqual({ kinds: KINDS, beforeId: first[first.length - 1]!.id, limit: 100 });
     expect(t.rows().length).toBeGreaterThan(shown);
   });
 
@@ -229,7 +251,7 @@ describe('the scrap.tf changes tab against the mock', () => {
 
   it('a click opens the drawer by base SKU; a right-click the item menu', async () => {
     const t = await mountLog();
-    const list = await t.b.rpc('scraptf.changes', { limit: 100 });
+    const list = await t.b.rpc('scraptf.changes', { kinds: KINDS, limit: 100 });
     fire(t.rows()[2]!, 'click');
     expect(t.probe().getAttribute('data-item')).toBe(list[2]!.sku);
     fire(t.rows()[3]!, 'contextmenu', { clientX: 30, clientY: 40 });
@@ -243,7 +265,7 @@ describe('the scrap.tf changes tab against the mock', () => {
   });
 
   it('exports the filtered feed through opps.exportCsv and the save dialog', async () => {
-    const t = await mountLog({ store: new Map([['flipdesk.ui.log.scraptfChanges', JSON.stringify({ bank: 'hats', kinds: ['gone', 'new'] })]]) });
+    const t = await mountLog({ store: new Map([[PREF, JSON.stringify({ bank: 'hats', kinds: ['gone', 'new'] })]]) });
     fire(t.button(/Export CSV/)!, 'click');
     await settle();
     expect(t.calls('opps.exportCsv').map((c) => c[1])).toEqual([{ kind: 'scraptfChanges', scraptfChanges: { bank: 'hats', kinds: ['new', 'gone'] } }]);
@@ -264,7 +286,10 @@ describe('the scrap.tf changes tab against the mock', () => {
     }
     await settle();
     // The first push reads at once; the rest wait for one trailing read 2 s later.
-    expect(pageReads()).toEqual([{ limit: 100 }, { limit: 100 }]);
+    expect(pageReads()).toEqual([
+      { kinds: KINDS, limit: 100 },
+      { kinds: KINDS, limit: 100 },
+    ]);
     const newest = (await t.b.rpc('scraptf.changes', { limit: 1 }))[0]!.id;
     expect(newest).toBeGreaterThan(top);
     expect(t.rows()[0]!.getAttribute('class')).toContain('stf-feed-row');
@@ -296,7 +321,7 @@ describe("the rows' live side (F20-UIPERF-4)", () => {
     expect(market.length).toBeGreaterThan(0);
     const shown = t.rows().length;
     expect(shown).toBe(100);
-    const first = await t.b.rpc('scraptf.changes', { limit: 1 });
+    const first = await t.b.rpc('scraptf.changes', { kinds: KINDS, limit: 1 });
     const sells = () => t.rows()[0]!.descendants().filter((c) => c.tagName === 'TD')[5]!.textContent;
     const pay = () => t.rows()[0]!.descendants().filter((c) => c.tagName === 'TD')[6]!.textContent;
     const was = [sells(), pay()];
@@ -305,7 +330,7 @@ describe("the rows' live side (F20-UIPERF-4)", () => {
     act(() => market.forEach((fire) => fire()));
     await settle();
     // One read of the rows shown, from the newest shown down: nothing above it, nothing added.
-    expect(t.queries().slice(reads)).toEqual([{ beforeId: first[0]!.id + 1, limit: shown }]);
+    expect(t.queries().slice(reads)).toEqual([{ kinds: KINDS, beforeId: first[0]!.id + 1, limit: shown }]);
     expect(t.rows()).toHaveLength(shown);
     expect(sells()).not.toBe(was[0]);
     expect(pay()).not.toBe(was[1]);

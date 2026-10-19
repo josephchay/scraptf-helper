@@ -1,4 +1,5 @@
 import { useMemo, useRef, useState, type MouseEvent } from 'react';
+import { SCRAPTF_BOUNDARY_SHORT } from '../../shared/boundaryText';
 import type { BulkPriceRow, Scrap, ScrapPrice } from '../../shared/types';
 import { rpc, saveCsv } from '../api';
 import { BULK_MAX_LINES, bulkCommitMessage, bulkInputStats, bulkPlanSummary, isSkipped, planBulkCommit, type BulkLineState, type BulkPlan } from '../bulkModel';
@@ -152,7 +153,7 @@ function PriceSheet() {
             <Icon name="plus" size={14} /> Paste a list
           </button>
         </div>
-        <p className="muted small">Type what you see on scrap.tf. The app never visits scrap.tf itself.</p>
+        <p className="muted small">Type what you see on scrap.tf. {SCRAPTF_BOUNDARY_SHORT}</p>
         <PriceForm
           key={editing?.id ?? 'new'}
           editing={editing}

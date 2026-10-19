@@ -143,10 +143,11 @@ const PRICE_SOURCE_WORDS: Record<CheckPriceSource, string> = {
 };
 
 /**
- * The desktop notification for a watcher flip, from the result only (the schema's item name and
- * the service's money), e.g. "Flip: Team Captain" / "scrap.tf 1 key 5.33 ref (copied) → sells for
- * 1 key 9.11 ref, +3.77 ref (6%)". null unless the result is an item with a flip verdict and a price,
- * and null when that price is a painted or spelled copy's (CHECK_EXTRAS_NOTE): no flip for a plain one.
+ * The desktop notification for a watcher flip while the watcher's popup is off (ACT-7), from the result
+ * only (the schema's item name and the service's money), e.g. "Flip: Team Captain" / "scrap.tf 1 key
+ * 5.33 ref (copied) → sells for 1 key 9.11 ref, +3.77 ref (6%)". null unless the result is an item with a
+ * flip verdict and a price, and null when that price is a painted or spelled copy's (CHECK_EXTRAS_NOTE):
+ * no flip for a plain one.
  */
 export function flipNotification(r: CheckResult): PushContract['notify'] | null {
   if (r.status !== 'item' || r.verdict !== 'flip' || !r.sku || !r.price || checkPriceIsOtherCopy(r)) return null;
@@ -303,12 +304,15 @@ export function createLiveCheckMain(deps: LiveCheckMainDeps): LiveCheckMain {
     }
   }
 
-  /** Watcher results: items only. Nothing at all happens for a non-item. */
+  /**
+   * Watcher results: items only. Nothing at all happens for a non-item. ACT-7: one alert per check, so the
+   * "Flip:" notification is for a watcher whose popup is off; the popup already shows the flip.
+   */
   function onWatchResult(result: CheckResult, s: number): void {
     if (result.status !== 'item') return;
     const settings = deps.settings();
-    if (settings.check.notifyFlips && result.verdict === 'flip') maybeNotify(result, settings);
     if (settings.check.popup) queuePopup(result, s);
+    else if (settings.check.notifyFlips && result.verdict === 'flip') maybeNotify(result, settings);
   }
 
   async function runWatch(copied: string, run: number): Promise<void> {

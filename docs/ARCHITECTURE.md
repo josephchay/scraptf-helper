@@ -6,9 +6,9 @@
 
 | Rule | What it means |
 |---|---|
-| R1 | Nothing in this app sends a request of its own to `scrap.tf` or any subdomain: no HTTP client request, fetch, `/ajax`, `ws.scrap.tf` socket or download, no polling, no auto-refresh, and no load, reload or history step from a timer, an event or a promise callback. That includes tests, fixtures and tooling, and `src/service/net/policy.ts` refuses every scrap.tf host. From 0.7 (F21) the one place scrap.tf is shown is the opt-in scrap.tf window (`src/main/scraptfWindow.ts`), which the **user** browses: Chromium loads only a static start page the user opened (`SCRAPTF_WINDOW_START_URLS`), a toolbar move the user clicked (back, forward, reload, home, a bank chip, Log out & clear) or the user's own clicks in the page, plus what those pages load themselves. |
+| R1 | Nothing in this app sends a request of its own to `scrap.tf` or any subdomain: no HTTP client request, fetch, `/ajax`, `ws.scrap.tf` socket or download, no polling, no auto-refresh, and no load, reload or history step from a timer, an event or a promise callback. That includes tests, fixtures and tooling, and `src/service/net/policy.ts` refuses every scrap.tf host. From 0.7 (F21) the one place scrap.tf is shown is the opt-in scrap.tf window (`src/main/scraptfWindow.ts`), which the **user** browses: Chromium loads only a static start page the user opened (`SCRAPTF_WINDOW_START_URLS`), a toolbar move the user clicked (back, forward, reload, home, a bank chip, Log out & clear), from 0.7.1 the same back, forward, reload and home from the user's own keys in the page and the mouse's back and forward buttons (`before-input-event` and `app-command`, which Chromium and Windows raise for real input only), or the user's own clicks in the page, plus what those pages load themselves. |
 | R2 | No HTML fetching from backpack.tf, marketplace.tf, stntrading.eu, mannco.store or steamcommunity.com. Only documented JSON APIs and websockets, reached through `src/service/net`. |
-| R3 | No userscripts, extensions or page injection: nothing of the app's runs in another site's page except F21's `READ_SCRIPT`, and the app never clicks, types, scrolls, sends input events or writes the DOM there. The one embedded browser is F21's opt-in scrap.tf window, whose view has no preload and runs exactly that one pinned, read-only script (`document.documentElement.outerHTML`) in isolated world 1001, only on `https://scrap.tf` pages, only on a document that has stopped loading, after each scrap.tf page load or in-page navigation in the window (the user's browsing, and what the page's own scripts do, such as a reload or a `replaceState`, which the app cannot tell apart; with the 30 s per-page gap, the one settle read and the dedupe) or on the user's Read page now. A read is a local snapshot and sends nothing. Steam's sign-in and Cloudflare's challenge frame are never read; a check page served at a scrap.tf address is read and imports nothing. It never solves or skips a challenge, never calls `setUserAgent` and never touches cookies (`session.cookies`, `document.cookie`). |
+| R3 | No userscripts, extensions or page injection: nothing of the app's runs in another site's page except F21's `READ_SCRIPT`, and the app never clicks, types, scrolls, sends input events or writes the DOM there. The one embedded browser is F21's opt-in scrap.tf window, whose view has no preload and runs exactly that one pinned, read-only script (`document.documentElement.outerHTML`) in isolated world 1001, only on `https://scrap.tf` pages the import reads (from 0.7.1 `scraptfImportablePath`: the bank pages, the unusual pages and scrap.tf/items, not the front page, raffles or settings), only on a document that has stopped loading, after each such page load or in-page navigation in the window (the user's browsing, and what the page's own scripts do, such as a reload or a `replaceState`, which the app cannot tell apart; with the 30 s per-page gap, the one settle read and the dedupe) or on the user's Read page now. A read is a local snapshot and sends nothing. Steam's sign-in and Cloudflare's challenge frame are never read; a check or error page served at a scrap.tf address (HTTP 403, 429 or 503), and Chromium's error page after a failed load, is not read when it loads, only on Read page now, and imports nothing. It never solves or skips a challenge, never calls `setUserAgent` and never touches cookies (`session.cookies`, `document.cookie`). |
 | R4 | No automated buying, selling, trading, listing, bumping or accepting. The app is read-only toward every platform. |
 | R5 | No proxy support and no multi-account features. |
 | R6 | Honest User-Agent: `TF2FlipDesk/<version> (+<contact>)`. Never a browser UA. The F21 scrap.tf window is a browser the user drives and keeps Electron's default user agent, which names the app and Electron: nothing in `src/` calls `setUserAgent` or rewrites the window's request headers. |
@@ -52,6 +52,7 @@ Wire protocol and the RPC method list: `src/shared/rpc.ts`. Domain types: `src/s
 | `src/shared/check.ts` | Live check (F16) limits, fixed user-facing texts (refusals, reasons, item notes, the privacy sentence, `CHECK_HOTKEY_CONFLICT`), `checkTextRefusal`, `checkPriceIsOtherCopy`, `blankCheckResult` and F19's `checkHintPriceOf` (a price copied on its own); zod-free, shared by main, the service, the dashboard and the mock so all of them refuse and word things alike |
 | `src/shared/itemUrl.ts` | the item links the app reads (marketplace.tf and PriceDB item pages, backpack.tf stats pages): hosts, path shapes and next.backpack.tf's query keys, shared by the schema resolver (`parseItemUrl`) and main's clipboard filter, which lets exactly these links through |
 | `src/shared/settingsSchema.ts` | zod schema for `Settings` (owned by main) |
+| `src/shared/importCodes.ts`, `scraptfPaths.ts`, `boundaryText.ts` | 0.7.1: the import's warning and refusal codes, fixed messages, skip reasons, partial-read thresholds and report limits (`importWarningCode`); `scraptfImportablePath`, the scrap.tf pages the import reads (parity with `pageKindFromUrl`, tested); the one boundary sentence (`SCRAPTF_BOUNDARY_SHORT`, `scraptfDataSourcesText`) every dashboard text uses |
 | `src/shared/scraptfWindowPolicy.ts` | F21's rules for the opt-in scrap.tf window, pure and zod-free: which URLs it starts on, keeps, sends to the browser or blocks (top level and frames), which pages it reads, the pinned `READ_SCRIPT` and its forbidden tokens, the read timings, the fixed texts and the settings gate; shared by main, the settings schema, the service, the mock and the tests |
 | `src/service/net/*` | `policy.ts`, `budgets.ts`, `http.ts`, `redact.ts`, `ratelimit.ts`, `errors.ts` |
 | `src/service/db/*` | `openRepo(path)` implementing `Repo` with `node:sqlite` |
@@ -60,9 +61,9 @@ Wire protocol and the RPC method list: `src/shared/rpc.ts`. Domain types: `src/s
 | `src/service/connectors/bptfSocket.ts`, `bptfApi.ts`, `bptfItem.ts` | backpack.tf websocket, snapshot/IGetPrices/IGetCurrencies, item → SKU mapping |
 | `src/service/domain/*` | matcher, pricing, confidence, key price, engine, views (list/group/detail), shopping list, Live market index (`market.ts`), journal, holdings (`holdings.ts`), the saved scrap.tf list cache (`scraptfList.ts`), the per-bank summary (`banks.ts`, F15), the live check parser and evaluation (`liveCheck.ts`), the bank stock cache and its notifications (`bankStock.ts`, F17), the scrap.tf history index and change feed (`scraptfHistory.ts`, F20) and the re-save reminders (`resaveReminders.ts`, F20), CSV |
 | `src/service/priceSheetIo.ts`, `buyerCheck.ts`, `rpcSchemas.ts` | bulk paste and backups (pure); `buyer.check` lookups; zod schemas shared by more than one handler |
-| `src/service/import/*` | saved scrap.tf page parser (`scraptfHtml.ts`, parse5, no script execution), the MHTML extractor (`mhtml.ts`, F18, pure), the one entry for both file types (`savedPage.ts`), folder watcher |
+| `src/service/import/*` | saved scrap.tf page parser (`scraptfHtml.ts`, parse5, no script execution), the MHTML extractor (`mhtml.ts`, F18, pure), the one entry for both file types (`savedPage.ts`), folder watcher; from 0.7.1 the in-memory ring of sanitized parser reports behind `'import.report'` (`reports.ts`, P4, never persisted) |
 | `src/service/core.ts`, `scheduler.ts`, `rpcHandlers.ts`, `entry.ts`, `logger.ts` | wiring and periodic jobs (integration) |
-| `src/main/*` | Electron main, preload, windows, tray, settings store, secrets, service host; the live check's controller (`liveCheck.ts`, with F19's `check.arm`), clipboard filter and watcher (`clipboardWatch.ts`) and global hotkey registration (`hotkeys.ts`); the opt-in scrap.tf window (`scraptfWindow.ts`, F21), the only module that may show scrap.tf |
+| `src/main/*` | Electron main, preload, windows, tray, settings store, secrets, service host; the live check's controller (`liveCheck.ts`, with F19's `check.arm`), clipboard filter and watcher (`clipboardWatch.ts`) and global hotkey registration (`hotkeys.ts`); the opt-in scrap.tf window (`scraptfWindow.ts`, F21), the only module that may show scrap.tf, and from 0.7.1 its remembered size and place (`windowBounds.ts`, F21-12) |
 | `src/renderer/*` | dashboard UI; `api.ts` uses `window.flipdesk` or, in a plain browser, `mock.ts`. Page logic lives in pure, unit-tested `*Model.ts` files |
 | `test/<area>/*.test.ts`, `test/fixtures/<area>/*` | vitest tests and fixtures per area |
 
@@ -490,6 +491,63 @@ importBankText(bank, stored?, savedWithoutCards?, fromWindow = false)  // banksM
 createMockScraptfWindow({ now; settings; emit; itemsOn? }): MockScraptfWindow; MOCK_WINDOW_READ_WARNING   // mockScraptfWindow.ts
 ```
 
+v0.7.1 import truth, bank history, alerts and the window ("0.7.1 round", below):
+
+```ts
+// shared/types.ts (every new field optional)
+ImportResult + skippedTotal?, skippedCounts? (benign reason text or warning code -> count), stockSave? ('written' | 'partial' | 'unsettled' | 'none'),
+  pageFlips?, topFlips?: ImportTopFlip[] (<= 3; { sku; name (app data); costScrap; maxCostScrap; profitScrap })
+ImportReport { id; at; origin; name; pageKind; bank; page; format; batchId; counts; headerColumns; warningCodes; items: ImportReportItem[] (<= 200) }
+ScraptfWindowRead + stored?, pageFlips?, bestFlip?; ScraptfWindowNav + importable?, notice?; ScraptfWindowState + pendingPartitionChange?
+MarketSort + 'seen'; MarketRow.scraptfLastSeenAt?; BankStockRow.lastSeenAt?; BankStockResult.olderPages?; ScraptfChangeEvent.wasFlip?
+ShoppingRow.knownObservedAt?, knownStock?, knownStale?
+// shared/rpc.ts
+'import.html' params + settled?: boolean (main only; false = an unsettled window snapshot); 'import.report' (service) { limit? } -> ImportReport[]
+'app.showBankStock' (main) { bank; filter: 'flips' | 'new' } -> { ok: true }; push 'ui.openBankStock' (main only, held by the preload like ui.openItem)
+// shared/importCodes.ts, scraptfPaths.ts, boundaryText.ts
+IMPORT_SCHEMA_LOADING_CODE, IMPORT_SCHEMA_LOADING_MESSAGE, LAYOUT_CHANGED, NO_PRICE_COLUMN, PARTIAL_READ, NO_STOCK_LIMIT, IMPORT_REFUSAL_CODES,
+SKIP_OUT_OF_STOCK, SKIP_SAME_OR_CHEAPER, SKIP_NEWER_SAVE, BENIGN_SKIP_REASONS, PARTIAL_READ_MAX_AGE_MS (6 h), PARTIAL_READ_RATIO (0.5),
+PARTIAL_READ_MIN_KEYS (8), IMPORT_REPORT_MAX_ITEMS, IMPORT_REPORT_RING (20), importWarningCode(w)
+scraptfImportablePath(url); SCRAPTF_BOUNDARY_SHORT, scraptfDataSourcesText(windowOn)
+// shared/bankStock.ts
+BANK_STOCK_KEEP_ALL_MS (2 h), BANK_STOCK_RECENT_BUCKET_MS (10 min), BANK_STOCK_RECENT_TIER_MS (24 h); bankStockThinning(saves, now, opts?) (new tiers)
+BANK_STOCK_SESSION_GAP_MS (30 min), BANK_STOCK_SESSION_READ (1000), bankStockBaselineOf(groupNewestFirst); BankStockPagePair.baseline
+BANK_STOCK_OLDER_PAGE_MS (48 h), bankStockCurrentPages(pages); BANK_STOCK_NEW_MAX_AGE_MS (24 h), bankStockNewAt(banks, now?)
+bankStockComparator(sort, dir, now?); bankStockLongListed(r, now, minListedMs?) (lastSeenAt - listedSince)
+BANK_STOCK_NOTIFY_AGE_NOTE_MS (15 min), bankStockSaveAgeText(ms), bankStockOldSaveNotice(...), bankStockNewFlipNotice(label, row, key, savedAgoMs?)
+// shared/banks.ts, market.ts, scraptfHistory.ts, scraptfList.ts
+bankStockFlips(rows, count); mergeBankNewestSaves(newest, extra); WholeLookSave, wholeLookNewestSaves(newest, wholeLookOf, itemCountOf), batchItemCounts(batches, extra?) (DC-2)
+scraptfCoverage(batches, categoriesOf, extra?, wholeLookOf?); MARKET_SORTS; marketProfitTie
+SCRAPTF_ITEM_STOCK_EVENTS (10), SCRAPTF_PRICE_KINDS; ScraptfKeyState, scraptfKeyStatesOf, scraptfEventIsCurrent, scraptfMarkSuperseded (ACT-10)
+ScraptfListed, scraptfListedOf, scraptfListedPick; marketListedSideMatches({ scraptfListedSince, scraptfLastSeenAt? }, q, now)
+scraptfResaveNotice(bank, lastSavedAt, now, window?); SCRAPTF_RESAVE_HOW_FILE, SCRAPTF_RESAVE_HOW_WINDOW; WATCH_WAITING_FOR_SCHEMA (scraptfList.ts)
+// shared/scraptfWindowPolicy.ts
+SCRAPTF_READ_REASONS + schemaLoading, notImportable; SCRAPTF_NOT_READ_AGAIN; SCRAPTF_WINDOW_NOTICES, SCRAPTF_LINK_NOTICES, SCRAPTF_FAILURE_NOTICES
+responseNotice(status), loadFailureNotice(errorCode); WindowKeyAction, WindowKeyInput, windowKeyAction(input), appCommandAction(command)
+// service
+Repo.bankNewestSaves(): { bank; batchId; savedAt; itemCount }[]   // V10 index idx_import_batches_bank_saved
+parseScrapTfHtml(html, schema, opts?: { address?; diagnostics? }) -> + diagnostics?: ParseDiagnostics; parseSavedPage(..., opts.diagnostics)
+recordImportReport(input), importReports(limit?), clearImportReports(), scrubReportText(s, max)   // import/reports.ts
+importSavedPage(ctx, { ..., settled? }); HandlerContext.bankStock + 'pageFlips'
+BankStock.pageFlips(bank, batchId): BankStockRow[]; BankStock.savedAtOf(batchId); BankStockNotifyDeps.stock: Partial<Pick<BankStock, 'savedAtOf'>>
+ScraptfHistory.listedFor(base, bank?): ScraptfListed | null; MarketIndexDeps.history + Partial listedFor; BanksSummaryDeps.repo + Partial bankNewestSaves, bankStockSaves
+BanksSummaryDeps.bankStock: Pick<BankStock, 'whatsNew'> & Partial<Pick<BankStock, 'list'>>
+EngineDeps.toldElsewhere(opp (+ inputObservedAt, firstSeenAt), now); EngineDeps.boughtSince?(baseSku, at); EngineDeps.recentBankSaveAt?(bank)
+NotifyFingerprint { obs; lid; p }, NotifyRecord { t; f }, notifyFingerprintOf, notifyWorthRepeating, parseNotifyRecords   // domain/engine.ts
+buildShoppingList(rows, q, keyPrice, now, opts?: { stockOf?(inputRef) }); ShoppingListOptions   // domain/shopping.ts
+USER_PRICE_TOLD_MS (5 min), newestScraptfBuys(journal), WATCH_WAITING_FOR_SCHEMA (re-export)   // core.ts
+// main
+MainRpcDeps.showBankStock?(bank, filter); createWindowBounds(deps), placeWindow, visibleOn, parseWindowBounds, MIN_VISIBLE (120 x 48)   // ipc.ts, windowBounds.ts
+ScraptfWindowDeps.bounds?: { file; screen; readFile?; writeFile? }; WindowImportParams.settled?: false
+// renderer
+MARKET_FLIPS_ROUTE, MARKET_FLIPS_PATH ('#/market/flips'); banksFlipsLine; bankStockRouteFilter(segments), bankStockOpenPath(push); bankLookForTitle
+listSetupState(s, windowOn?) ('window-only', 'watch-waiting'); listStepsAutoOpen(s, windowOn?); listBoundaryNote, marketBoundaryNote; FIRST_PRICE_LEAD
+bankStockBuyCopy(row, bank) (ItemMenuTarget.copy, recordBuyInit(item, prices, copy?)); bankStockHeader(bank, r, now, inWindow?); SESSION_NOTE
+DEFAULT_CHANGE_KINDS (all but 'stock'), CHANGES_PREF_KEY 'log.scraptfChanges.v2', changesViewFromLegacy; historyEventGroups; changeRowView.wasFlip
+importSkipSummary, IMPORT_REPORT_NOTE, importOffText(windowOn); checkNotifyHint(notificationsOn, popupOn?); scraptfOpenedToast(..., readOnLoad?)
+showFlipsView(read), bestFlipTitle, windowNoticeText   // scraptfWindowModel.ts
+```
+
 ## Integration (src/service/core.ts and friends)
 
 ```ts
@@ -515,7 +573,12 @@ importSavedPage(ctx, { html, fileName, mtimeMs })         // shared by 'import.h
   to a day. A fresh snapshot reconciles the stored order book; listings the feed updated or deleted after the
   snapshot was taken keep the feed's version. A snapshot served from the 10-min cache changes nothing.
 - The folder watch is reported as an error when fs.watch fails and is retried about once a minute. A file the
-  service died importing (repo meta `import.watchImporting`) is skipped once at the next start.
+  service died importing (repo meta `import.watchImporting`) is skipped once at the next start. From 0.7.1 (P3) it
+  starts only once the item schema has loaded, and reports `WATCH_WAITING_FOR_SCHEMA` ('Waiting for item data to load')
+  until then (`scraptf.listStatus`, Data health; the dashboard shows it as a muted wait, `listSetupState` 'watch-waiting');
+  it starts on the next 10 s status tick after the load, and its catch-up scan imports the pages saved meanwhile: its
+  start is fixed when the watch begins waiting (DC-4), so an import between the load and that tick (a window read, a
+  page picked by hand) does not skip them.
 - Generic "any effect" unusual buy orders (`<defindex>;5` without `u`) are eligible exits for every effect of
   that item, flagged `any-effect`.
 - Main pushes `service.state` (starting/ready/restarting/stopped), `ui.openItem` (notification click, or the
@@ -568,11 +631,18 @@ importSavedPage(ctx, { html, fileName, mtimeMs })         // shared by 'import.h
   items): one entry per save with rows, written and deleted with its `bank_stock` rows (`insertBankStock`,
   `pruneBankStock` and its orphan sweep), backfilled from `bank_stock`. The save lists read it, so they cost per kept
   save, not per stored row or per import batch ever written (`import_batches` is never purged).
+- Schema V9 (F21) adds `import_batches.origin` (see "The scrap.tf window (F21)", S3). Schema V10 (0.7.1) adds the
+  index `idx_import_batches_bank_saved` on `import_batches(bank, COALESCE(file_mtime, imported_at))` behind
+  `Repo.bankNewestSaves()` (each bank's newest non-empty save over all batches, DM-7). No table or column changes.
 - `shopping.list` and `opps.exportCsv {kind:'shopping'}` are built from the stored opportunities: one row per SKU with a
   ceiling above 0 and buyers; when a SKU has several inputs, the one with the highest confidence wins. The known cost is
   that row's own when it is typed or imported, else the newest typed/imported one, and `underCeiling` compares it only
   with its own row's ceiling (`knownMaxCostScrap`): painted, spelled and plain copies share a SKU. The scrap.tf bank-page
-  URLs are only passed to `links.open` (the user's browser), never fetched (R1).
+  URLs are only passed to `links.open` (the user's browser), never fetched (R1). From 0.7.1 (ACT-9) every row carries
+  `knownObservedAt` (the known row's input time), `knownStale` (the known row carries the engine's `stale-input` flag:
+  older than `profit.inputStaleMs`) and, on `shopping.list` only, `knownStock` (the stock scrap.tf showed with the
+  price behind the known row, `opts.stockOf`, one `getScrapPrice` per returned row; null for a typed price). The
+  dashboard counts only fresh known prices as at or under the ceiling.
 - `item.detail {history:false}` skips the PriceDB history request, so quick entry's live preview is local only.
   `ItemDetail.revenue` uses the engine's pricing over the same book (including generic any-effect orders), with the same
   reference gate, so the drawer, quick entry and the opportunity row agree. The drawer classifies the book against the
@@ -591,6 +661,25 @@ importSavedPage(ctx, { html, fileName, mtimeMs })         // shared by 'import.h
   the toast is clicked (F20, "Notification links" below); a bad one costs the toast its link, never the toast.
   From 0.6 an imported opportunity whose item a "New on scrap.tf" notification named in the last 30 minutes (F17) is
   recorded as notified without a toast of its own (`EngineDeps.toldElsewhere`), so one find makes one toast.
+  From 0.7.1 (ACT-2, ACT-3, ACT-7, ACT-8): an opportunity flagged `stale-input` (its input older than
+  `profit.inputStaleMs`) is never toasted and stays in the lists. `NOTIFY_META_KEY` stores `{ key: { t, f: { obs, lid, p } } }`
+  (the input's observedAt, for a rule its update time; the revenue order's listing id; the toasted profit); an old
+  `{ key: ts }` map parses as records with no fingerprint. Past `notifications.dedupMs` a row toasts again only if
+  `obs` or `lid` changed or its profit rose by `CHANGE_PROFIT_DELTA` or more. Records are not capped by count: one
+  stays while inside the window, and after it while it has a fingerprint and its row is still stored. The
+  `toldElsewhere` branch records the fingerprint too, so F17's one toast per find lasts past 30 min, and it also covers
+  an input of kind 'user' whose `inputObservedAt` or `firstSeenAt` is under `USER_PRICE_TOLD_MS` (5 min) old: a price
+  just saved from the check popup or quick entry gets no "Profit:" toast. `EngineDeps.boughtSince(base, at)` (core:
+  `newestScraptfBuys` over the journal, the newest buy per base on venue scrap.tf, reset by `journalChanged`) skips,
+  without recording, the toast of a base the user recorded buying on scrap.tf at or after the input's observedAt (for a
+  rule, at or after max(rule time, now - inputStaleMs)). `EngineDeps.recentBankSaveAt(bank)` (core: the bank's newest
+  bank stock save with rows, `repo.bankStockSaves(bank, 1)`, cached per bank and reset by `pricesChanged` and
+  `bankStockChanged`; a partial or unsettled look writes none, so it holds nothing back) skips "Candidate:" toasts of a
+  single-page bank (not 'unusuals') saved within `profit.inputStaleMs` (0 means 2 h): the item was not on that save.
+  Never for an australium (DC-5): its category is 'stranges', but scrap.tf's items bank holds australiums too, so a
+  fresh /buy/stranges save is no proof it is off sale.
+  In main (F16) the clipboard watcher's "Flip:" notification is sent only while `check.popup` is off, so one check
+  makes one alert.
 - `buyer.check` runs only on a click. It sends one users/info request on the `bptf-users` budget at user priority: it waits at
   most 15 s for a slot and then times out after 12 s, inside main's 30 s RPC timeout. It needs the access token and the
   backpack.tf API switch, and it refuses while the network is paused or the host is blocked. Successful answers are cached
@@ -694,7 +783,15 @@ saved pages. Nothing here fetches or polls scrap.tf (R1).
   batch counts for is `batchBankOf` (`src/shared/market.ts`): from 0.5 the bank the parser recognised and V5 recorded
   on the batch decides, whatever the page held (F15). Only a batch without one (imported before 0.5, or a page the
   parser did not recognise) falls back: kind 'items-list' is the list, any other page counts for the page its stored
-  items fall at least half into. The list counts for no page (the saved list has its own "All items" chip, F14). The
+  items fall at least half into. From 0.7.1 (DM-7, CQ-3) each bank's newest non-empty save over **all** batches
+  (`Repo.bankNewestSaves`: `item_count > 0` or the list, file time else import time, ties to the higher id, the V10
+  index `idx_import_batches_bank_saved`) is merged in, newer wins (`mergeBankNewestSaves`, `scraptfCoverage(batches,
+  categoriesOf, extra?)`), so a bank saved before 500 newer batches (a day of window reads) stays dated; the 500
+  batches still classify batches without a bank. A bank page is then dated and counted by its newest whole look, its
+  newest bank stock save (`Repo.bankStockSaves(bank, 1)`, with that batch's itemCount: `wholeLookNewestSaves`,
+  `scraptfCoverage(…, wholeLookOf?)`, DC-2), as its stock page and the engine's ACT-8 are: a partial (DM-2) or unsettled
+  (ACT-4) look records a batch with cards but no stock save, and dates nothing; a bank with no stock save (saved before
+  0.6) keeps the batch-based date. The list counts for no page (the saved list has its own "All items" chip, F14). The
   fallback reads the categories a batch stored when imported (`ImportBatch.categories`), because a later import
   rewrites the rows it shares in place under its own batch id (an /items list takes over a bank page's plain rows);
   only a batch from 0.2, without them, is classified from the rows carrying its id today (that map is collected while
@@ -756,7 +853,8 @@ a sale in the journal.
   `notifications.enabled`, the new `notifications.holdings` (boolean, default true; Settings > Notifications has the
   switch), and `notifications.minConfidence` (an item that entered `sell` below it stays pending, so more buyers
   later still notify it once; from 0.4 it gates backpack.tf exits only, see F14). Main applies `notifications.silent`. Dedupe is per SKU for `notifications.dedupMs`,
-  saved in repo meta `holdings.lastNotified` and expired by age like the engine's `engine.lastNotified`, so a restart
+  saved in repo meta `holdings.lastNotified` and expired by age (the engine's own records keep a fingerprint from
+  0.7.1, see Integration), so a restart
   does not notify again. At most `MAX_NOTIFICATIONS_PER_RUN` (3) per check, then one summary ("N more held items to
   sell", `sku: null`). The sell state is tracked while notifications are off, so switching them on replays nothing.
 - **Watched set.** `core.watchedSet()` is the base SKUs with a scrap.tf price plus `holdings.heldBases()` (open lots,
@@ -1026,7 +1124,13 @@ each cached until its scope is invalidated:
   `ScrapPrice.bank`).
 - **Flips** ('all', 'flips'): one `queryOpportunities({ status: ['profitable'], inputKinds: ['import'] })`, mapped through
   `inputRef 'price:<id>'` (`opportunityBank`), then `bankFlips`: count, summed profit, the top 3 by profit, then name,
-  then SKU. Flips are never rebuilt against an empty map while the saves read fails.
+  then SKU. Flips are never rebuilt against an empty map while the saves read fails. From 0.7.1 (UX-2b) a bank page
+  with a bank stock save takes its count, top 3 and profit sum from `BankStock.list({ filter: 'flips', sort: 'profit' })`
+  (`bankStockFlips`): the card equals its stock page's Flips chip, painted and clean copies counted apart, suspect
+  margins included as on the chip. Only the All items card, and a bank with no stock save, keep the opportunity rule.
+  `readSaves` merges `repo.bankNewestSaves()` and dates a bank page by its newest whole look (`repo.bankStockSaves(bank, 1)`,
+  DC-2) as the strip does, so a partial or unsettled look never dates the card, counts its items or heads its "Not in
+  your save".
 - **What to look for** ('all', 'market'): `market.uncheckedBy(bankForCategory, BANK_LOOK_FOR, now)`, one pass over the
   Live market's "Not checked" rows (buyers, no scrap.tf price of yours, no rule flip) in its default order: per bank the
   count and the 5 with the highest Pay up to above 0 and a revenue, as full rows (`bankLookFor` cuts and orders them
@@ -1123,7 +1227,8 @@ Decisions and deviations from the F15 spec:
 6. The mock leaves two banks never saved (skins and items), not one, because a mock test pins the strip with both.
 7. `ImportResult.bank` is shown on the Import page, beyond the spec.
 8. Known limits: README "Known limits" (fixtures synthesized from public markup, not live pages; strange skins' SKU
-   follows the card's quality class; re-tagging moves a price's bank).
+   followed the card's quality class until 0.7.1, which keys every skin the backpack.tf way, P2; re-tagging moves a
+   price's bank).
 
 ## Live check (F16)
 
@@ -1377,6 +1482,23 @@ are memoised per refresh and dropped when the schema loads. A failed read keeps 
 failure streak and is retried at most every `BANK_STOCK_RETRY_MS` (10 s) by reads, at once by `refresh()`. Nothing
 throws.
 
+**Session baseline** (0.7.1, CQ-2; covers DM-4's core symptom). A window reads a page every 30 s or more, so "the
+previous save" was often half a minute old and the next read emptied "What's new" and the New badges. A session is a
+run of a page's saves less than `BANK_STOCK_SESSION_GAP_MS` (30 min) apart; `bankStockBaselineOf` gives the newest
+save from before the newest save's session, else the save just before the newest (a page's first session). Each
+page's pair carries `baseline` (up to `BANK_STOCK_SESSION_READ`, 1,000, saves are read per page for it; `saves` still
+counts at most 10). In the cache each page keeps two diffs: `diff` (newest vs baseline) feeds the stock page, its
+chips and counts, `whatsNew`, `newAtFor`, `detailFor` and `seenFor`, and `previousSavedAt` is the baseline's time;
+`stepDiff` (newest vs previous) feeds `newFlips` and the S3 notifier, so toasts stay per read. `scraptf_events` are
+still written per read (F20). For daily file saves the baseline is the previous save, as before. `pageFlips(bank,
+batchId)` (UX-3) reads the newest save's own rows on sale with verdict flip and no suspect margin, most profit first,
+for a batch that is the first of its page's newest look. Staleness (DM-5): pages whose newest save is more than
+`BANK_STOCK_OLDER_PAGE_MS` (48 h) older than the bank's newest page drop out of counts, chips, `whatsNew` and
+`previousSavedAt` (`bankStockCurrentPages`; the newest page always stays) and are reported as
+`BankStockResult.olderPages` { count, newestSavedAt }; history, the feed, `detailFor` and `seenFor` keep every page.
+`bankStockNewAt(banks, now)` skips banks whose newest save is over `BANK_STOCK_NEW_MAX_AGE_MS` (24 h) old, and the
+cache moves `version()` when a bank turns stale so the market's cached New pass filters again.
+
 **RPC and push.** `scraptf.bankStock` (`BankStockQuery`, zod: bank required, filter and sort enums, dir, search up to
 200 characters, limit 1-2000 with default 200, offset 0 or more) returns `BankStockResult` (label, url, savedAt,
 previousSavedAt, saves, counts, rows, total, keyPrice, generatedAt). `opps.exportCsv {kind:'bankStock', bankStock}`
@@ -1390,8 +1512,8 @@ does not stop the rest.
 **Readers.**
 
 - **Banks summary** (`banks.ts`). `ScraptfBankSummary.whatsNew` = `BankStock.whatsNew(bank)`, read live on every
-  `summary()` (not inside a cached part): new, newFlips, gone, cheaper, pricier and `since` (the previous save), or null
-  with fewer than 2 saves. A failed read is logged once and shows null.
+  `summary()` (not inside a cached part): new, newFlips, gone, cheaper, pricier and `since` (the previous save; from
+  0.7.1 the session baseline, below), or null with fewer than 2 saves. A failed read is logged once and shows null.
 - **Live market** (`market.ts`). `MarketRow.scraptfNewAt` = `bankStockNewAt` of the base SKU (the newest save of any
   bank in which any copy of it is new), joined in `toRow`. `MarketQuery.newOnScraptf` keeps only such rows
   (`marketNewSideMatches`), with the other source filters and before the verdict counts, as the mock does; only a
@@ -1413,7 +1535,11 @@ usable PriceDB or community price, age-gated). Dedupe per bank and base SKU for 
 one save are one notification), saved before the push in repo meta `bankStock.lastNotified` and expired by age. At most
 3 toasts `New on scrap.tf (<Bank>): <name>` / `<cost>, sells for <revenue> to <buyer>, +<profit>` (`sku` set), then one
 `+N more new flips on scrap.tf/buy/hats` with body `From the page you saved. Open TF2 Flip Desk to see them.` (`sku`
-null). Main applies `notifications.silent`.
+null). Main applies `notifications.silent`. From 0.7.1 (ACT-6) the notifier reads the told batch's save time
+(`BankStock.savedAtOf`): a save older than `profit.inputStaleMs` (a catch-up import at start, an old file picked
+later) gets one summary toast, "3 new flips in your save of scrap.tf/buy/hats from 2 d ago"
+(`bankStockOldSaveNotice`), and no per-item toasts; a save `BANK_STOCK_NOTIFY_AGE_NOTE_MS` (15 min) old or more adds
+"; in your save 40 min ago" to each body (`bankStockSaveAgeText`).
 
 - **Held until the Live market has built.** The verdicts read market entries, which do not exist before the first
   build; the folder watch's catch-up at start runs right then. Every such import is held (per bank, each batch: the
@@ -1735,7 +1861,13 @@ Decisions and deviations from the F18 spec:
     does not).
 11. A page cut short is refused whole rather than read in part (the spec left both open). The prices of its cards
     would be right, but storing them would make the batch the bank's newest save, and a partial bank stock save
-    cannot be told from a complete one later.
+    cannot be told from a complete one later. From 0.7.1 the same reasoning covers looks the app can tell are
+    partial: a look at a bank page (not the list) with fewer than `PARTIAL_READ_RATIO` (half) of the on-sale keys of
+    the newest save of the same page made up to `PARTIAL_READ_MAX_AGE_MS` (6 h) before it, when that save had at least
+    `PARTIAL_READ_MIN_KEYS` (8) (DM-2, file or window), an /items page with a row whose stock cannot be read (P1), and a
+    window snapshot imported without its settle read (`settled: false`, ACT-4). These store their cards' prices and
+    the batch (the prices are right) but no bank stock save, so no events, run breaks, new flips or gone-price deletes
+    follow (`stockSave` 'partial' or 'unsettled'; the partial and stock warnings come first in `warnings`).
 
 ## Live market ↔ scrap.tf link (F19)
 
@@ -1926,10 +2058,17 @@ notification's URL only behind `notificationOpenUrl`'s three checks; `isScraptfB
 Synthetic sources prove each scan.
 
 **S1 Thinning** (`bankStockThinning` in `shared/bankStock.ts`, `Repo.pruneBankStock`). Retention is per bank page
-(`bank` + `bs.page`, F17-C1): every save of the last 24 h; from 24 h to 7 d the newest save of each UTC clock hour;
-from 7 d to 90 d the newest of each UTC day; nothing older; at most 300 saves per page (the newest). A page's newest
-save and the save it is compared with (the newest from **strictly** before it, `previousOf`) are never removed,
-whatever their age or the cap: the stock page, its chips and the feed read them. Buckets are clock-aligned, so a kept
+(`bank` + `bs.page`, F17-C1), from 0.7.1 (DM-3, CQ-1): every save of the last 2 h (`BANK_STOCK_KEEP_ALL_MS`); from
+2 h to 24 h (`BANK_STOCK_RECENT_TIER_MS`) the newest save of each clock-aligned 10 minutes
+(`BANK_STOCK_RECENT_BUCKET_MS`, well above `READ_AUTO_MIN_GAP_MS`); from 24 h to 7 d the newest of each UTC clock
+hour; from 7 d to 90 d the newest of each UTC day; nothing older. The cap of 300 saves per page applies to the 2 h
+tier only, so heavy window browsing never evicts hourly or daily history (in 0.7.0 it capped the whole page, and 300
+window reads pushed out every older save). A page's newest save, the save it is compared with (the newest from
+**strictly** before it, `previousOf`) and its session baseline (F17, `bankStockBaselineOf`) are never removed,
+whatever their age or the cap: the stock page, its chips and the feed read them. Nor are the few saves that keep the
+newest session one session (DC-3, `sessionChainOf`: walking from the newest, a save is kept when the next older one
+would be 30 min or more after the last kept), so an idle page's session, re-tiered to one save an hour past 24 h or cut
+by the cap, never opens a gap inside itself that would move its baseline into it. Buckets are clock-aligned, so a kept
 save stays its bucket's newest at the next run. `importSavedPage` prunes after its transaction with `orphans: false`
 (so `previous` exists when `onImport` runs inside it); the daily maintenance job prunes with the orphan sweep and
 calls `ctx.bankStockChanged()` when rows went. `Repo.bankStockSaveIndex()` lists `{ batchId, savedAt, bank, page }` of
@@ -1982,7 +2121,10 @@ for the feed filtered by bank).
   `listed` is false: never plotted). `change.hN` compares the current price with the newest observation at or before
   now - N (null when it was not on sale then, or nothing is on sale now); `change.listed` with the run's first save.
   Raw keys + metal are valued at today's key price (the last good one when it cannot be read, else the default), so a
-  key price move alone is no change. `events` are that copy's newest 50 (`scraptfEvents({ sku, specialKey })`). An item
+  key price move alone is no change. `events` are that copy's newest 50 (`scraptfEvents({ sku, specialKey })`); from
+  0.7.1 (DM-6) 50 price events (`SCRAPTF_PRICE_KINDS`: new, restocked, cheaper, pricier, gone) plus at most
+  `SCRAPTF_ITEM_STOCK_EVENTS` (10) 'stock' events, read apart and merged newest first, so stock moves never push a
+  price drop out. An item
   never saved reads `bank: null` with the schema's name.
 - **Bank stock rows.** `BankStock` joins `listedSince`, `firstSeenAt` and `changeSinceListed` from
   `history.runsFor(bank)` (one runs read per `list`/`all`/`whatsNew`/`newFlips`). `BankStockQuery` gains the filters
@@ -2229,12 +2371,25 @@ only in development. Its bounds follow resize, maximise, unmaximise, restore and
 - **Loads.** Every `loadURL`, `reload`, `navigationHistory.goBack` / `goForward` of the view sits in
   `function userNavigate`, called only from the user actions `open`, `back`, `forward`, `reload`, `home`, `go` and
   `clear`. It does nothing while the window is off, quitting or disposed, checks `isAllowedWindowStart` before
-  `loadURL`, and passes the URL alone (no user agent, headers, referrer or body). `open(start?)` and `go(url)`
+  `loadURL`, and passes the URL alone (no user agent, headers, referrer or body). From 0.7.1 (F21-11) the view's
+  `before-input-event` (key-down of F5, Ctrl+R, Alt+Left, Alt+Right, Alt+Home, never a repeat, with `preventDefault`)
+  and the window's `app-command` (browser-backward, browser-forward) call `pressKey`, which calls only `back`,
+  `forward`, `reload` and `home`; the compliance scan allows it from exactly those two listeners (`windowKeyProblems`).
+  Nothing moves the focus (deviation 12). `open(start)` of the page already on screen (same page key, main frame not
+  loading, no failure notice) only reveals the window (F21-7); a page that failed or crashed is loaded again. `open(start?)` and `go(url)`
   take the static list only (`SCRAPTF_START_REFUSAL`, never quoting the URL); `open` throws `SCRAPTF_WINDOW_OFF`
   while off; a new window loads `start` or Home, an open one only the page asked for; `home` and `go` open a closed
   window. Nothing retries on `did-fail-load` or `render-process-gone`; a dead toolbar renderer closes the window.
-- **keepLoggedIn.** A partition is fixed per view, so the next `open()` after a change replaces the view with one
-  on the new partition (it loads `start` or Home); events from the old view are ignored.
+- **keepLoggedIn.** A partition is fixed per view. From 0.7.1 (F21-6) it is chosen only when the window is created:
+  a change while the window is open waits for close and reopen (`ensureWindow` returns false for any live window),
+  `state().pendingPartitionChange` is true meanwhile, and the toolbar shows a "Reopen to apply" pill (it asks
+  `'scraptfWindow.state'` again when the setting changes). In 0.7.0 the next `open()` rebuilt the view, losing the page.
+- **Bounds** (0.7.1, F21-12, `windowBounds.ts`). `getNormalBounds()` and `isMaximized()` are saved on 'close' and in
+  main's close() to `userData/scraptf-window-bounds.json` (version 1, x, y, width, height, maximized; zod-checked,
+  written atomically, only when changed), not settings.json. They are restored only if at least 120 x 48 px
+  (`MIN_VISIBLE`) lies on a current display's work area; otherwise the window opens at 1280 x 900, fitted and centred
+  on the display under the cursor. A maximised window is maximised again at first show. main.ts passes
+  `bounds: { file, screen }`; tests inject a fake screen.
 - **Close and dispose.** Closing the window (the user, `close()` when the window is turned off, `dispose()` at
   quit) closes the view's webContents (not destroyed with its window), clears the settle timer and forgets the
   window; `dispose()` blocks later opens.
@@ -2244,7 +2399,12 @@ only in development. Its bounds follow resize, maximise, unmaximise, restore and
 - **Triggers.** The main frame's `did-finish-load`, and its `did-navigate-in-page` once the document has had its
   own `did-finish-load` (or nothing is loading; one during the load leaves the read to `did-finish-load`), when
   `readOnLoad` is on and `shouldReadUrl` passes. These follow the user's browsing and also what the page's own
-  scripts do (a reload, a `replaceState` to a new query); the app cannot tell the two apart. Each starts a cycle: one
+  scripts do (a reload, a `replaceState` to a new query); the app cannot tell the two apart. From 0.7.1 only a page
+  `scraptfImportablePath` accepts is read (F21-4; Read page now elsewhere answers `SCRAPTF_READ_REASONS.notImportable`
+  and the toolbar disables it from `nav.importable`), and a page notice blocks automatic reads until the next commit
+  (F21-3, F21-10): a scrap.tf main-frame document answered 403 or 503 (a challenge or error page) or 429 (rate limit)
+  from `did-navigate`, Chromium's error page after a failed load, or a crashed renderer. Read page now still reads
+  such a page and words an empty result by its notice; the gap and `autoEmpty` are left alone. Each starts a cycle: one
   read now (`readPage('load')`) and exactly one `timers.setTimeout(() => void readPage('settle'), READ_SETTLE_MS)`,
   the module's only timer, because scrap.tf adds cards after load. While the main frame is still loading
   (`canRunNow`: `getURL()` and `!isLoadingMainFrame()`, Electron's own test) the cycle waits for `did-stop-loading`;
@@ -2258,7 +2418,10 @@ only in development. Its bounds follow resize, maximise, unmaximise, restore and
   settle read imports its own snapshot, or the held one when it got nothing, at the cycle's start time. A cycle
   that ends before its settle read imports the held snapshot then: HTML already read, never a new read or load.
   So a page whose cards arrive late is saved once, compared with the user's previous save, and never shows a card
-  as gone and restocked, or as a new flip, 4 s apart.
+  as gone and restocked, or as a new flip, 4 s apart. From 0.7.1 (ACT-4) a held snapshot imported without its settle
+  read (`flushHeld`, the settle read falling back to it, or a load read whose cycle ended mid-script) is sent with
+  `settled: false`; the service stores its prices but no bank stock save (S3). Only settled imports count for the
+  dedupe, so the same HTML read settled later is imported again.
 - **Gap and dedupe.** Automatic read cycles of one page (its URL without the hash; up to 64 pages remembered) start
   at least `READ_AUTO_MIN_GAP_MS` apart; the settle read belongs to its load's cycle. An automatic read whose
   sha256 equals that page's last imported read within `READ_DEDUPE_MS` is skipped. A new document of a page whose
@@ -2266,7 +2429,14 @@ only in development. Its bounds follow resize, maximise, unmaximise, restore and
   cycle within the gap, so the real page the user lands on after solving the check is read. A failed import is not
   remembered, so the next read tries again. A load or settle read checks `readOnLoad` again when it runs. Read page
   now is deduped the same way: an unchanged page within `READ_DEDUPE_MS` is not imported again, and its last read is
-  pushed again with the reason `unchanged`.
+  pushed again with the reason `unchanged`. From 0.7.1 (F21-10) a page shown again within the gap, or unchanged
+  within the dedupe, re-pushes that page's own last read with the warning `SCRAPTF_NOT_READ_AGAIN` ("Read page now to
+  read it again"), only while that page is the document on screen. An automatic read that ends while a page notice is
+  up (UX-071-1: the held load snapshot of the page before, imported at the commit of a 429, a check or a failed load,
+  or of the same address reloaded into one) is remembered for its page but not pushed, so it never hides that notice;
+  no automatic read runs on such a document, and Read page now still takes the line. While the item schema loads the service refuses
+  the import with `IMPORT_SCHEMA_LOADING_MESSAGE`; main matches `IMPORT_SCHEMA_LOADING_CODE` and pushes the fixed
+  `SCRAPTF_READ_REASONS.schemaLoading` read, remembers nothing and keeps `autoEmpty`, so the next read imports (F21-1).
 - **The read.** `executeJavaScriptInIsolatedWorld(READ_WORLD_ID, [{ code: READ_SCRIPT }])` on the view's main frame,
   only for the URL of the document on screen (`mainFrame.url`, the last committed one: `getURL()` already names a
   toolbar load still pending, which would file the old DOM under the new page's bank), and only when `canRunNow`
@@ -2279,17 +2449,27 @@ only in development. Its bounds follow resize, maximise, unmaximise, restore and
   main.ts sends straight to the service (`host.call('import.html', p)`), never through the router. The name is cut to
   `WINDOW_READ_NAME_MAX` (260, the service's `fileName` cap, pinned by a test), so a long path is not refused on
   every read.
-- **Status.** Each read pushes `'scraptfWindow.read' { at, path, items, bank, newFlips, warning }` to the toolbar
+- **Status.** Each read pushes `'scraptfWindow.read' { at, path, items, bank, newFlips, warning, stored, pageFlips,
+  bestFlip }` (the last three from 0.7.1: `ImportResult.stored`, `pageFlips` and `topFlips[0]`, its SKU checked against
+  the openItem shape and its name cleaned and cut to 120 characters) to the toolbar
   and keeps it as `lastRead` (forgotten by Log out & clear). `warning` is the import's first warning cut at its `:`
   (the code, never the clipped page text after it); for a read the service recorded nothing for (`batchId: 0`),
   `no-cards-saved` on a bank or list page ("no items on screen yet; wait for them, then Read page now") and
-  `SCRAPTF_NOTHING_TO_IMPORT` elsewhere; or a fixed `SCRAPTF_READ_REASONS` text for an empty or failed read. Logs carry the path and counts only: never the
-  HTML, a URL query or an error's cause.
+  `SCRAPTF_NOTHING_TO_IMPORT` elsewhere; or a fixed `SCRAPTF_READ_REASONS` text for an empty or failed read. From
+  0.7.1 `importWarning` picks by priority: partial-read, layout-changed (preferred over no-cards-saved), no-stock-limit,
+  no-sku, no-price-column, unknown-bank, no-pays-column, then any other code but duplicate-cards and
+  page-kind-guessed, with counts as digits only ('partial-read: 3 48', 'no-sku: 2 48'); every code has toolbar text in
+  `WINDOW_WARNINGS`. Logs carry the path and counts only: never the HTML, a URL query or an error's cause.
 
 **M3 Toolbar, tray, links and IPC.**
 
-- `'scraptfWindow.nav' { url (windowDisplayUrl), canGoBack, canGoForward, loading, reading }` goes to the toolbar on
-  `did-navigate`, in-page navigation and start/stop loading. Pushes wait (the latest per event) until the toolbar
+- `'scraptfWindow.nav' { url (windowDisplayUrl), canGoBack, canGoForward, loading, reading, importable, notice }` goes
+  to the toolbar on `did-navigate`, in-page navigation and start/stop loading. From 0.7.1 `notice` is fixed text
+  (`SCRAPTF_WINDOW_NOTICES`): a response notice (403/503 challenge or error, 429 rate limit; scrap.tf documents only), a
+  load failure by Chromium net-error group (offline, insecure, bad response, other) or a crash, each ending "press
+  Reload" and cleared at the next commit, or a link notice (a blocked link, a dropped popup, a link out without a
+  click), which never replaces a page notice and changes at most once a second (`LINK_NOTICE_MIN_GAP_MS`); pushed only
+  when it changes. Pushes wait (the latest per event) until the toolbar
   page's `did-finish-load`, then go out before the current nav. `send()` forwards only main's `settings.changed`
   (the theme) and `service.state`; both F21 pushes are in `MAIN_ONLY_PUSH_EVENTS`, so the service host and
   `handlePush` drop them if the service sends them.
@@ -2307,9 +2487,12 @@ only in development. Its bounds follow resize, maximise, unmaximise, restore and
   (`{ opened: true, reason: null, openedIn: 'window' }`) only when the caller sends `allowWindow: true`, the window
   is enabled, `openLinksInWindow` is on and `isAllowedWindowStart(url)`. Only the opens worded through
   `scraptfLinksInWindow` send it: the Live market's scrap.tf button and header bank link, Open on scrap.tf in the
-  drawer and the row menu (`openOnScraptf`), and the banks cards. Everything else (the Bank stock page, Shopping, the
-  scrap.tf/items card, the drawer's list buttons, every other link) goes to the browser exactly as its words say,
-  and Home never does.
+  drawer and the row menu (`openOnScraptf`), the banks cards and, from 0.7.1, the Bank stock page's Open (F21-9).
+  Everything else (Shopping, the scrap.tf/items card's browser button, the drawer's list buttons, every other link)
+  goes to the browser exactly as its words say, and Home never does. The scrap.tf/items card and the Bank stock page
+  also get a click-only "Open in Flip Desk window" (`'scraptfWindow.open'` with the static page) while the window is
+  on (UX-5). `'app.showBankStock' { bank, filter }` (0.7.1, zod: `isScraptfBank`, 'flips' | 'new') shows the dashboard
+  and sends it `'ui.openBankStock'`; it loads nothing in the scrap.tf view.
 
 **S3 Service** (`import/savedPage.ts`, `rpcHandlers.ts`, schema V9).
 
@@ -2331,15 +2514,22 @@ only in development. Its bounds follow resize, maximise, unmaximise, restore and
   `bankStockChanged`; 0 on a page's first save).
 - Everything downstream is unchanged: a window read and a file save of the same page give the same parse, result,
   batch (apart from id, name and origin), prices, bank stock rows, page keys, change events, pushes and "What's
-  new".
+  new". From 0.7.1 a window read that wrote a save also carries `pageFlips` and `topFlips` (UX-3), and `settled:
+  false` (main only) stores prices and the batch but no bank stock save (`stockSave: 'unsettled'`).
 
 **Renderer.**
 
 - **U1 Toolbar** (`pages/ScraptfWindowBar.tsx`, window kind `'scraptf'`, `styles/scraptf-window.css`, @imported
   last). One 48 px line: Back, Forward, Reload, Home; bank chips from `SCRAPTF_BANKS` through `'scraptfWindow.go'`
   (`aria-current` on the page on screen); a read-only address (origin and path); **Read page now** (disabled off
-  scrap.tf and while a read runs; main's reason shown when none is taken); the status line "Read 48 items from
-  /buy/hats · 2 new flips · 3 s ago" (the live region changes only with a new read); **Log out & clear** behind a
+  scrap.tf and while a read runs, and from 0.7.1 on a page the import does not read; main's reason shown when none is
+  taken); the status line "Read 48 items from /buy/hats · 2 new flips · 3 s ago" (from 0.7.1 "Read 48 items from
+  /buy/hats · stored 46 · 10 flips (2 new) · best Team Captain +0.44 ref · 3 s ago", 'stored' only when it differs;
+  the best flip's name is a click-only `'app.openItem'`, and a click-only **Show flips** calls `'app.showBankStock'`
+  always on the Flips chip (UX-071-2: the read's "k new" counts new since the read before, the New chip new since the
+  session baseline, non-flips included, so it could hold none of them; Flips holds every flip with its New badge; the
+  'new' route stays for other callers); the notice line; the "Reopen to apply" pill) (the live region
+  changes only with a new read); **Log out & clear** behind a
   confirmation; and the always-visible "External-tool risk" pill, whose tooltip is the one-line risk and whose click
   puts the full text in the status line. Keys: Alt+Left, Alt+Right, F5 or Ctrl+R, Alt+Home (held keys ignored), and
   the arrow, Home and End keys between controls. It asks `'scraptfWindow.state'` once on mount (pushes that came
@@ -2406,7 +2596,10 @@ Synthetic sources prove each scan.
   page; a load whose cards arrive late is one save compared with the previous file save (no gone, restocked or new
   card, no new flip); a bank page with no cards yet says to read again; a long path imports; Settings' Log out &
   clear empties the toolbar; Steam's sign-in is never read; external pages reach the browser only through the
-  allowlist and after a click; `links.open` uses the window only with openLinksInWindow and `allowWindow`.
+  allowlist and after a click; `links.open` uses the window only with openLinksInWindow and `allowWindow`. From
+  0.7.1 also `windowBounds.test.ts` (a real temp-dir file round trip) and `scraptfWindowWiring.integration.test.ts`:
+  the window wired to the real service core (schema loading then loaded, the toolbar's flips through Show flips to
+  the stock page's chip, an unsettled snapshot writing no save).
 - Service and db: `test/import/importWindowRead.test.ts` (all eight fixtures as a window read and as a file save,
   the address hint, refusals, origins, names, nothing to import, the window off), `test/service/importOriginParams.test.ts`,
   `test/db/importOrigin.test.ts`.
@@ -2446,17 +2639,131 @@ Decisions and deviations from the F21 spec:
 11. Popups are always denied: one to an allowlisted site goes to the browser (only right after the user's own input
     to the view, one tab per input), one to
     scrap.tf is dropped. A dead toolbar renderer closes the window rather than reloading anything.
-12. The default partition is in memory; `persist:scraptf` only with keepLoggedIn, applied on the next open. Main
-    never focuses the view (`webContents.focus()`), so keyboard users click into the page first.
+12. The default partition is in memory; `persist:scraptf` only with keepLoggedIn, applied when the window is next
+    created (0.7.1: never by rebuilding an open window). Main never focuses the view (`webContents.focus()`), so
+    keyboard users click into the page first; from 0.7.1 the toolbar's keys also work with the page focused (M1).
 13. Settings' terms link points to the About page (Settings is on F20's opener-free list).
 14. A load and its settle read are one save (the spec imported each): the settle snapshot, or the load one when it got
     nothing, at the load's time. Read page now is deduped like automatic reads (the spec let it always import) and
     ends the page's cycle. Without that a page whose cards arrived late was saved twice 4 s apart, and its "What's
-    new", F20 history and new-flip notice compared the two.
+    new", F20 history and new-flip notice compared the two. From 0.7.1 a snapshot imported without its settle read
+    is marked `settled: false` and writes no bank stock save (ACT-4), so a cycle cut short can no longer store a
+    partial look as the page's newest save.
 15. Main refuses client certificates for the whole app and logs page-triggered lines through a per-kind throttle;
     the window's busy state is per view.
 16. Known limits: README "Known limits" (Cloudflare challenges the user solves, tested with stand-ins, reads as
     snapshots, popups, Stay signed in, the keyboard).
+
+## 0.7.1 round: import truth, bank history, alerts and the window
+
+One round of fixes from an audit of the scrap.tf side (parser, data, UX flow, window, actionability, code quality).
+**Boundary unchanged** (R1, R3, R6, R9, R10): every change is local parsing, local SQLite or local UI, or less
+reading and loading than 0.7.0 (F21-3 and F21-4 remove reads, F21-7 a load). `READ_SCRIPT` is byte-identical, no
+`loadURL`, `executeJavaScript*`, timer, cookie, user-agent or request call site was added, and the compliance scan
+gained the checks below. Schema V10 adds one index. Section names are the audit's finding ids.
+
+**Import truth** (`rpcHandlers.ts` `importSavedPage`, `import/scraptfHtml.ts`, `import/reports.ts`).
+
+- **P3 schema gate.** Right after the enabled and window-off checks, `importSavedPage` throws
+  `IMPORT_SCHEMA_LOADING_MESSAGE` while `schema.isLoaded()` is false (a throwing `isLoaded` counts as not loaded),
+  for files and window reads: nothing is parsed or recorded, so no SKU from a half-loaded schema is ever stored.
+  The folder watch waits for the schema (Integration), and the window says so (F21 M2).
+- **ACT-4 unsettled.** `importParams` accepts `settled`; only origin 'window' with `settled === false` counts:
+  prices and the batch are stored, but not `insertBankStock`, `onImport`, the gone deletes or the flips.
+- **DM-2 partial look** (`partialLookWarning`) and the **P1** tie-in: see F18 deviation 11. The page warnings
+  `partial-read: N of ~M items on screen; read the page again once every card shows` and `no-stock-limit: N rows
+  with no readable stock, so this look stores no bank stock save` come first in `warnings`.
+- **DM-1, UX-2a, ACT-1 gone prices.** Inside the transaction, after `onImport`, only when the save wrote stock and
+  the bank is not 'list': this batch's 'gone' events delete the 'import' prices that pass `replaceable` and match the
+  event's SKU and `bankStockSpecialKey`, with the page's bank, observed before the save and not kept by this import.
+  Their SKUs go to `affected`, so the engine records the price as removed. Typed prices, list-tagged prices and other
+  banks' prices are never touched, and the events already skip first saves, out-of-order saves, the same file again
+  and copies another page of the bank still lists. DC-1: a card only a look that stored no save caught (partial or
+  unsettled) has no gone event, so on a one-page bank (not 'unusuals', whose no-save looks record no page) the page's
+  newest save also deletes the replaceable import prices of its bank observed after the page's previous save and before
+  this one, not kept and not on sale in this save (`noSaveLookPricesGone`; the table is scanned only when the bank's
+  newest look before this one, `Repo.bankNewestSaves`, came after that previous save).
+- **P1 /items stock.** `limitsIn` reads `title`, `data-original-title`, `data-bs-original-title`, `aria-label`,
+  then the bar's leaf elements (a bare integer pair, or 'n/m'), never the whole cell. A row of a table with an Item
+  Limits column that yields nothing warns `no-stock-limit` (a refusal) and is not a price; its list row keeps stock
+  null.
+- **P2 strange skins.** `skinQuality` (paintkit and wear set, whatever the class): with an effect quality 15, plus
+  `quality2` 11 when strange; strange without an effect quality 11 and no `quality2` (`15000;11;w2;pk14`); otherwise
+  15. An Unusual card with no effect stays 5 and is refused. DESIGN_BRIEF §3.3 describes this form.
+- **P7 layout.** `scanDocument` counts lookalikes (`data-defindex` + `data-title` elements that fail `isCard`, and
+  `tr[data-defindex]` without `data-quality`); with no cards, no rows and lookalikes, the page warns `layout-changed:
+  N item elements not recognised` instead of no-cards-saved or no-items. A table with headers but no 'Price to buy'
+  warns `no-price-column` and reads no price (each row warns `no-price`); name, pays and limits still go by their
+  headers, and headerless tables keep the old layout. A window read that imports nothing returns
+  `[WINDOW_NOTHING_TO_IMPORT, layout-changed …]` when the page had lookalikes.
+- **P5 skip reasons.** A skip's reason is its first refusal-coded warning, else its first warning, else the old
+  fallback; `SKIP_*` texts for the benign skips. Refused entries come first, then the list is cut at 500;
+  `skippedTotal` and `skippedCounts` (keyed by the benign reason text, else the warning code) count every skip.
+  Every result carries `stockSave`.
+- **UX-3, ACT-5, F21-2 page flips.** A window read that wrote a save calls `BankStock.pageFlips(bank, batchId)`
+  after `bankStockChanged`: `pageFlips` = its length, `topFlips` = the best 3 with schema names.
+- **P4 parser report.** `parseScrapTfHtml(html, schema, { diagnostics: true })` returns `diagnostics` (counts,
+  header columns, at most 200 whitelisted records of refused cards and rows, of cards with a guess or mismatch code,
+  and of lookalikes): defindex, filtered class tokens, the title only without a custom name, content lines without
+  gift, receipt, craft, tool or custom-description lines (any wording), the indicator and value attributes, the
+  limit attributes, the SKU and the item's warnings; never the nav, scripts, asset ids or avatars. `reports.ts`
+  keeps the newest `IMPORT_REPORT_RING` (20) in memory only (`scrubReportText` masks 9+ digit runs, links and control
+  characters and clips every text); refused parses and empty window reads are kept as counts only.
+  `'import.report' { limit? }` returns copies, newest first; the Import page's **Copy parser report** puts them on
+  the clipboard as JSON and sends nothing.
+
+**Bank stock and history** (`shared/bankStock.ts`, `domain/bankStock.ts`, `shared/scraptfHistory.ts`,
+`domain/scraptfHistory.ts`, `banks.ts`, `market.ts`): DM-3/CQ-1 thinning (F20 S1), CQ-2 session baseline and
+DM-5 staleness (F17), DM-7/CQ-3 one coverage source (F13, F15), UX-2b card flips (F15), DM-6 item history (F20 S3),
+ACT-6 old-save toasts (F17 S3), plus:
+
+- **DM-5 listed span.** The 'long-listed' filter and count, the 'listed' sort (`bankStockComparator(sort, dir,
+  now)`) and the Live market's "Listed > 24 h" (`marketListedSideMatches`) measure `lastSeenAt - listedSince` of one
+  run (`scraptfListedOf`, the copy seen last), not to now, so a page saved once 60 days ago is not "listed 60 days".
+  `BankStockRow.lastSeenAt` and `MarketRow.scraptfLastSeenAt` (`ScraptfHistory.listedFor`, wired in core; without
+  it the market falls back to the 'seen' link time) carry it; the dashboard says "last seen N ago" past 48 h.
+- **ACT-10 superseded flips.** `flip` stays true only on a copy's newest event of its sort while the copy is on sale
+  in its page's newest save: a price event is superseded by a later price or on-sale change, a 'stock' event by any
+  change (`ScraptfKeyState.priceSince`, `pricePrevAt`). Other qualifying events get `wasFlip: true`. Worked out from
+  the cached saves, never a query; while the saves cannot be read, events are left as they are.
+- **F21-9 reminder.** `scraptfResaveNotice(bank, lastSavedAt, now, window?)`: with the window on and acknowledged and
+  openLinksInWindow on, the body says to open the page in the Flip Desk window; the click still opens the static bank
+  page in the browser.
+- **Mock parity** (`mock.ts`, `mockData.ts`): lastSeenAt, baseline what's new and New badges, the 24 h New rule,
+  `wasFlip`, card flips from the stock page, Shopping's known fields, `skippedTotal`/`skippedCounts` keyed as the
+  service keys them, an `'import.report'` sample, and the window demo's best flip from the mock's own stock page.
+
+**Alerts and the buy loop** (`engine.ts`, `core.ts`, `shopping.ts`, `liveCheck.ts`): ACT-2, ACT-3, ACT-7 and ACT-8
+(Integration, Notifications), ACT-9 (Integration, shopping) and P3's folder-watch gate (Integration).
+
+**The window** (F21, package D): F21-1, F21-3, F21-4, F21-6, F21-7, F21-10, F21-11 and F21-12 (M1 to M3), ACT-4's
+flag, the toolbar's flips and Show flips (U1). Compliance (F21-8): `clear` is in the deferred-literal scan, a
+`deferredWindowOpens` scan flags `allowWindow`, `openOnScraptf(` and `'app.showBankStock'` inside any deferred call
+span in renderer files, and `windowKeyProblems` allows `pressKey` only from the two input listeners after their
+checks; synthetic proofs show each flags what it should.
+
+**Dashboard** (package E): `#/market/flips` (flips priced from a saved page, the 'seen' sort, newest first) and the
+banks header's "N flips on your saves, newest X ago · View all"; `ui.openBankStock` routes the dashboard to
+`#/banks/<bank>/stock/<flips|new>`, which the stock page applies once and replaces with `#/banks/<bank>/stock`;
+window-aware data-in (the 'window-only' setup state, "Open in Flip Desk window" on the list card and the stock page,
+`scraptfOpenedToast`'s read-on-load hint); first run leads with "Save scrap.tf/items once"; one boundary sentence
+(`SCRAPTF_BOUNDARY_SHORT`, "Flip Desk never loads scrap.tf on its own."); one bank-page opener in the drawer (UX-11);
+the import-off warning names the window; Record buy from a bank stock row books that exact copy at its listed price
+(`ItemMenuTarget.copy`, ACT-11; a gone row prefills no price); Shopping's "Your price · 3 h ago" and stale rule; the
+banks card's "Not in your save N ago: watch for restocks" (single-page banks only); the muted "was a flip" pill; the
+change feed's default of every kind but 'stock' (`DEFAULT_CHANGE_KINDS`, key `log.scraptfChanges.v2`, the 0.7.0 key read
+once by `changesViewFromLegacy`) and the drawer's separate price and stock lists; the Import page's skip totals and
+**Copy parser report**; `checkNotifyHint` naming the popup rule; the waiting folder watch as a muted note.
+
+**Tests.** Each package's own, plus `test/service/integration0_7_1.test.ts` (a gone card across the banks card,
+stock page, market, drawer, opps and Shopping; 450 window reads on 60 daily saves keeping history, "listed since",
+"Listed > 24 h" and the coverage of a bank saved before 510 newer batches) and
+`test/main/scraptfWindowWiring.integration.test.ts` (the window over the real core: schema loading, Show flips,
+an unsettled snapshot).
+
+**Known limits** (README): in the window each read re-dates the prices on screen, so
+a flip still listed past the repeat time can toast again; a page's first session compares with the save just before
+the newest; more than 300 manual reads of one page within 2 h drop the oldest of them without a 10-minute bucket.
 
 ## Conventions
 

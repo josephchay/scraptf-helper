@@ -195,13 +195,38 @@ describe('MarketQuery.listedOnScraptf ("Listed on scrap.tf > 24 h")', () => {
     expect(h.rows({ listedOnScraptf: true, newOnScraptf: true })).toEqual([]);
   });
 
-  it('moves with the clock: a row joins once it has been listed 24 h (the pass is keyed on the minute)', () => {
+  it('measures to the newest sighting, not the clock (0.7.1, DM-5): a save a day on joins a row, time alone never does', () => {
     const h = setup();
     seed(h.repo);
     h.build();
+    // The list was saved once, an hour ago: listed for 0 however long ago that save is.
     const before = T0 - HOUR + SCRAPTF_LONG_LISTED_MS - MIN;
     expect(h.rows({ listedOnScraptf: true }, before).map((r) => r.sku).sort()).toEqual(['126;6', '378;6']);
-    expect(h.rows({ listedOnScraptf: true }, before + MIN).map((r) => r.sku).sort()).toEqual(['126;6', '205;6', '378;6']);
+    expect(h.rows({ listedOnScraptf: true }, T0 + 30 * DAY).map((r) => r.sku).sort()).toEqual(['126;6', '378;6']);
+    expect(h.row('205;6')).toMatchObject({ scraptfListedSince: T0 - HOUR, scraptfLastSeenAt: T0 - HOUR });
+    // Saved again a minute short of a day later: still short. A minute on, listed for a day.
+    h.clock.advance(SCRAPTF_LONG_LISTED_MS);
+    save(h.repo, 'list', T0 - HOUR + SCRAPTF_LONG_LISTED_MS - MIN, [s('205;6', 20)]);
+    h.changed();
+    expect(h.rows({ listedOnScraptf: true }).map((r) => r.sku).sort()).toEqual(['126;6', '378;6']);
+    save(h.repo, 'list', T0 - HOUR + SCRAPTF_LONG_LISTED_MS, [s('205;6', 20)]);
+    h.changed();
+    expect(h.rows({ listedOnScraptf: true }).map((r) => r.sku).sort()).toEqual(['126;6', '205;6', '378;6']);
+  });
+
+  it('reads the run and its sighting from history.listedFor when wired (0.7.1)', () => {
+    let history!: ScraptfHistory;
+    const h = setup({
+      listedSinceFor: (b, bank) => history.listedSinceFor(b, bank),
+      listedFor: (b, bank) => history.listedFor(b, bank),
+      version: () => history.version(),
+    });
+    history = h.history;
+    seed(h.repo);
+    h.build();
+    expect(h.row('378;6')).toMatchObject({ scraptfListedSince: T0 - 3 * DAY, scraptfLastSeenAt: T0 - 10 * MIN });
+    expect(h.row('205;6')).toMatchObject({ scraptfListedSince: T0 - HOUR, scraptfLastSeenAt: T0 - HOUR });
+    expect(h.rows({ listedOnScraptf: true }, T0 + 30 * DAY).map((r) => r.sku).sort()).toEqual(['126;6', '378;6']);
   });
 
   it('re-filters its cached pass after a history refresh, and only then', () => {

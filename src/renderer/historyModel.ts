@@ -3,8 +3,10 @@
 // been listed, the 1 h / 24 h / 7 d / since-listed change chips, stock now and the last change events,
 // all from 'scraptf.itemHistory'. Every value comes from pages the user saved (R10); a save is a
 // snapshot, so nothing is claimed about the time between two saves. Nothing here loads scrap.tf (R1).
+// 0.7.1: price changes and stock moves are listed apart (DM-6), and a sighting long past reads as one (DM-5).
 
 import { bankStockPagePath } from '../shared/bankStock';
+import { SCRAPTF_BOUNDARY_SHORT } from '../shared/boundaryText';
 import { scraptfBankInfo } from '../shared/links';
 import { scraptfAgoText } from '../shared/scraptfHistory';
 import type { Scrap, ScraptfBank, ScraptfChangeEvent, ScraptfHistoryPoint, ScraptfItemHistory, ScraptfPriceChange, UnixMs } from '../shared/types';
@@ -13,8 +15,10 @@ import { DASH, fmtAgo, fmtDateTime, fmtInt, fmtMoney, type Tone } from './format
 
 /** The block re-reads at most this often on pushes ('scraptf.changed', 'prices.changed'). */
 export const HISTORY_REFRESH_MS = 2_000;
-/** Change events listed before "Show all". */
+/** Change events listed before "Show all" (price changes and stock moves each). */
 export const HISTORY_EVENTS_SHOWN = 5;
+/** DM-5: a newest sighting older than this reads "last on sale … ago", not as a listing still running. */
+export const HISTORY_LAST_SEEN_STALE_MS = 48 * 3_600_000;
 
 function finite(v: unknown): v is number {
   return typeof v === 'number' && Number.isFinite(v);
@@ -38,7 +42,9 @@ export interface HistoryLine {
 
 /**
  * "Listed since 2 d 4 h (since your save on Oct 14 09:12)" while the newest save lists it on sale; else
- * when it was last on sale. Null without a bank (the empty state says why).
+ * when it was last on sale. DM-5: a run whose newest sighting (lastSeenAt) is over HISTORY_LAST_SEEN_STALE_MS
+ * old reads "Last on sale 3 d ago …" instead, its span ending there. Null without a bank (the empty state
+ * says why).
  */
 export function historyListedLine(h: Pick<ScraptfItemHistory, 'bank' | 'listedSince' | 'lastSeenAt' | 'firstSeenAt'>, now: UnixMs): HistoryLine | null {
   const path = historyBankPath(h);
@@ -47,6 +53,16 @@ export function historyListedLine(h: Pick<ScraptfItemHistory, 'bank' | 'listedSi
   const gaps = ' What happened between two saves is unknown.';
   if (finite(h.listedSince)) {
     const since = Math.min(h.listedSince, now);
+    const last = finite(h.lastSeenAt) ? Math.max(since, Math.min(h.lastSeenAt, now)) : null;
+    if (last !== null && now - last > HISTORY_LAST_SEEN_STALE_MS) {
+      // A run of one save (a page saved once, long ago) has no span to name: "after 0 m listed" says nothing.
+      const span = last - since >= 60_000;
+      return {
+        text: `Last on sale ${fmtAgo(last, now)} (your save on ${fmtSaveTime(last)})${span ? `, after ${scraptfAgoText(last - since)} listed` : ''}`,
+        title: `${span ? `On sale on ${path} in every one of your saves of its page from ${fmtDateTime(h.listedSince)} to ${fmtDateTime(last)}` : `On sale on ${path} in your save of ${fmtDateTime(last)}`}; no newer save of it shows it, so it may be gone.${first}${gaps}`,
+        tone: 'muted',
+      };
+    }
     return {
       text: `Listed since ${scraptfAgoText(now - since)} (since your save on ${fmtSaveTime(h.listedSince)})`,
       title: `On sale on ${path} in every one of your saves of its page since ${fmtDateTime(h.listedSince)}.${first}${gaps}`,
@@ -283,6 +299,17 @@ export interface HistoryEventLine {
 }
 
 /**
+ * DM-6: the copy's events split into price changes (new, restocked, cheaper, pricier, gone) and stock moves
+ * (same price, another count), each newest first as sent, so a run of stock moves never buries a price drop.
+ */
+export function historyEventGroups(events: readonly ScraptfChangeEvent[]): { price: ScraptfChangeEvent[]; stock: ScraptfChangeEvent[] } {
+  const price: ScraptfChangeEvent[] = [];
+  const stock: ScraptfChangeEvent[] = [];
+  for (const e of Array.isArray(events) ? events : []) (e.kind === 'stock' ? stock : price).push(e);
+  return { price, stock };
+}
+
+/**
  * The copy's change events (newest first, as the service sends them), at most `max`. They cover every
  * bank that listed the copy, while the chart reads one (`chartBank`): a line from another bank names it.
  */
@@ -321,7 +348,7 @@ export function historyNote(h: Pick<ScraptfItemHistory, 'bank' | 'points'> | nul
   if (!h || h.bank === null) {
     return {
       title: 'Not in your saved scrap.tf pages yet',
-      body: 'Its scrap.tf price history starts with your first save of a bank page that lists it (Ctrl+S into your watch folder); every later save adds a point. The app never visits scrap.tf.',
+      body: `Its scrap.tf price history starts with your first save of a bank page that lists it (Ctrl+S into your watch folder, or a read in the Flip Desk window); every later save adds a point. ${SCRAPTF_BOUNDARY_SHORT}`,
     };
   }
   if (h.points.length <= 1) {

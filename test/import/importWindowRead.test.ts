@@ -7,7 +7,7 @@
 
 import { parse, serializeOuter } from 'parse5';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import type { Engine, Logger, Repo } from '../../src/service/contracts';
+import type { Engine, Logger, Repo, SchemaService } from '../../src/service/contracts';
 import { openRepo } from '../../src/service/db';
 import { createBankStock, type BankStock } from '../../src/service/domain/bankStock';
 import type { MarketEval } from '../../src/service/domain/market';
@@ -16,6 +16,7 @@ import { parseSavedPage, warningCode } from '../../src/service/import';
 import { createRpcHandlers, importSavedPage, recordSkippedImport, WINDOW_NOTHING_TO_IMPORT, type HandlerContext } from '../../src/service/rpcHandlers';
 import { DEFAULT_SETTINGS, mergeSettings } from '../../src/shared/defaults';
 import { SCRAPTF_BANKS, SCRAPTF_HOME_URL } from '../../src/shared/links';
+import { IMPORT_SCHEMA_LOADING_CODE, IMPORT_SCHEMA_LOADING_MESSAGE } from '../../src/shared/importCodes';
 import { SCRAPTF_WINDOW_OFF } from '../../src/shared/scraptfWindowPolicy';
 import type { ImportBatch, ImportOrigin, ImportResult, KeyPriceState, ScraptfBank } from '../../src/shared/types';
 import { fixture, mhtmlOf, withoutAddress } from './mhtmlFixture';
@@ -82,7 +83,7 @@ interface Harness {
   window(html: string, address: string, at: number): Promise<ImportResult>;
 }
 
-function setup(): Harness {
+function setup(schema: SchemaService = createStubSchema()): Harness {
   const repo = openRepo(':memory:');
   repos.push(repo);
   // The window's gates as the settings setter requires them: import on and acknowledged, the window's own acknowledgement.
@@ -107,7 +108,7 @@ function setup(): Harness {
     log,
     repo,
     http: {},
-    schema: createStubSchema(),
+    schema,
     engine: { keyPrice: () => KEY, markDirty: quiet } as unknown as Engine,
     settings: () => settings,
     push: (event: string, payload: unknown) => void pushes.push({ event, payload }),
@@ -136,9 +137,9 @@ function setup(): Harness {
   };
 }
 
-/** A result without what names or tells the save apart: its batch id, file name, origin and the window's flip count. */
+/** A result without what names or tells the save apart: its batch id, file name, origin and the window's flip counts. */
 function sans(r: ImportResult) {
-  const { batchId: _id, fileName: _name, origin: _origin, newFlips: _flips, ...rest } = r;
+  const { batchId: _id, fileName: _name, origin: _origin, newFlips: _flips, pageFlips: _pageFlips, topFlips: _topFlips, ...rest } = r;
   return rest;
 }
 
@@ -462,5 +463,102 @@ describe('a window read of a page with no items to import', () => {
     const h = setup();
     const off = { ...h.ctx, settings: () => DEFAULT_SETTINGS } as HandlerContext;
     expect(() => importSavedPage(off, { html: '<html></html>', fileName: 'scrap.tf window /', mtimeMs: NOW, address: SCRAPTF_HOME_URL, origin: 'window' })).toThrow(/turned off/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 0.7.1: what a window read stores must match what scrap.tf showed
+// ---------------------------------------------------------------------------
+
+describe('0.7.1: a window read of the live DOM (P1, P3, ACT-4)', () => {
+  it('reads the /items list after its tooltips ran exactly as before them: nothing new, nothing more stored (P1)', async () => {
+    const h = setup();
+    const first = await h.window(outerHtmlOf(fixture('items_list.html')), 'https://scrap.tf/items', NOW - 10 * MIN);
+    expect(first.stockSave).toBe('written');
+    // The same list a few minutes later, hovered: Bootstrap moved every bar's n/limit out of title.
+    const hovered = await h.window(outerHtmlOf(fixture('items_list_bs3.html')), 'https://scrap.tf/items', NOW - 5 * MIN);
+    expect(hovered).toMatchObject({ stored: first.stored, newFlips: 0, stockSave: 'written' });
+    expect(hovered.warnings.map(warningCode)).not.toContain('no-stock-limit');
+    expect(h.stock.whatsNew('list')).toMatchObject({ new: 0, newFlips: 0, gone: 0, cheaper: 0, pricier: 0 });
+    // The sold-out rows stay sold out: no price for them, no event.
+    expect(h.repo.listScrapPrices().some((p) => p.sku === '143;6')).toBe(false);
+    expect(h.repo.scraptfEvents()).toEqual([]);
+    const bs5 = await h.window(outerHtmlOf(fixture('items_list_bs5.html')), 'https://scrap.tf/items', NOW - MIN);
+    expect(bs5).toMatchObject({ stored: first.stored, newFlips: 0 });
+    expect(h.repo.scraptfEvents()).toEqual([]);
+  });
+
+  it('refuses every read while the item schema loads: the schema-loading code, no batch, no prices, no bank stock (P3)', async () => {
+    const h = setup(createStubSchema({ loaded: false }));
+    for (const read of [() => h.window(outerHtmlOf(HATS), HATS_URL, NOW - MIN), () => h.file(HATS, NOW - MIN)]) {
+      const msg = await read().then(
+        () => null,
+        (e: unknown) => (e as Error).message,
+      );
+      expect(msg).toBe(IMPORT_SCHEMA_LOADING_MESSAGE);
+      expect(msg).toContain(IMPORT_SCHEMA_LOADING_CODE);
+    }
+    expect(h.repo.listImportBatches(5)).toEqual([]);
+    expect(h.repo.listScrapPrices()).toEqual([]);
+    expect(h.repo.bankStockSaves('hats')).toEqual([]);
+    expect(h.pushes).toEqual([]);
+    // Nothing of the page in the log either.
+    expect(h.logs.join('\n')).not.toContain('/buy/hats');
+  });
+
+  it('an unsettled snapshot stores its prices and batch but no bank stock save and no events (ACT-4)', async () => {
+    const h = setup();
+    const before = await h.file(hatsWithoutC38(), NOW - HOUR);
+    h.pushes.length = 0;
+    const r = await h.rpc({ html: outerHtmlOf(HATS), fileName: 'scrap.tf window /buy/hats', mtimeMs: NOW - MIN, address: HATS_URL, origin: 'window', settled: false });
+    expect(r.stockSave).toBe('unsettled');
+    expect(r.batchId).toBeGreaterThan(0);
+    expect(r.stored).toBeGreaterThan(20);
+    expect(h.repo.listScrapPrices().filter((p) => p.importBatch === r.batchId)).toHaveLength(r.stored);
+    expect(h.repo.bankStockSaves('hats').map((s) => s.batchId)).toEqual([before.batchId]);
+    expect(h.repo.scraptfEvents()).toEqual([]);
+    expect(h.pushes.map((p) => p.event)).not.toContain('scraptf.changed');
+    for (const k of ['newFlips', 'pageFlips', 'topFlips'] as const) expect(k in r, k).toBe(false);
+    // The next settled read is compared with the file save before, as if the snapshot never was.
+    const settled = await h.window(outerHtmlOf(HATS), HATS_URL, NOW);
+    expect(settled.stockSave).toBe('written');
+    expect(h.stock.whatsNew('hats')).toMatchObject({ new: 1 });
+  });
+
+  it("only false counts, and only on a window read: true, absent or a file's flag store the save", async () => {
+    const h = setup();
+    const a = await h.rpc({ html: outerHtmlOf(HATS), fileName: 'scrap.tf window /buy/hats', mtimeMs: NOW - 2 * MIN, address: HATS_URL, origin: 'window', settled: true });
+    const b = await h.rpc({ html: HATS, fileName: 'hats.html', mtimeMs: NOW - MIN, settled: false });
+    expect([a.stockSave, b.stockSave]).toEqual(['written', 'written']);
+    const bad = await h.rpc({ html: HATS, fileName: 'hats.html', mtimeMs: NOW, settled: 'no' }).then(
+      () => null,
+      (e: unknown) => (e as Error).message,
+    );
+    expect(bad).toMatch(/^Invalid parameters for import\.html: settled/);
+  });
+
+  it('a window read that wrote a save carries the page flips and the best three, named from the item data (UX-3)', async () => {
+    const h = setup();
+    const r = await h.window(outerHtmlOf(HATS), HATS_URL, NOW - MIN);
+    expect(r.stockSave).toBe('written');
+    const flips = h.stock.pageFlips('hats', r.batchId);
+    expect(flips.length).toBeGreaterThan(3);
+    expect(r.pageFlips).toBe(flips.length);
+    expect(r.topFlips).toHaveLength(3);
+    const schema = createStubSchema();
+    expect(r.topFlips).toEqual(
+      flips.slice(0, 3).map((f) => ({ sku: f.sku, name: schema.nameForSku(f.sku), costScrap: f.costScrap, maxCostScrap: f.maxCostScrap, profitScrap: f.profitScrap })),
+    );
+    // A file's result is as before: no flips on it.
+    const f = await h.file(HATS, NOW);
+    expect('pageFlips' in f || 'topFlips' in f).toBe(false);
+  });
+
+  it("keeps a layout-changed warning beside nothing-to-import on a bank page whose cards are in a new shape (P7)", async () => {
+    const h = setup();
+    const r = await h.window(outerHtmlOf(HATS.replace(/\bapp440\b/g, 'app-440')), HATS_URL, NOW - MIN);
+    expect(r.batchId).toBe(0);
+    expect(r.warnings.map(warningCode)).toEqual(['nothing-to-import', 'layout-changed']);
+    expect(h.repo.listImportBatches(5)).toEqual([]);
   });
 });

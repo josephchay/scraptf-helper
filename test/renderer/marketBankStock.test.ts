@@ -128,7 +128,7 @@ describe('"New on scrap.tf" source filter (F17)', () => {
     expect(NEW_ON_SCRAPTF_LABEL).toBe('New on scrap.tf');
     expect(NEW_ON_SCRAPTF_HINT).toBe('since your previous save');
     expect(NEW_ON_SCRAPTF_TITLE).toMatch(/newest save of a scrap\.tf bank page/);
-    expect(NEW_ON_SCRAPTF_TITLE).toMatch(/the app never visits scrap\.tf\.$/);
+    expect(NEW_ON_SCRAPTF_TITLE).toMatch(/Flip Desk never loads scrap\.tf on its own\.$/);
   });
 
   it('the empty table tells the user to save the page again or untick it', () => {
@@ -185,7 +185,7 @@ describe('"New" badge (MarketRow.scraptfNewAt)', () => {
     expect(fresh.title).toContain('(this item or a copy of it with paint or other extras)');
     // The drawer's line (bankStockItemOf) can name a later save of another page: the tooltip warns.
     expect(fresh.title).toContain('newest save that lists this exact item, which can be another page');
-    expect(fresh.title).toMatch(/the app never visits scrap\.tf\.$/);
+    expect(fresh.title).toMatch(/Flip Desk never loads scrap\.tf on its own\.$/);
     expect(scraptfNewBadge({ scraptfNewAt: NOW - SCRAPTF_NEW_FRESH_MS }, NOW)!.tone).toBe('info');
     const old = scraptfNewBadge({ scraptfNewAt: NOW - SCRAPTF_NEW_FRESH_MS - 1 }, NOW)!;
     expect(old.tone).toBe('muted');
@@ -304,7 +304,7 @@ describe('the drawer\'s bank stock line (ItemDetail.bankStock)', () => {
     const t = drawerBankStockLine(stock({ change: 'new' }), KEY, NOW)!.title;
     expect(t).toMatch(/^From your saved copy of scrap\.tf\/buy\/hats \(/);
     expect(t).toContain('Stock between your saves is unknown.');
-    expect(t).toContain('The app never visits scrap.tf');
+    expect(t).toContain('Flip Desk never loads scrap.tf on its own');
   });
 
   it('shows nothing without a save that lists the item, or for a bank it does not know', () => {

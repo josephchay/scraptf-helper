@@ -7,9 +7,10 @@
 import { appendFileSync, existsSync, mkdirSync, readdirSync, rmSync, statSync } from 'node:fs';
 import path from 'node:path';
 import type { PushContract, PushEvent, RpcMethod } from '../shared/rpc';
+import { WATCH_WAITING_FOR_SCHEMA } from '../shared/scraptfList';
 import { baseSku as toBaseSku, looksLikeSku } from '../shared/sku';
-import type { AppStatus, ConnectorHealth, HealthReport, Listing, RequestLogRow, ScraptfBank, SecretName, Settings, UnixMs } from '../shared/types';
-import { SECRET_NAMES } from '../shared/types';
+import type { AppStatus, ConnectorHealth, HealthReport, JournalEntry, Listing, RequestLogRow, ScraptfBank, SecretName, Settings, UnixMs } from '../shared/types';
+import { HOLDING_EXIT_VENUES, SECRET_NAMES } from '../shared/types';
 import { createBptfApi } from './connectors/bptfApi';
 import { createBptfSocket, type SocketTimers } from './connectors/bptfSocket';
 import { META_LOAD_ALL_AT, createPriceDb, type PricedbSocketFactory } from './connectors/pricedb';
@@ -110,6 +111,12 @@ const OPP_LOG_PAGES_PER_FLUSH = 50;
 const FEED_TOMBSTONE_MS = 30 * 60_000;
 /** A dead or missing watch folder is tried again at most this often. */
 const WATCH_RETRY_MS = 60_000;
+/**
+ * P3: what the folder watch reports while the item schema has not loaded (scraptf.listStatus, the banks
+ * page, Data health). It starts once it has: a page read before then would store SKUs that change later.
+ * The text lives in shared/scraptfList.ts so the dashboard can tell it from a watch error.
+ */
+export { WATCH_WAITING_FOR_SCHEMA };
 /** Repo meta: the saved page the folder watch was importing, cleared when done; a leftover means it crashed the service. */
 export const META_WATCH_IMPORTING = 'import.watchImporting';
 /** Repo meta: hosts disabled after a challenge page, as JSON {host: reason}; cleared only by the user (R7). */
@@ -142,6 +149,33 @@ const HOST_JOBS: Readonly<Record<string, readonly string[]>> = {
   'pricedb.io': ['pricedb-all', 'key-pricedb'],
   'sku.pricedb.io': ['schema'],
 };
+
+/**
+ * ACT-7: a price the user typed or saved (the check popup's Save price, quick entry) this recently is one
+ * they have just judged, so the engine records it as told instead of toasting "Profit:" about it.
+ */
+export const USER_PRICE_TOLD_MS = 5 * 60_000;
+
+/**
+ * ACT-3: the newest scrap.tf buy per base SKU in the journal (side 'buy', venue 'scrap.tf' in any case),
+ * for EngineDeps.boughtSince. A row whose SKU cannot be read is skipped.
+ */
+export function newestScraptfBuys(entries: readonly Pick<JournalEntry, 'side' | 'venue' | 'sku' | 'ts'>[]): Map<string, UnixMs> {
+  const venue = HOLDING_EXIT_VENUES.scraptf;
+  const out = new Map<string, UnixMs>();
+  for (const e of entries) {
+    if (e.side !== 'buy' || typeof e.venue !== 'string' || e.venue.trim().toLowerCase() !== venue || !Number.isFinite(e.ts)) continue;
+    let base: string;
+    try {
+      base = toBaseSku(e.sku);
+    } catch {
+      continue;
+    }
+    const prev = out.get(base);
+    if (prev === undefined || e.ts > prev) out.set(base, e.ts);
+  }
+  return out;
+}
 
 export interface ServiceCoreOptions {
   dataDir: string;
@@ -452,6 +486,11 @@ export function createServiceCore(opts: ServiceCoreOptions): ServiceCore {
   // so the two do not loop. Rows load on first use; scraptfListChanged() re-reads them.
   const scraptfList = createScraptfListCache({ repo, log, keyPrice: () => engine.keyPrice() });
 
+  // ACT-3: the journal's newest scrap.tf buy per base, read on first use and again after journalChanged.
+  let scraptfBuys: Map<string, UnixMs> | null = null;
+  // ACT-8: each bank's newest whole look, read per bank on first use and again after an import or a prune.
+  let bankSaves: Map<ScraptfBank, UnixMs | null> | null = null;
+
   const engine = createEngine({
     ...deps,
     schema,
@@ -459,7 +498,29 @@ export function createServiceCore(opts: ServiceCoreOptions): ServiceCore {
     scraptfKey: () => scraptfList.keyRow(),
     // F17: an imported item a "New on scrap.tf" toast just named gets no second "Profit:" toast. Late-bound
     // (the notifier is built below); the engine asks only while it runs, after start().
-    toldElsewhere: (opp, at) => opp.inputKind === 'import' && newFlipNotifier.toldRecently(toBaseSku(opp.sku), at),
+    // ACT-7: nor does a price the user typed or saved from the check popup minutes ago (dated then, or new
+    // to the engine then: the popup dates a price from the saved list at the list's save time).
+    toldElsewhere: (opp, at) =>
+      (opp.inputKind === 'import' && newFlipNotifier.toldRecently(toBaseSku(opp.sku), at)) ||
+      (opp.inputKind === 'user' && at - opp.inputObservedAt < USER_PRICE_TOLD_MS) ||
+      (opp.inputKind === 'user' && at - opp.firstSeenAt < USER_PRICE_TOLD_MS),
+    // ACT-3: no toast for an item the user recorded buying on scrap.tf after its price was seen.
+    boughtSince: (base, at) => {
+      scraptfBuys ??= newestScraptfBuys(repo.listJournal());
+      const ts = scraptfBuys.get(base);
+      return ts !== undefined && ts >= at;
+    },
+    // ACT-8: when each bank page was last seen whole, i.e. its newest bank stock save. Not
+    // repo.bankNewestSaves: a partial look (DM-2) or an unsettled window snapshot (ACT-4) records a batch
+    // with cards but no bank stock save, and the cards it missed may well be on the page.
+    recentBankSaveAt: (bank) => {
+      bankSaves ??= new Map();
+      if (!bankSaves.has(bank)) {
+        const newest = repo.bankStockSaves(bank, 1)[0];
+        bankSaves.set(bank, newest !== undefined && newest.items > 0 ? newest.savedAt : null);
+      }
+      return bankSaves.get(bank) ?? null;
+    },
     // ...and the other way round: an imported item the engine toasted first (an import held for the
     // market's first build at start-up) gets no second "New on scrap.tf" toast. Late-bound the same way.
     notified: (opps, at) => {
@@ -519,6 +580,8 @@ export function createServiceCore(opts: ServiceCoreOptions): ServiceCore {
     // the same way (the history reads market.entryFor).
     history: {
       listedSinceFor: (base, bank) => scraptfHistory.listedSinceFor(base, bank),
+      // 0.7.1 (DM-5): the run's newest sighting too, so "Listed > 24 h" measures between saves, not to now.
+      listedFor: (base, bank) => scraptfHistory.listedFor(base, bank),
       version: () => scraptfHistory.version(),
     },
   });
@@ -616,6 +679,7 @@ export function createServiceCore(opts: ServiceCoreOptions): ServiceCore {
    * judge the new save against its predecessor, then the banks page hears of it.
    */
   const bankStockChanged = (imported?: { bank: ScraptfBank; batchId: number }): void => {
+    bankSaves = null;
     bankStock.refresh();
     // F20: the runs index reads the same saves (a new one, or thinned ones gone).
     scraptfHistory.refresh();
@@ -802,7 +866,23 @@ export function createServiceCore(opts: ServiceCoreOptions): ServiceCore {
   /** When syncFolderWatch last looked at the folder, and whether it was missing then (warn once, not every retry). */
   let watchCheckedAt = 0;
   let watchFolderMissing = false;
+  /** P3: the folder is there but the item schema is not loaded yet, so the watch has not started (logged once). */
+  let watchWaitingForSchema = false;
+  /**
+   * DC-4: the catch-up start, fixed when the watch began waiting. An import between the schema loading and
+   * the tick that starts the watch (a window read, a page picked by hand) must not move it past the pages
+   * saved meanwhile, or while the app was closed.
+   */
+  let watchWaitingSince: UnixMs | null = null;
+  const catchUpSince = (): UnixMs | null => repo.listImportBatches(1)[0]?.importedAt ?? settings.import.acknowledgedAt;
   const importAllowed = (): boolean => settings.import.enabled && settings.import.acknowledgedAt !== null;
+  const schemaLoaded = (): boolean => {
+    try {
+      return schema.isLoaded();
+    } catch {
+      return false;
+    }
+  };
 
   /**
    * Imports one file from the watch folder. A marker in the repo names the file
@@ -885,9 +965,19 @@ export function createServiceCore(opts: ServiceCoreOptions): ServiceCore {
       watcher = null;
       log.info(dead ? 'saved-page folder watch stopped after an error' : 'saved-page folder watch stopped');
     }
-    if (ok && folder && !watcher) {
-      const last = repo.listImportBatches(1)[0]?.importedAt ?? null;
-      const since = last ?? settings.import.acknowledgedAt;
+    // P3: a page imported before the item schema loads would be stored under SKUs that change once it has.
+    // The status tick starts the watch once it has loaded, and its catch-up scan (since the last import
+    // before it began waiting, watchWaitingSince) picks up the pages saved meanwhile.
+    const waiting = ok && !watcher && !schemaLoaded();
+    if (waiting && !watchWaitingForSchema) {
+      log.info('saved-page folder watch waits for the item data to load');
+      watchWaitingSince = catchUpSince();
+    }
+    watchWaitingForSchema = waiting;
+    if (!ok) watchWaitingSince = null;
+    if (ok && folder && !watcher && !waiting) {
+      const since = watchWaitingSince ?? catchUpSince();
+      watchWaitingSince = null;
       watcher = {
         folder,
         handle: createFolderWatcher({
@@ -911,8 +1001,13 @@ export function createServiceCore(opts: ServiceCoreOptions): ServiceCore {
       return { active: alive, error: alive ? null : (watcher.handle.lastError() ?? 'Watching the folder stopped after an error; trying again every minute') };
     }
     // Same wording as the Data health page's folder-watch row.
-    return { active: false, error: importAllowed() && settings.import.watchFolder ? 'Folder not found' : null };
+    return { active: false, error: importAllowed() && settings.import.watchFolder ? folderWatchOffReason() : null };
   };
+
+  /** Why a chosen folder is not watched: the folder is gone, or (P3) the item schema has not loaded yet. */
+  function folderWatchOffReason(): string {
+    return !watchFolderMissing && !schemaLoaded() ? WATCH_WAITING_FOR_SCHEMA : 'Folder not found';
+  }
 
   /**
    * F15: the banks summary reads watchActive live, and the watch dies or comes back (the retry below)
@@ -925,11 +1020,15 @@ export function createServiceCore(opts: ServiceCoreOptions): ServiceCore {
     banksWatchActive = active;
   };
 
-  /** Status tick: a watch that failed, or a folder that was missing, is tried again about once a minute. */
+  /**
+   * Status tick: a watch that failed, or a folder that was missing, is tried again about once a minute;
+   * a watch held back for the item schema (P3) starts on the first tick after it has loaded.
+   */
   const retryFolderWatch = (): void => {
     if (!started || !importAllowed() || !settings.import.watchFolder) return;
     if (watcher !== null && watcher.handle.alive()) return;
-    if (clock.now() - watchCheckedAt < WATCH_RETRY_MS) return;
+    const schemaNowLoaded = watchWaitingForSchema && schemaLoaded();
+    if (!schemaNowLoaded && clock.now() - watchCheckedAt < WATCH_RETRY_MS) return;
     try {
       syncFolderWatch();
     } catch (err) {
@@ -1006,7 +1105,7 @@ export function createServiceCore(opts: ServiceCoreOptions): ServiceCore {
           : !importAllowed()
             ? 'Import is off (Settings)'
             : settings.import.watchFolder
-              ? 'Folder not found'
+              ? folderWatchOffReason()
               : 'No folder chosen',
         lastOkAt: null,
         lastErrorAt: null,
@@ -1069,6 +1168,8 @@ export function createServiceCore(opts: ServiceCoreOptions): ServiceCore {
     health: computeHealth,
     pricesChanged: () => {
       watched = null;
+      // ACT-8: every import calls this, so the engine dates the bank saves afresh on its next run.
+      bankSaves = null;
       // Every price and rule write: the Live market re-reads the user's side only (no rebuild).
       market.pricesChanged();
       scheduleStatusCheck();
@@ -1080,6 +1181,8 @@ export function createServiceCore(opts: ServiceCoreOptions): ServiceCore {
     journalChanged: () => {
       // Held SKUs join or leave the watch list; holdings re-read the journal.
       watched = null;
+      // ACT-3: a buy recorded or undone changes which toasts the engine holds back.
+      scraptfBuys = null;
       holdings.journalChanged();
       push('journal.changed', { at: clock.now() });
     },

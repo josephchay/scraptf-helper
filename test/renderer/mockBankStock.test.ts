@@ -169,9 +169,11 @@ describe('the bank stock elsewhere', () => {
     await b.rpc('import.pickFile', undefined);
     expect(pushes.length).toBeGreaterThan(at);
     const after = await stock(b, 'hats');
-    expect(after).toMatchObject({ saves: BANK_STOCK_KEEP_SAVES, savedAt: T0 - 30_000, previousSavedAt: before.savedAt });
+    // 0.7.1 (CQ-2): 3.5 minutes after the newest save, in its session, so the changes stay since the save
+    // before that session (the service's rule, bankStockBaselineOf).
+    expect(after).toMatchObject({ saves: BANK_STOCK_KEEP_SAVES, savedAt: T0 - 30_000, previousSavedAt: before.previousSavedAt });
     expect(after.counts.gone).toBeGreaterThan(0);
     const banks = new Map((await b.rpc('scraptf.banks', undefined)).banks.map((x) => [x.bank, x]));
-    expect(banks.get('hats')!.whatsNew!.since).toBe(before.savedAt);
+    expect(banks.get('hats')!.whatsNew!.since).toBe(before.previousSavedAt);
   });
 });

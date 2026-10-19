@@ -1,7 +1,10 @@
+import { SCRAPTF_BOUNDARY_SHORT } from '../../shared/boundaryText';
 import type { SetupCode } from '../../shared/types';
 import { rpc } from '../api';
 import { useApp } from '../hooks/appContext';
 import { usePersistentState } from '../hooks/usePersistentState';
+import { firstPriceText } from '../scraptfListModel';
+import { scraptfWindowOn } from '../scraptfWindowModel';
 import { Icon } from './Icon';
 
 interface Step {
@@ -11,9 +14,12 @@ interface Step {
   actions: { label: string; run: () => void }[];
 }
 
-/** First-run checklist, shown while status.setupNeeded is non-empty. */
+/**
+ * First-run checklist, shown while status.setupNeeded is non-empty. UX-4: the first price leads with one
+ * save of scrap.tf/items (the Import page's price-list card), typing stays as the other way.
+ */
 export function SetupChecklist() {
-  const { status, navigate, toast } = useApp();
+  const { status, settings, navigate, toast } = useApp();
   const [dismissedKey, setDismissedKey] = usePersistentState<string>('setup.dismissed', '', (v) => (typeof v === 'string' ? v : ''));
   const needed = status?.setupNeeded ?? [];
   const key = [...needed].sort().join(',');
@@ -44,9 +50,10 @@ export function SetupChecklist() {
     },
     {
       code: 'first-price',
-      title: 'Add your first scrap.tf price',
-      body: 'Browse scrap.tf yourself and type a price you see, or add a price-sheet rule for a whole category.',
+      title: 'Add your first scrap.tf prices',
+      body: `${firstPriceText(scraptfWindowOn(settings))} Or type a price you see, or add a price-sheet rule for a whole category.`,
       actions: [
+        { label: 'Save scrap.tf/items', run: () => navigate('import') },
         { label: 'Quick entry', run: openQuick },
         { label: 'Price sheet', run: () => navigate('prices') },
       ],
@@ -61,7 +68,7 @@ export function SetupChecklist() {
         <div>
           <h2 id="setup-title">Get set up</h2>
           <p className="muted">
-            {doneCount} of {steps.length} done. The app only reads public APIs and never fetches scrap.tf itself.
+            {doneCount} of {steps.length} done. The app only reads public APIs. {SCRAPTF_BOUNDARY_SHORT}
           </p>
         </div>
         <button type="button" className="btn ghost small" onClick={() => setDismissedKey(key)}>

@@ -61,7 +61,7 @@ describe('line 1: the scrap.tf price', () => {
     expect(line).toMatchObject({ price: '1 key 5.33 ref', source: 'copied', stock: '3/12', full: false, outOfStock: false });
     expect(line.pays).not.toBeNull();
     expect(line.title).toContain('from the text you copied');
-    expect(line.title).toContain('The app never visits scrap.tf.');
+    expect(line.title).toContain('Flip Desk never loads scrap.tf on its own.');
   });
 
   it('names the saved list with its age, a typed price as yours, an import with its age', () => {

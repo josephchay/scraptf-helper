@@ -4,13 +4,16 @@
 // up to the cap), and the words of one change ("1.33 → 1.22 ref (−8 %)", the Flip pill). Pure; nothing
 // here touches the network or scrap.tf, and no change ever yields a URL.
 
+import { readFileSync } from 'node:fs';
 import { describe, expect, it, vi } from 'vitest';
 import {
   CHANGE_BANK_OPTIONS,
   CHANGE_KIND_LABELS,
   CHANGE_KIND_OPTIONS,
+  CHANGES_LEGACY_PREF_KEY,
   CHANGES_MAX_KEPT,
   CHANGES_PAGE,
+  CHANGES_PREF_KEY,
   DEFAULT_CHANGES_VIEW,
   LOG_CHANGES_ROUTE,
   LOG_TABS,
@@ -23,7 +26,9 @@ import {
   changesEmptyText,
   changesExportQuery,
   changesFilterCount,
+  changesKindsAreDefault,
   changesQueryOf,
+  changesViewFromLegacy,
   changesViewKey,
   createChangesFeed,
   fetchChangesAfter,
@@ -36,6 +41,7 @@ import {
   olderChangesLimit,
   sanitizeChangesView,
   type ChangesFeedState,
+  type ChangesView,
 } from '../../src/renderer/changesModel';
 import { SCRAPTF_BANKS } from '../../src/shared/links';
 import { SCRAPTF_CHANGES_DEFAULT_LIMIT } from '../../src/shared/scraptfHistory';
@@ -93,11 +99,23 @@ describe('the Live log tabs', () => {
   });
 });
 
+/** The user's "Show every change": no kind filter at all (stock moves included). */
+const EVERY_KIND: ChangesView = { bank: '', kinds: [] };
+
 describe('the view, remembered', () => {
   it('reads anything from storage back as a valid view, kinds in the shared order', () => {
     for (const bad of [null, undefined, 3, 'x', [], { bank: 'moon', kinds: 'new' }, { kinds: [1, null, 'sold'] }]) {
       expect(sanitizeChangesView(bad), JSON.stringify(bad)).toEqual(DEFAULT_CHANGES_VIEW);
     }
+    // DM-6: the default is every kind but stock moves; a saved choice is kept, "every kind" ([]) included.
+    expect(DEFAULT_CHANGES_VIEW.kinds).toEqual(SCRAPTF_CHANGE_KINDS.filter((k) => k !== 'stock'));
+    expect(DEFAULT_CHANGES_VIEW.kinds).not.toContain('stock');
+    expect(sanitizeChangesView({ bank: '', kinds: [] })).toEqual(EVERY_KIND);
+    expect(sanitizeChangesView({ bank: 'hats' })).toEqual({ bank: 'hats', kinds: DEFAULT_CHANGES_VIEW.kinds });
+    expect(sanitizeChangesView({ kinds: ['stock'] })).toEqual({ bank: '', kinds: ['stock'] });
+    expect(changesKindsAreDefault(DEFAULT_CHANGES_VIEW.kinds)).toBe(true);
+    expect(changesKindsAreDefault(['new'])).toBe(false);
+    expect(changesKindsAreDefault([])).toBe(false);
     expect(sanitizeChangesView({ bank: 'unusuals', kinds: ['gone', 'new', 'gone', 'x'] })).toEqual({ bank: 'unusuals', kinds: ['new', 'gone'] });
     // Every kind ticked stays ticked; the query leaves such a filter out.
     const all = sanitizeChangesView({ kinds: [...SCRAPTF_CHANGE_KINDS].reverse() });
@@ -106,8 +124,27 @@ describe('the view, remembered', () => {
     expect(changesFilterCount(all)).toBe(0);
   });
 
+  it("DM-6: 0.7.0's remembered default is no choice: the feed starts without stock moves, keeping a real choice", () => {
+    // 0.7.0 wrote its default under the old key on the tab's first render; kept as "every kind" it would
+    // leave stock moves on screen for everyone who ever opened the tab.
+    expect(CHANGES_PREF_KEY).not.toBe(CHANGES_LEGACY_PREF_KEY);
+    expect(CHANGES_LEGACY_PREF_KEY).toBe('log.scraptfChanges');
+    expect(changesViewFromLegacy({ bank: '', kinds: [] })).toEqual(DEFAULT_CHANGES_VIEW);
+    expect(changesViewFromLegacy(null)).toEqual(DEFAULT_CHANGES_VIEW);
+    expect(changesViewFromLegacy('junk')).toEqual(DEFAULT_CHANGES_VIEW);
+    // Its bank and kinds the user picked carry over.
+    expect(changesViewFromLegacy({ bank: 'hats', kinds: [] })).toEqual({ bank: 'hats', kinds: DEFAULT_CHANGES_VIEW.kinds });
+    expect(changesViewFromLegacy({ bank: 'weapons', kinds: ['stock', 'gone'] })).toEqual({ bank: 'weapons', kinds: ['gone', 'stock'] });
+    // The tab starts from it only while the new key holds nothing, and remembers under the new key.
+    const page = readFileSync(new URL('../../src/renderer/pages/LogPage.tsx', import.meta.url), 'utf8');
+    expect(page).toContain('changesViewFromLegacy(readPref<unknown>(CHANGES_LEGACY_PREF_KEY, null))');
+    expect(page).toContain('usePersistentState<ChangesView>(CHANGES_PREF_KEY, fromLegacy, sanitizeChangesView)');
+  });
+
   it("builds 'scraptf.changes' params: bank and kinds only when set, beforeId for older pages, limit clamped", () => {
-    expect(changesQueryOf(DEFAULT_CHANGES_VIEW)).toEqual({ limit: CHANGES_PAGE });
+    expect(changesQueryOf(EVERY_KIND)).toEqual({ limit: CHANGES_PAGE });
+    // The default view asks for every kind but stock moves.
+    expect(changesQueryOf(DEFAULT_CHANGES_VIEW)).toEqual({ kinds: SCRAPTF_CHANGE_KINDS.filter((k) => k !== 'stock'), limit: CHANGES_PAGE });
     expect(CHANGES_PAGE).toBe(SCRAPTF_CHANGES_DEFAULT_LIMIT);
     expect(changesQueryOf({ bank: 'hats', kinds: ['pricier', 'cheaper'] }, 812, 50)).toEqual({ bank: 'hats', kinds: ['cheaper', 'pricier'], beforeId: 812, limit: 50 });
     expect(changesQueryOf(DEFAULT_CHANGES_VIEW, 0).beforeId).toBeUndefined();
@@ -220,7 +257,7 @@ describe('createChangesFeed', () => {
 
   it('a refresh merges what arrived since the newest shown; a burst of pushes costs at most two reads', async () => {
     const t = harness({ page: 3 });
-    t.feed.load(DEFAULT_CHANGES_VIEW);
+    t.feed.load(EVERY_KIND);
     // Before the first answer the newest is on its way: nothing more to read.
     t.feed.refresh();
     expect(t.calls).toHaveLength(1);
@@ -246,7 +283,7 @@ describe('createChangesFeed', () => {
 
   it('a refresh that finds more than the cap replaces the list, so it has no hole', async () => {
     const t = harness({ page: 2, maxKept: 4 });
-    t.feed.load(DEFAULT_CHANGES_VIEW);
+    t.feed.load(EVERY_KIND);
     t.calls[0]!.d.resolve([ev({ id: 2 }), ev({ id: 1 })]);
     await flush();
     t.feed.refresh();
@@ -261,7 +298,7 @@ describe('createChangesFeed', () => {
   // F20-UIPERF-3: the footer read "That is every change kept" although the cap had cut events off.
   it('a refresh that pushes the list past the cap leaves "Load older" possible: the oldest are still in the feed', async () => {
     const t = harness({ page: 2, maxKept: 4 });
-    t.feed.load(DEFAULT_CHANGES_VIEW);
+    t.feed.load(EVERY_KIND);
     t.calls[0]!.d.resolve([ev({ id: 3 }), ev({ id: 2 })]);
     await flush();
     t.feed.older();
@@ -283,7 +320,7 @@ describe('createChangesFeed', () => {
 
   it('a refresh that re-reads events already shown, and cuts nothing, keeps "That is every change kept"', async () => {
     const t = harness({ page: 2, maxKept: 10 });
-    t.feed.load(DEFAULT_CHANGES_VIEW);
+    t.feed.load(EVERY_KIND);
     t.calls[0]!.d.resolve([ev({ id: 3 }), ev({ id: 2 })]);
     await flush();
     t.feed.older();
@@ -299,7 +336,7 @@ describe('createChangesFeed', () => {
 
   it('"Load older" answered after a refresh that filled the list keeps older events reachable', async () => {
     const t = harness({ page: 2, maxKept: 4 });
-    t.feed.load(DEFAULT_CHANGES_VIEW);
+    t.feed.load(EVERY_KIND);
     t.calls[0]!.d.resolve([ev({ id: 4 }), ev({ id: 3 })]);
     await flush();
     t.feed.older();
@@ -355,7 +392,7 @@ describe('createChangesFeed', () => {
 
   it('a re-value never adds an event, reads at most the rows shown, pages by 500, and runs once more after a burst', async () => {
     const t = harness({ page: 500, maxKept: 2000 });
-    t.feed.load(DEFAULT_CHANGES_VIEW);
+    t.feed.load(EVERY_KIND);
     t.calls[0]!.d.resolve(Array.from({ length: 500 }, (_, i) => ev({ id: 1000 - i })));
     await flush();
     t.feed.older();
@@ -384,7 +421,7 @@ describe('createChangesFeed', () => {
 
   it('a re-value of a view the user has left is dropped; a failed one keeps the values shown', async () => {
     const t = harness({ page: 2 });
-    t.feed.load(DEFAULT_CHANGES_VIEW);
+    t.feed.load(EVERY_KIND);
     t.feed.revalue(2);
     // Nothing to value before the first answer.
     expect(t.calls).toHaveLength(1);
@@ -422,13 +459,13 @@ describe('createChangesFeed', () => {
     t.calls[2]!.d.resolve([ev({ id: 3 })]);
     await flush();
     expect(t.states).toHaveLength(before);
-    t.feed.load(DEFAULT_CHANGES_VIEW);
+    t.feed.load(EVERY_KIND);
     expect(t.calls).toHaveLength(3);
   });
 
   it('a failed first read says why; a failed refresh keeps the list and marks it stale; a failed "Load older" reports', async () => {
     const t = harness({ page: 1 });
-    t.feed.load(DEFAULT_CHANGES_VIEW);
+    t.feed.load(EVERY_KIND);
     t.calls[0]!.d.reject(new Error('The background service is restarting.'));
     await flush();
     expect(t.last()).toMatchObject({ loading: false, error: 'The background service is restarting.', events: [] });
@@ -461,7 +498,7 @@ describe('createChangesFeed', () => {
       },
       (s) => states.push(s),
     );
-    feed.load(DEFAULT_CHANGES_VIEW);
+    feed.load(EVERY_KIND);
     for (let i = 0; i < 5; i++) await Promise.resolve();
     expect(states[states.length - 1]).toMatchObject({ loading: false, error: 'bridge missing' });
   });
@@ -535,9 +572,25 @@ describe('the words of one change', () => {
     expect(JSON.stringify(v)).not.toMatch(/https?:/);
   });
 
+  it('a superseded flip keeps a muted "was a flip", never the green Flip (ACT-10)', () => {
+    const was = changeRowView(ev({ flip: false, wasFlip: true }), K, NOW);
+    expect(was.flip).toBeNull();
+    expect(was.wasFlip).toMatchObject({ text: 'was a flip' });
+    expect(was.wasFlip!.title).toContain('a later save of scrap.tf/buy/hats changed this copy again or no longer lists it on sale');
+    // A flip now wins; without the field (an older service), nothing.
+    expect(changeRowView(ev({ flip: true, wasFlip: true }), K, NOW).wasFlip).toBeNull();
+    expect(changeRowView(ev({ flip: false }), K, NOW).wasFlip).toBeNull();
+    const page = readFileSync(new URL('../../src/renderer/pages/LogPage.tsx', import.meta.url), 'utf8');
+    expect(page).toContain('<span className="pill tone-muted stf-feed-flip stf-feed-was-flip" title={v.wasFlip.title}>');
+  });
+
   it('the empty list says why', () => {
     expect(changesEmptyText(DEFAULT_CHANGES_VIEW)).toMatchObject({ title: 'No scrap.tf changes yet', filtered: false });
-    expect(changesEmptyText(DEFAULT_CHANGES_VIEW).body).toContain('The app never visits scrap.tf.');
+    expect(changesEmptyText(EVERY_KIND)).toMatchObject({ title: 'No scrap.tf changes yet', filtered: false });
+    expect(changesEmptyText(DEFAULT_CHANGES_VIEW).body).toContain('Flip Desk never loads scrap.tf on its own.');
+    expect(changesEmptyText(DEFAULT_CHANGES_VIEW).body).toContain('stock moves show when you tick Stock');
+    // A bank picked with the default kinds is a filter of the user's.
+    expect(changesEmptyText({ ...DEFAULT_CHANGES_VIEW, bank: 'hats' }).filtered).toBe(true);
     const f = changesEmptyText({ bank: 'hats', kinds: ['gone'] });
     expect(f).toMatchObject({ title: 'No changes match these filters', filtered: true });
     expect(f.body).toBe('Nothing of these kinds changed on scrap.tf/buy/hats between your saves. Show every change to see the rest.');

@@ -3,7 +3,10 @@
 // dialog values it back to exactly that amount. Pure; the dialog itself is unchanged.
 
 import { describe, expect, it } from 'vitest';
-import { initialPriceText, initialTradeForm, splitAtKey, typedPrice } from '../../src/renderer/recordTradeModel';
+import { bankStockBuyCopy } from '../../src/renderer/bankStockModel';
+import { recordTradeInit } from '../../src/renderer/itemMenuModel';
+import { checkTrade, initialPriceText, initialTradeForm, splitAtKey, typedPrice } from '../../src/renderer/recordTradeModel';
+import type { BankStockRow } from '../../src/shared/types';
 
 const KEY = 568;
 const T0 = Date.UTC(2026, 9, 15, 12, 0, 0);
@@ -35,5 +38,37 @@ describe('splitAtKey', () => {
       expect(typedPrice(form, KEY).value).toBe(v);
     }
     expect(initialPriceText(splitAtKey(KEY + 48, KEY))).toBe('1 key 5.33 ref');
+  });
+});
+
+describe('Record buy from a bank stock row (ACT-11)', () => {
+  const PAINT = 15185211;
+  const painted = {
+    sku: '378;6',
+    key: `378;6|${JSON.stringify([PAINT, [], [], null, null, false, false])}`,
+    costKeys: 2,
+    costScrapRaw: 30,
+    change: null,
+  } satisfies Pick<BankStockRow, 'sku' | 'key' | 'costKeys' | 'costScrapRaw' | 'change'>;
+  const detail = { name: 'Team Captain', scrapPrices: [], revenue: null, buyOrders: [] };
+
+  it('a painted row prefills the painted SKU and the row price, keys and metal as listed', () => {
+    const init = recordTradeInit('buy', { sku: '378;6', name: 'Team Captain', copy: bankStockBuyCopy(painted, 'hats') }, detail, { useOrder: 'conservative' } as never, T0);
+    expect(init).toMatchObject({ side: 'buy', sku: `378;6;p${PAINT}`, venue: 'scrap.tf', keys: 2, scrap: 30 });
+    const form = initialTradeForm(init, T0);
+    expect(form.text).toBe('2 keys 3.33 ref');
+    expect(form.note).toBe('from your save of scrap.tf/buy/hats (Paint: Australium Gold)');
+    // The journal books exactly that copy and price.
+    const checked = checkTrade(form, { sku: init.sku, name: init.name }, T0);
+    expect(checked.ok).toBe(true);
+    if (checked.ok) expect(checked.input).toMatchObject({ sku: `378;6;p${PAINT}`, side: 'buy', keys: 2, scrap: 30 });
+  });
+
+  it('a gone row prefills no price, and its note gives the last one', () => {
+    const init = recordTradeInit('buy', { sku: '378;6', name: 'Team Captain', copy: bankStockBuyCopy({ ...painted, change: 'gone' }, 'hats') }, detail, { useOrder: 'conservative' } as never, T0);
+    expect(init.keys).toBeUndefined();
+    expect(init.scrap).toBeUndefined();
+    expect(initialTradeForm(init, T0).text).toBe('');
+    expect(init.note).toBe('last price 2 keys 3.33 ref in your save of scrap.tf/buy/hats, gone from your newest save (Paint: Australium Gold)');
   });
 });

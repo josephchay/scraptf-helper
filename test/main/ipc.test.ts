@@ -3,10 +3,12 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it, vi } from 'vitest';
 import {
   createRpcRouter,
+  IMPORT_HTML_ORIGIN_REFUSAL,
   isKnownMethod,
   PICK_PAGE_REFUSAL,
   registerRpcHandler,
   senderUrlOf,
+  SHOW_BANK_STOCK_UNAVAILABLE,
   withCsvExtension,
   type MainRpcDeps,
   type RpcCallContext,
@@ -39,6 +41,7 @@ function makeDeps(overrides: Partial<MainRpcDeps> = {}) {
     service: { callRaw: vi.fn(async (method: string, params: unknown) => ({ forwarded: method, params })) },
     showQuickEntry: vi.fn(),
     openItemInDashboard: vi.fn(),
+    showBankStock: vi.fn(),
     appInfo: vi.fn(() => ({ version: '0.1.0', dataDir: 'd', logDir: 'l', platform: 'win32', electron: '44', node: '24' })),
     serviceState: vi.fn((): ReturnType<MainRpcDeps['serviceState']> => null),
     hotkeys: vi.fn(
@@ -177,6 +180,57 @@ describe('main methods', () => {
     await expect(route(ctx(), 'app.openItem', { sku: 'javascript:alert(1)' })).rejects.toThrow(/Invalid parameters/);
     await expect(route(ctx(), 'app.openItem', {})).rejects.toThrow(/Invalid parameters/);
     expect(deps.openItemInDashboard).toHaveBeenCalledTimes(1);
+  });
+
+  it('app.showBankStock (0.7.1) shows the dashboard on a known bank and chip, with fixed-text refusals', async () => {
+    const { deps } = makeDeps();
+    const route = createRpcRouter(deps);
+    expect(MAIN_METHODS).toContain('app.showBankStock');
+    expect(SERVICE_METHODS).not.toContain('app.showBankStock');
+    await expect(route(ctx(), 'app.showBankStock', { bank: 'hats', filter: 'flips' })).resolves.toEqual({ ok: true });
+    await expect(route(ctx(), 'app.showBankStock', { bank: 'list', filter: 'new' })).resolves.toEqual({ ok: true });
+    expect(deps.showBankStock.mock.calls).toEqual([
+      ['hats', 'flips'],
+      ['list', 'new'],
+    ]);
+    const bad: unknown[] = [
+      { bank: '<img src=x>', filter: 'flips' },
+      { bank: '__proto__', filter: 'new' },
+      { bank: 'HATS', filter: 'flips' },
+      { bank: 'hats', filter: 'gone' },
+      { bank: 'hats' },
+      { filter: 'flips' },
+      {},
+      null,
+      undefined,
+      'hats',
+    ];
+    for (const params of bad) {
+      const err = await route(ctx(), 'app.showBankStock', params).then(
+        () => null,
+        (e: Error) => e.message,
+      );
+      expect(err, JSON.stringify(params)).toMatch(/^Invalid parameters for app\.showBankStock: /);
+      // Fixed text: nothing the page sent is quoted back (it reaches main's debug log).
+      expect(err).not.toMatch(/img|proto|HATS|gone/);
+    }
+    expect(deps.showBankStock).toHaveBeenCalledTimes(2);
+    expect(deps.service.callRaw).not.toHaveBeenCalled();
+  });
+
+  it('app.showBankStock answers a fixed refusal from a router built without it', async () => {
+    const { deps } = makeDeps();
+    const { showBankStock: _omitted, ...rest } = deps;
+    await expect(createRpcRouter(rest)(ctx(), 'app.showBankStock', { bank: 'hats', filter: 'flips' })).rejects.toThrow(SHOW_BANK_STOCK_UNAVAILABLE);
+  });
+
+  it("refuses a page's import.html that carries settled (0.7.1: main's window read alone sets it)", async () => {
+    const { deps } = makeDeps();
+    const route = createRpcRouter(deps);
+    for (const settled of [false, true]) {
+      await expect(route(ctx(), 'import.html', { html: '<p/>', fileName: 'a.html', mtimeMs: 1, settled })).rejects.toThrow(IMPORT_HTML_ORIGIN_REFUSAL);
+    }
+    expect(deps.service.callRaw).not.toHaveBeenCalled();
   });
 
   it('settings.get and settings.set with validation', async () => {

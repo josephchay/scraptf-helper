@@ -4,10 +4,12 @@
 //
 // Every control is a user action sent to main ('scraptfWindow.*'): Back, Forward, Reload, Home, the bank
 // chips (static SCRAPTF_BANKS pages only; main refuses anything else), Read page now and Log out & clear.
-// The address is read-only text from main's 'scraptfWindow.nav' (origin and path, never a query), the
-// status line from 'scraptfWindow.read'. This page never loads, reads or sees scrap.tf itself: no effect,
-// push listener or timer here calls main's window methods (the compliance scan checks), and nothing here
-// builds a URL. Pure helpers live in scraptfWindowModel.ts, styles in styles/scraptf-window.css.
+// 0.7.1: Show flips and the best flip's name show the dashboard ('app.showBankStock', 'app.openItem'); they
+// load nothing in the window. The address is read-only text from main's 'scraptfWindow.nav' (origin and
+// path, never a query), the status line from 'scraptfWindow.read' and nav's fixed notice. This page never
+// loads, reads or sees scrap.tf itself: no effect, push listener or timer here calls main's window methods
+// or Show flips (the compliance scan checks), and nothing here builds a URL. Pure helpers live in
+// scraptfWindowModel.ts, styles in styles/scraptf-window.css.
 
 import { useEffect, useId, useRef, useState, type KeyboardEvent } from 'react';
 import type { RpcMethod } from '../../shared/rpc';
@@ -26,13 +28,19 @@ import {
   barBankChips,
   barFocusMove,
   barShortcut,
+  bestFlipTitle,
   readButtonView,
   readStatusView,
   SCRAPTF_WINDOW_CLEAR_TITLE,
+  SCRAPTF_WINDOW_PARTITION_NOTE,
+  SCRAPTF_WINDOW_PARTITION_PILL,
   SCRAPTF_WINDOW_RISK_PILL,
   SCRAPTF_WINDOW_RISK_TIP,
+  showFlipsView,
   WINDOW_CLEARED_TEXT,
+  windowNoticeText,
   type BarAction,
+  type ShowFlipsView,
 } from '../scraptfWindowModel';
 
 // Kept importable from here (the mock's tests used it before the model existed).
@@ -72,6 +80,12 @@ export function ScraptfWindowBar() {
   const [read, setRead] = useState<ScraptfWindowRead | null>(null);
   const [note, setNote] = useState<Note | null>(null);
   const [reading, setReading] = useState(false);
+  // main's notice about the page on screen (a challenge, a failed load, a link it kept): shown until a newer
+  // read or the next page (main clears it at the next commit).
+  const [notice, setNotice] = useState<string | null>(null);
+  const lastNotice = useRef<string | null>(null);
+  // F21-6: a "Stay signed in" change waits for the window to be reopened.
+  const [pendingPartition, setPendingPartition] = useState(false);
   const readingRef = useRef(false);
   // A push that came before the state answer is newer than it.
   const navPushed = useRef(false);
@@ -88,19 +102,47 @@ export function ScraptfWindowBar() {
         if (!alive) return;
         if (!navPushed.current) setNav({ url: s.url, canGoBack: s.canGoBack, canGoForward: s.canGoForward, loading: false });
         if (!readPushed.current) setRead(s.lastRead);
+        setPendingPartition(s.pendingPartitionChange === true);
       })
       .catch(() => undefined);
     return () => {
       alive = false;
     };
   }, []);
+  // "Stay signed in" changed after the toolbar knew it: main says whether this window now waits for a reopen.
+  // 'state' only reports; it moves and reads nothing.
+  const keep = settings?.scraptfWindow?.keepLoggedIn;
+  const keepSeen = useRef<boolean | undefined>(undefined);
+  useEffect(() => {
+    if (keep === undefined) return;
+    const before = keepSeen.current;
+    keepSeen.current = keep;
+    if (before === undefined || before === keep) return;
+    let alive = true;
+    rpc('scraptfWindow.state')
+      .then((s) => {
+        if (alive) setPendingPartition(s.pendingPartitionChange === true);
+      })
+      .catch(() => undefined);
+    return () => {
+      alive = false;
+    };
+  }, [keep]);
   usePush('scraptfWindow.nav', (n) => {
     navPushed.current = true;
     setNav(n);
+    // A new notice (or none, at the next page) takes the status line; the same one again changes nothing.
+    const next = windowNoticeText(n.notice);
+    if (next !== lastNotice.current) {
+      lastNotice.current = next;
+      setNotice(next);
+    }
   });
   usePush('scraptfWindow.read', (r) => {
     readPushed.current = true;
     setRead(r);
+    // A newer read takes the line from a notice.
+    setNotice(null);
     // null: Log out & clear ran (here or in Settings): the read belonged to the session just cleared.
     setNote(r === null ? { text: WINDOW_CLEARED_TEXT, tone: 'good' } : null);
   });
@@ -132,6 +174,7 @@ export function ScraptfWindowBar() {
         if (o.read) {
           readPushed.current = true;
           setRead(o.read);
+          setNotice(null);
         }
         setNote(o.reason ? { text: o.reason, tone: 'warn' } : null);
       })
@@ -140,6 +183,16 @@ export function ScraptfWindowBar() {
         readingRef.current = false;
         setReading(false);
       });
+  };
+
+  // Show flips: the dashboard on the read bank's stock page (main shows it; nothing loads in this window).
+  const showFlips = (f: ShowFlipsView) => {
+    rpc('app.showBankStock', { bank: f.bank, filter: f.filter }).catch(fail);
+  };
+
+  // The best flip's name: its item in the dashboard.
+  const openBest = (sku: string) => {
+    rpc('app.openItem', { sku }).catch(fail);
   };
 
   const clear = () => {
@@ -176,9 +229,12 @@ export function ScraptfWindowBar() {
 
   const readOnLoad = settings?.scraptfWindow?.readOnLoad ?? true;
   const address = addressView(nav.url);
-  const readBtn = readButtonView(nav.url, reading);
+  const readBtn = readButtonView(nav.url, reading, nav.importable);
   const status = readStatusView(read, now, readOnLoad);
-  const tone = note ? note.tone : status.tone;
+  const flips = showFlipsView(read);
+  // The line: a note (a refusal, Log out done) first, then main's notice, then the newest read.
+  const tone = note ? note.tone : notice ? 'warn' : status.tone;
+  const lineTitle = note ? note.text : (notice ?? status.title);
   const active = activeBankOf(nav.url);
   const addressIcon: IconName = address.kind === 'scraptf' ? 'shield' : address.kind === 'steam' ? 'user' : 'info';
 
@@ -221,11 +277,26 @@ export function ScraptfWindowBar() {
             />
             {nav.loading ? <span className="stfw-loading">Loading…</span> : nav.reading ? <span className="stfw-loading">Reading…</span> : null}
           </div>
-          <div className={`stfw-statusline${tone === 'muted' ? ' muted' : tone ? ` tone-text-${tone}` : ''}`} title={note ? note.text : status.title}>
+          <div className={`stfw-statusline${tone === 'muted' ? ' muted' : tone ? ` tone-text-${tone}` : ''}`} title={lineTitle}>
             <span className="stfw-status" role="status">
-              {note ? note.text : status.main}
+              {note ? (
+                note.text
+              ) : notice ? (
+                notice
+              ) : status.best ? (
+                <>
+                  {status.lead} · best{' '}
+                  <button type="button" className="link-btn stfw-best" title={bestFlipTitle(status.best)} onClick={() => openBest(status.best!.sku)}>
+                    {status.best.name}
+                  </button>{' '}
+                  {status.best.profit}
+                  {status.tail}
+                </>
+              ) : (
+                status.main
+              )}
             </span>
-            {!note && status.age ? (
+            {!note && !notice && status.age ? (
               <span className="stfw-age" aria-hidden="true">
                 {' '}
                 · {status.age}
@@ -238,6 +309,20 @@ export function ScraptfWindowBar() {
           <span className="stfw-long">{readBtn.label}</span>
           <span className="stfw-short">{reading ? 'Reading…' : 'Read'}</span>
         </button>
+        {flips ? (
+          <button type="button" className="btn small stfw-read stfw-flips" title={flips.title} onClick={() => showFlips(flips)}>
+            <Icon name="bolt" size={13} />
+            <span className="stfw-long">{flips.label}</span>
+            <span className="stfw-short">Flips</span>
+          </button>
+        ) : null}
+        {pendingPartition ? (
+          <button type="button" className="pill tone-info stfw-risk stfw-reopen" title={SCRAPTF_WINDOW_PARTITION_NOTE} onClick={() => setNote({ text: SCRAPTF_WINDOW_PARTITION_NOTE, tone: 'warn' })}>
+            <Icon name="info" size={12} />
+            <span className="stfw-long">{SCRAPTF_WINDOW_PARTITION_PILL}</span>
+            <span className="stfw-short">Reopen</span>
+          </button>
+        ) : null}
         {/* Always shown. A click puts the risk in the status line, for keyboard and touch too. */}
         <button type="button" className="pill tone-warn stfw-risk" title={SCRAPTF_WINDOW_RISK_TIP} aria-describedby={riskId} onClick={() => setNote({ text: SCRAPTF_WINDOW_RISK_TIP, tone: 'warn' })}>
           <Icon name="warning" size={12} />

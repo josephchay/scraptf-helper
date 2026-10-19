@@ -5,12 +5,14 @@
 //
 // The bank-page URLs are static scrap.tf pages the user opens in their own
 // browser (links.open). Nothing here, or anywhere in the app, fetches them.
+// 0.7.1 (ACT-9): "Your price" says how old it is (knownObservedAt), and a stale one (knownStale) is not
+// counted as at or under the ceiling; rows from an older service read as before.
 
 import { parsePrice } from '../shared/currency';
 import { scraptfPageFor } from '../shared/links';
-import type { Category, OrderSummary, ProfitSettings, Scrap, ShoppingListResult, ShoppingQuery, ShoppingRow } from '../shared/types';
+import type { Category, OrderSummary, ProfitSettings, Scrap, ShoppingListResult, ShoppingQuery, ShoppingRow, UnixMs } from '../shared/types';
 import { CATEGORIES, CATEGORY_LABELS } from '../shared/types';
-import { fmtMoney, fmtPct } from './format';
+import { fmtAgo, fmtDateTime, fmtInt, fmtMoney, fmtPct } from './format';
 
 // ---------------------------------------------------------------------------
 // Filters
@@ -200,16 +202,39 @@ export function sanitizeCollapsedCategories(v: unknown): Category[] {
 // Cells
 // ---------------------------------------------------------------------------
 
-/** Rows whose latest typed or imported price is at or under the ceiling: flips at the price already seen. */
+/** ACT-9: the row's own price is older than profit.inputStaleMs (ShoppingRow.knownStale; absent: fresh). */
+export function yourPriceStale(r: Partial<Pick<ShoppingRow, 'knownStale'>>): boolean {
+  return r.knownStale === true;
+}
+
+/**
+ * Rows whose latest typed or imported price is at or under the ceiling: flips at the price already seen.
+ * ACT-9: only fresh prices count; a stale one may no longer be what scrap.tf charges.
+ */
 export function countUnderCeiling(rows: readonly ShoppingRow[]): number {
   let n = 0;
-  for (const r of rows) if (r.underCeiling === true) n++;
+  for (const r of rows) if (r.underCeiling === true && !yourPriceStale(r)) n++;
   return n;
 }
 
-/** Colour of the "Your price" cell: green at or under the ceiling, red over it, none without a price. */
-export function yourPriceTone(r: Pick<ShoppingRow, 'underCeiling'>): 'good' | 'bad' | null {
-  return r.underCeiling === true ? 'good' : r.underCeiling === false ? 'bad' : null;
+/**
+ * Colour of the "Your price" cell: green at or under the ceiling, red over it, none without a price.
+ * ACT-9: a stale price at or under it gets no green (the cell says "stale" instead).
+ */
+export function yourPriceTone(r: Pick<ShoppingRow, 'underCeiling'> & Partial<Pick<ShoppingRow, 'knownStale'>>): 'good' | 'bad' | null {
+  if (r.underCeiling === true) return yourPriceStale(r) ? null : 'good';
+  return r.underCeiling === false ? 'bad' : null;
+}
+
+/**
+ * ACT-9: "3 h ago" for "Your price" (ShoppingRow.knownObservedAt) and whether it is stale; null without a
+ * price or a time (an older service), which shows as before.
+ */
+export function yourPriceAge(r: Pick<ShoppingRow, 'knownCostScrap'> & Partial<Pick<ShoppingRow, 'knownObservedAt' | 'knownStale'>>, now: UnixMs): { text: string; stale: boolean } | null {
+  const at = r.knownObservedAt;
+  if (r.knownCostScrap === null || typeof at !== 'number' || !Number.isFinite(at)) return null;
+  // A time a little ahead of this clock reads "just now", not "in 2 min".
+  return { text: fmtAgo(Math.min(at, now), now), stale: yourPriceStale(r) };
 }
 
 /**
@@ -217,15 +242,23 @@ export function yourPriceTone(r: Pick<ShoppingRow, 'underCeiling'>): 'good' | 'b
  * (knownMaxCostScrap), the same pair underCeiling and the cell's colour use: a painted or
  * spelled copy can share the SKU with a plain one and sell for something else entirely.
  */
-export function yourPriceTitle(r: Pick<ShoppingRow, 'knownCostScrap' | 'knownMaxCostScrap' | 'maxCostScrap'>, keyScrap: Scrap | null): string {
+export function yourPriceTitle(
+  r: Pick<ShoppingRow, 'knownCostScrap' | 'knownMaxCostScrap' | 'maxCostScrap'> & Partial<Pick<ShoppingRow, 'knownObservedAt' | 'knownStock' | 'knownStale'>>,
+  keyScrap: Scrap | null,
+): string {
   if (r.knownCostScrap === null) return 'No price typed or imported for this item; only a price-sheet rule matches. Check scrap.tf.';
-  if (r.knownMaxCostScrap === null) return 'No cost clears your thresholds for the copy you priced: not a flip at that price.';
+  // ACT-9: when the price was seen, its stock then, and whether it is too old to count as a flip now.
+  const at = typeof r.knownObservedAt === 'number' && Number.isFinite(r.knownObservedAt) ? r.knownObservedAt : null;
+  const stock = typeof r.knownStock === 'number' && Number.isFinite(r.knownStock) ? ` ${fmtInt(r.knownStock)} in stock then.` : '';
+  const seen = at === null ? '' : ` Seen ${fmtDateTime(at)}.${stock}`;
+  const stale = yourPriceStale(r) ? ' Older than your stale-input limit (Settings, Profit), so it is not counted as at or under the ceiling: check scrap.tf again.' : '';
+  if (r.knownMaxCostScrap === null) return `No cost clears your thresholds for the copy you priced: not a flip at that price.${seen}${stale}`;
   const ceiling = r.knownMaxCostScrap === r.maxCostScrap ? 'the ceiling' : `that copy's own ceiling (${fmtMoney(r.knownMaxCostScrap, keyScrap)})`;
   const d = r.knownMaxCostScrap - r.knownCostScrap;
-  if (d === 0) return `Your latest scrap.tf price is exactly ${ceiling}: still a flip.`;
+  if (d === 0) return `Your latest scrap.tf price is exactly ${ceiling}: still a flip.${seen}${stale}`;
   return d > 0
-    ? `Your latest scrap.tf price is ${fmtMoney(d, keyScrap)} under ${ceiling}: a flip at that price.`
-    : `Your latest scrap.tf price is ${fmtMoney(-d, keyScrap)} over ${ceiling}: not a flip at that price.`;
+    ? `Your latest scrap.tf price is ${fmtMoney(d, keyScrap)} under ${ceiling}: a flip at that price.${seen}${stale}`
+    : `Your latest scrap.tf price is ${fmtMoney(-d, keyScrap)} over ${ceiling}: not a flip at that price.${seen}${stale}`;
 }
 
 export function buyerKindLabel(order: Pick<OrderSummary, 'isBot'>): 'Bot' | 'Human' {

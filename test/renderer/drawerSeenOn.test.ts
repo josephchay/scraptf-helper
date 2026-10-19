@@ -1,8 +1,8 @@
 // F15 in the item drawer, rendered with react-dom/client into the minimal DOM in domShim.ts with the
 // browser mock as the app bridge: "Seen on scrap.tf/buy/stranges · 1 h ago" from ItemDetail.seenOn,
-// and every "Open bank page" (the price list block's button, "Open on scrap.tf (copies name)" in the
-// header) going to the bank page the item was last seen on, else its category's. Only links.open
-// with static pages; nothing leaves the process.
+// and "Open on scrap.tf (copies name)" in the header going to the bank page the item was last seen on,
+// else its category's (0.7.1, UX-11: the price list block has no second "Open bank page"). Only
+// links.open with static pages; nothing leaves the process.
 
 import { readFileSync } from 'node:fs';
 import { act, createElement, type ReactNode } from 'react';
@@ -112,7 +112,7 @@ async function mount(sku: string) {
   return { b, all, fire, sub, button, section, header, opened };
 }
 
-describe('"Seen on" and "Open bank page" in the drawer (F15)', () => {
+describe('"Seen on" and the bank page opener in the drawer (F15)', () => {
   it('names the bank page the newest imported price came from, and opens it', async () => {
     const t = await mount('194;11');
     const d = (await t.b.rpc('item.detail', { sku: '194;11', history: false }))!;
@@ -120,10 +120,11 @@ describe('"Seen on" and "Open bank page" in the drawer (F15)', () => {
     const seen = t.sub().descendants().find((e) => e.getAttribute('class') === 'drawer-seen muted')!;
     expect(seen.textContent).toBe('· Seen on scrap.tf/buy/stranges · 1 h ago');
     expect(seen.getAttribute('title')).toContain('your saved copy of scrap.tf/buy/stranges');
-    t.fire(t.button(t.section(), 'Open bank page')!);
+    // UX-11: one opener of the bank page, the header's.
+    expect(t.button(t.section(), 'Open bank page')).toBeNull();
     t.fire(t.button(t.header(), 'Open on scrap.tf (copies name)')!);
     await settle();
-    expect(t.opened()).toEqual([scraptfPageFor('stranges'), scraptfPageFor('stranges')]);
+    expect(t.opened()).toEqual([scraptfPageFor('stranges')]);
   });
 
   it('an item last seen on the /items list says so, and its bank page is its category\'s', async () => {
@@ -132,10 +133,9 @@ describe('"Seen on" and "Open bank page" in the drawer (F15)', () => {
     expect(d.seenOn).toMatchObject({ bank: 'list' });
     // The mock dates a seeded imported price at its page's save, as the import does: the list, 2 h ago.
     expect(t.sub().textContent).toContain('Seen on scrap.tf/items · 2 h ago');
-    t.fire(t.button(t.section(), 'Open bank page')!);
     t.fire(t.button(t.header(), 'Open on scrap.tf (copies name)')!);
     await settle();
-    expect(t.opened()).toEqual([scraptfPageFor(d.category), scraptfPageFor(d.category)]);
+    expect(t.opened()).toEqual([scraptfPageFor(d.category)]);
     expect(t.opened()[0]).toBe('https://scrap.tf/buy/items');
     for (const u of t.opened()) expect(STATIC_EXTERNAL_URLS).toContain(u);
   });
@@ -144,7 +144,7 @@ describe('"Seen on" and "Open bank page" in the drawer (F15)', () => {
     const t = await mount('378;6');
     expect((await t.b.rpc('item.detail', { sku: '378;6', history: false }))!.seenOn).toBeNull();
     expect(t.sub().textContent).not.toContain('Seen on');
-    t.fire(t.button(t.section(), 'Open bank page')!);
+    t.fire(t.button(t.header(), 'Open on scrap.tf (copies name)')!);
     await settle();
     expect(t.opened()).toEqual([scraptfPageFor('hats')]);
   });

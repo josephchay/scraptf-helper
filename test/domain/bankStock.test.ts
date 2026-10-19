@@ -402,11 +402,22 @@ describe('the cache', () => {
     expect(rows.mock.calls.map((c) => c[0])).toEqual([third]);
     expect(h.stock.version()).toBeGreaterThan(v0);
     const r = h.list({ filter: 'new' });
-    expect(r).toMatchObject({ savedAt: NOW - MIN, previousSavedAt: NOW - 10 * MIN, saves: 3 });
-    expect(r.rows.map((x) => x.sku)).toEqual(['13;6']);
+    // 0.7.1 (CQ-2): the third save comes 9 minutes after the newest, in its session, so the changes stay
+    // since the save before that session (3 h ago): 7;6 (back on sale since then) is still new.
+    expect(r).toMatchObject({ savedAt: NOW - MIN, previousSavedAt: NOW - 3 * HOUR, saves: 3 });
+    expect(r.rows.map((x) => x.sku)).toEqual(['7;6', '13;6']);
     expect(h.stock.newFlips('hats', newest)).toEqual([]);
-    expect(h.stock.newAtFor('7;6')).toBeNull();
+    // S3 still tells one read at a time: against the save just before, 7;6 was already on sale.
+    expect(h.stock.newFlips('hats', third)).toEqual([]);
+    expect(h.stock.newAtFor('7;6')).toBe(NOW - MIN);
     expect(h.stock.newAtFor('13;6')).toBe(NOW - MIN);
+    // A save past the session moves the baseline along: the changes are since the third save.
+    const fourth = save(repo, 'hats', NOW + HOUR, [s('378;6', 30, { name: 'Team Captain' }), s('7;6', 10, { stock: 1 }), s('13;6', 5), s('14;6', 7)]);
+    h.stock.refresh();
+    expect(h.list({ filter: 'new' })).toMatchObject({ savedAt: NOW + HOUR, previousSavedAt: NOW - MIN });
+    expect(h.list({ filter: 'new' }).rows.map((x) => x.sku)).toEqual(['14;6']);
+    expect(h.stock.newAtFor('7;6')).toBeNull();
+    expect(h.stock.newFlips('hats', fourth)).toEqual([]);
   });
 
   it('a refresh that changed nothing keeps the version (the market keeps its filtered pass)', () => {

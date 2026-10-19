@@ -6,10 +6,20 @@
 // user browses; Flip Desk itself never fetches scrap.tf (the HTTP layer still refuses it, R1).
 
 import { bankStockPagePath } from '../shared/bankStock';
+import { LAYOUT_CHANGED, NO_PRICE_COLUMN, NO_STOCK_LIMIT, PARTIAL_READ } from '../shared/importCodes';
 import { SCRAPTF_BANKS } from '../shared/links';
-import { READ_AUTO_MIN_GAP_MS, READ_SETTLE_MS, SCRAPTF_READ_REASONS, scraptfWindowEnableProblem, SCRAPTF_WINDOW_NEEDS_IMPORT, shouldReadUrl } from '../shared/scraptfWindowPolicy';
-import type { ImportOrigin, ScraptfBank, ScraptfWindowNav, ScraptfWindowRead, Settings, UnixMs } from '../shared/types';
-import { fmtAgo, fmtDateTime, fmtInt, truncate } from './format';
+import {
+  READ_AUTO_MIN_GAP_MS,
+  READ_SETTLE_MS,
+  SCRAPTF_NOT_READ_AGAIN,
+  SCRAPTF_READ_REASONS,
+  SCRAPTF_WINDOW_NOTICES,
+  scraptfWindowEnableProblem,
+  SCRAPTF_WINDOW_NEEDS_IMPORT,
+  shouldReadUrl,
+} from '../shared/scraptfWindowPolicy';
+import type { BankStockOpenFilter, ImportOrigin, ScraptfBank, ScraptfWindowNav, ScraptfWindowRead, Settings, UnixMs } from '../shared/types';
+import { fmtAgo, fmtDateTime, fmtInt, fmtRefOnly, truncate } from './format';
 import { importWarningCode } from './importModel';
 
 // ---------------------------------------------------------------------------
@@ -44,7 +54,7 @@ export const SCRAPTF_WINDOW_RISK_TEXT = SCRAPTF_WINDOW_RISK.join(' ');
 /** What the window does: plain words, no promise beyond what main does. */
 export const SCRAPTF_WINDOW_DOES: readonly string[] = Object.freeze([
   'Shows scrap.tf in a window of its own. You click, sign in through Steam and browse it yourself, and you solve any Cloudflare check yourself.',
-  `When a scrap.tf page finishes loading in the window (from your click, or one the page makes itself), it reads the page already on screen, and once more ${READ_SETTLE_MS / 1000} seconds later because scrap.tf adds its cards late; the two are imported as one save. Or only when you press Read page now. A read sends nothing over the network.`,
+  `When a scrap.tf page Flip Desk imports (a bank page, the unusual pages, scrap.tf/items) finishes loading in the window (from your click, or one the page makes itself), it reads the page already on screen, and once more ${READ_SETTLE_MS / 1000} seconds later because scrap.tf adds its cards late; the two are imported as one save. Or only when you press Read page now. A read sends nothing over the network.`,
   'Imports what it read like a page you saved with Ctrl+S: prices, bank stock, history and new-flip notifications.',
 ]);
 
@@ -65,12 +75,15 @@ export const SCRAPTF_WINDOW_KEEP_LABEL = 'Stay signed in after Flip Desk quits';
 // encryption (the enableCookieEncryption fuse in electron-builder.yml), a development run does not. Log out &
 // clear is the way to remove a kept sign-in.
 export const SCRAPTF_WINDOW_KEEP_HINT =
-  "Off: the window keeps your sign-in in memory only, gone when Flip Desk quits. On: it is kept on this computer in the window's own browser storage, the way a browser keeps it, until you use Log out & clear. Flip Desk never reads either. A change applies the next time the window opens.";
+  "Off: the window keeps your sign-in in memory only, gone when Flip Desk quits. On: it is kept on this computer in the window's own browser storage, the way a browser keeps it, until you use Log out & clear. Flip Desk never reads either. A change applies once you close the scrap.tf window and open it again; you sign in to scrap.tf again then.";
+/** 0.7.1 (F21-6): the toolbar's note while a "Stay signed in" change waits for the window to be reopened. */
+export const SCRAPTF_WINDOW_PARTITION_NOTE = 'Stay signed in changes when you close and reopen this window; you will sign in to scrap.tf again then.';
+export const SCRAPTF_WINDOW_PARTITION_PILL = 'Reopen to apply';
 export const SCRAPTF_WINDOW_READ_LABEL = 'Read scrap.tf pages as they load';
-export const SCRAPTF_WINDOW_READ_HINT = `On: a read follows each scrap.tf page load or in-page navigation in the window, whether it comes from your click or from the page itself (a reload, a page switch it makes), when the page finishes loading and once more ${READ_SETTLE_MS / 1000} s later, imported once. A page loaded again within ${READ_AUTO_MIN_GAP_MS / 1000} s is not read again, unless nothing could be imported from it then (a Cloudflare check you had to solve, say), and an unchanged page is not imported twice within a minute. A read is a snapshot of the page on screen and sends nothing. Off: only when you press Read page now. Steam sign-in and Cloudflare's check frame are never read; a check page shown at a scrap.tf address is read but imports nothing.`;
+export const SCRAPTF_WINDOW_READ_HINT = `On: a read follows each scrap.tf page load or in-page navigation in the window, whether it comes from your click or from the page itself (a reload, a page switch it makes), when the page finishes loading and once more ${READ_SETTLE_MS / 1000} s later, imported once. Only pages Flip Desk imports are read: the bank pages, the unusual pages and scrap.tf/items, not the front page, raffles or settings. A page loaded again within ${READ_AUTO_MIN_GAP_MS / 1000} s is not read again, unless nothing could be imported from it then (a Cloudflare check you had to solve, say), and an unchanged page is not imported twice within a minute. A read is a snapshot of the page on screen and sends nothing. Off: only when you press Read page now. Steam sign-in and Cloudflare's check frame are never read; a check or error page shown at a scrap.tf address is not read when it loads, and imports nothing if you read it.`;
 export const SCRAPTF_WINDOW_LINKS_LABEL = "Open Flip Desk's scrap.tf links in this window";
 export const SCRAPTF_WINDOW_LINKS_HINT =
-  "The Live market's scrap.tf button and bank link, Open on scrap.tf in the item drawer and the row menu, and the scrap.tf banks cards open their scrap.tf page here instead of your browser. Every other link still opens in your browser, the Bank stock page and the scrap.tf/items card included.";
+  "The Live market's scrap.tf button and bank link, Open on scrap.tf in the item drawer and the row menu, the scrap.tf banks cards and the Bank stock page's Open open their scrap.tf page here instead of your browser. Every other link still opens in your browser.";
 export const SCRAPTF_WINDOW_CLEAR_TITLE =
   "Signs you out in the scrap.tf window: clears its cookies, site storage and cache, then shows scrap.tf's front page if the window is open. Your Flip Desk data is not touched.";
 
@@ -216,11 +229,17 @@ export function addressView(url: string | null | undefined): AddressView {
   return { text, title: `${url} · not a scrap.tf page: Flip Desk never reads it`, kind: 'other' };
 }
 
-/** "Read page now": disabled off scrap.tf (Steam sign-in, nothing open) and while a read runs. */
-export function readButtonView(url: string | null | undefined, busy: boolean): { disabled: boolean; label: string; title: string } {
+/**
+ * "Read page now": disabled off scrap.tf (Steam sign-in, nothing open), on a scrap.tf page the import cannot
+ * read (main's nav.importable false, F21-4: the front page, raffles, settings) and while a read runs.
+ */
+export function readButtonView(url: string | null | undefined, busy: boolean, importable?: boolean): { disabled: boolean; label: string; title: string } {
   if (busy) return { disabled: true, label: 'Reading…', title: 'Reading the page on screen…' };
   if (typeof url !== 'string' || url === '') return { disabled: true, label: 'Read page now', title: 'Open a scrap.tf page first.' };
   if (!shouldReadUrl(url)) return { disabled: true, label: 'Read page now', title: SCRAPTF_READ_REASONS.notScraptf };
+  if (importable === false) {
+    return { disabled: true, label: 'Read page now', title: `${SCRAPTF_READ_REASONS.notImportable} Flip Desk reads bank pages, the unusual pages and scrap.tf/items.` };
+  }
   return {
     disabled: false,
     label: 'Read page now',
@@ -228,50 +247,115 @@ export function readButtonView(url: string | null | undefined, busy: boolean): {
   };
 }
 
-/** The import's warning codes, said for a page on screen rather than a saved file. */
-const WINDOW_WARNINGS: Readonly<Record<string, string>> = Object.freeze({
+function count(v: unknown): number {
+  return typeof v === 'number' && Number.isFinite(v) ? Math.max(0, Math.floor(v)) : 0;
+}
+
+const plural = (n: number, one: string, many: string) => `${fmtInt(n)} ${n === 1 ? one : many}`;
+
+/**
+ * The import's warning codes, said for a page on screen rather than a saved file. Main sends the code alone,
+ * or with its counts as digits ('partial-read: 3 48'); a function words those counts.
+ */
+const WINDOW_WARNINGS: Readonly<Record<string, string | ((n: readonly number[]) => string)>> = Object.freeze({
   'no-cards-saved': 'no items on screen yet; wait for them, then Read page now',
   'no-items': 'no items on this page',
   'page-kind-unknown': 'not a page Flip Desk imports',
   'schema-not-loaded': 'item names are still loading; read again in a moment',
   'too-large': 'the page is over the 20 MB import limit',
+  // 0.7.1 (F21-10), the codes main picks first, in its order.
+  [PARTIAL_READ]: (n: readonly number[]) =>
+    `${n.length >= 2 ? `only ${fmtInt(n[0])} of ~${fmtInt(n[1])} items were on screen` : 'only part of the page was on screen'}, so no stock save: Read page now once every card shows`,
+  [LAYOUT_CHANGED]: "scrap.tf changed this page's layout: its items could not be read",
+  [NO_STOCK_LIMIT]: (n: readonly number[]) => `stock unreadable for ${n.length >= 1 ? plural(n[0]!, 'row', 'rows') : 'some rows'}, so no stock save`,
+  'no-sku': (n: readonly number[]) => (n.length >= 2 ? `${fmtInt(n[0])} of ${fmtInt(n[1])} items not recognised` : 'some items not recognised'),
+  [NO_PRICE_COLUMN]: 'no "Price to buy" column found, so no prices were read',
+  'unknown-bank': 'not a scrap.tf bank page Flip Desk knows',
+  'no-pays-column': 'no "Price we pay" column found, so what scrap.tf pays was not read',
+  [SCRAPTF_NOT_READ_AGAIN]: 'Read page now to read it again',
 });
 
-/** A read's warning (main sends the import's first warning code, or a fixed SCRAPTF_READ_REASONS text). */
+/** Warnings that say how to read again, not that something is wrong: no warning tone. */
+const INFO_WARNINGS: ReadonlySet<string> = new Set([SCRAPTF_NOT_READ_AGAIN]);
+
+/** A read's warning (main sends the import's warning code, or a fixed SCRAPTF_READ_REASONS or notice text). */
 export function readWarningText(warning: string | null | undefined): string | null {
   if (typeof warning !== 'string' || warning.trim() === '') return null;
   const code = importWarningCode(warning);
-  if (Object.hasOwn(WINDOW_WARNINGS, code)) return WINDOW_WARNINGS[code]!;
+  if (Object.hasOwn(WINDOW_WARNINGS, code)) {
+    const words = WINDOW_WARNINGS[code]!;
+    if (typeof words === 'string') return words;
+    // Digits only from what follows the code, never other text.
+    const at = warning.indexOf(':');
+    const counts = (at < 0 ? [] : (warning.slice(at + 1).match(/\d{1,9}/g) ?? [])).slice(0, 2).map(Number);
+    return words(counts);
+  }
   return truncate(warning.trim(), 140);
 }
 
+/** A best flip's name, ready to show: its item (a click opens it in the dashboard) and its profit. */
+export interface BestFlipView {
+  sku: string;
+  name: string;
+  /** "+0.44 ref". */
+  profit: string;
+}
+
 export interface ReadStatusView {
-  /** "Read 48 items from /buy/hats · 2 new flips" (changes only with a new read: the live region). */
+  /** "Read 48 items from /buy/hats · stored 46 · 10 flips (2 new) · best Team Captain +0.44 ref" (changes only with a new read: the live region). */
   main: string;
   /** "3 s ago" (ticks; outside the live region); '' before any read. */
   age: string;
   tone: 'good' | 'warn' | 'muted' | null;
   title: string;
+  /**
+   * `main` in three pieces, for the toolbar to make the best flip's name a button: `main` is `lead`, then
+   * " · best <name> <profit>" when `best` is set, then `tail`.
+   */
+  lead: string;
+  best: BestFlipView | null;
+  tail: string;
 }
 
-function count(v: unknown): number {
-  return typeof v === 'number' && Number.isFinite(v) ? Math.max(0, Math.floor(v)) : 0;
-}
-
-/** The status line's words for main's failed reads (failedRead's fixed SCRAPTF_READ_REASONS texts). */
+/** The status line's words for main's failed reads (failedRead's fixed texts, and a challenge page that gave nothing). */
 const READ_FAILURE_LINES: Readonly<Record<string, string>> = Object.freeze({
   [SCRAPTF_READ_REASONS.failed]: 'try Read page now again',
   [SCRAPTF_READ_REASONS.empty]: 'nothing to read yet (still loading, or over the 20 MB limit)',
+  [SCRAPTF_READ_REASONS.schemaLoading]: 'item data is still loading; press Read page now in a moment',
+  [SCRAPTF_WINDOW_NOTICES.challenge]: 'a Cloudflare check or error page is on screen: solve it in the page',
+  [SCRAPTF_WINDOW_NOTICES.rateLimited]: 'scrap.tf is rate-limiting this window: wait a minute before reloading',
+  // Read page now on Chromium's error page after a failed load: main words it by the load's notice.
+  [SCRAPTF_WINDOW_NOTICES.offline]: 'scrap.tf could not be reached: press Reload',
+  [SCRAPTF_WINDOW_NOTICES.insecure]: 'the connection to scrap.tf could not be secured: press Reload',
+  [SCRAPTF_WINDOW_NOTICES.badResponse]: 'scrap.tf sent a page that could not be shown: press Reload',
+  [SCRAPTF_WINDOW_NOTICES.loadFailed]: 'the page did not load: press Reload',
 });
+
+function bestFlipOf(b: ScraptfWindowRead['bestFlip']): BestFlipView | null {
+  if (!b || typeof b.sku !== 'string' || typeof b.name !== 'string' || b.name.trim() === '' || typeof b.profitScrap !== 'number' || !Number.isFinite(b.profitScrap)) return null;
+  const profit = fmtRefOnly(b.profitScrap);
+  return { sku: b.sku, name: truncate(b.name.trim(), 60), profit: b.profitScrap > 0 ? `+${profit}` : profit };
+}
+
+/** "10 flips (2 new)" when main says how many flips are on sale on the page; "2 new flips" otherwise. */
+function flipsPart(pageFlips: number | null, fresh: number): string | null {
+  const onPage = pageFlips === null ? 0 : Math.max(pageFlips, fresh);
+  if (onPage > 0) return `${plural(onPage, 'flip', 'flips')}${fresh > 0 ? ` (${fmtInt(fresh)} new)` : ''}`;
+  return fresh > 0 ? `${fmtInt(fresh)} new ${fresh === 1 ? 'flip' : 'flips'}` : null;
+}
 
 /** The toolbar's status line for the newest read; `readOnLoad` words the line before the first one. */
 export function readStatusView(read: ScraptfWindowRead | null | undefined, now: UnixMs, readOnLoad = true): ReadStatusView {
   if (!read) {
+    const main = 'Not read yet';
     return {
-      main: 'Not read yet',
+      main,
       age: '',
       tone: 'muted',
       title: readOnLoad ? 'scrap.tf pages are read when they finish loading in the window.' : 'Reading on load is off: press Read page now to read the page on screen.',
+      lead: main,
+      best: null,
+      tail: '',
     };
   }
   const items = count(read.items);
@@ -282,28 +366,79 @@ export function readStatusView(read: ScraptfWindowRead | null | undefined, now: 
   const age = at === null ? '' : fmtAgo(Math.min(at, now), now);
   const sent = typeof read.warning === 'string' ? read.warning.trim() : '';
   if (Object.hasOwn(READ_FAILURE_LINES, sent)) {
-    // Main's failed read (the script failed, or the page gave nothing): no items were read, so no "Read 0 items".
-    return {
-      main: `Could not read ${path} · ${READ_FAILURE_LINES[sent]!}`,
-      age,
-      tone: 'warn',
-      title: `${at === null ? '' : `${fmtDateTime(at)}: `}${sent} Nothing was imported from scrap.tf${path}.`,
-    };
+    // Main's failed read (the script failed, the page gave nothing, the item data was loading, a challenge page
+    // gave nothing): nothing was imported, so no "Read 0 items".
+    const main = `Could not read ${path} · ${READ_FAILURE_LINES[sent]!}`;
+    return { main, age, tone: 'warn', title: `${at === null ? '' : `${fmtDateTime(at)}: `}${sent} Nothing was imported from scrap.tf${path}.`, lead: main, best: null, tail: '' };
   }
   // The line joins its parts with " · ", so a sentence's own full stop goes.
   const warn = readWarningText(read.warning)?.replace(/[.\s]+$/, '') || null;
-  const parts = [`Read ${fmtInt(items)} ${items === 1 ? 'item' : 'items'} from ${path}`];
-  if (flips > 0) parts.push(`${fmtInt(flips)} new ${flips === 1 ? 'flip' : 'flips'}`);
-  if (warn) parts.push(warn);
+  const info = warn !== null && INFO_WARNINGS.has(importWarningCode(sent));
+  // 0.7.1 (UX-3, P5): the prices stored when not every item was, and the flips on sale on this page.
+  const stored = typeof read.stored === 'number' && Number.isFinite(read.stored) ? count(read.stored) : null;
+  const pageFlips = typeof read.pageFlips === 'number' && Number.isFinite(read.pageFlips) ? count(read.pageFlips) : null;
+  const best = bestFlipOf(read.bestFlip);
+  const parts = [`Read ${plural(items, 'item', 'items')} from ${path}`];
+  if (stored !== null && items > 0 && stored !== items) parts.push(`stored ${fmtInt(stored)}`);
+  const flipsText = flipsPart(pageFlips, flips);
+  if (flipsText) parts.push(flipsText);
+  const lead = parts.join(' · ');
+  const tail = warn ? ` · ${warn}` : '';
+  const main = `${best ? `${lead} · best ${best.name} ${best.profit}` : lead}${tail}`;
   const bank = SCRAPTF_BANKS.find((b) => b.bank === read.bank);
+  const onPage = pageFlips === null ? 0 : Math.max(pageFlips, flips);
   const title = [
-    `${at === null ? 'Read' : `Read ${fmtDateTime(at)}`}: ${fmtInt(items)} ${items === 1 ? 'item' : 'items'} on scrap.tf${path}${bank ? ` (${bank.label})` : ''}, imported like a saved page.`,
-    flips > 0 ? `${fmtInt(flips)} of them new since your previous save and a flip now.` : '',
+    `${at === null ? 'Read' : `Read ${fmtDateTime(at)}`}: ${plural(items, 'item', 'items')} on scrap.tf${path}${bank ? ` (${bank.label})` : ''}, imported like a saved page.`,
+    stored !== null && items > 0 ? `${fmtInt(stored)} stored as prices.` : '',
+    onPage > 0
+      ? `${plural(onPage, 'flip', 'flips')} on sale on this page now${flips > 0 ? `, ${fmtInt(flips)} of them new since your previous save` : ''}.`
+      : flips > 0
+        ? `${fmtInt(flips)} of them new since your previous save and a flip now.`
+        : '',
+    best ? `Best: ${best.name}, ${best.profit} profit.` : '',
     warn ? `Note: ${warn}.` : '',
   ]
     .filter(Boolean)
     .join(' ');
-  return { main: parts.join(' · '), age, tone: warn ? 'warn' : flips > 0 ? 'good' : null, title };
+  return { main, age, tone: warn && !info ? 'warn' : onPage > 0 || flips > 0 ? 'good' : null, title, lead, best, tail };
+}
+
+/** The toolbar's "Show flips" (0.7.1, F21-2): the read's bank and the chip its stock page opens on. */
+export interface ShowFlipsView {
+  bank: ScraptfBank;
+  filter: BankStockOpenFilter;
+  label: string;
+  title: string;
+}
+
+/**
+ * "Show flips" once a read recognised a bank and found flips, always on the Flips chip: every flip on sale on
+ * the page, the new ones with their New badges. Not the New chip (UX-071-2): the read's "k new" counts new
+ * since the read before, while that chip counts new since the session's baseline (CQ-2) and holds non-flips,
+ * so it could hold none of them. A click shows the dashboard (app.showBankStock); it loads nothing here.
+ */
+export function showFlipsView(read: ScraptfWindowRead | null | undefined): ShowFlipsView | null {
+  if (!read || typeof read.bank !== 'string') return null;
+  const bank = SCRAPTF_BANKS.find((b) => b.bank === read.bank);
+  if (!bank) return null;
+  const fresh = count(read.newFlips);
+  const onPage = count(read.pageFlips);
+  if (fresh <= 0 && onPage <= 0) return null;
+  const filter: BankStockOpenFilter = 'flips';
+  // An older service sends no pageFlips: its new flips are on sale on the page too.
+  const flips = plural(Math.max(onPage, fresh), 'flip', 'flips');
+  const fresher = fresh > 0 ? ` (${fmtInt(fresh)} new since your previous read)` : '';
+  return { bank: bank.bank, filter, label: 'Show flips', title: `Shows ${bank.label} in the dashboard's Bank stock, on Flips: ${flips} on sale on this page${fresher}. Nothing is loaded in this window.` };
+}
+
+/** The best flip's name: a click opens the item in the dashboard. */
+export function bestFlipTitle(best: BestFlipView): string {
+  return `Opens ${best.name} in the dashboard (${best.profit} profit at scrap.tf's price on this page).`;
+}
+
+/** main's notice about the page on screen (nav.notice, fixed text), for the status line; null when none. */
+export function windowNoticeText(notice: unknown): string | null {
+  return typeof notice === 'string' && notice.trim() !== '' ? truncate(notice.trim(), 200) : null;
 }
 
 /** The status line as one string: "Read 48 items from /buy/hats · 2 new flips · 3 s ago" (or "Could not read …"). */

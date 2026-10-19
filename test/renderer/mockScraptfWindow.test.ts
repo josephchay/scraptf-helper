@@ -78,19 +78,37 @@ describe('scraptfWindow.* (mock)', () => {
     await b.rpc('scraptfWindow.open', undefined);
     await b.rpc('scraptfWindow.go', { url: HATS });
     await b.rpc('scraptfWindow.back', undefined);
-    expect(navs.map((n) => [n.url, n.canGoBack, n.canGoForward])).toEqual([
-      ['https://scrap.tf/', false, false],
-      [HATS, true, false],
-      ['https://scrap.tf/', false, true],
+    expect(navs.map((n) => [n.url, n.canGoBack, n.canGoForward, n.importable])).toEqual([
+      ['https://scrap.tf/', false, false, false],
+      [HATS, true, false, true],
+      ['https://scrap.tf/', false, true, false],
     ]);
-    expect(reads.map((r) => [r.path, r.bank])).toEqual([
-      ['/', null],
-      ['/buy/hats', 'hats'],
-      ['/', null],
-    ]);
+    // Like main (F21-4): only a page the import reads is read, so the front page is not.
+    expect(reads.map((r) => [r.path, r.bank])).toEqual([['/buy/hats', 'hats']]);
     expect(reads.every((r) => r.warning === MOCK_WINDOW_READ_WARNING)).toBe(true);
+    // Made-up flips, so the toolbar demo shows its Show flips; the best one is the mock's hats stock page's
+    // top Flips row (0.7.1 step I: as the service's topFlips[0]), so its name is a working link too.
+    const top = (await b.rpc('scraptf.bankStock', { bank: 'hats', filter: 'flips', sort: 'profit', limit: 1 })).rows[0]!;
+    expect(reads[0]).toMatchObject({ stored: reads[0]!.items, bestFlip: { sku: top.sku, name: top.name, profitScrap: top.profitScrap } });
+    expect(reads[0]!.pageFlips).toBeGreaterThanOrEqual(reads[0]!.newFlips);
     await b.rpc('scraptfWindow.forward', undefined);
     expect((await b.rpc('scraptfWindow.state', undefined)).url).toBe(HATS);
+  });
+
+  it('refuses Read page now off the pages the import reads, and does not load the page on screen again', async () => {
+    const b = make();
+    await turnOn(b, true);
+    const navs: PushContract['scraptfWindow.nav'][] = [];
+    b.on('scraptfWindow.nav', (p) => navs.push(p));
+    await b.rpc('scraptfWindow.open', undefined);
+    await expect(b.rpc('scraptfWindow.read', undefined)).resolves.toEqual({ read: null, reason: SCRAPTF_READ_REASONS.notImportable });
+    await b.rpc('scraptfWindow.open', { start: HATS });
+    const loads = navs.length;
+    // The page already on screen (F21-7): an open or a link only brings the window up.
+    await b.rpc('scraptfWindow.open', { start: HATS });
+    await expect(b.rpc('links.open', { url: HATS, allowWindow: true })).resolves.toEqual({ opened: true, reason: null, openedIn: 'window' });
+    expect(navs).toHaveLength(loads);
+    expect((await b.rpc('scraptfWindow.state', undefined)).canGoBack).toBe(true);
   });
 
   it('validates pages as main does and throttles Read page now', async () => {
@@ -100,6 +118,7 @@ describe('scraptfWindow.* (mock)', () => {
     await expect(b.rpc('scraptfWindow.open', { start: 'https://evil.example/' })).rejects.toThrow(/start: not a scrap\.tf page/);
     await expect(b.rpc('scraptfWindow.read', undefined)).resolves.toEqual({ read: null, reason: SCRAPTF_READ_REASONS.notOpen });
     await b.rpc('scraptfWindow.open', { start: HATS });
+    // The read on load a moment ago does not count for Read page now's throttle.
     const first = await b.rpc('scraptfWindow.read', undefined);
     expect(first.read).toMatchObject({ path: '/buy/hats', bank: 'hats' });
     await expect(b.rpc('scraptfWindow.read', undefined)).resolves.toEqual({ read: null, reason: SCRAPTF_READ_REASONS.tooSoon });

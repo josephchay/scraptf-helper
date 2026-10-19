@@ -667,7 +667,7 @@ export function CheckSection({ s }: { s: Settings }) {
     <Section
       id="set-check"
       title="Live check"
-      intro="Copy an item name or a row of scrap.tf/items while you browse, then see its flip at once: the price, what it sells for and Pay up to. The app never visits scrap.tf or reads your browser; it only reads text you copy, on this computer."
+      intro="Copy an item name or a row of scrap.tf/items while you browse, then see its flip at once: the price, what it sells for and Pay up to. Flip Desk never loads scrap.tf on its own or reads your browser; it only reads text you copy, on this computer."
     >
       <Field label="Check hotkey" htmlFor="check-hotkey" hint={hotkeyStatus.tone === 'bad' ? undefined : hotkeyStatus.text} error={hotkeyStatus.tone === 'bad' ? hotkeyStatus.text : null}>
         <div className="lc-hotkey-row">
@@ -676,7 +676,7 @@ export function CheckSection({ s }: { s: Settings }) {
         </div>
       </Field>
       <Toggle checked={c.watchClipboard} onChange={(on) => void setWatch(on)} label={CHECK_WATCH_LABEL} description={checkWatchHint(c.watchClipboard, paused)} />
-      <Toggle checked={c.notifyFlips} onChange={(notifyFlips) => void set({ notifyFlips })} label={CHECK_NOTIFY_LABEL} description={checkNotifyHint(s.notifications.enabled)} />
+      <Toggle checked={c.notifyFlips} onChange={(notifyFlips) => void set({ notifyFlips })} label={CHECK_NOTIFY_LABEL} description={checkNotifyHint(s.notifications.enabled, c.popup)} />
       <Toggle checked={c.popup} onChange={(popup) => void set({ popup })} label={CHECK_POPUP_LABEL} description={CHECK_POPUP_HINT} />
       <div className="form-actions">
         <button type="button" className="btn small" disabled={test.busy} onClick={() => void runTest()} title={`Checks "${CHECK_SAMPLE_TEXT}" against your local data, as if you had copied it`}>

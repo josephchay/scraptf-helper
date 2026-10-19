@@ -25,6 +25,8 @@ import {
   shoppingQuery,
   shoppingRowId,
   thresholdSummary,
+  yourPriceAge,
+  yourPriceStale,
   yourPriceTitle,
   yourPriceTone,
 } from '../../src/renderer/shoppingModel';
@@ -216,6 +218,36 @@ describe('cells', () => {
     expect(yourPriceTone({ underCeiling: false })).toBe('bad');
     expect(yourPriceTone({ underCeiling: null })).toBeNull();
     expect(countUnderCeiling([row({ sku: 'a', underCeiling: true }), row({ sku: 'b', underCeiling: false }), row({ sku: 'c' })])).toBe(1);
+  });
+
+  it('counts only fresh prices as at or under the ceiling, and says how old each is (ACT-9)', () => {
+    const NOW = Date.UTC(2026, 9, 15, 12, 0, 0);
+    const H = 3_600_000;
+    const fresh = row({ sku: 'a', underCeiling: true, knownCostScrap: 91, knownObservedAt: NOW - H, knownStock: 3, knownStale: false });
+    const stale = row({ sku: 'b', underCeiling: true, knownCostScrap: 91, knownObservedAt: NOW - 3 * H, knownStock: 1, knownStale: true });
+    expect(countUnderCeiling([fresh, stale])).toBe(1);
+    expect(yourPriceStale(stale)).toBe(true);
+    expect(yourPriceStale(fresh)).toBe(false);
+    // No green for a stale price at or under it; over it stays red.
+    expect(yourPriceTone(stale)).toBeNull();
+    expect(yourPriceTone({ underCeiling: false, knownStale: true })).toBe('bad');
+    expect(yourPriceTone(fresh)).toBe('good');
+    expect(yourPriceAge(fresh, NOW)).toEqual({ text: '1 h ago', stale: false });
+    expect(yourPriceAge(stale, NOW)).toEqual({ text: '3 h ago', stale: true });
+    // A time a little ahead of the clock is now.
+    expect(yourPriceAge({ knownCostScrap: 91, knownObservedAt: NOW + 60_000 }, NOW)!.text).toBe('just now');
+    // The title: when it was seen, its stock then, and why a stale one is not counted.
+    const t = yourPriceTitle({ ...stale, knownMaxCostScrap: 100, maxCostScrap: 100 }, KEY);
+    expect(t).toContain('1.00 ref under the ceiling');
+    expect(t).toContain('1 in stock then.');
+    expect(t).toContain('not counted as at or under the ceiling');
+    // An older service (no fields): counted and coloured as before, no age.
+    const before = row({ sku: 'c', underCeiling: true, knownCostScrap: 91 });
+    expect(countUnderCeiling([before])).toBe(1);
+    expect(yourPriceTone(before)).toBe('good');
+    expect(yourPriceAge(before, NOW)).toBeNull();
+    expect(yourPriceAge(row({ sku: 'd', knownCostScrap: null, knownObservedAt: NOW }), NOW)).toBeNull();
+    expect(yourPriceTitle({ knownCostScrap: 91, knownMaxCostScrap: 100, maxCostScrap: 100 }, KEY)).toBe('Your latest scrap.tf price is 1.00 ref under the ceiling: a flip at that price.');
   });
 
   it('explains your price relative to the ceiling', () => {

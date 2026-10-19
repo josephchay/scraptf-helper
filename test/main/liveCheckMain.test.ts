@@ -496,8 +496,8 @@ describe('live check clipboard watcher', () => {
     expect(h.showPopup).toHaveBeenCalledTimes(1);
   });
 
-  it('notifies flips once per SKU per minute, only with notifyFlips and notifications on', async () => {
-    const h = await watching();
+  it('notifies flips once per SKU per minute, only with notifyFlips and notifications on and the popup off', async () => {
+    const h = await watching({ popup: false });
     h.copy('Team Captain');
     await h.poll();
     expect(h.notify).toHaveBeenCalledTimes(1);
@@ -521,18 +521,40 @@ describe('live check clipboard watcher', () => {
     expect(h.notify).toHaveBeenCalledTimes(3);
 
     for (const init of [{ notifyFlips: false }, { notificationsEnabled: false }]) {
-      const q = await watching(init);
+      const q = await watching({ popup: false, ...init });
       q.copy('Team Captain');
       await q.poll();
+      expect(q.check).toHaveBeenCalledTimes(1);
       expect(q.notify).not.toHaveBeenCalled();
-      expect(q.showPopup).toHaveBeenCalledTimes(1);
+      expect(q.showPopup).not.toHaveBeenCalled();
     }
 
-    const over = await watching();
+    const over = await watching({ popup: false });
     over.answers.set('Team Captain', (source) => itemResult({ source, verdict: 'over', profitScrap: -3 }));
     over.copy('Team Captain');
     await over.poll();
     expect(over.notify).not.toHaveBeenCalled();
+  });
+
+  it('raises one alert per check (ACT-7): with the popup on, the popup shows the flip and no "Flip:" toast follows', async () => {
+    const h = await watching();
+    h.copy('Team Captain');
+    await h.poll();
+    expect(h.shown().map((s) => s.id)).toEqual([1]);
+    expect(h.notify).not.toHaveBeenCalled();
+    // Still none for a later flip, and none once the per-SKU minute has passed.
+    await h.advance(CHECK_NOTIFY_DEDUP_MS);
+    h.answers.set('Earbuds', (source) => itemResult({ id: 99, source, sku: '143;6', name: 'Earbuds' }));
+    h.copy('Earbuds');
+    await h.poll();
+    expect(h.showPopup).toHaveBeenCalledTimes(2);
+    expect(h.notify).not.toHaveBeenCalled();
+    // The popup turned off: the flip is told by a notification instead.
+    h.settings.check.popup = false;
+    h.copy('Team Captain');
+    await h.poll();
+    expect(h.showPopup).toHaveBeenCalledTimes(2);
+    expect(h.notify).toHaveBeenCalledTimes(1);
   });
 
   it('never notifies or pops up from the hotkey path', async () => {
@@ -1085,7 +1107,8 @@ describe('privacy: the main logger never receives clipboard text', () => {
     };
     const consoleSpies = (['log', 'info', 'warn', 'error', 'debug'] as const).map((k) => vi.spyOn(console, k).mockImplementation(() => undefined));
     try {
-      const h = harness({ watch: true });
+      // Popup off for the watcher, so its flips go through the (throwing) notification; the hotkey still shows the popup.
+      const h = harness({ watch: true, popup: false });
       const ctl = createLiveCheckMain({ ...h.deps, log });
       ctl.syncWatch();
       await h.flush();
@@ -1151,7 +1174,8 @@ describe('privacy: the main logger never receives clipboard text', () => {
     };
     const consoleSpies = (['log', 'info', 'warn', 'error', 'debug'] as const).map((k) => vi.spyOn(console, k).mockImplementation(() => undefined));
     try {
-      const h = harness({ watch: true });
+      // Popup off for the watcher, so its flips go through the (throwing) notification; the hotkey still shows the popup.
+      const h = harness({ watch: true, popup: false });
       const ctl = createLiveCheckMain({ ...h.deps, log });
       ctl.syncWatch();
       await h.flush();
@@ -1165,7 +1189,7 @@ describe('privacy: the main logger never receives clipboard text', () => {
       h.answers.set('1.33 ref', () => leak());
       h.copy('1.33 ref');
       await h.poll();
-      // The user copies the name: checked, and the popup and the notification both throw with it.
+      // The user copies the name: checked, and the notification throws with it (the hotkey's popup below does too).
       h.showPopup.mockImplementation(() => {
         throw leak();
       });

@@ -2,6 +2,7 @@ import type { PushContract } from '../../shared/rpc';
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import type { AppStatus, DeepPartial, ImportResult, Scrap, SecretsStatus, Settings } from '../../shared/types';
 import { isMock, rpc, windowKind } from '../api';
+import { bankStockOpenPath } from '../banksModel';
 import { errorMessage } from '../format';
 import { NO_CARDS_TOAST_MS, importNoticeToastText } from '../importModel';
 import { createServiceStateTracker, type ServiceStateTracker } from '../serviceStateModel';
@@ -144,6 +145,14 @@ export function AppProvider({ children }: { children: ReactNode }) {
   // Notification clicks and the quick-entry window ask the dashboard to open an item.
   usePush('ui.openItem', (p) => {
     if (p && typeof p.sku === 'string' && p.sku.trim()) setItemSku(p.sku.trim());
+  });
+  // F21-2: the scrap.tf window toolbar's "Show flips" (main shows the dashboard first). Only a route of
+  // this dashboard changes; the stock page applies the chip once and drops it from the address.
+  usePush('ui.openBankStock', (p) => {
+    // Main sends it to the dashboard only; another window's route (the toolbar's hash) must never move.
+    if (windowKind() !== 'dashboard') return;
+    const path = bankStockOpenPath(p);
+    if (path) navigate(path);
   });
   const serviceTracker = useRef<ServiceStateTracker | null>(null);
   serviceTracker.current ??= createServiceStateTracker(setServiceState, refreshStatus);

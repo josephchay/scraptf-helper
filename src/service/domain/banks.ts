@@ -12,11 +12,14 @@
 // - the /items list card (F14's cache), keyed on the cache's own version; while the list holds no
 //   rows, the list's batches from the saves part.
 // Everything is read once per rebuild, never per row, and only when summary() asks. F17's "What's
-// new" per card comes from the bank stock cache (in memory) on every summary(), not from a part.
+// new" per card comes from the bank stock cache (in memory) on every summary(), not from a part, and
+// from 0.7.1 (UX-2b) so do a bank page's flips (its stock page's Flips chip); only the All items card,
+// and a bank with no stock save, count the profitable opportunities on its prices.
 
-import { BANK_LOOK_FOR, NO_BANK_FLIPS, bankFlips, bankLookFor, type BankFlips, type BankLookFor } from '../../shared/banks';
+import { BANK_STOCK_MAX_LIMIT } from '../../shared/bankStock';
+import { BANK_LOOK_FOR, NO_BANK_FLIPS, bankFlips, bankLookFor, bankStockFlips, type BankFlips, type BankLookFor } from '../../shared/banks';
 import { SCRAPTF_BANKS, bankForCategory, isScraptfBank, type ScraptfBankInfo } from '../../shared/links';
-import { scraptfBankSaves } from '../../shared/market';
+import { batchItemCounts, mergeBankNewestSaves, scraptfBankSaves, wholeLookNewestSaves } from '../../shared/market';
 import type {
   Category,
   Opportunity,
@@ -51,8 +54,12 @@ export interface BanksSummaryDeps {
   /**
    * Read once per rebuild, never per row: the newest batches (with their bank), the prices (bank joined)
    * and the profitable opportunities on imported prices (filtered in SQL: the rest can never be a flip).
+   * 0.7.1 (DM-7, CQ-3): bankNewestSaves dates each bank over every batch, as the coverage strip does
+   * (optional so older stand-ins still work: then only the newest COVERAGE_BATCHES date a bank).
+   * DC-2: bankStockSaves(bank, 1) is each bank page's newest whole look, which dates and counts its card
+   * (wholeLookNewestSaves; optional the same way).
    */
-  repo: Pick<Repo, 'listImportBatches' | 'listScrapPrices' | 'queryOpportunities'>;
+  repo: Pick<Repo, 'listImportBatches' | 'listScrapPrices' | 'queryOpportunities'> & Partial<Pick<Repo, 'bankNewestSaves' | 'bankStockSaves'>>;
   /** The Live market index, in memory: lookFor and unchecked come from its "Not checked" rows. */
   market: Pick<MarketIndex, 'uncheckedBy'>;
   /** F14's saved /items list, for the 'list' card (the same data as 'scraptf.listStatus'). */
@@ -66,11 +73,13 @@ export interface BanksSummaryDeps {
    */
   categoryOf?(sku: string): Category;
   /**
-   * F17: each bank's "What's new" (BankStock.whatsNew: the change counts between its two newest saves,
+   * F17: each bank's "What's new" (BankStock.whatsNew: the change counts since its session baseline,
    * verdicts from the live book). Read on every summary(), outside the cached parts, so it follows the
-   * market without its own invalidation. Omitted: whatsNew is null on every card.
+   * market without its own invalidation. Omitted: whatsNew is null on every card. 0.7.1 (UX-2b): list,
+   * when given, gives each bank page's card its flips: the stock page's Flips chip and its most profitable
+   * rows, so the card and the page agree; a bank with no stock save keeps the opportunity count.
    */
-  bankStock?: Pick<BankStock, 'whatsNew'>;
+  bankStock?: Pick<BankStock, 'whatsNew'> & Partial<Pick<BankStock, 'list'>>;
   /** Injected in tests; defaults to unref'd real timers. */
   timers?: TimerApi;
 }
@@ -200,7 +209,14 @@ export function createBanksSummary(deps: BanksSummaryDeps): BanksSummary {
       }
       return out;
     };
-    const { bankOf, newest } = scraptfBankSaves(batches, categoriesOf);
+    const saves = scraptfBankSaves(batches, categoriesOf);
+    const bankOf = saves.bankOf;
+    // DM-7: dated over every batch, not only the newest 500 (the coverage strip reads the same query).
+    const extra = typeof repo.bankNewestSaves === 'function' ? repo.bankNewestSaves() : null;
+    // DC-2: and a bank page by its newest whole look, as its stock page: never a partial or unsettled one.
+    const stockSaves = typeof repo.bankStockSaves === 'function' ? repo.bankStockSaves.bind(repo) : null;
+    const wholeLookOf = stockSaves ? (bank: ScraptfBank) => stockSaves(bank, 1)[0] : null;
+    const newest = wholeLookNewestSaves(mergeBankNewestSaves(saves.newest, extra), wholeLookOf, batchItemCounts(batches, extra));
 
     // Per bank: the saved pages behind its rows today (ScraptfBankSummary.pages: its current data, as
     // F14 counts the list's pages; not every save, which a page re-saved all day would inflate) and its
@@ -240,8 +256,8 @@ export function createBanksSummary(deps: BanksSummaryDeps): BanksSummary {
       if (!save && !k) continue;
       const pages = k?.pages.size ?? 0;
       if (save) {
-        // The newest save is one of them even when it stored nothing: only the list's can (a bank
-        // page that stored nothing was saved without its cards and is never `newest`, F18 S3).
+        // The newest save is one of them even when it stored nothing: the list's, or a whole look whose
+        // cards were all sold out (a page saved without its cards stores no stock save and is never `newest`, F18 S3).
         const withNewest = pages + (k?.pages.has(save.id) ? 0 : 1);
         // The newest save, as the coverage strip counts it (its itemCount, fixed at import: later saves
         // re-tag the rows it shares). Rows left from older saves are not on it: sold since, or moved.
@@ -346,6 +362,26 @@ export function createBanksSummary(deps: BanksSummaryDeps): BanksSummary {
     }
   }
 
+  /**
+   * UX-2b: a bank page's card flips as its stock page counts them (the Flips chip: on sale on the shown
+   * saves, verdict flip; most profit first). Null: no stock save of the bank (a page saved before 0.6, or
+   * pruned), a list-less stand-in, or a failed read: the opportunity count stands then. Live, like whatsNew.
+   */
+  let stockFlipsFailing = false;
+  function stockFlipsOf(bank: ScraptfBank, now: UnixMs): BankFlips | null {
+    const list = deps.bankStock?.list;
+    if (!list || bank === 'list') return null;
+    try {
+      const r = list({ bank, filter: 'flips', sort: 'profit', dir: 'desc', limit: BANK_STOCK_MAX_LIMIT }, now);
+      stockFlipsFailing = false;
+      return r.savedAt === null ? null : bankStockFlips(r.rows, r.counts.flips);
+    } catch (err) {
+      if (!stockFlipsFailing) log.warn('scrap.tf banks could not read the stock page flips', { error: String(err) });
+      stockFlipsFailing = true;
+      return null;
+    }
+  }
+
   function notify(): void {
     timer = null;
     if (stopped) return;
@@ -370,7 +406,8 @@ export function createBanksSummary(deps: BanksSummaryDeps): BanksSummary {
       const listed = listState();
       const banks = SCRAPTF_BANKS.map((info): ScraptfBankSummary => {
         const saved = info.bank === 'list' ? listCard(listed, s) : (s.perBank.get(info.bank) ?? NEVER_SAVED);
-        const flip = f.get(info.bank) ?? NO_BANK_FLIPS;
+        // UX-2b: a bank page counts what its stock page shows; only the All items card keeps the price rule.
+        const flip = stockFlipsOf(info.bank, now) ?? f.get(info.bank) ?? NO_BANK_FLIPS;
         const look = l.get(info.bank) ?? NOTHING_TO_LOOK_FOR;
         // Copies: the cached parts serve every later call until invalidated.
         return {

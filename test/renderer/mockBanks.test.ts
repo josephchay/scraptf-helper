@@ -5,7 +5,8 @@
 
 import { afterEach, describe, expect, it } from 'vitest';
 import { createMockBridge, type MockBridge } from '../../src/renderer/mock';
-import { BANK_LOOK_FOR, BANK_TOP_FLIPS, bankFlips, bankLookFor } from '../../src/shared/banks';
+import { BANK_STOCK_MAX_LIMIT } from '../../src/shared/bankStock';
+import { BANK_LOOK_FOR, BANK_TOP_FLIPS, bankFlips, bankLookFor, bankStockFlips } from '../../src/shared/banks';
 import { SCRAPTF_BANKS, scraptfSeenOn } from '../../src/shared/links';
 import { MARKET_MAX_LIMIT } from '../../src/shared/market';
 import { PUSH_EVENTS, SERVICE_METHODS, type PushContract } from '../../src/shared/rpc';
@@ -69,8 +70,12 @@ describe("'scraptf.banks'", () => {
     const market = await b.rpc('market.list', { limit: MARKET_MAX_LIMIT });
     expect(market.total).toBeLessThanOrEqual(MARKET_MAX_LIMIT);
     for (const x of r.banks) {
-      const f = flips.get(x.bank) ?? { flips: 0, flipProfitScrap: 0, top: [] };
+      // 0.7.1 (UX-2b): a bank page with a stock save counts its stock page's Flips chip and rows; the
+      // list (and a bank without one) the profitable opportunities on its prices.
+      const page = x.bank === 'list' ? null : await b.rpc('scraptf.bankStock', { bank: x.bank, filter: 'flips', sort: 'profit', dir: 'desc', limit: BANK_STOCK_MAX_LIMIT });
+      const f = page && page.savedAt !== null ? bankStockFlips(page.rows, page.counts.flips) : (flips.get(x.bank) ?? { flips: 0, flipProfitScrap: 0, top: [] });
       expect({ flips: x.flips, flipProfitScrap: x.flipProfitScrap, top: x.top }, x.bank).toEqual(f);
+      if (page && page.savedAt !== null) expect(x.flips, x.bank).toBe(page.counts.flips);
       const info = SCRAPTF_BANKS.find((i) => i.bank === x.bank)!;
       expect({ unchecked: x.unchecked, lookFor: x.lookFor }, x.bank).toEqual(bankLookFor(market.rows, info.categories));
     }

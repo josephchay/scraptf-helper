@@ -103,7 +103,8 @@ export function createResaveReminders(deps: ResaveRemindersDeps): ResaveReminder
       for (const bank of scraptfResaveBanksOf(s.import.resaveBanks, lastSaved.keys())) {
         const lastSavedAt = lastSaved.get(bank) ?? null;
         if (lastSavedAt === null || !scraptfResaveDue({ minutes, lastSavedAt, lastRemindedAt: remindedAt.get(bank) ?? null, now: at })) continue;
-        const notice = scraptfResaveNotice(bank, lastSavedAt, at);
+        // F21-9: a window user is told to open the page there, not to press Ctrl+S (the click still opens the browser).
+        const notice = scraptfResaveNotice(bank, lastSavedAt, at, s.scraptfWindow);
         if (!notice) continue;
         // Recorded before the push: a failing push is not retried every minute.
         remindedAt.set(bank, at);

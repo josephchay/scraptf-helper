@@ -502,6 +502,14 @@ export interface ShoppingRow {
   inputKinds: InputKind[];
   flags: string[];
   updatedAt: UnixMs;
+  /**
+   * 0.7.1 (ACT-9): when the price knownCostScrap comes from was observed (the known opportunity's
+   * inputObservedAt), its stock on that save, and whether it is older than profit.inputStaleMs. Absent
+   * (older services, the mock until filled): shown as before, and the row counts as fresh.
+   */
+  knownObservedAt?: UnixMs | null;
+  knownStock?: number | null;
+  knownStale?: boolean;
 }
 
 export interface ShoppingListResult {
@@ -532,7 +540,8 @@ export const MARKET_VERDICTS: readonly MarketVerdict[] = ['flip', 'rule-flip', '
 export type MarketSource = 'typed' | 'page' | 'none';
 export const MARKET_SOURCES: readonly MarketSource[] = ['page', 'typed', 'none'];
 
-export type MarketSort = 'ceiling' | 'revenue' | 'buyers' | 'profit' | 'updated' | 'name';
+/** 'seen' (0.7.1): when the user's own price was observed (knownObservedAt), freshest first; ties by profit. */
+export type MarketSort = 'ceiling' | 'revenue' | 'buyers' | 'profit' | 'updated' | 'name' | 'seen';
 
 export interface MarketQuery {
   search?: string;
@@ -635,6 +644,11 @@ export interface MarketRow {
    * Joined at read time like the other scraptf* fields.
    */
   scraptfListedSince: UnixMs | null;
+  /**
+   * 0.7.1 (DM-5): the newest save that still listed it on sale in the run scraptfListedSince starts, so a
+   * run whose last sighting is old is not read as current. Absent or null: unknown (shown as before).
+   */
+  scraptfLastSeenAt?: UnixMs | null;
 }
 
 export interface MarketStats {
@@ -1089,6 +1103,89 @@ export interface ImportResult {
    * file imports and for window reads that wrote no bank stock (main shows 0 then).
    */
   newFlips?: number;
+  /**
+   * 0.7.1 (P5): every skipped entry before `skipped` was cut, and how many per reason (the reason text,
+   * a refusal code for refusals). Absent from older results: `skipped.length` is the count then.
+   */
+  skippedTotal?: number;
+  skippedCounts?: Record<string, number>;
+  /**
+   * 0.7.1: what this import did with the page's bank stock. 'written': a save (rows) was stored;
+   * 'partial': a look with far fewer cards than a recent save of the page (DM-2); 'unsettled': a window
+   * snapshot cut before its settle read (ACT-4); 'none': nothing to store (no bank, no rows). Prices are
+   * stored in every case. Absent: not reported (older services).
+   */
+  stockSave?: 'written' | 'partial' | 'unsettled' | 'none';
+  /**
+   * 0.7.1, window reads that wrote a save: the flips on sale on this save now (BankStock.pageFlips), and
+   * the best few of them (at most 3, most profit first). Absent otherwise.
+   */
+  pageFlips?: number;
+  topFlips?: ImportTopFlip[];
+}
+
+/**
+ * 0.7.1 ImportResult.topFlips: one flip on the page just read. The name comes from the app's own item
+ * data (the schema), never from page text.
+ */
+export interface ImportTopFlip {
+  sku: string;
+  name: string;
+  costScrap: Scrap;
+  maxCostScrap: Scrap;
+  profitScrap: Scrap;
+}
+
+/**
+ * 0.7.1 (P4) 'import.report': one parse of a saved page or window read, as a sanitized summary the user can
+ * copy into a bug report. Whitelisted data only: counts, header texts, warning codes and the card fields
+ * the parser read (never the nav, scripts, asset ids, avatars, Steam IDs, custom names or gift text). Kept
+ * in memory only (a ring of the newest few), never stored or sent.
+ */
+export interface ImportReport {
+  /** Grows with every report (the ring's order). */
+  id: number;
+  at: UnixMs;
+  origin: ImportOrigin;
+  /** The file name (a window read: windowReadFileName). */
+  name: string;
+  pageKind: ImportPageKind;
+  bank: ScraptfBank | null;
+  /** The page key (ScrapTfParseResult.page). */
+  page: string;
+  format: 'html' | 'mhtml' | 'window';
+  /** The batch the import recorded; 0 when it recorded none (a refused read, a throw). */
+  batchId: number;
+  counts: { dataDefindex: number; cards: number; rows: number; selectedSkipped: number; duplicates: number; lookalikes: number };
+  /** The /items table's header cells as the parser read them. */
+  headerColumns: string[];
+  /** Page and item warnings by code (importWarningCode), counted. */
+  warningCodes: Record<string, number>;
+  /** At most IMPORT_REPORT_MAX_ITEMS: refused cards and stored cards with a guess or mismatch code. */
+  items: ImportReportItem[];
+}
+
+/** 0.7.1 (P4): one card or /items row of an ImportReport, as the parser read it (whitelisted fields only). */
+export interface ImportReportItem {
+  defindex: number | null;
+  /** Filtered to quality\d+, killstreak\d, fx\d+, uncraft* and the item/app440/hoverable flags. */
+  classTokens: string[];
+  /** The card's title only when the item has no custom name. */
+  title: string | null;
+  /** The content lines parseContent kept (gift and receipt lines already dropped). */
+  contentLines: string[];
+  indicator: string | null;
+  itemValue: string | null;
+  numAvailable: string | null;
+  numSelected: string | null;
+  particleId: number | null;
+  warpaintId: number | null;
+  /** An /items row's cell texts. */
+  cells?: string[];
+  /** An /items row's stock-limit attributes as read. */
+  limitAttrs?: { title: string | null; dataOriginalTitle: string | null; dataBsOriginalTitle: string | null; ariaLabel: string | null };
+  sku: string | null;
+  warnings: string[];
 }
 
 /**
@@ -1098,6 +1195,18 @@ export interface ImportResult {
  */
 export type ImportOrigin = 'file' | 'window';
 export const IMPORT_ORIGINS: readonly ImportOrigin[] = ['file', 'window'];
+
+/**
+ * 0.7.1 Repo.bankNewestSaves: one bank's newest save over every import batch that recorded its bank, as
+ * scraptfBankSaves dates a bank (save time = batchSavedAt, ties to the higher id; a bank page that stored
+ * nothing is no save, the list counts with none: isEmptyBankSave).
+ */
+export interface BankNewestSave {
+  bank: ScraptfBank;
+  batchId: number;
+  savedAt: UnixMs;
+  itemCount: number;
+}
 
 /** Items per category (absent = none). */
 export type CategoryCounts = Partial<Record<Category, number>>;
@@ -1301,6 +1410,11 @@ export interface BankStockRow {
   firstSeenAt: UnixMs | null;
   /** F20: the price now against the price when the current run began (raw keys + metal, valued at the current key price); null without a run. */
   changeSinceListed: ScraptfPriceChange | null;
+  /**
+   * 0.7.1 (DM-5): the newest save that listed it on sale (the end of its current run), so an old sighting is
+   * not read as current. Absent or null: unknown (shown as before).
+   */
+  lastSeenAt?: UnixMs | null;
 }
 
 /** 'scraptf.bankStock' (and opps.exportCsv kind 'bankStock'). */
@@ -1360,6 +1474,12 @@ export interface BankStockResult {
    */
   pages?: number;
   oldestSavedAt?: UnixMs | null;
+  /**
+   * 0.7.1 (DM-5): pages of the bank whose newest save is far older than the bank's newest page, left out of
+   * the counts, chips and "What's new" (history and the feed keep them), and the newest of their saves.
+   * Absent or null: none left out.
+   */
+  olderPages?: { count: number; newestSavedAt: UnixMs } | null;
   /** Over the whole bank, whatever the filter and search: each chip's count. */
   counts: BankStockCounts;
   /** The page of matching rows, in the query's order. */
@@ -1447,6 +1567,11 @@ export interface ScraptfChangeEvent extends ScraptfEventStored {
   maxCostScrap: Scrap | null;
   /** toValueScrap is at or under maxCostScrap now: the "Flip" pill. */
   flip: boolean;
+  /**
+   * 0.7.1 (ACT-10): the event would be a flip now, but a later event of the same copy superseded it (or the
+   * copy is no longer on sale), so `flip` is false: the muted "was a flip" pill. Absent: false.
+   */
+  wasFlip?: boolean;
 }
 
 /** 'scraptf.changes' params (zod in rpcHandlers): newest first, paged by id. */
@@ -1844,6 +1969,12 @@ export interface ScraptfWindowRead {
   newFlips: number;
   /** One short, fixed-text warning (the import's first, or why it imported nothing); null when none. */
   warning: string | null;
+  /** 0.7.1: ImportResult.stored (prices written). Absent: not reported. */
+  stored?: number;
+  /** 0.7.1: ImportResult.pageFlips (flips on sale on this save). Absent: not reported. */
+  pageFlips?: number;
+  /** 0.7.1: the first of ImportResult.topFlips; null or absent when none. */
+  bestFlip?: { sku: string; name: string; profitScrap: Scrap } | null;
 }
 
 /** F21 push 'scraptfWindow.nav' (main only, to the toolbar): where the scrap.tf view is. */
@@ -1858,6 +1989,13 @@ export interface ScraptfWindowNav {
    * the page is imported once, as its newer snapshot. Absent (the mock, a closed window): false.
    */
   reading?: boolean;
+  /** 0.7.1 (F21-4): the page on screen is one the import reads (scraptfImportablePath). Absent: as before. */
+  importable?: boolean;
+  /**
+   * 0.7.1 (F21-3, F21-10): one fixed-text notice about the page on screen (a challenge, a 429, a load error,
+   * a crash, a blocked link); never page content. Absent or null: none.
+   */
+  notice?: string | null;
 }
 
 /** F21 'scraptfWindow.state': the window as main holds it (a toolbar that loads late asks for it). */
@@ -1868,6 +2006,21 @@ export interface ScraptfWindowState {
   canGoBack: boolean;
   canGoForward: boolean;
   lastRead: ScraptfWindowRead | null;
+  /**
+   * 0.7.1 (F21-6): "Stay signed in" changed while the window is open; it applies when the window is closed
+   * and opened again. Absent: false.
+   */
+  pendingPartitionChange?: boolean;
+}
+
+/** 0.7.1 'app.showBankStock' / push 'ui.openBankStock': which chip a bank's stock page opens on. */
+export type BankStockOpenFilter = 'flips' | 'new';
+export const BANK_STOCK_OPEN_FILTERS: readonly BankStockOpenFilter[] = ['flips', 'new'];
+
+/** 0.7.1 'app.showBankStock' params and the 'ui.openBankStock' push: a bank's stock page on one chip. */
+export interface BankStockOpen {
+  bank: ScraptfBank;
+  filter: BankStockOpenFilter;
 }
 
 /** F21 'scraptfWindow.read' (the toolbar's Read page now): the read taken, or why none was (fixed text). */

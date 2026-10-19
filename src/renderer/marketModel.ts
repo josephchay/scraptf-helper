@@ -15,6 +15,7 @@
 // R10). Nothing here, or anywhere in the app, fetches scrap.tf.
 
 import { bankStockPagePath } from '../shared/bankStock';
+import { SCRAPTF_BOUNDARY_SHORT, scraptfDataSourcesText } from '../shared/boundaryText';
 import { parsePrice } from '../shared/currency';
 import { SCRAPTF_BANKS, bankForCategory, scraptfBankInfo, type ScraptfBankInfo } from '../shared/links';
 import { MARKET_DEFAULT_LIMIT, MARKET_MAX_LIMIT, MARKET_MAX_SEARCH_CHARS, MARKET_SORTS } from '../shared/market';
@@ -219,13 +220,24 @@ export interface MarketRouteIntent {
   sort: MarketSortState;
 }
 
+/** UX-1: the route segment after 'market' of "flips on my saves, freshest first": #/market/flips. */
+export const MARKET_FLIPS_ROUTE = 'flips';
+/** navigate() path of that view (the banks page header's "View all"). */
+export const MARKET_FLIPS_PATH = `market/${MARKET_FLIPS_ROUTE}`;
+
 /**
  * What #/market/bank/<bank> asks for: that bank's categories and Not checked, nothing else, highest
  * Pay up to first, so the table starts with the card's "What to look for" rows and counts what the
- * card's "See all" said. null for any other route.
+ * card's "See all" said. UX-1: #/market/flips asks for every Flip whose scrap.tf price came from a page
+ * the user saved (or read in the window), the freshest sighting first (the 'seen' sort, ties by profit),
+ * across every bank. null for any other route.
  */
 export function marketRouteIntent(segments: readonly string[]): MarketRouteIntent | null {
-  if (segments[0] !== 'market' || segments[1] !== MARKET_BANK_ROUTE) return null;
+  if (segments[0] !== 'market') return null;
+  if (segments[1] === MARKET_FLIPS_ROUTE && segments.length === 2) {
+    return { key: MARKET_FLIPS_ROUTE, filters: { ...defaultMarketFilters(), verdicts: ['flip'], sources: ['page'] }, sort: { sort: 'seen', dir: 'desc' } };
+  }
+  if (segments[1] !== MARKET_BANK_ROUTE) return null;
   const info = scraptfBankInfo(segments[2]);
   if (!info || !info.categories.length) return null;
   return {
@@ -648,6 +660,7 @@ export const SORT_LABELS: Record<MarketSort, string> = {
   profit: 'Profit',
   updated: 'Updated',
   name: 'Name',
+  seen: 'Seen on scrap.tf',
 };
 
 export interface VerdictPill {
@@ -963,7 +976,7 @@ export function coverageChips(s: Pick<MarketListResult['scraptf'], 'importEnable
 
 /**
  * The scrap.tf side in one line: "Your scrap.tf data: 12 typed, 30 from saved pages (newest page
- * 4 min ago). Folder watch on." All of it is what the user typed or saved; the app never visits scrap.tf.
+ * 4 min ago). Folder watch on." All of it is what the user typed, saved or read in the scrap.tf window; Flip Desk never loads scrap.tf on its own.
  */
 export function scraptfSideText(s: MarketListResult['scraptf'], now: UnixMs): { text: string; watch: 'on' | 'off' | 'import-off' } {
   const newest = s.newestPageAt !== null ? ` (newest page ${fmtAgo(s.newestPageAt, now)})` : '';
@@ -973,7 +986,12 @@ export function scraptfSideText(s: MarketListResult['scraptf'], now: UnixMs): { 
 }
 
 /** Shown once on the page until dismissed. */
-export const BOUNDARY_NOTE = 'The app never visits scrap.tf. Browse it yourself; prices you type or pages you save show up here.';
+export const BOUNDARY_NOTE = marketBoundaryNote(false);
+
+/** UX-7: the same note, true with the opt-in scrap.tf window on (`windowOn`: scraptfWindowOn). */
+export function marketBoundaryNote(windowOn: boolean): string {
+  return `${SCRAPTF_BOUNDARY_SHORT} Browse it yourself: ${scraptfDataSourcesText(windowOn)} show up here.`;
+}
 
 /** "No updates waiting", "1 update waiting", "38 updates waiting". */
 export function waitingText(n: number): string {
@@ -1023,7 +1041,7 @@ export function emptyMarketReason(a: {
 export const NEW_ON_SCRAPTF_LABEL = 'New on scrap.tf';
 export const NEW_ON_SCRAPTF_HINT = 'since your previous save';
 export const NEW_ON_SCRAPTF_TITLE =
-  'Only items on sale in your newest save of a scrap.tf bank page that your previous save of that page did not have (or had sold out). From pages you saved; the app never visits scrap.tf.';
+  'Only items on sale in your newest save of a scrap.tf bank page that your previous save of that page did not have (or had sold out). From pages you saved. Flip Desk never loads scrap.tf on its own.';
 
 /** A "New" badge from a save older than this reads muted: scrap.tf has had a day to sell it since. */
 export const SCRAPTF_NEW_FRESH_MS = 24 * 3_600_000;
@@ -1049,7 +1067,7 @@ export function scraptfNewBadge(r: Pick<MarketRow, 'scraptfNewAt'>, now: UnixMs)
     // Per base SKU across every bank (bankStockNewAt), while the drawer names the newest save listing this
     // exact copy (often a later scrap.tf/items save where it is unchanged): say so, or the two read as a
     // contradiction.
-    title: `New on scrap.tf: on sale in a scrap.tf page you saved ${fmtAgo(shown, now)} (${fmtDateTime(at)}) that your previous save of the same page did not have, or had sold out (this item or a copy of it with paint or other extras). The item's details show your newest save that lists this exact item, which can be another page. Stock between your saves is unknown; the app never visits scrap.tf.`,
+    title: `New on scrap.tf: on sale in a scrap.tf page you saved ${fmtAgo(shown, now)} (${fmtDateTime(at)}) that your previous save of the same page did not have, or had sold out (this item or a copy of it with paint or other extras). The item's details show your newest save that lists this exact item, which can be another page. Stock between your saves is unknown. ${SCRAPTF_BOUNDARY_SHORT}`,
   };
 }
 
@@ -1057,7 +1075,7 @@ export function scraptfNewBadge(r: Pick<MarketRow, 'scraptfNewAt'>, now: UnixMs)
 export const LISTED_ON_SCRAPTF_LABEL = 'Listed on scrap.tf > 24 h';
 export const LISTED_ON_SCRAPTF_HINT = 'in your saves';
 export const LISTED_ON_SCRAPTF_TITLE =
-  'Only items that every one of your saves of the scrap.tf bank page they were seen on has listed on sale for at least a day, without a break. What happened between two saves is unknown. From pages you saved; the app never visits scrap.tf.';
+  'Only items that every one of your saves of the scrap.tf bank page they were seen on has listed on sale for at least a day, without a break, up to the newest save that lists it (a page saved once long ago counts no time). What happened between two saves is unknown. From pages you saved. Flip Desk never loads scrap.tf on its own.';
 
 /** The empty table's advice when the filters hide everything; the F17 and F20 switches say what they need. */
 export function emptyFiltersText(f: Pick<MarketFilters, 'newOnScraptf'> & Partial<Pick<MarketFilters, 'listedOnScraptf'>>): string {
@@ -1148,7 +1166,7 @@ export function drawerBankStockLine(b: ItemBankStock | null | undefined, keyScra
     change,
     tone: b.change === null ? null : (BANK_STOCK_CHANGE_TONES[b.change] ?? null),
     text: prefix + (change ?? ''),
-    title: `From your saved copy of ${path}${when}. ${compared} Stock between your saves is unknown. The app never visits scrap.tf; save the page again (Ctrl+S, as '${SAVE_MODE}') to update this.`,
+    title: `From your saved copy of ${path}${when}. ${compared} Stock between your saves is unknown. ${SCRAPTF_BOUNDARY_SHORT} Save the page again (Ctrl+S, as '${SAVE_MODE}') to update this.`,
     route,
   };
 }
@@ -1207,7 +1225,7 @@ export function marketScraptfButton(r: Pick<MarketRow, 'sku' | 'name' | 'categor
     seen,
     title: inWindow
       ? `${where} Opens it in the Flip Desk window and copies the name (${MARKET_SCRAPTF_KEY}).`
-      : `${where} Opens it and copies the name (${MARKET_SCRAPTF_KEY}). The app never visits scrap.tf.`,
+      : `${where} Opens it and copies the name (${MARKET_SCRAPTF_KEY}). ${SCRAPTF_BOUNDARY_SHORT}`,
     // Starts with the visible label (WCAG 2.5.3): "click All items" by voice must find the button.
     ariaLabel: `${info.label}: open ${path} in ${inWindow ? 'the Flip Desk window' : 'your browser'} and copy the name`,
   };
@@ -1247,7 +1265,7 @@ export function marketBankLink(categories: readonly Category[], inWindow = false
     text: `Open ${path}`,
     title: inWindow
       ? `Opens scrap.tf's ${info.label} bank in the Flip Desk window, to look for these items there.`
-      : `Opens scrap.tf's ${info.label} bank in your browser, to look for these items there. The app never visits scrap.tf.`,
+      : `Opens scrap.tf's ${info.label} bank in your browser, to look for these items there. ${SCRAPTF_BOUNDARY_SHORT}`,
     ariaLabel: `Open ${path} in ${inWindow ? 'the Flip Desk window' : 'your browser'}`,
   };
 }

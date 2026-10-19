@@ -11,7 +11,9 @@ import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 import { resetBptfSocketGuard } from '../../src/service/connectors/bptfSocket';
 import type { PricedbSocketLike } from '../../src/service/connectors/pricedb';
+import { META_SCHEMA_CHECKED_AT, META_SCHEMA_EXTRAS, buildSchemaSnapshot } from '../../src/service/connectors/schema';
 import { createServiceCore, type ServiceCore } from '../../src/service/core';
+import { openRepo } from '../../src/service/db';
 import { createLogger } from '../../src/service/logger';
 import { DEFAULT_SETTINGS, mergeSettings } from '../../src/shared/defaults';
 import type { PushEvent } from '../../src/shared/rpc';
@@ -138,10 +140,31 @@ afterEach(async () => {
   while (temps.length) rmSync(temps.pop()!, { recursive: true, force: true });
 });
 
-function setup(patch: DeepPartial<Settings> = {}, secrets: Partial<Record<SecretName, string>> = { steamApiKey: SECRET }, extra?: ExtraRoute) {
+/**
+ * The item schema as an earlier run cached it, so a core started with the network paused has item data
+ * (the folder watch waits for it: a page read without it would get SKUs that change later, P3).
+ */
+function seedCachedSchema(dataDir: string): void {
+  mkdirSync(dataDir, { recursive: true });
+  const repo = openRepo(path.join(dataDir, 'flipdesk.sqlite'));
+  const now = Date.now();
+  const built = buildSchemaSnapshot(schemaSubset, paintList, now, 'W/"fixture"');
+  repo.replaceSchema(built.snapshot);
+  repo.setMeta(META_SCHEMA_EXTRAS, JSON.stringify(built.extras));
+  repo.setMeta(META_SCHEMA_CHECKED_AT, String(now));
+  repo.close();
+}
+
+function setup(
+  patch: DeepPartial<Settings> = {},
+  secrets: Partial<Record<SecretName, string>> = { steamApiKey: SECRET },
+  extra?: ExtraRoute,
+  opts: { cachedSchema?: boolean } = {},
+) {
   const root = mkdtempSync(path.join(os.tmpdir(), 'flipdesk-core-'));
   temps.push(root);
   const dataDir = path.join(root, 'data');
+  if (opts.cachedSchema) seedCachedSchema(dataDir);
   const fetch = fakeFetch(extra);
   const ws = fakeWs();
   const logger = createLogger({ dataDir });
@@ -347,7 +370,8 @@ describe('service core end to end', () => {
   }, 60_000);
 
   it('imports pages saved into the watch folder once import is enabled, and stops watching when it is turned off', async () => {
-    const h = setup({ networkPaused: true });
+    // Item data cached by an earlier run: the watch starts at once even with the network paused.
+    const h = setup({ networkPaused: true }, undefined, undefined, { cachedSchema: true });
     const folder = path.join(h.root, 'saved');
     mkdirSync(folder);
     await h.core.start();

@@ -27,6 +27,7 @@ import {
   SAVE_MODE_TEXT,
   importFailedToast,
   importNoticeToastText,
+  importOffText,
   importSavedWithoutCards,
   importTooLarge,
   importWarningCode,
@@ -229,6 +230,23 @@ describe('the Import page result', () => {
   });
 });
 
+describe('turning import off (UX-12)', () => {
+  it('names what it also does to the scrap.tf window while the window is on', () => {
+    const off = importOffText(false);
+    expect(off.confirmLabel).toBe('Turn off import?');
+    expect(off.text).toBe('Turning it off stops the folder watch and hides the import buttons. Imported prices stay in your price sheet. Your watch folder choice is cleared.');
+    const on = importOffText(true);
+    expect(on.text).toBe(
+      `${off.text} This also turns off the scrap.tf window and closes it; turn it on again in Settings → scrap.tf window.`,
+    );
+    expect(on.confirmLabel).toBe('Turn off import and the scrap.tf window?');
+    const page = read('pages/ImportPage.tsx');
+    expect(page).toContain("const off = importOffText(settings?.scraptfWindow?.enabled === true);");
+    expect(page).toContain('confirmLabel={off.confirmLabel}');
+    expect(page).toContain("{off.text}");
+  });
+});
+
 describe('the copy', () => {
   const imp = read('pages/ImportPage.tsx');
 
@@ -261,7 +279,10 @@ describe('the copy', () => {
 
   it('every save step and tip names the save type', () => {
     // scrap.tf/items: Webpage, Complete only (an image per row puts a Single File save over the limits).
-    expect(read('components/ScraptfListCard.tsx')).toContain('Press <kbd>Ctrl</kbd>+<kbd>S</kbd>, <SaveModeChoice alt={false} />, and save it into your watch folder');
+    // UX-5: "Or, in your browser, press" with the scrap.tf window on.
+    const card = read('components/ScraptfListCard.tsx');
+    expect(card).toContain("{w ? 'Or, in your browser, press ' : 'Press '}");
+    expect(card).toContain('<kbd>Ctrl</kbd>+<kbd>S</kbd>, <SaveModeChoice alt={false} />, and save it into your watch folder');
     const banks = read('pages/BanksPage.tsx');
     expect(banks).toContain('In the save dialog, <SaveModeChoice />. {SAVE_MODE_LIST_ONLY}');
     expect(banks).toContain('Save it with <kbd>Ctrl</kbd>+<kbd>S</kbd> as <strong>{SAVE_MODE}</strong> into your watch folder');
@@ -291,7 +312,7 @@ describe('the copy', () => {
     expect(emptyFiltersText({ newOnScraptf: true })).toContain(`Ctrl+S into your watch folder, ${complete}`);
     expect(emptyFiltersText({ newOnScraptf: false })).not.toContain('Ctrl+S');
     const drawerLine = drawerBankStockLine({ bank: 'hats', savedAt: T0 - 60_000, change: null, previousCostScrap: null, stock: 1 }, null, T0)!;
-    expect(drawerLine.title).toContain(`save the page again (Ctrl+S, ${complete}) to update this`);
+    expect(drawerLine.title).toContain(`Save the page again (Ctrl+S, ${complete}) to update this`);
     // Nothing on sale: sold out, or saved before scrap.tf added its cards.
     expect(bankStockFilterEmpty('all').body).toBe(
       "The page you saved lists no item with a price to buy and stock: everything may have been sold out, or the page was saved before scrap.tf added its cards. Save it again as 'Webpage, Complete'.",
@@ -317,7 +338,7 @@ describe('the copy', () => {
     const cards = bankCards(null, null, T0);
     const list = cards.find((c) => c.isList)!;
     expect(list.bank).toBe('list');
-    expect(list.openTitle).toBe(`Opens scrap.tf/items in your own browser; the app never visits it. ${LIST_SAVE_TIP}`);
+    expect(list.openTitle).toBe(`Opens scrap.tf/items in your own browser. Flip Desk never loads scrap.tf on its own. ${LIST_SAVE_TIP}`);
     const stockList = bankStockHeader('list', null, T0)!;
     expect(stockList.openTitle).toBe(list.openTitle);
     for (const t of [list.openTitle, stockList.openTitle]) {

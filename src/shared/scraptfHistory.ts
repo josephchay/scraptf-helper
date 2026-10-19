@@ -26,11 +26,13 @@ import type {
   Scrap,
   ScraptfBank,
   ScraptfChangeEvent,
+  ScraptfChangeKind,
   ScraptfEventStored,
   ScraptfHistoryPoint,
   ScraptfItemHistory,
   ScraptfKeyRun,
   ScraptfPriceChange,
+  ScraptfWindowSettings,
   UnixMs,
 } from './types';
 
@@ -47,8 +49,15 @@ export const SCRAPTF_CHANGES_DEFAULT_LIMIT = 100;
 export const SCRAPTF_CHANGES_MAX_LIMIT = 500;
 /** opps.exportCsv kind 'scraptfChanges': at most this many events, newest first. */
 export const SCRAPTF_CHANGES_EXPORT_MAX = 5000;
-/** S3: ScraptfItemHistory.events holds at most this many, newest first. */
+/** S3: ScraptfItemHistory.events holds at most this many price events (every kind but 'stock'), newest first. */
 export const SCRAPTF_ITEM_EVENTS = 50;
+/**
+ * 0.7.1 (DM-6): and, apart from those, at most this many 'stock' events, so a busy page's stock moves
+ * (a 'stock' event per save) never push a price drop out of the drawer's history.
+ */
+export const SCRAPTF_ITEM_STOCK_EVENTS = 10;
+/** 0.7.1 (DM-6): the change kinds that are a price event (an item history reads them apart from 'stock'). */
+export const SCRAPTF_PRICE_KINDS: readonly ScraptfChangeKind[] = ['new', 'restocked', 'cheaper', 'pricier', 'gone'];
 /** S5: settings.import.resaveReminderMin's range (0 = off). */
 export const SCRAPTF_RESAVE_MAX_MIN = 1440;
 /** U4's helper text, shared so Settings and the docs say it alike. */
@@ -153,6 +162,131 @@ export function scraptfChangeEvent(e: ScraptfEventStored, keyScrap: Scrap, buy: 
     maxCostScrap,
     flip: e.kind !== 'gone' && toValueScrap !== null && maxCostScrap !== null && toValueScrap <= maxCostScrap,
   };
+}
+
+/**
+ * 0.7.1 (ACT-10): one copy's current state across a bank's retained saves (scraptfKeyStatesOf): whether it
+ * is on sale on its newest observation, and since when its price and stock have been as they are now.
+ */
+export interface ScraptfKeyState {
+  onSale: boolean;
+  /** The first retained save showing the current state (on sale or not, price, stock as the events compare them). */
+  since: UnixMs;
+  /** The observation just before `since` (the save that showed the earlier state); null: none. */
+  prevAt: UnixMs | null;
+  /**
+   * As `since`, but only a price or on-sale change starts a new state: a stock move at the same price (a
+   * 'stock' event, hidden from the feed by default) does not supersede the price event before it.
+   */
+  priceSince: UnixMs;
+  /** The observation just before `priceSince`; null: none. */
+  pricePrevAt: UnixMs | null;
+}
+
+/**
+ * A change event would be written between these two rows of one copy (scraptfEventsOf's rules); without
+ * `stock`, only a price or on-sale change counts (ScraptfKeyState.priceSince).
+ */
+function stateChanged(prev: BankStockStored | null, cur: BankStockStored | null, stock: boolean): boolean {
+  const was = bankStockOnSale(prev);
+  const is = bankStockOnSale(cur);
+  if (was !== is) return true;
+  if (!is || !prev || !cur) return false;
+  const a = rawOf(prev);
+  const b = rawOf(cur);
+  if (a.keys !== b.keys || a.scrap !== b.scrap) return true;
+  return stock && finite(prev.stock) && finite(cur.stock) && prev.stock !== cur.stock;
+}
+
+/**
+ * 0.7.1 (ACT-10): per copy (bankStockKey), its current state across one bank's retained saves, by
+ * scraptfRunsOf's home-page rule (a save of another page that does not list it says nothing). From the
+ * saves in memory, never a query. O(rows + observations).
+ */
+export function scraptfKeyStatesOf(saves: readonly ScraptfSaveRows[]): Map<string, ScraptfKeyState> {
+  interface St {
+    state: ScraptfKeyState;
+    home: string;
+    last: BankStockStored | null;
+    lastAt: UnixMs;
+  }
+  const states = new Map<string, St>();
+  const homeKeys = new Map<string, Set<string>>();
+  const homeOf = (page: string): Set<string> => {
+    let s = homeKeys.get(page);
+    if (!s) homeKeys.set(page, (s = new Set()));
+    return s;
+  };
+  const see = (st: St, at: UnixMs, row: BankStockStored | null): void => {
+    if (stateChanged(st.last, row, true)) {
+      st.state.prevAt = st.lastAt;
+      st.state.since = at;
+    }
+    if (stateChanged(st.last, row, false)) {
+      st.state.pricePrevAt = st.lastAt;
+      st.state.priceSince = at;
+    }
+    st.state.onSale = bankStockOnSale(row);
+    st.last = row;
+    st.lastAt = at;
+  };
+  for (const save of oldestFirst(saves)) {
+    const listedHere = new Set<string>();
+    for (const row of save.rows) {
+      const key = bankStockKey(row.sku, row.specialKey);
+      if (listedHere.has(key)) continue;
+      listedHere.add(key);
+      const st = states.get(key);
+      if (!st) {
+        states.set(key, { state: { onSale: bankStockOnSale(row), since: save.savedAt, prevAt: null, priceSince: save.savedAt, pricePrevAt: null }, home: save.page, last: row, lastAt: save.savedAt });
+        homeOf(save.page).add(key);
+        continue;
+      }
+      if (st.home !== save.page) {
+        homeKeys.get(st.home)?.delete(key);
+        st.home = save.page;
+        homeOf(save.page).add(key);
+      }
+      see(st, save.savedAt, row);
+    }
+    for (const key of homeKeys.get(save.page) ?? []) {
+      if (!listedHere.has(key)) see(states.get(key)!, save.savedAt, null);
+    }
+  }
+  const out = new Map<string, ScraptfKeyState>();
+  for (const [key, st] of states) out.set(key, st.state);
+  return out;
+}
+
+/**
+ * 0.7.1 (ACT-10): whether an event is still the copy's newest change of its sort and the copy is on sale
+ * now: it falls after the observation before the current state began and at or before the save that first
+ * showed it (a save between the two may have been thinned away, so its event can be anywhere in that
+ * span). A 'stock' event is measured against every change; a price event against price and on-sale
+ * changes only, so a later stock move at the same price leaves its Flip pill (the feed hides stock moves
+ * by default, and the price it reports still stands).
+ */
+export function scraptfEventIsCurrent(e: Pick<NewScraptfEvent, 'at'> & Partial<Pick<NewScraptfEvent, 'kind'>>, st: ScraptfKeyState | null | undefined): boolean {
+  if (!st || !st.onSale || !finite(e.at)) return false;
+  const stockMove = e.kind === 'stock';
+  const since = stockMove ? st.since : st.priceSince;
+  const prevAt = stockMove ? st.prevAt : st.pricePrevAt;
+  return e.at <= since && (prevAt === null || e.at > prevAt);
+}
+
+/**
+ * 0.7.1 (ACT-10): the "Flip" pill only on the copy's newest event while it is on sale (its newest price
+ * event, and its newest stock move; scraptfEventIsCurrent); an earlier one (a later change superseded it,
+ * or the copy is gone) keeps flip false and gets wasFlip, the muted pill.
+ * `statesOf(bank)` null: that bank's saves are not known (a failed read), so its events stay as they are.
+ */
+export function scraptfMarkSuperseded(events: readonly ScraptfChangeEvent[], statesOf: (bank: ScraptfBank) => ReadonlyMap<string, ScraptfKeyState> | null): ScraptfChangeEvent[] {
+  return events.map((e) => {
+    if (!e.flip) return e;
+    const states = statesOf(e.bank);
+    if (states === null || scraptfEventIsCurrent(e, states.get(e.key))) return e;
+    return { ...e, flip: false, wasFlip: true };
+  });
 }
 
 /** The feed's filters as the service applies them after the repo read (the mock filters the same way). */
@@ -356,7 +490,8 @@ function better(a: { bank: ScraptfBank; at: UnixMs }, b: { bank: ScraptfBank; at
  * bank's retained saves. The history is read from one bank: the one whose newest observation lists it on
  * sale (a bank page before the /items list, then the newest), else the one that last listed it on sale,
  * else the one that last listed it at all. `events` are this base SKU's stored events valued now (the
- * caller reads them; this keeps the copy's own, newest first, at most SCRAPTF_ITEM_EVENTS). change.hN
+ * caller reads them; this keeps the copy's own, newest first, at most SCRAPTF_ITEM_EVENTS price events
+ * and, 0.7.1, at most SCRAPTF_ITEM_STOCK_EVENTS 'stock' ones besides). change.hN
  * compares the current price with the newest observation at or before now - N (null when it was not on
  * sale then, or nothing is on sale now); change.listed with the run's first save. All prices are raw keys
  * + metal valued at the key price now.
@@ -395,10 +530,13 @@ export function scraptfItemHistoryOf(a: {
     if (better({ bank: b.bank, at: listedAt }, lastListed)) lastListed = { bank: b.bank, obs, run, at: listedAt };
   }
   const pick = onSaleNow ?? lastOnSale ?? lastListed;
+  // DM-6: price events and stock moves are capped apart, so 60 stock moves cannot push out a price drop.
+  let prices = 0;
+  let stocks = 0;
   const events = a.events
     .filter((e) => e.key === key)
     .sort((x, y) => y.id - x.id)
-    .slice(0, SCRAPTF_ITEM_EVENTS);
+    .filter((e) => (e.kind === 'stock' ? ++stocks <= SCRAPTF_ITEM_STOCK_EVENTS : ++prices <= SCRAPTF_ITEM_EVENTS));
   const empty: ScraptfItemHistory = {
     sku: base,
     specialKey,
@@ -455,25 +593,57 @@ export function scraptfItemHistoryOf(a: {
   };
 }
 
+/** 0.7.1 (DM-5): a base SKU's listed run as the Live market joins it: when it began and its newest sighting on sale. */
+export interface ScraptfListed {
+  since: UnixMs;
+  lastSeenAt: UnixMs;
+}
+
 /**
- * MarketRow.scraptfListedSince for a base SKU from one bank's runs: the earliest listedSince among the
- * copies of it listed now (any special key), else null. The bank is the row's scraptfLink bank when its
- * source is 'seen'.
+ * Picks the run a base SKU is "listed" by among its copies' runs: the newest sighting first (0.7.1, DM-5:
+ * a copy last seen on a page saved weeks ago does not stand for one on the save of an hour ago), then the
+ * earliest start (the copies listed on that save, as before). Shared by the history index and the mock.
  */
-export function scraptfListedSinceOf(runs: ReadonlyMap<string, ScraptfKeyRun> | null | undefined, baseSku: string): UnixMs | null {
+export function scraptfListedPick(cur: ScraptfListed | null | undefined, next: ScraptfListed): boolean {
+  if (!cur) return true;
+  if (next.lastSeenAt !== cur.lastSeenAt) return next.lastSeenAt > cur.lastSeenAt;
+  return next.since < cur.since;
+}
+
+/**
+ * 0.7.1 (DM-5): MarketRow.scraptfListedSince and scraptfLastSeenAt for a base SKU from one bank's runs:
+ * among the copies of it listed now (any special key), the one seen on sale last (scraptfListedPick), its
+ * run's start and newest sighting; null when none is listed.
+ */
+export function scraptfListedOf(runs: ReadonlyMap<string, ScraptfKeyRun> | null | undefined, baseSku: string): ScraptfListed | null {
   if (!runs) return null;
-  let best: UnixMs | null = null;
+  let best: ScraptfListed | null = null;
   for (const r of runs.values()) {
     if (r.sku !== baseSku || r.listedSince === null) continue;
-    if (best === null || r.listedSince < best) best = r.listedSince;
+    const next = { since: r.listedSince, lastSeenAt: r.lastSeenAt ?? r.listedSince };
+    if (scraptfListedPick(best, next)) best = next;
   }
   return best;
 }
 
-/** MarketQuery.listedOnScraptf (U5): listed on scrap.tf for at least SCRAPTF_LONG_LISTED_MS before `now`. */
-export function marketListedSideMatches(r: { scraptfListedSince: UnixMs | null }, q: { listedOnScraptf?: boolean }, now: UnixMs): boolean {
+/**
+ * MarketRow.scraptfListedSince for a base SKU from one bank's runs (scraptfListedOf's since), else null.
+ * The bank is the row's scraptfLink bank when its source is 'seen'.
+ */
+export function scraptfListedSinceOf(runs: ReadonlyMap<string, ScraptfKeyRun> | null | undefined, baseSku: string): UnixMs | null {
+  return scraptfListedOf(runs, baseSku)?.since ?? null;
+}
+
+/**
+ * MarketQuery.listedOnScraptf (U5): listed on scrap.tf for at least SCRAPTF_LONG_LISTED_MS, measured to
+ * its newest sighting on sale (0.7.1, DM-5: scraptfLastSeenAt - scraptfListedSince), or to `now` when that
+ * is not known. A page saved once 60 days ago has listed it for 0, not 60 days.
+ */
+export function marketListedSideMatches(r: { scraptfListedSince: UnixMs | null; scraptfLastSeenAt?: UnixMs | null }, q: { listedOnScraptf?: boolean }, now: UnixMs): boolean {
   if (q.listedOnScraptf !== true) return true;
-  return finite(r.scraptfListedSince) && now - r.scraptfListedSince >= SCRAPTF_LONG_LISTED_MS;
+  if (!finite(r.scraptfListedSince)) return false;
+  const end = finite(r.scraptfLastSeenAt) ? r.scraptfLastSeenAt : now;
+  return end - r.scraptfListedSince >= SCRAPTF_LONG_LISTED_MS;
 }
 
 // ---------------------------------------------------------------------------
@@ -514,18 +684,34 @@ export function scraptfResaveDue(a: { minutes: number; lastSavedAt: UnixMs | nul
   return a.now - a.lastRemindedAt >= every;
 }
 
+/** 0.7.1 (F21-9): the reminder's way to refresh a page, as the user gets their pages in. */
+export const SCRAPTF_RESAVE_HOW_FILE = "Save it again (Ctrl+S, 'Webpage, Complete') to refresh prices and see what changed";
+export const SCRAPTF_RESAVE_HOW_WINDOW = 'Open it in the Flip Desk window to refresh prices and see what changed';
+
+/** 0.7.1: the user opens scrap.tf links in the Flip Desk window (on, acknowledged, links sent there). */
+function linksInWindow(w: Pick<ScraptfWindowSettings, 'enabled' | 'acknowledgedAt' | 'openLinksInWindow'> | null | undefined): boolean {
+  return !!w && w.enabled === true && w.acknowledgedAt !== null && w.acknowledgedAt !== undefined && w.openLinksInWindow === true;
+}
+
 /**
  * The reminder's notify payload: "Re-save scrap.tf/buy/hats" / "Last saved 1 h 05 m ago. Save it again
  * (Ctrl+S, 'Webpage, Complete') to refresh prices and see what changed", with the bank's static
  * SCRAPTF_BANKS URL as openUrl (main opens it on a click only, after its own allowlist check). Null for
- * an unknown bank.
+ * an unknown bank. 0.7.1 (F21-9): with the scrap.tf window on and links opening there (`window`, the
+ * settings.scraptfWindow), the body says to open it in the Flip Desk window instead; the click still
+ * opens the user's browser.
  */
-export function scraptfResaveNotice(bank: ScraptfBank, lastSavedAt: UnixMs, now: UnixMs): { title: string; body: string; sku: null; openUrl: string } | null {
+export function scraptfResaveNotice(
+  bank: ScraptfBank,
+  lastSavedAt: UnixMs,
+  now: UnixMs,
+  window?: Pick<ScraptfWindowSettings, 'enabled' | 'acknowledgedAt' | 'openLinksInWindow'> | null,
+): { title: string; body: string; sku: null; openUrl: string } | null {
   const info = scraptfBankInfo(bank);
   if (!info) return null;
   return {
     title: `Re-save ${bankStockPagePath(info.url)}`,
-    body: `Last saved ${scraptfAgoText(now - lastSavedAt)} ago. Save it again (Ctrl+S, 'Webpage, Complete') to refresh prices and see what changed`,
+    body: `Last saved ${scraptfAgoText(now - lastSavedAt)} ago. ${linksInWindow(window) ? SCRAPTF_RESAVE_HOW_WINDOW : SCRAPTF_RESAVE_HOW_FILE}`,
     sku: null,
     openUrl: info.url,
   };

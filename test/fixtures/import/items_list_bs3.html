@@ -1,0 +1,251 @@
+<!DOCTYPE html>
+<html lang="en">
+	<head>
+		<meta charset="utf-8" />
+		<title>Item  Trading - TF2 - Scrap.TF</title>
+		<!-- SYNTHETIC FIXTURE: layout and several rows/prices modelled on http://web.archive.org/web/20261014041145/https://scrap.tf/items ; icons, other rows and stock counts are made up. -->
+		<!-- 0.7.1 (P1) VARIANT: the live page after its Bootstrap 3 tooltips ran (a hovered DOM): each Item Limits bar keeps n/limit in data-original-title and title is left empty, as Bootstrap 3 fixTitle leaves it. -->
+		<meta http-equiv="X-UA-Compatible" content="IE=edge" />
+		<meta name="description" content="Buy and sell various TF2 items for metal, keys, and other items."/>
+		<meta name="viewport" content="width=device-width" />
+		<script type="text/javascript">
+			const webSocketInfo = {"host":"ws.example.invalid","port":443};
+		</script>
+		<!-- Open Graph Protocol -->
+		<meta property="og:type" content="website" />
+		<meta property="og:url" content="https://scrap.tf/items" />
+		<meta property="og:title" content="Item  Trading - TF2 - Scrap.TF" />
+		<link rel="stylesheet" href="/css/styles.1791488770.css" />
+	</head>
+
+	<body class="page-theme-light" id="pid-items" style="background-color: #281F4D;">
+		<div class="hover-over">
+			<div class="hover-over-title"></div>
+			<div class="hover-over-content"></div>
+		</div>
+
+		<div class="flat-dotted-rule" style="margin-top: 40px;"></div>
+
+		<h3 id="pricelist" class="subtitle">Item Prices</h3>
+
+		<div class="container text-center">
+			<ul id="if-controls" class="nav nav-pills center-pills" style="padding-bottom: 1.4em;"><li role="presentation" class="active"><a href="#pricelist" onclick="ScrapTF.Items.FilterPricelist(null, event)">All Items</a></li><li role="presentation"><a href="#pricelist" onclick="ScrapTF.Items.FilterPricelist(itembank_filters.stranges, event);">Stranges</a></li></ul>
+		</div>
+
+		<div class="container">
+			<table id="itembanking-list" class="table table-bordered">
+				<thead>
+				<tr>
+					<th>Icon</th>
+					<th>Item</th>
+					<th>Price to buy</th>
+					<th>Price we pay</th>
+					<th width="200px;">Item Limits</th>
+				</tr>
+				</thead>
+				<tbody>
+
+									<tr data-quality="6" data-defindex="5833" data-type="" data-slot="">
+						<td><img data-selectable="false" src="https://steamcdn-a.akamaihd.net/apps/440/icons/FIXTURE-key.png" alt="Icon"
+								 class="item quality6 rev-banking-background" style=""
+								 data-original-title=""></td>
+						<td>Tough Break Key</td>
+												<td>
+							1 key, 6 refined
+						</td>
+						<td>
+							1 key, 1 refined
+						</td>
+						<td>
+							<div rel="tooltip" title="" data-original-title="49/50" style="position:relative;background:#fff"><div style='width:100%;background:#2ecc71'><div style='width:98%;background:#e74c3c;padding-left:3px'>49</div><div style='position:absolute;right:0%;top:0;padding-right:3px'>50</div></div></div>
+						</td>
+					</tr>
+									<tr data-quality="6" data-defindex="5832" data-type="supply_crate" data-slot="">
+						<td><img data-selectable="false" src="https://steamcdn-a.akamaihd.net/apps/440/icons/FIXTURE-case.png" alt="Icon"
+								 class="item quality6 rev-banking-background" style=""
+								 data-original-title=""></td>
+						<td>Warbird Weapons Case #100</td>
+												<td>
+							7 keys, 10 refined
+						</td>
+						<td>
+							6 keys
+						</td>
+						<td>
+							<div rel="tooltip" title="" data-original-title="3/5" style="position:relative;background:#fff"><div style='width:100%;background:#2ecc71'><div style='width:60%;background:#e74c3c;padding-left:3px'>3</div><div style='position:absolute;right:0%;top:0;padding-right:3px'>5</div></div></div>
+						</td>
+					</tr>
+									<tr data-quality="6" data-defindex="143" data-type="" data-slot="misc">
+						<td><img data-selectable="false" src="https://steamcdn-a.akamaihd.net/apps/440/icons/FIXTURE-earbuds.png" alt="Icon"
+								 class="item quality6 rev-banking-background" style=""
+								 data-original-title=""></td>
+						<td>Earbuds</td>
+												<td>
+							10 keys, 50 refined
+						</td>
+						<td>
+							8 keys, 10 refined
+						</td>
+						<td>
+							<div rel="tooltip" title="" data-original-title="0/5" style="position:relative;background:#fff"><div style='width:100%;background:#2ecc71'><div style='width:0%;background:#e74c3c;padding-left:3px'>0</div><div style='position:absolute;right:0%;top:0;padding-right:3px'>5</div></div></div>
+						</td>
+					</tr>
+									<tr data-quality="6" data-defindex="126" data-type="hat" data-slot="head">
+						<td><img data-selectable="false" src="https://steamcdn-a.akamaihd.net/apps/440/icons/FIXTURE-bill.png" alt="Icon"
+								 class="item quality6 rev-banking-background" style=""
+								 data-original-title=""></td>
+						<td>Bills Hat</td>
+												<td>
+							3 keys, 53 refined
+						</td>
+						<td>
+							3 keys, 42 refined
+						</td>
+						<td>
+							<div rel="tooltip" title="" data-original-title="2/5" style="position:relative;background:#fff"><div style='width:100%;background:#2ecc71'><div style='width:40%;background:#e74c3c;padding-left:3px'>2</div><div style='position:absolute;right:0%;top:0;padding-right:3px'>5</div></div></div>
+						</td>
+					</tr>
+									<tr data-quality="6" data-defindex="725" data-type="" data-slot="">
+						<td><img data-selectable="false" src="https://steamcdn-a.akamaihd.net/apps/440/icons/FIXTURE-ticket.png" alt="Icon"
+								 class="item quality6 rev-banking-background" style=""
+								 data-original-title=""></td>
+						<td>Non-Craftable Tour of Duty Ticket</td>
+												<td>
+							30.33 refined
+						</td>
+						<td>
+							26.44 refined
+						</td>
+						<td>
+							<div rel="tooltip" title="" data-original-title="44/400" style="position:relative;background:#fff"><div style='width:100%;background:#2ecc71'><div style='width:10%;background:#e74c3c;padding-left:3px'>44</div><div style='position:absolute;right:0%;top:0;padding-right:3px'>400</div></div></div>
+						</td>
+					</tr>
+									<tr data-quality="6" data-defindex="5020" data-type="tool" data-slot="">
+						<td><img data-selectable="false" src="https://steamcdn-a.akamaihd.net/apps/440/icons/FIXTURE-tag.png" alt="Icon"
+								 class="item quality6 rev-banking-background" style=""
+								 data-original-title=""></td>
+						<td>Name Tag</td>
+												<td>
+							17.33 refined
+						</td>
+						<td>
+							16 refined
+						</td>
+						<td>
+							<div rel="tooltip" title="" data-original-title="483/500" style="position:relative;background:#fff"><div style='width:100%;background:#2ecc71'><div style='width:96%;background:#e74c3c;padding-left:3px'>483</div><div style='position:absolute;right:0%;top:0;padding-right:3px'>500</div></div></div>
+						</td>
+					</tr>
+									<tr data-quality="11" data-defindex="30621" data-type="" data-slot="">
+						<td><img data-selectable="false" src="https://steamcdn-a.akamaihd.net/apps/440/icons/FIXTURE-taunt.png" alt="Icon"
+								 class="item quality11 rev-banking-background" style=""
+								 data-original-title=""></td>
+						<td>Strange Taunt: Burstchester</td>
+												<td>
+							66 keys
+						</td>
+						<td>
+							60 keys
+						</td>
+						<td>
+							<div rel="tooltip" title="" data-original-title="1/2" style="position:relative;background:#fff"><div style='width:100%;background:#2ecc71'><div style='width:50%;background:#e74c3c;padding-left:3px'>1</div><div style='position:absolute;right:0%;top:0;padding-right:3px'>2</div></div></div>
+						</td>
+					</tr>
+									<tr data-quality="1" data-defindex="1015" data-type="" data-slot="">
+						<td><img data-selectable="false" src="https://steamcdn-a.akamaihd.net/apps/440/icons/FIXTURE-shred.png" alt="Icon"
+								 class="item quality1 rev-banking-background" style=""
+								 data-original-title=""></td>
+						<td>Genuine Taunt: The Shred Alert</td>
+												<td>
+							3 keys, 39.88 refined
+						</td>
+						<td>
+							3 keys, 20 refined
+						</td>
+						<td>
+							<div rel="tooltip" title="" data-original-title="0/3" style="position:relative;background:#fff"><div style='width:100%;background:#2ecc71'><div style='width:0%;background:#e74c3c;padding-left:3px'>0</div><div style='position:absolute;right:0%;top:0;padding-right:3px'>3</div></div></div>
+						</td>
+					</tr>
+									<tr data-quality="6" data-defindex="6012" data-type="part" data-slot="">
+						<td><img data-selectable="false" src="https://steamcdn-a.akamaihd.net/apps/440/icons/FIXTURE-part.png" alt="Icon"
+								 class="item quality6 rev-banking-background" style=""
+								 data-original-title=""></td>
+						<td>Strange Part: Airborne Enemies Killed</td>
+												<td>
+							4 keys, 10 refined
+						</td>
+						<td>
+							3 keys, 40 refined
+						</td>
+						<td>
+							<div rel="tooltip" title="" data-original-title="5/10" style="position:relative;background:#fff"><div style='width:100%;background:#2ecc71'><div style='width:50%;background:#e74c3c;padding-left:3px'>5</div><div style='position:absolute;right:0%;top:0;padding-right:3px'>10</div></div></div>
+						</td>
+					</tr>
+									<tr data-quality="6" data-defindex="5818" data-type="" data-slot="">
+						<td><img data-selectable="false" src="https://steamcdn-a.akamaihd.net/apps/440/icons/FIXTURE-transfer.png" alt="Icon"
+								 class="item quality6 rev-banking-background" style=""
+								 data-original-title=""></td>
+						<td>Strange Count Transfer Tool</td>
+												<td>
+							0.22 refined
+						</td>
+						<td>
+							0.11 refined
+						</td>
+						<td>
+							<div rel="tooltip" title="" data-original-title="12/20" style="position:relative;background:#fff"><div style='width:100%;background:#2ecc71'><div style='width:60%;background:#e74c3c;padding-left:3px'>12</div><div style='position:absolute;right:0%;top:0;padding-right:3px'>20</div></div></div>
+						</td>
+					</tr>
+									<tr data-quality="11" data-defindex="205" data-type="weapon" data-slot="primary">
+						<td><img data-selectable="false" src="https://steamcdn-a.akamaihd.net/apps/440/icons/FIXTURE-aussie-rl.png" alt="Icon"
+								 class="item quality11 rev-banking-background" style=""
+								 data-original-title=""></td>
+						<td>Strange Australium Rocket Launcher</td>
+												<td>
+							44 keys, 44 refined
+						</td>
+						<td>
+							40 keys
+						</td>
+						<td>
+							<div rel="tooltip" title="" data-original-title="1/3" style="position:relative;background:#fff"><div style='width:100%;background:#2ecc71'><div style='width:33%;background:#e74c3c;padding-left:3px'>1</div><div style='position:absolute;right:0%;top:0;padding-right:3px'>3</div></div></div>
+						</td>
+					</tr>
+									<tr data-quality="3" data-defindex="126" data-type="hat" data-slot="head">
+						<td><img data-selectable="false" src="https://steamcdn-a.akamaihd.net/apps/440/icons/FIXTURE-bill.png" alt="Icon"
+								 class="item quality3 rev-banking-background" style=""
+								 data-original-title=""></td>
+						<td>Vintage Bills Hat</td>
+												<td>
+							45 keys
+						</td>
+						<td>
+							40 keys
+						</td>
+						<td>
+							<div rel="tooltip" title="" data-original-title="1/2" style="position:relative;background:#fff"><div style='width:100%;background:#2ecc71'><div style='width:50%;background:#e74c3c;padding-left:3px'>1</div><div style='position:absolute;right:0%;top:0;padding-right:3px'>2</div></div></div>
+						</td>
+					</tr>
+									<tr data-quality="6" data-defindex="31193" data-type="" data-slot="misc">
+						<td><img data-selectable="false" src="https://steamcdn-a.akamaihd.net/apps/440/icons/FIXTURE-dandy.png" alt="Icon"
+								 class="item quality6 rev-banking-background" style=""
+								 data-original-title=""></td>
+						<td>Crocodile Dandy</td>
+												<td>
+							Sold out
+						</td>
+						<td>
+							1.33 refined
+						</td>
+						<td>
+							<div rel="tooltip" title="" data-original-title="0/5" style="position:relative;background:#fff"><div style='width:100%;background:#2ecc71'><div style='width:0%;background:#e74c3c;padding-left:3px'>0</div><div style='position:absolute;right:0%;top:0;padding-right:3px'>5</div></div></div>
+						</td>
+					</tr>
+								</tbody>
+			</table>
+		</div>
+
+		<footer id="footer">
+			<div class="container"></div>
+		</footer>
+	</body>
+</html>

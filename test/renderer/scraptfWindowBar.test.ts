@@ -9,10 +9,11 @@ import { act, createElement, type ReactNode } from 'react';
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { createMockBridge, type MockBridge } from '../../src/renderer/mock';
 import { MOCK_WINDOW_READ_WARNING } from '../../src/renderer/mockScraptfWindow';
-import { SCRAPTF_WINDOW_RISK_TIP, WINDOW_CLEARED_TEXT } from '../../src/renderer/scraptfWindowModel';
+import { readStatusView, SCRAPTF_WINDOW_PARTITION_NOTE, SCRAPTF_WINDOW_RISK_TIP, WINDOW_CLEARED_TEXT } from '../../src/renderer/scraptfWindowModel';
 import { SCRAPTF_BANKS, SCRAPTF_HOME_URL } from '../../src/shared/links';
 import type { FlipdeskBridge } from '../../src/shared/rpc';
-import { READ_MANUAL_MIN_GAP_MS, SCRAPTF_READ_REASONS } from '../../src/shared/scraptfWindowPolicy';
+import { READ_MANUAL_MIN_GAP_MS, SCRAPTF_READ_REASONS, SCRAPTF_WINDOW_NOTICES } from '../../src/shared/scraptfWindowPolicy';
+import type { ScraptfWindowRead, ScraptfWindowState } from '../../src/shared/types';
 import { installDomShim, ShimElement, ShimEvent, type ShimDocument } from './domShim';
 
 const T0 = Date.UTC(2026, 9, 19, 12, 0, 0);
@@ -57,7 +58,7 @@ async function settle(rounds = 8): Promise<void> {
   });
 }
 
-async function mount(opts: { readOnLoad?: boolean } = {}) {
+async function mount(opts: { readOnLoad?: boolean; state?: (s: ScraptfWindowState) => ScraptfWindowState } = {}) {
   vi.stubGlobal('localStorage', { getItem: () => null, setItem: () => undefined, removeItem: () => undefined });
   let clock = T0;
   const b = (bridge = createMockBridge({ tickMs: 0, latencyMs: 0, now: () => clock }));
@@ -69,6 +70,8 @@ async function mount(opts: { readOnLoad?: boolean } = {}) {
     windowKind: 'scraptf',
     rpc: (m, p) => {
       calls.push({ method: m, params: p });
+      // main's state as a test words it (the mock has no partitions).
+      if (m === 'scraptfWindow.state' && opts.state) return b.rpc(m, p).then((s) => opts.state!(s as ScraptfWindowState)) as never;
       return b.rpc(m, p);
     },
     on: (e, fn) => {
@@ -270,6 +273,161 @@ describe('the toolbar, mounted', () => {
   });
 });
 
+describe('the toolbar, 0.7.1 (UX-3, ACT-5, F21-2, F21-3, F21-4, F21-6)', () => {
+  const flipRead: ScraptfWindowRead = {
+    at: T0,
+    path: '/buy/hats',
+    items: 48,
+    bank: 'hats',
+    newFlips: 0,
+    warning: null,
+    stored: 46,
+    pageFlips: 10,
+    bestFlip: { sku: '378;6', name: 'Team Captain', profitScrap: 4 },
+  };
+  /** Calls that show the dashboard from the toolbar. */
+  const shows = (t: Awaited<ReturnType<typeof mount>>) => t.calls.filter((c) => c.method === 'app.showBankStock' || c.method === 'app.openItem');
+
+  it('shows the flips a read found, and opens them in the dashboard only on a click', async () => {
+    const t = await mount();
+    expect(t.byText(/Show flips/)).toBeUndefined();
+    // main's read push: the toolbar only listens.
+    await act(async () => {
+      t.push('scraptfWindow.read', flipRead);
+    });
+    await settle();
+    expect(t.status()).toBe(readStatusView(flipRead, T0).main);
+    expect(t.status()).toBe('Read 48 items from /buy/hats · stored 46 · 10 flips · best Team Captain +0.44 ref');
+    const show = t.byText(/Show flips/);
+    expect(show).toBeDefined();
+    expect(show.getAttribute('title')).toMatch(/^Shows Hats in the dashboard's Bank stock, on Flips: 10 flips on sale on this page\./);
+    // Nothing showed the dashboard on its own: the push only drew the button.
+    expect(shows(t)).toEqual([]);
+    await t.click(show);
+    expect(shows(t)).toEqual([{ method: 'app.showBankStock', params: { bank: 'hats', filter: 'flips' } }]);
+    // The best flip's name opens its item, on a click.
+    const name = t.all().find((e) => e.tagName === 'BUTTON' && e.textContent === 'Team Captain')!;
+    expect(name.getAttribute('title')).toMatch(/^Opens Team Captain in the dashboard/);
+    await t.click(name);
+    expect(shows(t).at(-1)).toEqual({ method: 'app.openItem', params: { sku: '378;6' } });
+    // New flips since the previous read: still the Flips chip (UX-071-2), which holds them with their New badges.
+    await act(async () => {
+      t.push('scraptfWindow.read', { ...flipRead, at: T0 + 1, newFlips: 2 });
+    });
+    await settle();
+    expect(t.byText(/Show flips/).getAttribute('title')).toContain('on Flips: 10 flips on sale on this page (2 new since your previous read).');
+    await t.click(t.byText(/Show flips/));
+    expect(shows(t).at(-1)).toEqual({ method: 'app.showBankStock', params: { bank: 'hats', filter: 'flips' } });
+    expect(shows(t).filter((c) => (c.params as { filter?: string }).filter === 'new')).toEqual([]);
+    // A read of a page with no flips takes the button away.
+    await act(async () => {
+      t.push('scraptfWindow.read', { ...flipRead, at: T0 + 2, pageFlips: 0, bestFlip: null });
+    });
+    await settle();
+    expect(t.byText(/Show flips/)).toBeUndefined();
+    expect(t.moves()).toEqual([]);
+  });
+
+  it('shows main\'s notice about the page on screen until a newer read or the next page, and disables Read where nothing imports', async () => {
+    const t = await mount();
+    await t.click(t.chip('Hats'));
+    const readLine = t.status();
+    expect(readLine).toMatch(/^Read \d+ items? from \/buy\/hats/);
+    const nav = { url: 'https://scrap.tf/buy/hats', canGoBack: false, canGoForward: false, loading: false, importable: true };
+    await act(async () => {
+      t.push('scraptfWindow.nav', { ...nav, notice: SCRAPTF_WINDOW_NOTICES.challenge });
+    });
+    await settle();
+    expect(t.status()).toBe(SCRAPTF_WINDOW_NOTICES.challenge);
+    expect((t.statusLine().getAttribute('class') ?? '').split(' ')).toContain('tone-text-warn');
+    // The same notice again (a loading change) changes nothing; the next page clears it.
+    await act(async () => {
+      t.push('scraptfWindow.nav', { ...nav, loading: true, notice: SCRAPTF_WINDOW_NOTICES.challenge });
+      t.push('scraptfWindow.nav', { ...nav, notice: null });
+    });
+    await settle();
+    expect(t.status()).toBe(readLine);
+    // A newer read takes the line from a notice.
+    await act(async () => {
+      t.push('scraptfWindow.nav', { ...nav, notice: SCRAPTF_WINDOW_NOTICES.blocked });
+    });
+    await settle();
+    expect(t.status()).toBe(SCRAPTF_WINDOW_NOTICES.blocked);
+    await act(async () => {
+      t.push('scraptfWindow.read', flipRead);
+    });
+    await settle();
+    expect(t.status()).toBe(readStatusView(flipRead, T0).main);
+    // A scrap.tf page the import cannot read: Read page now is off, and says why.
+    await act(async () => {
+      t.push('scraptfWindow.nav', { ...nav, url: 'https://scrap.tf/raffles', importable: false, notice: null });
+    });
+    await settle();
+    const btn = t.byText(/Read page now/);
+    expect(t.disabled(btn)).toBe(true);
+    expect(btn.getAttribute('title')).toMatch(/^Nothing to import on this page\./);
+    expect(t.moves().map((c) => c.method)).toEqual(['scraptfWindow.go']);
+  });
+
+  it("holds a page notice over every later nav push of that page (UX-071-1: main sends no other page's read over it)", async () => {
+    const t = await mount();
+    await t.click(t.chip('Hats'));
+    const nav = { url: 'https://scrap.tf/buy/weapons', canGoBack: true, canGoForward: false, loading: false, importable: true };
+    await act(async () => {
+      t.push('scraptfWindow.nav', { ...nav, loading: true, notice: SCRAPTF_WINDOW_NOTICES.rateLimited });
+    });
+    await settle();
+    expect(t.status()).toBe(SCRAPTF_WINDOW_NOTICES.rateLimited);
+    // The load finishing, its frames, a back/forward change: the same notice, still on the line.
+    await act(async () => {
+      t.push('scraptfWindow.nav', { ...nav, notice: SCRAPTF_WINDOW_NOTICES.rateLimited });
+      t.push('scraptfWindow.nav', { ...nav, canGoForward: true, notice: SCRAPTF_WINDOW_NOTICES.rateLimited });
+      t.push('scraptfWindow.nav', { ...nav, loading: true, notice: SCRAPTF_WINDOW_NOTICES.rateLimited });
+    });
+    await settle();
+    expect(t.status()).toBe(SCRAPTF_WINDOW_NOTICES.rateLimited);
+    expect(t.address()).toBe('scrap.tf/buy/weapons');
+    expect((t.statusLine().getAttribute('class') ?? '').split(' ')).toContain('tone-text-warn');
+  });
+
+  it('says a "Stay signed in" change waits for the window to be reopened, asking main only when it changes', async () => {
+    let pending = false;
+    const t = await mount({ state: (s) => ({ ...s, ...(pending ? { pendingPartitionChange: true } : {}) }) });
+    const states = () => t.calls.filter((c) => c.method === 'scraptfWindow.state').length;
+    expect(states()).toBe(1);
+    expect(t.byText(/Reopen to apply/)).toBeUndefined();
+    pending = true;
+    await act(async () => {
+      await t.b.rpc('settings.set', { scraptfWindow: { keepLoggedIn: true } });
+    });
+    await settle();
+    expect(states()).toBe(2);
+    const pill = t.byText(/Reopen to apply/);
+    expect(pill.getAttribute('title')).toBe(SCRAPTF_WINDOW_PARTITION_NOTE);
+    await t.click(pill);
+    expect(t.status()).toBe(SCRAPTF_WINDOW_PARTITION_NOTE);
+    // Another setting changing asks nothing; setting it back clears the pill.
+    await act(async () => {
+      await t.b.rpc('settings.set', { scraptfWindow: { readOnLoad: false } });
+    });
+    await settle();
+    expect(states()).toBe(2);
+    pending = false;
+    await act(async () => {
+      await t.b.rpc('settings.set', { scraptfWindow: { keepLoggedIn: false } });
+    });
+    await settle();
+    expect(states()).toBe(3);
+    expect(t.byText(/Reopen to apply/)).toBeUndefined();
+    expect(t.moves()).toEqual([]);
+  });
+
+  it('a toolbar opened on a window that waits for a reopen says so at once', async () => {
+    const t = await mount({ state: (s) => ({ ...s, pendingPartitionChange: true }) });
+    expect(t.byText(/Reopen to apply/)).toBeDefined();
+  });
+});
+
 describe('wiring (static)', () => {
   const page = read('pages/ScraptfWindowBar.tsx');
 
@@ -277,6 +435,11 @@ describe('wiring (static)', () => {
     const methods = [...new Set([...page.matchAll(/'(scraptfWindow\.[a-z]+)'/g)].map((m) => m[1]))].sort();
     expect(methods).toEqual(['scraptfWindow.back', 'scraptfWindow.clear', 'scraptfWindow.forward', 'scraptfWindow.go', 'scraptfWindow.home', 'scraptfWindow.nav', 'scraptfWindow.read', 'scraptfWindow.reload', 'scraptfWindow.state']);
     expect(page).toContain("rpc('scraptfWindow.go', { url }).catch(fail);");
+    // 0.7.1: the dashboard, shown on a click (Show flips, the best flip's name); never a URL.
+    const shows = [...new Set([...page.matchAll(/rpc\('(app\.[a-zA-Z]+)'/g)].map((m) => m[1]))].sort();
+    expect(shows).toEqual(['app.openItem', 'app.showBankStock']);
+    expect(page).toContain("rpc('app.showBankStock', { bank: f.bank, filter: f.filter }).catch(fail);");
+    expect(page).toContain('onClick={() => showFlips(flips)}');
     // The chips come from the static list (barBankChips reads SCRAPTF_BANKS), the address is text.
     expect(page).toContain('barBankChips().map((c) =>');
     expect(page).not.toMatch(/https?:\/\/|new URL\(|links\.open|openLink|openOrCopy|fetch\(|XMLHttpRequest|WebSocket|<webview|<iframe|window\.open|location\.href/);

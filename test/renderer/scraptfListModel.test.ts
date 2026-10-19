@@ -58,7 +58,7 @@ function row(over: Partial<ListRow> = {}): ListRow {
 
 describe('copy', () => {
   it('states the boundary and what one save updates', () => {
-    expect(LIST_BOUNDARY_NOTE).toBe('The app never visits scrap.tf; your browser does, and you choose when.');
+    expect(LIST_BOUNDARY_NOTE).toBe('Flip Desk never loads scrap.tf on its own. Your browser does, and you choose when.');
     expect(LIST_PICKUP_TEXT).toBe('Flip Desk picks it up within seconds and updates prices, the Live market, Holdings and the key price.');
     // The card's own re-read is local IPC, and rare.
     expect(LIST_POLL_MS).toBeGreaterThanOrEqual(30_000);

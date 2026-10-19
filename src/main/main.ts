@@ -20,6 +20,7 @@ import {
   powerMonitor,
   protocol,
   safeStorage,
+  screen,
   session,
   shell,
   utilityProcess,
@@ -30,7 +31,7 @@ import { z } from 'zod';
 import { CHECK_PRIVACY_SENTENCE } from '../shared/check';
 import { isAllowedExternalUrl } from '../shared/links';
 import type { AppInfo, PushContract } from '../shared/rpc';
-import type { AppStatus, HealthReport } from '../shared/types';
+import type { AppStatus, BankStockOpenFilter, HealthReport, ScraptfBank } from '../shared/types';
 import { createSystemPause, type SystemPause } from './clipboardWatch';
 import { applyGlobalHotkey, startupHotkeyNotice } from './hotkeys';
 import { acquireMachineLock, type MachineLock } from './instanceLock';
@@ -39,7 +40,7 @@ import { CHECK_CALL_TIMEOUT_MS, createLiveCheckMain, type LiveCheckMain } from '
 import { clip, droppedOpenUrl, handleNotificationClick, notificationContent, notificationOptions } from './notify';
 import { APP_USER_MODEL_ID, parseLaunchArgs, readFileBounded, resolveAppPaths, safeErrorMessage, type AppPaths } from './paths';
 import { APP_SCHEME_PRIVILEGES, registerAppProtocol } from './protocol';
-import { createScraptfWindowManager, type ScraptfWindowManager } from './scraptfWindow';
+import { createScraptfWindowManager, SCRAPTF_WINDOW_BOUNDS_FILE, type ScraptfWindowManager } from './scraptfWindow';
 import { createSecretsStore, type SecretsStore } from './secrets';
 import {
   createMainLog,
@@ -179,6 +180,15 @@ function openItemInDashboard(rt: Runtime, sku: string): void {
   rt.windows.sendToDashboard('ui.openItem', { sku });
 }
 
+/**
+ * 0.7.1: shows the dashboard on a bank's stock page and chip (the scrap.tf window toolbar's "Show flips").
+ * Same shape as openItemInDashboard; it loads nothing in the scrap.tf window.
+ */
+function showBankStock(rt: Runtime, bank: ScraptfBank, filter: BankStockOpenFilter): void {
+  rt.windows.showDashboard();
+  rt.windows.sendToDashboard('ui.openBankStock', { bank, filter });
+}
+
 function trayState(rt: Runtime): TrayState {
   const s = rt.settings.get();
   return {
@@ -234,6 +244,7 @@ function handlePush(rt: Runtime, event: keyof PushContract, payload: unknown): v
       return;
     case 'settings.changed':
     case 'ui.openItem':
+    case 'ui.openBankStock':
     case 'ui.quickPrefill':
     case 'ui.checkShow':
     case 'service.state':
@@ -599,6 +610,9 @@ function start(): void {
     openExternal: (url) => shell.openExternal(url),
     isQuitting: () => quitting,
     onStateChanged: () => refreshTray(rt),
+    // 0.7.1 (F21-12): its size and place, in a file of its own (not settings.json), restored onto a display
+    // that is there.
+    bounds: { file: path.join(paths.userData, SCRAPTF_WINDOW_BOUNDS_FILE), screen },
   });
   rt.scraptfWindow = scraptfWindow;
 
@@ -673,6 +687,8 @@ function start(): void {
         rt.windows.hideCheck();
         openItemInDashboard(rt, sku);
       },
+      // 0.7.1: validated in ipc.ts; the toolbar's click only.
+      showBankStock: (bank, filter) => showBankStock(rt, bank, filter),
       appInfo,
       serviceState: () => serviceStatePush(host.status(), Date.now()),
       hotkeys: () => ({ quickEntry: settings.hotkeyStatus(), check: settings.checkHotkeyStatus() }),

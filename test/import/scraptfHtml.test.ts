@@ -85,7 +85,8 @@ describe('parseScrapTfHtml: saved /buy/hats page', () => {
     ['9100000017', '205;11;australium;kt-3', 48, 90, 1],
     ['9100000018', '16105;15;w3;pk105', 0, 25, 1],
     ['9100000019', '208;15;w1;pk300', 0, 40, 1],
-    ['9100000020', '15000;15;w2;pk14;strange', 0, 120, 1],
+    // 0.7.1 (P2): a strange skin without an effect is Strange (11), as backpack.tf keys it, whatever its class.
+    ['9100000020', '15000;11;w2;pk14', 0, 120, 1],
     ['9100000021', '15063;15;w4;pk70', 0, 33, 1],
     ['9100000022', '15000;15;u701;w1;pk1014', 3, 0, 1],
     ['9100000023', '940;6', 0, 20, 1],
@@ -449,7 +450,9 @@ describe('parseScrapTfHtml: the "Price we pay" column on edited lists', () => {
     expect(it.pays).toBeNull();
     expect(it.stock).toBeNull();
     expect(it.stockLimit).toBeNull();
-    expect(codes(it)).toEqual(['no-pays-price']);
+    // 0.7.1 (P1): the list has an Item Limits column, so a row without one cannot say it is in stock.
+    expect(codes(it)).toEqual(['no-pays-price', 'no-stock-limit']);
+    expect(isImportableItem(it)).toBe(false);
   });
 
   it('reads a full item (stock at its limit)', () => {

@@ -14,6 +14,8 @@ import { useApp } from '../hooks/appContext';
 import { usePersistentState } from '../hooks/usePersistentState';
 import { useRpcQuery, useThrottled, useVisiblePush } from '../hooks/useRpc';
 import { useDebounced, useNow } from '../hooks/useTimers';
+import { firstPriceText } from '../scraptfListModel';
+import { scraptfWindowOn } from '../scraptfWindowModel';
 import {
   DEFAULT_FILTERS,
   GROUP_BY_LABELS,
@@ -403,7 +405,7 @@ function NoResults({
   onReset: () => void;
   onAllStatuses: () => void;
 }) {
-  const { navigate, updateSettings, toast, dataVersion } = useApp();
+  const { navigate, updateSettings, toast, dataVersion, settings } = useApp();
   const [counts, setCounts] = useState<{ prices: number; rules: number } | null>(null);
   const [tick, setTick] = useState(0);
   const bump = useThrottled(() => setTick((t) => t + 1), 3000);
@@ -426,25 +428,27 @@ function NoResults({
   const openQuick = () => rpc('app.showQuickEntry').catch(() => toast('Could not open quick entry.', 'bad'));
 
   if (counts && counts.prices === 0 && counts.rules === 0) {
+    // UX-4: one save of scrap.tf/items (the Import page's price-list card) first; typing stays secondary.
     return (
       <EmptyState
         icon="tag"
         title="Add the scrap.tf prices you want to check"
         actions={
           <>
-            <button type="button" className="btn primary" onClick={() => void openQuick()}>
+            <button type="button" className="btn primary" onClick={() => navigate('import')}>
+              <Icon name="import" size={14} /> Save scrap.tf/items
+            </button>
+            <button type="button" className="btn" onClick={() => void openQuick()}>
               <Icon name="quick" size={14} /> Quick entry
             </button>
-            <button type="button" className="btn" onClick={() => navigate('prices')}>
+            <button type="button" className="btn ghost" onClick={() => navigate('prices')}>
               Open price sheet
-            </button>
-            <button type="button" className="btn ghost" onClick={() => navigate('import')}>
-              Import a saved page
             </button>
           </>
         }
       >
-        Browse scrap.tf in your own browser and type the prices you see (or add a rule such as &quot;unique craftable hats cost 1.77 ref&quot;). The app compares them with live backpack.tf buy orders and lists what is profitable here.
+        {firstPriceText(scraptfWindowOn(settings))} Or type the prices you see (Quick entry), or add a rule such as &quot;unique craftable hats cost 1.77 ref&quot;. The app compares them with live
+        backpack.tf buy orders and lists what is profitable here.
       </EmptyState>
     );
   }

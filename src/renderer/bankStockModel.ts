@@ -8,8 +8,9 @@
 // only effect is the call it is handed.
 //
 // Labels, paths and the page's address always come from SCRAPTF_BANKS (scraptfBankInfo), whatever
-// the service sent; the page hands that static address only to links.open. The app never visits
-// scrap.tf (R1): the data is only the pages the user saved into the watch folder (R10).
+// the service sent; the page hands that static address only to links.open or, on a click, to the
+// user's scrap.tf window. Flip Desk never loads scrap.tf on its own (R1): the data is only the pages
+// the user saved into the watch folder or read in that window (R10).
 
 import {
   BANK_STOCK_DEFAULT_LIMIT,
@@ -17,16 +18,20 @@ import {
   BANK_STOCK_MAX_AGE_MS,
   BANK_STOCK_MAX_LIMIT,
   BANK_STOCK_MAX_SEARCH_CHARS,
+  BANK_STOCK_SESSION_GAP_MS,
   SCRAPTF_LONG_LISTED_MS,
   bankStockDefaultDir,
 } from '../shared/bankStock';
+import { SCRAPTF_BOUNDARY_SHORT } from '../shared/boundaryText';
 import { scraptfBankInfo } from '../shared/links';
 import { scraptfAgoText } from '../shared/scraptfHistory';
+import { fromObject, fromString } from '../shared/sku';
 import { BANK_STOCK_FILTERS, BANK_STOCK_SORTS } from '../shared/types';
 import type { BankStockCounts, BankStockFilter, BankStockQuery, BankStockResult, BankStockRow, BankStockSort, BankStockVerdict, Scrap, ScraptfBank, UnixMs } from '../shared/types';
 import { BANK_SAVE_TIP, LIST_SAVE_TIP, bankFreshness, bankPath, type BankFreshness } from './banksModel';
 import { changePctText } from './changesModel';
 import { SAVE_MODE } from './importModel';
+import type { RecordBuyCopy } from './itemMenuModel';
 import { DASH, PAINT_NAMES, errorMessage, fmtAgo, fmtDateTime, fmtInt, fmtKeysMetal, fmtMoney, fmtPct, fmtSignedMoney, paintHex, type Tone } from './format';
 
 /** Rows per read; "Load more" adds as many, up to BANK_STOCK_MAX_LIMIT (a whole bank page). */
@@ -47,17 +52,9 @@ export const BANK_STOCK_EXTRAS_TITLE =
  * of one SKU can be told apart. Empty for a clean copy or a key it cannot read.
  */
 export function bankStockExtras(key: string): string[] {
-  const at = typeof key === 'string' ? key.indexOf('|') : -1;
-  const raw = at >= 0 ? key.slice(at + 1) : '';
-  if (!raw) return [];
-  let v: unknown;
-  try {
-    v = JSON.parse(raw);
-  } catch {
-    return [];
-  }
-  if (!Array.isArray(v)) return [];
-  const [paint, spells, parts, sheen, killstreaker, customName, customDesc] = v as unknown[];
+  const v = specialOf(key);
+  if (!v) return [];
+  const [paint, spells, parts, sheen, killstreaker, customName, customDesc] = v;
   const names = (x: unknown): string[] => (Array.isArray(x) ? x.filter((s): s is string => typeof s === 'string' && s.trim() !== '').map((s) => s.trim()) : []);
   const out: string[] = [];
   if (finite(paint) && paint > 0) out.push(`Paint: ${PAINT_NAMES[paint] ?? paintHex(paint)}`);
@@ -68,6 +65,51 @@ export function bankStockExtras(key: string): string[] {
   if (customName === true) out.push('A name tag');
   if (customDesc === true) out.push('A description tag');
   return out;
+}
+
+/** A row key's extras JSON (`${sku}|${specialKey}`) as its array, or null for a clean copy or a key it cannot read. */
+function specialOf(key: string): unknown[] | null {
+  const at = typeof key === 'string' ? key.indexOf('|') : -1;
+  const raw = at >= 0 ? key.slice(at + 1) : '';
+  if (!raw) return null;
+  try {
+    const v: unknown = JSON.parse(raw);
+    return Array.isArray(v) ? (v as unknown[]) : null;
+  } catch {
+    return null;
+  }
+}
+
+/** The paint a row's copy has (the extras' first entry), or null. */
+export function bankStockPaintOf(key: string): number | null {
+  const paint = specialOf(key)?.[0];
+  return finite(paint) && paint > 0 ? paint : null;
+}
+
+/**
+ * ACT-11: what Record buy books for a row: its exact copy (a painted copy under its painted SKU, as the
+ * journal and Holdings key it) at the price the save listed (keys and metal as listed), noted "from your
+ * save of scrap.tf/buy/hats" with its extras. A gone row is no longer on sale: no price is prefilled, and
+ * the note gives its last one.
+ */
+export function bankStockBuyCopy(r: Pick<BankStockRow, 'sku' | 'key' | 'costKeys' | 'costScrapRaw' | 'change'>, bank: ScraptfBank): RecordBuyCopy {
+  const info = scraptfBankInfo(bank);
+  const path = info ? bankPath(info.url) : 'scrap.tf';
+  const paint = bankStockPaintOf(r.key);
+  let sku = r.sku;
+  if (paint !== null) {
+    try {
+      sku = fromObject({ ...fromString(r.sku), paint });
+    } catch {
+      // An unreadable SKU stays as the row has it.
+    }
+  }
+  const extras = bankStockExtras(r.key);
+  const tail = extras.length ? ` (${extras.join(', ')})` : '';
+  const keys = finite(r.costKeys) && r.costKeys > 0 ? Math.floor(r.costKeys) : 0;
+  const scrap = finite(r.costScrapRaw) ? Math.max(0, Math.round(r.costScrapRaw)) : 0;
+  if (r.change === 'gone') return { sku, note: `last price ${fmtKeysMetal(keys, scrap)} in your save of ${path}, gone from your newest save${tail}` };
+  return { sku, keys, scrap, note: `from your save of ${path}${tail}` };
 }
 
 /** The "extras" badge's hover: which extras this copy has, then the clean-copy caveat. */
@@ -82,8 +124,12 @@ function finite(v: unknown): v is number {
 
 /** F20 S1: how long saves are kept for price history (bankStockThinning). */
 const KEPT_DAYS = Math.round(BANK_STOCK_MAX_AGE_MS / 86_400_000);
-// F20: the thinning never drops a page's newest save or its compare save, whatever their age.
-export const RETENTION_NOTE = `For price history your saves are kept up to ${KEPT_DAYS} days: every save from the last day, then one an hour for a week, then one a day; a page's newest save and the one it is compared with always stay.`;
+// F20: the thinning never drops a page's newest save or its compare save, whatever their age. 0.7.1 (DM-3,
+// CQ-1): the tiers are B's bankStockThinning ones (every save for 2 h, then 10-minute, hourly and daily buckets).
+export const RETENTION_NOTE = `For price history your saves are kept up to ${KEPT_DAYS} days: every save from the last 2 hours, then one every 10 minutes for the rest of the day, then one an hour for a week, then one a day; a page's newest save and the ones it is compared with always stay.`;
+
+/** 0.7.1 (CQ-2): what "your latest run of saves" means (BANK_STOCK_SESSION_GAP_MS). */
+export const SESSION_NOTE = `Saves less than ${Math.round(BANK_STOCK_SESSION_GAP_MS / 60_000)} min apart count as one run, so reading the page again soon after does not clear what changed.`;
 
 function sinceWhen(previousSavedAt: UnixMs | null, now: UnixMs): string {
   return previousSavedAt === null ? 'your previous save' : `your previous save (${fmtAgo(Math.min(previousSavedAt, now), now)})`;
@@ -204,7 +250,8 @@ export const BANK_STOCK_FILTER_HELP: Readonly<Record<BankStockFilter, string>> =
   flips: 'On sale now, and a backpack.tf buyer pays enough to clear your profit thresholds.',
   changed: 'On sale in both saves at another price: cheaper or pricier.',
   gone: 'On sale in your previous save but not in your newest one: sold, sold out or taken off the page.',
-  'long-listed': 'On sale in every one of your saves of this page for at least a day: listed since then without a break.',
+  // DM-5: measured to the newest save that lists it, so a page saved once long ago counts no time.
+  'long-listed': 'On sale in every one of your saves of this page for at least a day, up to the newest one that lists it: listed since then without a break.',
   dropped: 'On sale now, and cheaper than when your saves first listed it in its current run.',
 };
 
@@ -295,11 +342,15 @@ export interface BankStockHeaderView {
   openTitle: string;
 }
 
-/** The header for `bank` from SCRAPTF_BANKS, dated by the answer (null until it arrives); null for an unknown bank. */
+/**
+ * The header for `bank` from SCRAPTF_BANKS, dated by the answer (null until it arrives); null for an unknown
+ * bank. F21-9 `inWindow` (scraptfLinksInWindow): main opens the page's Open in the user's scrap.tf window.
+ */
 export function bankStockHeader(
   bank: ScraptfBank,
   r: Pick<BankStockResult, 'savedAt' | 'previousSavedAt' | 'saves' | 'counts' | 'pages' | 'oldestSavedAt'> | null,
   now: UnixMs,
+  inWindow = false,
 ): BankStockHeaderView | null {
   const info = scraptfBankInfo(bank);
   if (!info) return null;
@@ -314,7 +365,9 @@ export function bankStockHeader(
     title: `${info.label} stock`,
     freshness: bankFreshness(savedAt, now),
     // The list gets no Single File alternative: such a save of it is refused (SAVE_MODE_LIST_NOTE).
-    openTitle: `Opens ${path} in your own browser; the app never visits it. ${info.bank === 'list' ? LIST_SAVE_TIP : BANK_SAVE_TIP}`,
+    openTitle: inWindow
+      ? `Opens ${path} in the Flip Desk window, where you browse it yourself.`
+      : `Opens ${path} in your own browser. ${SCRAPTF_BOUNDARY_SHORT} ${info.bank === 'list' ? LIST_SAVE_TIP : BANK_SAVE_TIP}`,
   };
   if (!r) return { ...base, saved: { text: 'Reading your saves…', title: '' }, previous: null, firstSave: false };
   if (savedAt === null) {
@@ -347,14 +400,34 @@ export function bankStockHeader(
   return {
     ...base,
     saved,
+    // 0.7.1 (CQ-2): previousSavedAt is the session baseline, the save before your latest run of saves, so
+    // a window read 30 s after the last one still shows what changed since you last looked.
     previous: {
       text: `previous save ${fmtAgo(Math.min(prevAt, now), now)}`,
       title:
         pages > 1
-          ? `Changes are counted page by page, each against your previous save of that page (the earliest: ${fmtDateTime(prevAt)}).`
-          : `Changes are counted against your previous save (${fmtDateTime(prevAt)}).`,
+          ? `Changes are counted page by page, each against your save of that page from before your latest run of saves (the earliest: ${fmtDateTime(prevAt)}). ${SESSION_NOTE}`
+          : `Changes are counted against your save from before your latest run of saves (${fmtDateTime(prevAt)}). ${SESSION_NOTE}`,
     },
     firstSave: false,
+  };
+}
+
+/**
+ * DM-5: "2 older pages (last saved 3 d ago)" for BankStockResult.olderPages: pages of the bank saved long
+ * before its newest page, left out of the counts, the chips and "What's new" (history keeps them). null
+ * when none were left out (or the answer is from before 0.7.1).
+ */
+export function bankStockOlderPages(r: Pick<BankStockResult, 'olderPages'> | null | undefined, now: UnixMs): { text: string; title: string } | null {
+  const o = r?.olderPages;
+  if (!o || !finite(o.count) || o.count < 1) return null;
+  const n = Math.floor(o.count);
+  const at = finite(o.newestSavedAt) ? o.newestSavedAt : null;
+  const when = at === null ? '' : ` (last saved ${fmtAgo(Math.min(at, now), now)})`;
+  const one = n === 1;
+  return {
+    text: `${fmtInt(n)} older ${one ? 'page' : 'pages'}${when}`,
+    title: `${fmtInt(n)} ${one ? 'page' : 'pages'} of this bank you saved long before its newest page${at === null ? '' : ` (the newest of them ${fmtDateTime(at)})`}: left out of the counts, the chips and What's new until you save ${one ? 'it' : 'them'} again. The item history keeps every save.`,
   };
 }
 
@@ -440,18 +513,35 @@ export interface BankStockListedCell {
   long: boolean;
 }
 
+/** DM-5: a row whose newest sighting is older than this reads "last seen N ago", not as a listing still running. */
+export const BANK_STOCK_LAST_SEEN_STALE_MS = 48 * 3_600_000;
+
 /**
  * F20 Listed: how long every one of the user's saves of the page has listed it on sale, since the run
- * began (BankStockRow.listedSince); a dash for a gone row or one with no run.
+ * began (BankStockRow.listedSince); a dash for a gone row or one with no run. DM-5: the span ends at the
+ * newest save that listed it (BankStockRow.lastSeenAt; absent: now, as before), and a sighting over
+ * BANK_STOCK_LAST_SEEN_STALE_MS old reads "last seen 3 d ago" instead.
  */
-export function bankStockListedCell(r: Pick<BankStockRow, 'listedSince' | 'firstSeenAt' | 'change'>, now: UnixMs): BankStockListedCell {
+export function bankStockListedCell(r: Pick<BankStockRow, 'listedSince' | 'firstSeenAt' | 'change'> & Partial<Pick<BankStockRow, 'lastSeenAt'>>, now: UnixMs): BankStockListedCell {
   if (!finite(r.listedSince)) {
     return { text: DASH, title: r.change === 'gone' ? 'Not on sale in your newest save.' : 'Not on sale in a run of your saves yet.', muted: true, long: false };
   }
-  const dur = Math.max(0, now - r.listedSince);
+  const last = finite(r.lastSeenAt) ? Math.max(r.listedSince, Math.min(r.lastSeenAt, now)) : null;
+  const dur = Math.max(0, (last ?? now) - r.listedSince);
   const ago = scraptfAgoText(dur);
   // An earlier run means it was off sale for a while in between.
   const first = finite(r.firstSeenAt) && r.firstSeenAt < r.listedSince ? ` Your saves first listed it on sale ${fmtDateTime(r.firstSeenAt)}; it was off sale for a while since.` : '';
+  if (last !== null && now - last > BANK_STOCK_LAST_SEEN_STALE_MS) {
+    const seen = fmtAgo(last, now);
+    // A run of one save has no span to name.
+    const after = dur >= 60_000 ? `, after ${ago} on sale in your saves since ${fmtDateTime(r.listedSince)}` : '';
+    return {
+      text: `last seen ${seen}`,
+      title: `Last on sale in your save of ${fmtDateTime(last)} (${seen})${after}. No newer save of its page shows it, so it may be gone.${first} What happened between two saves is unknown.`,
+      muted: true,
+      long: dur >= SCRAPTF_LONG_LISTED_MS,
+    };
+  }
   return {
     text: ago,
     title: `On sale in every one of your saves of its page since ${fmtDateTime(r.listedSince)} (${ago}).${first} What happened between two saves is unknown.`,

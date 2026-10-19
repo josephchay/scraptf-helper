@@ -21,8 +21,9 @@ function repoAt(path: string) {
 }
 
 describe('migration V9', () => {
-  it('is the newest migration and adds a NULL origin to every earlier batch', () => {
-    expect(SCHEMA_VERSION).toBe(9);
+  it('adds a NULL origin to every earlier batch', () => {
+    // 0.7.1 appended V10 (the bank and save-time index), so V9 is no longer the newest.
+    expect(SCHEMA_VERSION).toBeGreaterThanOrEqual(9);
     expect(MIGRATIONS[8]).toMatchObject({ version: 9, name: 'saved-page batch origin' });
     const t = tempDir();
     cleanups.push(t.cleanup);

@@ -7,12 +7,13 @@
 // in api.ts). Recording writes the user's own journal; nothing is traded (R4).
 // "Open on scrap.tf (copies name)" (F14) copies the name for scrap.tf's own
 // search and hands the static bank page (where the user last saw the item, F15,
-// else its category's) to the user's browser; the app never visits scrap.tf (R1).
+// else its category's) to the user's browser; Flip Desk never loads scrap.tf on its own (R1).
 // F19: it also arms the Live check ('check.arm', main only, in memory), so a price
 // the user copies there on its own is checked as this item. F21: when the user has
 // the opt-in scrap.tf window open Flip Desk's links (openLinksInWindow), main shows
 // the same static page there instead (links.open answers openedIn: 'window'), and
-// the toast and tooltips say so.
+// the toast and tooltips say so. 0.7.1 (ACT-11): a bank stock row's menu carries its exact copy
+// (ItemMenuTarget.copy), and Record buy books that copy at the price its save listed.
 //
 // MenuPopover is the generic part (placement, roving focus, closing rules); the
 // drawer's buyer actions menu (F3) uses it too.
@@ -45,6 +46,7 @@ import {
   type MenuItemSpec,
   type MenuPoint,
   type MenuSection,
+  type RecordBuyCopy,
 } from '../itemMenuModel';
 import { createLatestGate } from '../quickModel';
 import { scraptfLinksInWindow } from '../scraptfWindowModel';
@@ -64,19 +66,27 @@ export interface ItemMenuTarget {
    * bank page; without it the menu reads where the user last saw the item (ItemDetail.seenOn).
    */
   bank?: ScraptfBank;
+  /**
+   * ACT-11, Record buy only: the exact copy the row shows (a bank stock row: bankStockBuyCopy), so a painted
+   * copy is booked as painted, at the price its save listed, instead of the price sheet's newest price.
+   */
+  copy?: RecordBuyCopy;
 }
 
 export { isContextMenuKey, menuPointForRect } from '../itemMenuModel';
 
-/** F19: arm the Live check for this item, and word the toast from these settings (Settings → Live check). */
+/**
+ * F19: arm the Live check for this item, and word the toast from these settings (Settings → Live check;
+ * UX-5: the scrap.tf window's readOnLoad, when the page opens there).
+ */
 export interface ScraptfArm {
   sku: string;
-  settings: Pick<Settings, 'check' | 'networkPaused'> | null | undefined;
+  settings: (Pick<Settings, 'check' | 'networkPaused'> & Partial<Pick<Settings, 'scraptfWindow'>>) | null | undefined;
 }
 
 /**
  * "Open on scrap.tf (copies name)" (F14): copies the name for scrap.tf's own search box, then hands
- * the page to the user's browser through 'links.open' (main's allowlist). The app never visits scrap.tf (R1).
+ * the page to the user's browser through 'links.open' (main's allowlist). Flip Desk never loads scrap.tf on its own (R1).
  * With `arm` (F19) it first tells main which item this is ('check.arm', kept in memory, never logged),
  * so the check hotkey or watcher checks a price copied there as this item.
  */
@@ -91,7 +101,7 @@ export async function openOnScraptf(url: string, name: string, toast: (text: str
   // F21: worded through scraptfOpenTitle(…, inWindow), so main may put it in the scrap.tf window.
   const opened = await openLink(url, { allowWindow: true });
   const back = arm ? scraptfBackHint(checkReturnPath(arm.settings, (await hotkeys)?.check ?? null, armed)) : null;
-  const t = scraptfOpenedToast(copied, opened, url, back);
+  const t = scraptfOpenedToast(copied, opened, url, back, arm?.settings?.scraptfWindow?.readOnLoad !== false);
   toast(t.text, t.tone);
 }
 

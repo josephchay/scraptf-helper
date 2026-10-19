@@ -57,8 +57,11 @@ export const CHECK_REFUSALS = {
 
 /** The not-item reason when nothing resolved (fuzzy guesses included: a wrong item would be a wrong flip). */
 export const CHECK_NOT_ITEM_REASON = 'No TF2 item recognised in that text.';
-/** Not-item reason for a scrap.tf link: the app never opens or fetches it (R1). */
-export const CHECK_SCRAPTF_LINK_REASON = 'That is a scrap.tf link, and Flip Desk never opens scrap.tf. Copy the item name or its row instead.';
+/**
+ * Not-item reason for a scrap.tf link: the check never opens or fetches a link it is handed (R1). 0.7.1 (UX-7):
+ * worded so it stays true with the opt-in scrap.tf window on, where the user does browse scrap.tf.
+ */
+export const CHECK_SCRAPTF_LINK_REASON = 'Flip Desk does not open scrap.tf links you copy; copy the item name or its row instead.';
 /** Not-item reason while the item schema has not loaded (names cannot resolve yet; SKUs still do). */
 export const CHECK_SCHEMA_LOADING_REASON = 'The item list is still loading, so names cannot be recognised yet. Try again in a moment.';
 

@@ -40,7 +40,6 @@ import { useRpcQuery, useThrottled, useVisiblePush } from '../hooks/useRpc';
 import { useNow } from '../hooks/useTimers';
 import {
   backgroundCheckListings,
-  bankPageUrl,
   blockBuyer,
   buyerLabel,
   buyerMenuSections,
@@ -77,7 +76,8 @@ import {
 } from '../itemMenuModel';
 import { drawerBankStockLine } from '../marketModel';
 import { listRowIsOtherCopy, previewRevenue } from '../quickModel';
-import { scraptfLinksInWindow } from '../scraptfWindowModel';
+import { listBoundaryNote } from '../scraptfListModel';
+import { scraptfLinksInWindow, scraptfWindowOn } from '../scraptfWindowModel';
 
 export function ItemDrawer() {
   const { itemSku, closeItem } = useApp();
@@ -455,11 +455,12 @@ function InputCard({ o, keyScrap, now, ruleName }: { o: Opportunity; keyScrap: S
 
 /**
  * The item's row of the user's saved scrap.tf/items list: what scrap.tf charges and pays, its stock
- * and the save's age, with "Use as my price" and the pages to open in the user's browser. The list
- * only ever comes from a page the user saved (R10); the app never visits scrap.tf (R1).
+ * and the save's age, with "Use as my price" and scrap.tf/items to open in the user's browser (UX-11: the
+ * item's bank page is the header's Open on scrap.tf, so it is not offered twice). The list only ever comes
+ * from a page the user saved (R10); Flip Desk never loads scrap.tf on its own (R1).
  */
 function ScraptfListSection({ d, row, keyScrap, now, onChanged }: { d: ItemDetail; row: ScraptfListRow | null | undefined; keyScrap: Scrap | null; now: number; onChanged: () => void }) {
-  const { toast } = useApp();
+  const { toast, settings } = useApp();
   const [saving, setSaving] = useState(false);
   // A second click before the first save answers would add the price twice.
   const savingRef = useRef(false);
@@ -469,7 +470,6 @@ function ScraptfListSection({ d, row, keyScrap, now, onChanged }: { d: ItemDetai
   // Each prices.upsert adds a row: once this list price is on the sheet, a second click would only duplicate it.
   // A painted drawer's own prices never hold the plain copy's row, so the service answers for it.
   const used = row ? d.scraptfListSaved || listPriceAlreadySaved(row, d.scrapPrices) : false;
-  const bankPage = bankPageUrl(d.seenOn, d.category);
 
   const saveAsMine = async () => {
     const input = row ? listPriceInput(row, d) : null;
@@ -574,12 +574,8 @@ function ScraptfListSection({ d, row, keyScrap, now, onChanged }: { d: ItemDetai
         <button type="button" className="btn small ghost" title={`${SCRAPTF_ITEMS_URL}: open it in your browser to save the whole list again`} onClick={() => void openOrCopy(SCRAPTF_ITEMS_URL, toast)}>
           <Icon name="external" size={12} /> Open scrap.tf/items
         </button>
-        {/* F15: the bank page the item was last seen on, else its category's (bankPageUrl). */}
-        <button type="button" className="btn small ghost" title={bankPage} onClick={() => void openOrCopy(bankPage, toast)}>
-          <Icon name="external" size={12} /> Open bank page
-        </button>
       </div>
-      <p className="muted small stf-list-note">The app never visits scrap.tf; your browser does, and you choose when.</p>
+      <p className="muted small stf-list-note">{listBoundaryNote(scraptfWindowOn(settings))}</p>
     </section>
   );
 }
