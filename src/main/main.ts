@@ -39,6 +39,7 @@ import { CHECK_CALL_TIMEOUT_MS, createLiveCheckMain, type LiveCheckMain } from '
 import { clip, droppedOpenUrl, handleNotificationClick, notificationContent, notificationOptions } from './notify';
 import { APP_USER_MODEL_ID, parseLaunchArgs, readFileBounded, resolveAppPaths, safeErrorMessage, type AppPaths } from './paths';
 import { APP_SCHEME_PRIVILEGES, registerAppProtocol } from './protocol';
+import { createScraptfWindowManager, type ScraptfWindowManager } from './scraptfWindow';
 import { createSecretsStore, type SecretsStore } from './secrets';
 import {
   createMainLog,
@@ -51,7 +52,7 @@ import {
 } from './serviceHost';
 import { createSettingsStore, type HotkeyResult, type HotkeyStatus, type SettingsStore } from './settingsStore';
 import { createTray, type TrayController, type TrayState } from './tray';
-import { createWindowManager, hardenSession, hardenWebContents, type WindowManager } from './windows';
+import { createWindowManager, hardenSession, hardenWebContents, refuseClientCertificate, type WindowManager } from './windows';
 
 app.setAppUserModelId(APP_USER_MODEL_ID);
 
@@ -80,6 +81,8 @@ interface Runtime {
   /** F16 hotkey and clipboard watcher; null in a smoke test, which never reads the clipboard. */
   liveCheck: LiveCheckMain | null;
   systemPause: SystemPause | null;
+  /** F21: the opt-in scrap.tf window (opened only on a user's click); null before start(). */
+  scraptfWindow: ScraptfWindowManager | null;
 }
 
 let log: MainLog;
@@ -186,6 +189,7 @@ function trayState(rt: Runtime): TrayState {
     hotkey: rt.settings.hotkeyStatus(),
     checkWatch: s.check.watchClipboard,
     checkHotkey: rt.settings.checkHotkeyStatus(),
+    scraptfWindow: s.scraptfWindow.enabled,
     now: Date.now(),
   };
 }
@@ -223,6 +227,7 @@ function handlePush(rt: Runtime, event: keyof PushContract, payload: unknown): v
       lastStatus = payload;
       refreshTray(rt);
       rt.windows.broadcast('status.changed', payload);
+      rt.scraptfWindow?.send('status.changed', payload);
       return;
     case 'notify':
       showNotification(rt, payload);
@@ -232,10 +237,14 @@ function handlePush(rt: Runtime, event: keyof PushContract, payload: unknown): v
     case 'ui.quickPrefill':
     case 'ui.checkShow':
     case 'service.state':
+    case 'scraptfWindow.read':
+    case 'scraptfWindow.nav':
       // Main owns these; the service host already drops them (MAIN_ONLY_PUSH_EVENTS).
       return;
     default:
       rt.windows.broadcast(event, payload as never);
+      // F21: the scrap.tf window's toolbar too; it keeps only what it shows.
+      rt.scraptfWindow?.send(event, payload as never);
   }
 }
 
@@ -495,6 +504,7 @@ function shutdown(): Promise<void> {
         // not ready yet
       }
       runtime?.liveCheck?.stop();
+      runtime?.scraptfWindow?.dispose();
       runtime?.systemPause?.dispose();
       runtime?.tray?.destroy();
       try {
@@ -573,8 +583,24 @@ function start(): void {
     log,
   });
 
-  const rt: Runtime = { paths, settings, secrets, windows, host, tray: null, liveCheck: null, systemPause: null };
+  const rt: Runtime = { paths, settings, secrets, windows, host, tray: null, liveCheck: null, systemPause: null, scraptfWindow: null };
   runtime = rt;
+
+  // F21: built now, opened only by a user's click (dashboard, tray, links.open with openLinksInWindow).
+  const scraptfWindow = createScraptfWindowManager({
+    settings: () => settings.get(),
+    log,
+    preloadPath: paths.preload,
+    iconPath: paths.iconPng,
+    devTools: args.dev,
+    // Straight to the service: the only 'import.html' call that may carry address and origin.
+    importHtml: (p) => host.call('import.html', p),
+    // Only for a page topLevelNavigationDecision calls 'external' (isAllowedExternalUrl accepted it).
+    openExternal: (url) => shell.openExternal(url),
+    isQuitting: () => quitting,
+    onStateChanged: () => refreshTray(rt),
+  });
+  rt.scraptfWindow = scraptfWindow;
 
   if (!args.smokeTest) {
     // powerMonitor is usable now (after 'ready'): the watcher reads nothing while locked or suspended.
@@ -598,9 +624,14 @@ function start(): void {
   settings.onChange((next) => {
     host.sendSettings(next);
     rt.windows.broadcast('settings.changed', next);
+    rt.scraptfWindow?.send('settings.changed', next);
     // Starts or stops the clipboard watcher with check.watchClipboard (Settings or the tray).
     rt.liveCheck?.syncWatch();
     refreshTray(rt);
+  });
+  // F21: turning the window off (or import, which turns it off) closes it at once.
+  settings.onChange((next, prev) => {
+    if (prev.scraptfWindow.enabled && !next.scraptfWindow.enabled) rt.scraptfWindow?.close();
   });
   secrets.onChange((all) => {
     log.setRedactions(Object.values(all));
@@ -611,7 +642,10 @@ function start(): void {
     refreshTray(rt);
     if (s.state === 'ready') refreshStatus(rt);
     const push = serviceStatePush(s, Date.now());
-    if (push) rt.windows.broadcast('service.state', push);
+    if (push) {
+      rt.windows.broadcast('service.state', push);
+      rt.scraptfWindow?.send('service.state', push);
+    }
   });
 
   const appInfo = (): AppInfo => ({
@@ -647,6 +681,8 @@ function start(): void {
       armCheck: (arm) => rt.liveCheck?.arm(arm) ?? { armedUntil: null },
       isAllowedExternalUrl,
       openExternal: (url) => shell.openExternal(url),
+      // F21: every 'scraptfWindow.*' method, and links.open's static scrap.tf pages when the user chose the window.
+      scraptfWindow,
       dialogs: {
         openHtmlFile: (win) =>
           pickPath(win, {
@@ -697,6 +733,15 @@ function start(): void {
             showNotice(rt, { title: 'Clipboard check is on', body: CHECK_PRIVACY_SENTENCE });
           }
         },
+        // F21: the user's click; the menu can lag a settings change by a moment, so the switch is checked again.
+        openScraptfWindow: () => {
+          if (!settings.get().scraptfWindow.enabled) return;
+          try {
+            rt.scraptfWindow?.open();
+          } catch (err) {
+            log.warn(`the scrap.tf window did not open: ${safeErrorMessage(err)}`);
+          }
+        },
         quit: () => app.quit(),
       },
       trayState(rt),
@@ -737,7 +782,12 @@ function bootstrap(): void {
   });
   // Keep running in the tray when every window is closed or hidden.
   app.on('window-all-closed', () => undefined);
-  app.on('web-contents-created', (_e, contents) => hardenWebContents(contents, log));
+  // F21: the scrap.tf window's view applies its own navigation policy; every other webContents stays app:// only.
+  app.on('web-contents-created', (_e, contents) =>
+    hardenWebContents(contents, log, { ownNavigation: (c) => runtime?.scraptfWindow?.ownsContents(c) === true }),
+  );
+  // F21: no client certificate for any host (Electron would hand the first one in the store to whoever asks).
+  app.on('select-client-certificate', refuseClientCertificate);
   app.on('child-process-gone', (_e, details) => {
     log.warn(`child process gone: ${details.type} ${details.reason}`, { name: details.name, exitCode: details.exitCode });
   });

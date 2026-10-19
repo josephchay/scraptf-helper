@@ -357,8 +357,8 @@ describe('imports, request log and snapshots', () => {
     const b = repo.createImportBatch({ fileName: 'b.html', pageKind: 'unusuals', fileMtime: 2, importedAt: 20, itemCount: 0 });
     expect(b).toBeGreaterThan(a);
     expect(repo.listImportBatches(10)).toEqual([
-      { id: b, fileName: 'b.html', pageKind: 'unusuals', fileMtime: 2, importedAt: 20, itemCount: 0, categories: null, bank: null },
-      { id: a, fileName: 'a.html', pageKind: 'buy', fileMtime: 1, importedAt: 10, itemCount: 3, categories: null, bank: null },
+      { id: b, fileName: 'b.html', pageKind: 'unusuals', fileMtime: 2, importedAt: 20, itemCount: 0, categories: null, bank: null, origin: null },
+      { id: a, fileName: 'a.html', pageKind: 'buy', fileMtime: 1, importedAt: 10, itemCount: 3, categories: null, bank: null, origin: null },
     ]);
     expect(repo.listImportBatches(1)).toHaveLength(1);
   });

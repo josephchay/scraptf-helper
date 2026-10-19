@@ -346,6 +346,12 @@ INSERT OR IGNORE INTO bank_stock_saves (batch_id, bank, page, items)
   SELECT batch_id, MIN(bank), MIN(page), COUNT(*) FROM bank_stock GROUP BY batch_id;
 `;
 
+// F21: how a batch reached the import, 'file' (a saved page: the picker or the folder watch) or 'window'
+// (a read of the opt-in scrap.tf window, which main alone can mark). Older batches read NULL.
+const V9_BATCH_ORIGIN = `
+ALTER TABLE import_batches ADD COLUMN origin TEXT;
+`;
+
 export const MIGRATIONS: readonly Migration[] = Object.freeze([
   { version: 1, name: 'initial schema', sql: V1_INITIAL },
   { version: 2, name: 'opportunity pay-up-to ceiling', sql: V2_MAX_COST },
@@ -355,6 +361,7 @@ export const MIGRATIONS: readonly Migration[] = Object.freeze([
   { version: 6, name: 'scrap.tf bank stock', sql: V6_BANK_STOCK },
   { version: 7, name: 'scrap.tf change events', sql: V7_SCRAPTF_EVENTS },
   { version: 8, name: 'scrap.tf feed by bank and kept saves', sql: V8_SCRAPTF_SAVES },
+  { version: 9, name: 'saved-page batch origin', sql: V9_BATCH_ORIGIN },
 ]);
 
 export const SCHEMA_VERSION: number = MIGRATIONS.reduce((max, m) => Math.max(max, m.version), 0);

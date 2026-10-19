@@ -61,6 +61,7 @@ const state = (over: Partial<TrayState> = {}): TrayState => ({
   hotkey: { accelerator: 'CommandOrControl+Alt+F', registered: true, error: null },
   checkWatch: false,
   checkHotkey: { accelerator: 'CommandOrControl+Alt+C', registered: true, error: null },
+  scraptfWindow: false,
   now: 1_000_000,
   ...over,
 });
@@ -71,6 +72,7 @@ const actions = (): TrayActions & Record<string, ReturnType<typeof vi.fn>> => ({
   setLiveFeedPaused: vi.fn(),
   setNetworkPaused: vi.fn(),
   setClipboardWatch: vi.fn(),
+  openScraptfWindow: vi.fn(),
   quit: vi.fn(),
 });
 
@@ -177,6 +179,20 @@ describe('trayMenuTemplate', () => {
     expect(a.quit).toHaveBeenCalled();
   });
 
+  it('F21: offers "Open scrap.tf window" only while the user has the window turned on', () => {
+    const a = actions();
+    expect(trayMenuTemplate(state(), a).some((i) => i.label === 'Open scrap.tf window')).toBe(false);
+    const items = trayMenuTemplate(state({ scraptfWindow: true }), a);
+    expect(items.map((i) => i.label ?? i.type).slice(0, 4)).toEqual(['Show dashboard', 'Quick entry', 'Open scrap.tf window', 'separator']);
+    const item = items.find((i) => i.label === 'Open scrap.tf window')! as MenuItemConstructorOptions & { click: () => void };
+    // A plain item: no checkbox, no accelerator; only the click opens the window.
+    expect(item.type).toBeUndefined();
+    expect(item.accelerator).toBeUndefined();
+    expect(a.openScraptfWindow).not.toHaveBeenCalled();
+    item.click();
+    expect(a.openScraptfWindow).toHaveBeenCalledTimes(1);
+  });
+
   it('shows the hotkey only when it is registered, without registering it again', () => {
     const quick = trayMenuTemplate(state(), actions())[1]!;
     expect(quick.accelerator).toBe('CommandOrControl+Alt+F');
@@ -226,6 +242,20 @@ describe('createTray', () => {
     tray.update(state({ checkWatch: false }));
     expect(t.menuSets).toBe(3);
     expect(menuKey(state({ checkWatch: true }))).not.toBe(menuKey(state({ checkWatch: false })));
+  });
+
+  it('F21: rebuilds the menu when the scrap.tf window is turned on or off', () => {
+    const tray = createTray('tray.png', actions(), state(), log());
+    const t = fake.FakeTray.last!;
+    const labels = () => (t.menu as { template: MenuItemConstructorOptions[] }).template.map((i) => i.label);
+    expect(labels()).not.toContain('Open scrap.tf window');
+    tray.update(state({ scraptfWindow: true }));
+    expect(t.menuSets).toBe(2);
+    expect(labels()).toContain('Open scrap.tf window');
+    tray.update(state({ scraptfWindow: false }));
+    expect(t.menuSets).toBe(3);
+    expect(labels()).not.toContain('Open scrap.tf window');
+    expect(menuKey(state({ scraptfWindow: true }))).not.toBe(menuKey(state({ scraptfWindow: false })));
   });
 
   it('warns when the icon image is missing', () => {

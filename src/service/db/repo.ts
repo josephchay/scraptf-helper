@@ -16,7 +16,7 @@ import type {
 import { bankStockThinning, type BankStockThinSave } from '../../shared/bankStock';
 import { cleanCategoryCounts } from '../../shared/market';
 import { SCRAPTF_CHANGES_DEFAULT_LIMIT, SCRAPTF_EVENTS_MAX_AGE_MS, SCRAPTF_ITEM_EVENTS } from '../../shared/scraptfHistory';
-import { CATEGORIES, SCRAPTF_BANK_IDS, SCRAPTF_CHANGE_KINDS } from '../../shared/types';
+import { CATEGORIES, IMPORT_ORIGINS, SCRAPTF_BANK_IDS, SCRAPTF_CHANGE_KINDS } from '../../shared/types';
 import type {
   BankStockSave,
   BankStockStored,
@@ -24,6 +24,7 @@ import type {
   ConfidenceLevel,
   GroupBy,
   ImportBatch,
+  ImportOrigin,
   ImportPageKind,
   InputKind,
   Intent,
@@ -123,6 +124,11 @@ function oneOf<T extends string>(v: Out, allowed: readonly T[], fallback: T): T 
 /** A stored or incoming bank id (F15); anything else (a newer build's id, damage) reads as unknown. */
 function bankOrNull(v: unknown): ScraptfBank | null {
   return typeof v === 'string' && (SCRAPTF_BANK_IDS as readonly string[]).includes(v) ? (v as ScraptfBank) : null;
+}
+
+/** F21: a stored import origin, or null for anything else (batches before V9, an unknown value). */
+function originOrNull(v: unknown): ImportOrigin | null {
+  return typeof v === 'string' && (IMPORT_ORIGINS as readonly string[]).includes(v) ? (v as ImportOrigin) : null;
 }
 
 function bindNum(v: unknown, fallback = 0): number {
@@ -646,6 +652,7 @@ function rowToImportBatch(r: SqlRow): ImportBatch {
     itemCount: num(r['item_count']),
     categories: cleanCategoryCounts(parseJson(r['categories'])),
     bank: bankOrNull(r['bank']),
+    origin: originOrNull(r['origin']),
   };
 }
 
@@ -1527,7 +1534,7 @@ export function createRepo(db: SqliteDb): Repo {
     createImportBatch(b) {
       const categories = cleanCategoryCounts(b.categories);
       return insertId(
-        'INSERT INTO import_batches (file_name, page_kind, file_mtime, imported_at, item_count, categories, bank) VALUES (?, ?, ?, ?, ?, ?, ?)',
+        'INSERT INTO import_batches (file_name, page_kind, file_mtime, imported_at, item_count, categories, bank, origin) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
         String(b.fileName ?? ''),
         String(b.pageKind),
         bindNum(b.fileMtime),
@@ -1535,6 +1542,7 @@ export function createRepo(db: SqliteDb): Repo {
         bindNum(b.itemCount),
         categories ? JSON.stringify(categories) : null,
         bankOrNull(b.bank),
+        originOrNull(b.origin),
       );
     },
 

@@ -263,8 +263,11 @@ describe('main.ts notification click wiring (F20)', () => {
     expect(click.match(/openExternal\(/g)).toHaveLength(1);
   });
 
-  it('opens a URL from main only through links.open and the notification click', () => {
-    expect(MAIN.match(/shell\.openExternal\(/g)).toHaveLength(2);
+  it('opens a URL from main only through links.open, the notification click and the scrap.tf window', () => {
+    // F21 adds the third: a page the scrap.tf window's policy calls 'external' (isAllowedExternalUrl).
+    expect(MAIN.match(/shell\.openExternal\(/g)).toHaveLength(3);
     expect(MAIN).toContain('isAllowedExternalUrl, openExternal: (url) => shell.openExternal(url),');
+    const stfw = MAIN.slice(MAIN.indexOf('createScraptfWindowManager({'), MAIN.indexOf('rt.scraptfWindow = scraptfWindow;'));
+    expect(stfw).toContain('openExternal: (url) => shell.openExternal(url),');
   });
 });

@@ -2,16 +2,28 @@ import { ExternalLink } from '../components/ExternalLink';
 import { Icon } from '../components/Icon';
 
 const NEVER: { rule: string; text: string }[] = [
-  { rule: 'R1', text: 'Never sends any request to scrap.tf or its subdomains. You browse scrap.tf yourself, in your own browser.' },
+  {
+    rule: 'R1',
+    text: 'Never sends a request of its own to scrap.tf or its subdomains: no page fetch, no /ajax, no socket, no polling or auto-refresh. You browse scrap.tf yourself, in your own browser or, if you turn it on, in the scrap.tf window.',
+  },
   { rule: 'R2', text: 'Never reads web pages from backpack.tf, marketplace.tf, Steam, STN or mannco. Only their documented JSON APIs and websockets.' },
-  { rule: 'R3', text: 'No userscripts, browser extensions or injecting anything into websites. There is no built-in scrap.tf browser.' },
+  {
+    rule: 'R3',
+    text: "No userscripts or browser extensions, and nothing of the app's runs in any website, with one exception: the opt-in scrap.tf window. It has no preload or extension; its only code in a page is one read-only snapshot of the scrap.tf page on screen, as saving the page would take, and it never clicks, types or changes anything there.",
+  },
   { rule: 'R4', text: 'Never buys, sells, trades, lists, bumps, accepts or declines anything. You do every trade yourself, with Steam mobile confirmation.' },
   { rule: 'R5', text: 'No proxies and no multiple accounts. One account, one connection, your own keys.' },
   { rule: 'R6', text: 'Identifies itself honestly in every request (TF2FlipDesk plus your contact address). Never pretends to be a browser.' },
   { rule: 'R7', text: 'Stays below every published rate limit, waits when a site asks it to (429, Retry-After), and stops on any challenge page.' },
   { rule: 'R8', text: 'Your keys and tokens are encrypted on this computer, never logged, and sent only to the site that issued them.' },
-  { rule: 'R9', text: 'Never asks for or stores Steam passwords, session cookies or authenticator secrets.' },
-  { rule: 'R10', text: 'scrap.tf prices come only from you: typed in, from your own price-sheet rules, or from pages you saved yourself (off until you opt in).' },
+  {
+    rule: 'R9',
+    text: "Never asks for, reads or stores Steam passwords, session cookies or authenticator secrets. In the scrap.tf window you sign in on Steam's own page; the app never sees what you type there, and the session stays in that window's own browser storage (gone when the app quits, unless you choose to stay signed in).",
+  },
+  {
+    rule: 'R10',
+    text: 'scrap.tf prices come only from you: typed in, from your own price-sheet rules, from pages you saved yourself, or read from the scrap.tf window while you browse it (each off until you opt in).',
+  },
 ];
 
 const TERMS: { label: string; url: string; note?: string }[] = [
@@ -41,7 +53,8 @@ export function AboutPage() {
         </ul>
         <p className="muted small">
           No tool can promise you won&apos;t be banned. These platforms can act on behaviour and reports. The only lasting protection is to stay inside their rules,
-          which is what the app is built around.
+          which is what the app is built around. The opt-in scrap.tf window is the exception: scrap.tf&apos;s terms forbid external tools, so
+          it carries a ban risk you accept when you turn it on.
         </p>
       </section>
 
@@ -91,7 +104,7 @@ export function AboutPage() {
           </li>
           <li>
             The idea comes from VeBeshka&apos;s <ExternalLink url="https://github.com/VeBeshka/tf2-scraptf-profit-helper">TF2 ScrapTF Profit Helper</ExternalLink>. This app
-            works without running anything on scrap.tf.
+            runs nothing on scrap.tf beyond the opt-in scrap.tf window&apos;s read-only snapshot of a page you opened.
           </li>
           <li>SKU handling is a port of @tf2autobot/tf2-sku (MIT).</li>
         </ul>

@@ -393,8 +393,9 @@ export function hostLabel(url: string): string {
  * journal, F12); Open on scrap.tf (copies name) (F14); then the link groups
  * once 'links.forSku' answers. `seenOn` is the item's ItemDetail.seenOn once read (F15); a row
  * that names its scrap.tf page itself (ItemMenuTarget.bank, the banks page) goes there instead.
+ * `inWindow` (F21, scraptfLinksInWindow) only words the scrap.tf action's tooltip: main decides where it opens.
  */
-export function itemMenuSections(target: ItemMenuTarget, links: LinksState, seenOn: Pick<ScraptfSeenOn, 'bank'> | null = null): MenuSection<ItemMenuAction>[] {
+export function itemMenuSections(target: ItemMenuTarget, links: LinksState, seenOn: Pick<ScraptfSeenOn, 'bank'> | null = null, inWindow = false): MenuSection<ItemMenuAction>[] {
   const stfUrl = scraptfOpenUrl(target.category, links, target.bank ? { bank: target.bank } : seenOn);
   const stfName = scraptfSearchName(target);
   const sections: MenuSection<ItemMenuAction>[] = [
@@ -419,7 +420,7 @@ export function itemMenuSections(target: ItemMenuTarget, links: LinksState, seen
           label: OPEN_ON_SCRAPTF_LABEL,
           hint: 'scrap.tf',
           // Without the item's category the page is known once links.forSku answers.
-          title: stfUrl ? scraptfOpenTitle(stfUrl, stfName) : 'Finding the scrap.tf page for this item…',
+          title: stfUrl ? scraptfOpenTitle(stfUrl, stfName, inWindow) : 'Finding the scrap.tf page for this item…',
           icon: 'external',
           disabled: stfUrl === null,
           action: stfUrl ? { kind: 'scraptf', url: stfUrl, name: stfName } : null,
@@ -803,6 +804,8 @@ export function recordTradeInit(
 
 export const OPEN_ON_SCRAPTF_LABEL = 'Open on scrap.tf (copies name)';
 export const SCRAPTF_NAME_COPIED = "Name copied. Paste it into scrap.tf's search.";
+/** F21: the same, when main opened the page in the user's scrap.tf window. */
+export const SCRAPTF_NAME_COPIED_WINDOW = "Opened in the Flip Desk window. Name copied; paste it into scrap.tf's search.";
 
 const BANK_PAGE_URLS: ReadonlySet<string> = new Set(SCRAPTF_BANK_PAGES.map((p) => p.url));
 
@@ -858,7 +861,9 @@ export function scraptfSearchName(item: { sku: string; name: string }): string {
   return unpaintedName(item.name) || item.name.trim() || item.sku;
 }
 
-export function scraptfOpenTitle(url: string, name: string): string {
+/** F21 `inWindow` (scraptfLinksInWindow): main opens the page in the user's scrap.tf window, not the browser. */
+export function scraptfOpenTitle(url: string, name: string, inWindow = false): string {
+  if (inWindow) return `Copies "${truncate(name, 60)}" for scrap.tf's search and opens ${url} in the Flip Desk window, where you browse it yourself.`;
   return `Copies "${truncate(name, 60)}" for scrap.tf's search and opens ${url} in your browser. The app never visits scrap.tf.`;
 }
 
@@ -866,18 +871,21 @@ export function scraptfOpenTitle(url: string, name: string): string {
  * The toast after "Open on scrap.tf": copied and opened is the usual case. The name is copied first
  * (a page loses clipboard access once the browser takes focus), so either step may fail alone.
  * F19: `back` (checkModel's scraptfBackHint) says how the price found there comes back through the
- * Live check; with it the toast names the page it opened.
+ * Live check; with it the toast names the page it opened. F21: `opened.openedIn === 'window'` (main sent the
+ * page to the user's scrap.tf window) says so instead of "your browser".
  */
 export function scraptfOpenedToast(
   copied: boolean,
-  opened: { opened: boolean; reason: string | null },
+  opened: { opened: boolean; reason: string | null; openedIn?: 'window' },
   url: string,
   back: string | null = null,
 ): { text: string; tone: 'good' | 'warn' } {
   const tail = back ? ` ${back}` : '';
   if (opened.opened) {
-    if (!copied) return { text: `scrap.tf is open in your browser, but the name could not be copied. Type it into scrap.tf's search.${tail}`, tone: 'warn' };
-    return back ? { text: `Opened ${bankStockPagePath(url)} in your browser. The name is copied; paste it into scrap.tf's search.${tail}`, tone: 'good' } : { text: SCRAPTF_NAME_COPIED, tone: 'good' };
+    const where = opened.openedIn === 'window' ? 'the Flip Desk window' : 'your browser';
+    if (!copied) return { text: `scrap.tf is open in ${where}, but the name could not be copied. Type it into scrap.tf's search.${tail}`, tone: 'warn' };
+    if (back) return { text: `Opened ${bankStockPagePath(url)} in ${where}. The name is copied; paste it into scrap.tf's search.${tail}`, tone: 'good' };
+    return { text: opened.openedIn === 'window' ? SCRAPTF_NAME_COPIED_WINDOW : SCRAPTF_NAME_COPIED, tone: 'good' };
   }
   const why = opened.reason ?? 'The link could not be opened.';
   return copied

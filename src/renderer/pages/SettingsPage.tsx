@@ -8,7 +8,7 @@ import { SCRAPTF_RESAVE_HELP } from '../../shared/scraptfHistory';
 import type { CheckResult, InputKind, ScraptfBank, SecretName, Settings } from '../../shared/types';
 import { rpc } from '../api';
 import { checkBriefText } from '../checkModel';
-import { CheckGroup, CommitInput, Field, Segmented, Toggle } from '../components/Controls';
+import { CheckGroup, CommitInput, ConfirmButton, Field, Segmented, Toggle } from '../components/Controls';
 import { ExternalLink } from '../components/ExternalLink';
 import { Banner, LoadingBlock } from '../components/Feedback';
 import { Icon } from '../components/Icon';
@@ -18,6 +18,26 @@ import { useApp } from '../hooks/appContext';
 import { usePush, useRpcQuery } from '../hooks/useRpc';
 import { useNow } from '../hooks/useTimers';
 import { CheckVerdictPill } from './CheckPopup';
+import {
+  SCRAPTF_WINDOW_ACK_TEXT,
+  SCRAPTF_WINDOW_CLEAR_TITLE,
+  SCRAPTF_WINDOW_DOES,
+  SCRAPTF_WINDOW_ENABLE_LABEL,
+  SCRAPTF_WINDOW_KEEP_HINT,
+  SCRAPTF_WINDOW_KEEP_LABEL,
+  SCRAPTF_WINDOW_LINKS_HINT,
+  SCRAPTF_WINDOW_LINKS_LABEL,
+  SCRAPTF_WINDOW_NAV_TITLE,
+  SCRAPTF_WINDOW_NEVER,
+  SCRAPTF_WINDOW_READ_HINT,
+  SCRAPTF_WINDOW_READ_LABEL,
+  SCRAPTF_WINDOW_RISK,
+  WINDOW_CLEARED_TEXT,
+  windowAckText,
+  windowEnableView,
+  windowOpenFailedText,
+  windowRefusalText,
+} from '../scraptfWindowModel';
 import {
   CHECK_NOTIFY_LABEL,
   CHECK_POPUP_HINT,
@@ -67,6 +87,7 @@ const SECTIONS = [
   ['set-profit', 'Profit thresholds'],
   ['set-notify', 'Notifications'],
   ['set-import', 'Saved-page import'],
+  ['set-window', 'scrap.tf window'],
   ['set-feed', 'Live feed'],
   ['set-connectors', 'Data sources'],
   ['set-block', 'Blocklist'],
@@ -107,6 +128,8 @@ export function SettingsPage() {
         <NotifySection s={settings} />
         {/* F20: re-save reminders (the import switches themselves stay on the Import page). */}
         <ImportSection s={settings} />
+        {/* F21. Main's settings load always adds the window group; the guard keeps the page up regardless. */}
+        {settings.scraptfWindow ? <ScraptfWindowSection s={settings} /> : null}
         <FeedSection s={settings} />
         <ConnectorsSection s={settings} />
         <BlocklistSection s={settings} />
@@ -787,6 +810,136 @@ function AppearanceSection({ s }: { s: Settings }) {
             ]}
           />
         </Field>
+      </div>
+    </Section>
+  );
+}
+
+/**
+ * F21 "scrap.tf window (opt-in)": what the window does and never does, the risk in scrap.tf's own words
+ * (the ToS, the staff stance, a ban possible on both sites), the acknowledgement (scraptfWindow.acknowledgedAt),
+ * the switch (main's setter refuses it without import and both acknowledgements; its reason shows here),
+ * the three options, Open the scrap.tf window and Log out & clear. Opening is 'scraptfWindow.open' on a
+ * click only; nothing here loads scrap.tf. Exported for the render tests.
+ */
+export function ScraptfWindowSection({ s }: { s: Settings }) {
+  const { updateSettings, navigate, toast } = useApp();
+  const w = s.scraptfWindow;
+  const enable = windowEnableView(s);
+  const ackText = windowAckText(w.acknowledgedAt);
+  const [refusal, setRefusal] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const set = (patch: Partial<Settings['scraptfWindow']>) => void updateSettings({ scraptfWindow: patch });
+
+  const setAck = (on: boolean) => {
+    setRefusal(null);
+    set({ acknowledgedAt: on ? Date.now() : null });
+  };
+
+  // Not through updateSettings: its toast drops main's reason, and the switch shows it instead.
+  // 'settings.changed' (main broadcasts every change) brings the new value back to the page.
+  const setEnabled = async (on: boolean) => {
+    setBusy(true);
+    try {
+      await rpc('settings.set', { scraptfWindow: { enabled: on } });
+      setRefusal(null);
+    } catch (e) {
+      setRefusal(windowRefusalText(errorMessage(e)));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const openWindow = () => {
+    rpc('scraptfWindow.open').catch((e: unknown) => toast(windowOpenFailedText(errorMessage(e)), 'bad'));
+  };
+  const clearWindow = () => {
+    rpc('scraptfWindow.clear').then(
+      () => toast(WINDOW_CLEARED_TEXT, 'good'),
+      (e: unknown) => toast(`Could not clear the scrap.tf window: ${errorMessage(e)}`, 'bad'),
+    );
+  };
+
+  return (
+    <Section
+      id="set-window"
+      title="scrap.tf window (opt-in)"
+      intro="Browse scrap.tf yourself in a window of Flip Desk. When a scrap.tf page you opened finishes loading, Flip Desk reads what is on screen and imports it, as if you had saved the page with Ctrl+S."
+    >
+      <div className="stfw-settings-lists">
+        <div>
+          <h3>What it does</h3>
+          <ul className="small">
+            {SCRAPTF_WINDOW_DOES.map((t) => (
+              <li key={t}>{t}</li>
+            ))}
+          </ul>
+        </div>
+        <div>
+          <h3>What it never does</h3>
+          <ul className="small">
+            {SCRAPTF_WINDOW_NEVER.map((t) => (
+              <li key={t}>{t}</li>
+            ))}
+          </ul>
+        </div>
+      </div>
+      <Banner tone="bad" icon="warning">
+        <div className="stfw-risk-text">
+          <p>
+            <strong>{SCRAPTF_WINDOW_RISK[0]}</strong> {SCRAPTF_WINDOW_RISK[1]}
+          </p>
+          <p>
+            {SCRAPTF_WINDOW_RISK[2]} <strong>{SCRAPTF_WINDOW_RISK[3]}</strong>
+          </p>
+          {/* Settings opens no scrap.tf page (F20's opener-free list): the terms link lives on the About page. */}
+          <p>
+            {SCRAPTF_WINDOW_RISK[4]}{' '}
+            <button type="button" className="link-btn" onClick={() => navigate('about')}>
+              scrap.tf&apos;s terms are linked on the About page
+            </button>
+          </p>
+        </div>
+      </Banner>
+      <label className="ack-row">
+        <input type="checkbox" checked={w.acknowledgedAt !== null} onChange={(e) => setAck(e.target.checked)} />
+        <span>{SCRAPTF_WINDOW_ACK_TEXT}</span>
+      </label>
+      {ackText ? <p className="muted small stfw-ack-when">{ackText}</p> : null}
+      <Toggle
+        checked={w.enabled}
+        disabled={enable.disabled || busy}
+        onChange={(on) => void setEnabled(on)}
+        label={SCRAPTF_WINDOW_ENABLE_LABEL}
+        description={
+          <>
+            {enable.hint}
+            {enable.blocker === 'import' ? (
+              <>
+                {' '}
+                <button type="button" className="link-btn" onClick={() => navigate('import')}>
+                  Go to Import
+                </button>
+              </>
+            ) : null}
+          </>
+        }
+      />
+      {refusal ? (
+        <div className="small tone-text-bad" role="alert">
+          <Icon name="warning" size={12} /> {refusal}
+        </div>
+      ) : null}
+      <Toggle checked={w.keepLoggedIn} onChange={(keepLoggedIn) => set({ keepLoggedIn })} label={SCRAPTF_WINDOW_KEEP_LABEL} description={SCRAPTF_WINDOW_KEEP_HINT} />
+      <Toggle checked={w.readOnLoad} onChange={(readOnLoad) => set({ readOnLoad })} label={SCRAPTF_WINDOW_READ_LABEL} description={SCRAPTF_WINDOW_READ_HINT} />
+      <Toggle checked={w.openLinksInWindow} onChange={(openLinksInWindow) => set({ openLinksInWindow })} label={SCRAPTF_WINDOW_LINKS_LABEL} description={SCRAPTF_WINDOW_LINKS_HINT} />
+      <div className="form-actions">
+        <button type="button" className="btn small primary" disabled={!w.enabled} title={w.enabled ? SCRAPTF_WINDOW_NAV_TITLE : 'Turn the window on first.'} onClick={openWindow}>
+          <Icon name="window" size={14} /> Open the scrap.tf window
+        </button>
+        <ConfirmButton className="btn small ghost" confirmLabel="Log out and clear?" ariaLabel="Log out & clear the scrap.tf window" title={SCRAPTF_WINDOW_CLEAR_TITLE} onConfirm={clearWindow}>
+          <Icon name="logout" size={14} /> Log out &amp; clear
+        </ConfirmButton>
       </div>
     </Section>
   );

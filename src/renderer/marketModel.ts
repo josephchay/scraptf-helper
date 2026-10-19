@@ -1188,8 +1188,9 @@ function rowBank(r: Pick<MarketRow, 'category' | 'scraptfLink'>): ScraptfBankInf
  * U1: the Item cell's scrap.tf button. "Seen on scrap.tf/buy/hats in your save 12 min ago" when a saved
  * page listed the item, else "scrap.tf's Hats bank (not in your saves yet)"; either way it opens that
  * page and copies the name. The URL is the bank's static one: links.open only ever gets an allowlisted page.
+ * F21 `inWindow` (scraptfLinksInWindow): main opens it in the user's scrap.tf window; only the words change.
  */
-export function marketScraptfButton(r: Pick<MarketRow, 'sku' | 'name' | 'category' | 'scraptfLink'>, now: UnixMs): MarketScraptfButton {
+export function marketScraptfButton(r: Pick<MarketRow, 'sku' | 'name' | 'category' | 'scraptfLink'>, now: UnixMs, inWindow = false): MarketScraptfButton {
   const info = rowBank(r);
   const path = bankStockPagePath(info.url);
   const link = r.scraptfLink;
@@ -1204,9 +1205,11 @@ export function marketScraptfButton(r: Pick<MarketRow, 'sku' | 'name' | 'categor
     label: info.label,
     name: scraptfSearchName(r),
     seen,
-    title: `${where} Opens it and copies the name (${MARKET_SCRAPTF_KEY}). The app never visits scrap.tf.`,
+    title: inWindow
+      ? `${where} Opens it in the Flip Desk window and copies the name (${MARKET_SCRAPTF_KEY}).`
+      : `${where} Opens it and copies the name (${MARKET_SCRAPTF_KEY}). The app never visits scrap.tf.`,
     // Starts with the visible label (WCAG 2.5.3): "click All items" by voice must find the button.
-    ariaLabel: `${info.label}: open ${path} in your browser and copy the name`,
+    ariaLabel: `${info.label}: open ${path} in ${inWindow ? 'the Flip Desk window' : 'your browser'} and copy the name`,
   };
 }
 
@@ -1230,8 +1233,11 @@ export interface MarketBankLink {
   ariaLabel: string;
 }
 
-/** U2: the header's "Open scrap.tf/buy/<bank> ↗" while the market shows one bank's items; null otherwise. */
-export function marketBankLink(categories: readonly Category[]): MarketBankLink | null {
+/**
+ * U2: the header's "Open scrap.tf/buy/<bank> ↗" while the market shows one bank's items; null otherwise.
+ * F21 `inWindow`: worded for the user's scrap.tf window, where main then opens it.
+ */
+export function marketBankLink(categories: readonly Category[], inWindow = false): MarketBankLink | null {
   const info = marketSingleBank(categories);
   if (!info) return null;
   const path = bankStockPagePath(info.url);
@@ -1239,7 +1245,9 @@ export function marketBankLink(categories: readonly Category[]): MarketBankLink 
     bank: info.bank,
     url: info.url,
     text: `Open ${path}`,
-    title: `Opens scrap.tf's ${info.label} bank in your browser, to look for these items there. The app never visits scrap.tf.`,
-    ariaLabel: `Open ${path} in your browser`,
+    title: inWindow
+      ? `Opens scrap.tf's ${info.label} bank in the Flip Desk window, to look for these items there.`
+      : `Opens scrap.tf's ${info.label} bank in your browser, to look for these items there. The app never visits scrap.tf.`,
+    ariaLabel: `Open ${path} in ${inWindow ? 'the Flip Desk window' : 'your browser'}`,
   };
 }

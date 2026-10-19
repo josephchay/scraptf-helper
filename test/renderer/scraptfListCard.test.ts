@@ -69,10 +69,10 @@ describe('scraptf-list.css', () => {
     expect(css).not.toMatch(/animation|transition/);
   });
 
-  it('is imported after every earlier sheet (only the F15 banks, F16 live check, F17 bank stock and F20 history sheets follow it)', () => {
+  it('is imported after every earlier sheet (only the F15 banks, F16 live check, F17 bank stock, F20 history and F21 window sheets follow it)', () => {
     const index = readFileSync(new URL('../../src/renderer/styles/index.css', import.meta.url), 'utf8');
     const imports = [...index.matchAll(/@import '\.\/([a-z-]+\.css)';/g)].map((m) => m[1]);
-    expect(imports.slice(-5)).toEqual(['scraptf-list.css', 'banks.css', 'check.css', 'bank-stock.css', 'scraptf-history.css']);
+    expect(imports.slice(-6)).toEqual(['scraptf-list.css', 'banks.css', 'check.css', 'bank-stock.css', 'scraptf-history.css', 'scraptf-window.css']);
   });
 });
 

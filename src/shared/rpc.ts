@@ -21,6 +21,7 @@ import type {
   HoldingsQuery,
   HoldingsResult,
   ImportBatch,
+  ImportOrigin,
   ImportResult,
   ItemDetail,
   ItemSuggestion,
@@ -43,6 +44,10 @@ import type {
   ScraptfChangesQuery,
   ScraptfItemHistory,
   ScraptfListStatus,
+  ScraptfReadOutcome,
+  ScraptfWindowNav,
+  ScraptfWindowRead,
+  ScraptfWindowState,
   SecretName,
   SecretsStatus,
   Settings,
@@ -149,8 +154,13 @@ export interface RpcContract {
   'journal.delete': { params: { id: number }; result: { ok: true } };
   'journal.summary': { params: void; result: JournalSummary };
   'journal.exportCsv': { params: void; result: { csv: string; suggestedName: string } };
-  /** Parse a saved scrap.tf page. Refused unless Settings.import.enabled. */
-  'import.html': { params: { html: string; fileName: string; mtimeMs: number }; result: ImportResult };
+  /**
+   * Parse a saved scrap.tf page. Refused unless Settings.import.enabled.
+   * F21: `address` (an https URL on exactly scrap.tf, a page-address hint for bank and page detection, as an
+   * MHTML Content-Location) and `origin` ('file' | 'window'; absent = 'file') are set by main only, for a
+   * read of the scrap.tf window. Main's router refuses either on a call from a page.
+   */
+  'import.html': { params: { html: string; fileName: string; mtimeMs: number; address?: string; origin?: ImportOrigin }; result: ImportResult };
   'import.batches': { params: { limit?: number }; result: ImportBatch[] };
   /**
    * F14: the user's saved scrap.tf/items price list (rows, age, pages) plus the import switches and the
@@ -236,8 +246,35 @@ export interface RpcContract {
   'secrets.status': { params: void; result: SecretsStatus };
   /** value null deletes the secret. */
   'secrets.set': { params: { name: SecretName; value: string | null }; result: SecretsStatus };
-  /** Opens an https URL in the default browser after checking the host allowlist. */
-  'links.open': { params: { url: string }; result: { opened: boolean; reason: string | null } };
+  /**
+   * Opens an https URL in the default browser after checking the host allowlist. F21: with `allowWindow`
+   * (sent only by the opens whose wording follows openLinksInWindow: the Live market's scrap.tf button and
+   * bank link, the drawer's and the row menu's Open on scrap.tf, the banks cards), the scrap.tf window on and
+   * `scraptfWindow.openLinksInWindow`, a static scrap.tf start page (isAllowedWindowStart) opens in that
+   * window instead, and the result says `openedIn: 'window'` (absent: the browser). Every other caller's
+   * link goes to the browser, as its words say.
+   */
+  'links.open': { params: { url: string; allowWindow?: boolean }; result: { opened: boolean; reason: string | null; openedIn?: 'window' } };
+  /**
+   * F21, the opt-in scrap.tf window (refused while settings.scraptfWindow.enabled is off). Every one of these
+   * is a user action: a click in the dashboard, the tray or the window's toolbar. `start` / `url` must be a
+   * static start page (isAllowedWindowStart: scrap.tf's front page, a SCRAPTF_BANKS page, scrap.tf/items).
+   * open: creates or focuses the window; loads `start` when given, else Home on a new window.
+   */
+  'scraptfWindow.open': { params: { start?: string } | void; result: { ok: true } };
+  'scraptfWindow.back': { params: void; result: { ok: true } };
+  'scraptfWindow.forward': { params: void; result: { ok: true } };
+  'scraptfWindow.reload': { params: void; result: { ok: true } };
+  /** Loads scrap.tf's front page. */
+  'scraptfWindow.home': { params: void; result: { ok: true } };
+  /** Loads one static start page (the toolbar's bank chips). */
+  'scraptfWindow.go': { params: { url: string }; result: { ok: true } };
+  /** "Read page now": one read of the page on screen (at most every READ_MANUAL_MIN_GAP_MS), or why none. */
+  'scraptfWindow.read': { params: void; result: ScraptfReadOutcome };
+  /** "Log out & clear": clears the window's partition (storage and cache), then loads Home. Allowed while off. */
+  'scraptfWindow.clear': { params: void; result: { ok: true } };
+  /** The window as main holds it (closed when off). Allowed while off. */
+  'scraptfWindow.state': { params: void; result: ScraptfWindowState };
   /** Shows an open-file dialog, reads the chosen saved page and forwards it to 'import.html'. */
   'import.pickFile': { params: void; result: ImportResult | null };
   'import.pickWatchFolder': { params: void; result: { folder: string | null } };
@@ -266,6 +303,15 @@ export const MAIN_METHODS: readonly RpcMethod[] = [
   'import.pickFile',
   'import.pickWatchFolder',
   'file.saveText',
+  'scraptfWindow.open',
+  'scraptfWindow.back',
+  'scraptfWindow.forward',
+  'scraptfWindow.reload',
+  'scraptfWindow.home',
+  'scraptfWindow.go',
+  'scraptfWindow.read',
+  'scraptfWindow.clear',
+  'scraptfWindow.state',
 ];
 
 export const SERVICE_METHODS: readonly RpcMethod[] = [
@@ -366,6 +412,13 @@ export interface PushContract {
    * another push.
    */
   'service.state': { state: 'starting' | 'ready' | 'restarting' | 'stopped'; detail: string | null; nextAttemptAt: number | null };
+  /**
+   * F21, main only, to the scrap.tf window's toolbar: a read of the page on screen was imported (or why not).
+   * null: Log out & clear ran (from the toolbar or Settings), so the toolbar shows no read.
+   */
+  'scraptfWindow.read': ScraptfWindowRead | null;
+  /** F21, main only, to the scrap.tf window's toolbar: the view navigated, or started / stopped loading. */
+  'scraptfWindow.nav': ScraptfWindowNav;
 }
 
 export type PushEvent = keyof PushContract;
@@ -387,6 +440,8 @@ export const PUSH_EVENTS: readonly PushEvent[] = [
   'ui.quickPrefill',
   'ui.checkShow',
   'service.state',
+  'scraptfWindow.read',
+  'scraptfWindow.nav',
 ];
 
 /** API exposed on window.flipdesk by the preload script. */
@@ -394,7 +449,7 @@ export interface FlipdeskBridge {
   rpc<M extends RpcMethod>(method: M, params: RpcParams<M>): Promise<RpcResult<M>>;
   /** Returns an unsubscribe function. */
   on<E extends PushEvent>(event: E, listener: (payload: PushContract[E]) => void): () => void;
-  /** 'dashboard', 'quick-entry' or 'check' (the live check popup, F16). */
+  /** 'dashboard', 'quick-entry', 'check' (the live check popup, F16) or 'scraptf' (the scrap.tf window's toolbar, F21). */
   windowKind: string;
 }
 

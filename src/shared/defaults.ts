@@ -62,6 +62,8 @@ export const DEFAULT_SETTINGS: Settings = {
   app: { startAtLogin: false, startHidden: false, closeToTray: true, quickEntryHotkey: 'CommandOrControl+Alt+F' },
   // Live check (F16): the watcher reads the clipboard, so it stays off until the user turns it on.
   check: { hotkey: 'CommandOrControl+Alt+C', watchClipboard: false, notifyFlips: true, popup: true },
+  // F21: the scrap.tf window carries a ban risk the user must accept first, so it starts off.
+  scraptfWindow: { enabled: false, acknowledgedAt: null, keepLoggedIn: false, readOnLoad: true, openLinksInWindow: false },
   networkPaused: false,
   blocklist: [],
   ui: { theme: 'system', density: 'comfortable' },

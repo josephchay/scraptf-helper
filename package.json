@@ -1,8 +1,8 @@
 {
   "name": "tf2-flip-desk",
   "productName": "TF2 Flip Desk",
-  "version": "0.6.0",
-  "description": "Local desktop profit monitor for TF2 trading. Compares prices you enter with live backpack.tf buy orders using only official APIs. Never contacts scrap.tf and never trades on your behalf.",
+  "version": "0.7.0",
+  "description": "Local desktop profit monitor for TF2 trading. Compares prices you enter with live backpack.tf buy orders using only official APIs. Never fetches scrap.tf itself (an opt-in window lets you browse it yourself) and never trades on your behalf.",
   "private": true,
   "license": "Apache-2.0",
   "author": "Joseph",

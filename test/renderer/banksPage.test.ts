@@ -46,7 +46,10 @@ describe('the page', () => {
 
   it('reads scraptf.banks (and the list card\'s status), nothing else: no new traffic', () => {
     const methods = new Set([...page.matchAll(/(?:rpc|useRpcQuery)\('([a-zA-Z.]+)'/g)].map((m) => m[1]));
-    expect([...methods]).toEqual(['scraptf.banks']);
+    // F21: 'scraptfWindow.open' is a click's window action (main's), not a read: still no new traffic.
+    expect([...methods]).toEqual(['scraptf.banks', 'scraptfWindow.open']);
+    expect(page).toContain("rpc('scraptfWindow.open', { start: info.url })");
+    expect(page).toContain('const info = scraptfBankInfo(c.bank);');
     for (const m of methods) expect([...SERVICE_METHODS, ...MAIN_METHODS]).toContain(m);
     // The Import and folder hints are the price list card's own state (F14).
     expect(page).toContain('useScraptfListStatus()');
@@ -88,12 +91,13 @@ describe('banks.css', () => {
     expect(css).toMatch(/\.banks-grid \{[^}]*grid-template-columns: repeat\(auto-fill, minmax\(min\(100%, 300px\), 1fr\)\);/);
   });
 
-  it('is imported after every earlier sheet (only the F16 live check, F17 bank stock and F20 history sheets follow it)', () => {
+  it('is imported after every earlier sheet (only the F16 live check, F17 bank stock, F20 history and F21 window sheets follow it)', () => {
     const index = read('styles/index.css').trim().split('\n');
-    expect(index[index.length - 1]).toBe("@import './scraptf-history.css';");
-    expect(index[index.length - 2]).toBe("@import './bank-stock.css';");
-    expect(index[index.length - 3]).toBe("@import './check.css';");
-    expect(index[index.length - 4]).toBe("@import './banks.css';");
+    expect(index[index.length - 1]).toBe("@import './scraptf-window.css';");
+    expect(index[index.length - 2]).toBe("@import './scraptf-history.css';");
+    expect(index[index.length - 3]).toBe("@import './bank-stock.css';");
+    expect(index[index.length - 4]).toBe("@import './check.css';");
+    expect(index[index.length - 5]).toBe("@import './banks.css';");
   });
 });
 
@@ -513,5 +517,73 @@ describe('BanksPage against the mock', () => {
     await settle();
     // The first push reads at once; the rest wait for one trailing read 2 s later.
     expect(t.calls('scraptf.banks')).toHaveLength(2);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// F21: the opt-in scrap.tf window on the cards
+// ---------------------------------------------------------------------------
+
+describe('F21: "Open in Flip Desk window" on the cards', () => {
+  const WINDOW = { linksHere: false, readOnLoad: true };
+
+  it('is not there while the window is off', () => {
+    expect(html()).not.toContain('Flip Desk window');
+    expect(html({ scraptfWindow: null })).not.toContain('Flip Desk window');
+  });
+
+  it('adds a button per card beside Open in browser, named by its page, and says the window reads it', () => {
+    const h = html({ scraptfWindow: WINDOW });
+    expect(h.match(/<\/svg> Open in browser<\/button>/g)).toHaveLength(8);
+    expect(h.match(/<\/svg> Open in Flip Desk window<\/button>/g)).toHaveLength(8);
+    for (const b of SCRAPTF_BANKS) expect(h).toContain(`aria-label="Open in Flip Desk window: ${b.url.replace('https://', '')}"`);
+    expect(h.match(/In the Flip Desk window it is read as it loads; or save it with <kbd>Ctrl<\/kbd>\+<kbd>S<\/kbd> as <strong>Webpage, Complete<\/strong> into your watch folder\./g)).toHaveLength(8);
+    expect(h).toContain('Enter opens one in your browser.');
+    expect(html({ scraptfWindow: { ...WINDOW, readOnLoad: false } })).toContain('In the Flip Desk window it is read when you press Read page now');
+  });
+
+  it("drops Open in browser when Flip Desk's scrap.tf links open in the window (it would land there too)", () => {
+    const h = html({ scraptfWindow: { ...WINDOW, linksHere: true } });
+    expect(h).not.toContain('Open in browser');
+    expect(h.match(/<\/svg> Open in Flip Desk window<\/button>/g)).toHaveLength(8);
+    expect(h).toContain('Enter opens one in the Flip Desk window.');
+  });
+
+  it('waits for import like Open in browser', () => {
+    const h = html({ scraptfWindow: WINDOW, status: { ...STATUS, importEnabled: false } });
+    expect(h.match(/<button type="button" class="btn small bank-open-window[^"]*" disabled=""/g)).toHaveLength(8);
+  });
+
+  it('a click asks for that card (mounted view)', () => {
+    const onOpenInWindow = vi.fn();
+    const container = doc.createElement('div');
+    doc.body.appendChild(container);
+    const root = createRoot(container as unknown as Element);
+    act(() => root.render(createElement(AppProvider, null, createElement(BanksView, props({ scraptfWindow: WINDOW, onOpenInWindow })))));
+    unmounts.push(() => {
+      act(() => root.unmount());
+      doc.body.removeChild(container);
+    });
+    const btn = container.descendants().find((e) => e.tagName === 'BUTTON' && e.getAttribute('aria-label') === 'Open in Flip Desk window: scrap.tf/buy/weapons')!;
+    act(() => {
+      btn.dispatchEvent(new ShimEvent('click', { bubbles: true, cancelable: true }));
+    });
+    expect(onOpenInWindow).toHaveBeenCalledTimes(1);
+    expect(onOpenInWindow.mock.calls[0]![0]).toMatchObject({ bank: 'weapons', url: 'https://scrap.tf/buy/weapons' });
+  });
+
+  it("against the mock: opens the card's static page in the window on a click, nothing in the browser", async () => {
+    const t = await mountPage();
+    expect(t.content()).not.toContain('Open in Flip Desk window');
+    await t.b.rpc('settings.set', { scraptfWindow: { enabled: true, acknowledgedAt: T0 } });
+    await settle();
+    // Nothing moved the window yet: the button appears, that is all.
+    expect(t.calls('scraptfWindow.open')).toEqual([]);
+    const btn = t.button(t.card('stranges'), /Open in Flip Desk window/)!;
+    t.fire(btn, 'click');
+    await settle();
+    expect(t.calls('scraptfWindow.open').map((c) => c[1])).toEqual([{ start: 'https://scrap.tf/buy/stranges' }]);
+    expect(t.opened()).toEqual([]);
+    expect((await t.b.rpc('scraptfWindow.state', undefined)).url).toBe('https://scrap.tf/buy/stranges');
   });
 });

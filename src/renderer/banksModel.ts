@@ -389,29 +389,33 @@ export function seenOnText(seenOn: Pick<ScraptfSeenOn, 'bank' | 'at'> | null | u
  * F18 S3), so the line says so instead of "Counted as a save". `savedWithoutCards`
  * (importSavedWithoutCards of the result; unknown for an ImportBatch, which keeps no warnings) decides
  * whether the save type is to blame: a page whose cards were all read but skipped (every price already
- * set by a newer save, say) was saved fine.
+ * set by a newer save, say) was saved fine. F21 `fromWindow` (origin 'window'): a read of the scrap.tf
+ * window was no save, so the remedy is to read it again there once the items show.
  */
 export function importBankText(
   bank: ScraptfBank | null | undefined,
   stored?: number | null,
   savedWithoutCards?: boolean,
+  fromWindow = false,
 ): { text: string; title: string } | null {
   if (bank === undefined) return null;
   const info = scraptfBankInfo(bank);
   if (!info) {
     return {
       text: 'Not recognised',
-      title: "The saved page's address did not name a scrap.tf page this app knows, so the banks page and the Live market strip file it by the categories of the items it stored.",
+      title: `${fromWindow ? 'The page read in the Flip Desk window is not' : "The saved page's address did not name"} a scrap.tf page this app knows, so the banks page and the Live market strip file it by the categories of the items it stored.`,
     };
   }
   const path = bankPath(info.url);
   if (typeof stored === 'number' && isEmptyBankSave({ itemCount: stored }, info.bank)) {
     const what =
-      savedWithoutCards === true
-        ? `Save it again as '${SAVE_MODE}'.`
-        : savedWithoutCards === false
-          ? 'The skipped items say why.'
-          : `If it was saved before its items showed, save it again as '${SAVE_MODE}'.`;
+      savedWithoutCards === false
+        ? 'The skipped items say why.'
+        : fromWindow
+          ? 'If it was read before its items showed, press Read page now in the window once they show.'
+          : savedWithoutCards === true
+            ? `Save it again as '${SAVE_MODE}'.`
+            : `If it was saved before its items showed, save it again as '${SAVE_MODE}'.`;
     return {
       text: `${info.label} · ${path} · not counted`,
       title: `Not counted as a save of ${path}: it stored no items, so the scrap.tf banks page and the Live market strip pass over it. ${what}`,

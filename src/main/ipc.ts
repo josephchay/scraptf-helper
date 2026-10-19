@@ -10,10 +10,12 @@ import type { Logger } from '../service/contracts';
 import { CHECK_ARM_NAME_MAX, CHECK_PRICE_TEXT_MAX } from '../shared/check';
 import { decodeHtmlBuffer } from '../shared/htmlDecode';
 import { MAIN_METHODS, SERVICE_METHODS, type AppInfo, type HotkeysStatus, type PushContract, type RpcMethod } from '../shared/rpc';
+import { IMPORT_HTML_ORIGIN_REFUSAL, isAllowedWindowStart, SCRAPTF_WINDOW_OFF } from '../shared/scraptfWindowPolicy';
 import { validateSettingsPatch } from '../shared/settingsSchema';
 import { isValidSku } from '../shared/sku';
-import type { CheckArm, SecretName, SecretsStatus, Settings, UnixMs } from '../shared/types';
+import type { CheckArm, ScraptfWindowState, SecretName, SecretsStatus, Settings, UnixMs } from '../shared/types';
 import { isHttpsUrl, isTrustedSenderUrl, MAX_IMPORT_BYTES, safeErrorMessage, sanitizeFileName } from './paths';
+import type { ScraptfWindowManager } from './scraptfWindow';
 import { MAX_SECRET_LENGTH, secretNameSchema } from './secrets';
 
 export const RPC_CHANNEL = 'rpc';
@@ -49,6 +51,11 @@ export interface MainRpcDeps {
   armCheck(arm: CheckArm | null): { armedUntil: UnixMs | null };
   isAllowedExternalUrl(url: string): boolean;
   openExternal(url: string): Promise<void>;
+  /**
+   * F21: the scrap.tf window (main/scraptfWindow.ts). Optional, so a router without one (tests) answers
+   * every 'scraptfWindow.*' call with a fixed refusal and links.open keeps to the browser.
+   */
+  scraptfWindow?: ScraptfWindowRpc;
   dialogs: {
     openHtmlFile(window: unknown): Promise<string | null>;
     openFolder(window: unknown): Promise<string | null>;
@@ -65,11 +72,15 @@ export interface MainRpcDeps {
 
 export type RpcRouter = (ctx: RpcCallContext, method: unknown, params: unknown) => Promise<unknown>;
 
+/** What the router asks of the scrap.tf window. */
+export type ScraptfWindowRpc = Pick<ScraptfWindowManager, 'open' | 'back' | 'forward' | 'reload' | 'home' | 'go' | 'readNow' | 'clear' | 'state'>;
+
 const secretsSetParams = z.object({
   name: secretNameSchema,
   value: z.string().max(MAX_SECRET_LENGTH).nullable(),
 });
-const linksOpenParams = z.object({ url: z.string().min(1).max(4096) });
+// F21 allowWindow: the caller words its link for the scrap.tf window when openLinksInWindow is on.
+const linksOpenParams = z.object({ url: z.string().min(1).max(4096), allowWindow: z.boolean().optional() });
 const openItemParams = z.object({ sku: z.string().trim().min(1).max(200).regex(/^\d+;\d+(;[a-z0-9-]+)*$/i, 'not a SKU') });
 // Same rule as the service's skuText (rpcHandlers.ts): the SKU is pushed to the renderer as is.
 const quickEntrySku = z.string().trim().min(1).max(300).toLowerCase().refine(isValidSku, 'not a SKU');
@@ -120,6 +131,25 @@ export const PICK_PAGE_REFUSAL = 'Choose a saved .html or .mhtml page.';
 export const CHECK_TEXT_SOURCE_REFUSAL = 'Invalid parameters for check.text: source: a page can only send manual checks';
 /** F19: only main adds a 'check.text' hint (from its own 'check.arm'); a page may not. Fixed text, like the above. */
 export const CHECK_TEXT_HINT_REFUSAL = 'Invalid parameters for check.text: hint: only the check hotkey and the clipboard watcher send one';
+// F21: a page's 'import.html' may not carry address or origin (main's window read calls the service directly).
+export { IMPORT_HTML_ORIGIN_REFUSAL };
+/** F21: a router built without the scrap.tf window (tests). */
+export const SCRAPTF_WINDOW_UNAVAILABLE = 'The scrap.tf window is not available.';
+// F21. Fixed text: the URL is never quoted (a failed call's message reaches main's debug log).
+const START_REFUSAL = 'not a scrap.tf page the window opens';
+const windowStartUrl = z
+  .string({ error: START_REFUSAL })
+  .max(4096, { error: START_REFUSAL })
+  .refine((u) => isAllowedWindowStart(u), { error: START_REFUSAL });
+const scraptfOpenParams = z.object({ start: windowStartUrl.optional() }, { error: 'expected { start? }' }).nullish();
+const scraptfGoParams = z.object({ url: windowStartUrl }, { error: 'expected { url }' });
+const CLOSED_WINDOW: ScraptfWindowState = { open: false, url: null, canGoBack: false, canGoForward: false, lastRead: null };
+
+function hasWindowImportKeys(params: unknown): boolean {
+  if (typeof params !== 'object' || params === null) return false;
+  const p = params as { address?: unknown; origin?: unknown };
+  return p.address !== undefined || p.origin !== undefined;
+}
 
 function isManualCheck(params: unknown): boolean {
   return typeof params === 'object' && params !== null && (params as { source?: unknown }).source === 'manual';
@@ -164,12 +194,21 @@ export function isKnownMethod(method: unknown): method is RpcMethod {
 }
 
 export function createRpcRouter(deps: MainRpcDeps): RpcRouter {
+  /** F21: the window, for an action the user may take only while it is on. */
+  const windowOn = (): ScraptfWindowRpc => {
+    if (!deps.scraptfWindow) throw new Error(SCRAPTF_WINDOW_UNAVAILABLE);
+    if (!deps.settings.get().scraptfWindow.enabled) throw new Error(SCRAPTF_WINDOW_OFF);
+    return deps.scraptfWindow;
+  };
+
   return async (ctx, method, params) => {
     if (!isKnownMethod(method)) {
       throw new Error(typeof method === 'string' ? `Unknown method: ${method.slice(0, 64)}` : 'Invalid method');
     }
 
     if (serviceMethods.has(method)) {
+      // F21: only main's own call for a scrap.tf window read carries these.
+      if (method === 'import.html' && hasWindowImportKeys(params)) throw new Error(IMPORT_HTML_ORIGIN_REFUSAL);
       // Same 20 MB cap as the file picker; the service re-validates everything else.
       if (method === 'import.html') parseParams(importHtmlParams, params, method);
       if (method === 'check.text' && !isManualCheck(params)) throw new Error(CHECK_TEXT_SOURCE_REFUSAL);
@@ -215,7 +254,14 @@ export function createRpcRouter(deps: MainRpcDeps): RpcRouter {
         return deps.secrets.set(p.name, p.value);
       }
       case 'links.open': {
-        const { url } = parseParams(linksOpenParams, params, method);
+        const { url, allowWindow } = parseParams(linksOpenParams, params, method);
+        // F21: the user chose to open the app's static scrap.tf pages in the scrap.tf window. Only a caller
+        // that says so (allowWindow) sends one there: a button that promises the browser keeps its word.
+        const sw = deps.settings.get().scraptfWindow;
+        if (allowWindow === true && deps.scraptfWindow && sw.enabled && sw.openLinksInWindow && isAllowedWindowStart(url)) {
+          deps.scraptfWindow.open(url);
+          return { opened: true, reason: null, openedIn: 'window' };
+        }
         let allowed = false;
         try {
           allowed = isHttpsUrl(url) && deps.isAllowedExternalUrl(url);
@@ -269,6 +315,41 @@ export function createRpcRouter(deps: MainRpcDeps): RpcRouter {
         await deps.files.writeText(target, p.text);
         return { saved: true, path: target };
       }
+      // ----- F21: the scrap.tf window. Every call is a user's click (dashboard, tray, toolbar). -----
+      case 'scraptfWindow.open': {
+        const w = windowOn();
+        const p = parseParams(scraptfOpenParams, params, method);
+        if (p?.start === undefined) w.open();
+        else w.open(p.start);
+        return { ok: true };
+      }
+      case 'scraptfWindow.back':
+        windowOn().back();
+        return { ok: true };
+      case 'scraptfWindow.forward':
+        windowOn().forward();
+        return { ok: true };
+      case 'scraptfWindow.reload':
+        windowOn().reload();
+        return { ok: true };
+      case 'scraptfWindow.home':
+        windowOn().home();
+        return { ok: true };
+      case 'scraptfWindow.go': {
+        const w = windowOn();
+        w.go(parseParams(scraptfGoParams, params, method).url);
+        return { ok: true };
+      }
+      case 'scraptfWindow.read':
+        return windowOn().readNow();
+      case 'scraptfWindow.clear':
+        // Allowed while off: the user may want the session gone after turning the window off.
+        if (!deps.scraptfWindow) throw new Error(SCRAPTF_WINDOW_UNAVAILABLE);
+        await deps.scraptfWindow.clear();
+        return { ok: true };
+      case 'scraptfWindow.state':
+        // A copy: main's own state must not change through IPC.
+        return deps.scraptfWindow ? structuredClone(deps.scraptfWindow.state()) : { ...CLOSED_WINDOW };
       default:
         throw new Error(`Unhandled method: ${method}`);
     }

@@ -1,5 +1,5 @@
-// Tray icon: context menu (show, quick entry, pause toggles, the live check's
-// clipboard watcher, quit) and a tooltip summarising the latest status push.
+// Tray icon: context menu (show, quick entry, the opt-in scrap.tf window, pause toggles, the live
+// check's clipboard watcher, quit) and a tooltip summarising the latest status push.
 
 import { Menu, nativeImage, Tray, type MenuItemConstructorOptions } from 'electron';
 import type { Logger } from '../service/contracts';
@@ -17,6 +17,8 @@ export interface TrayState {
   checkWatch: boolean;
   /** F16: the live check hotkey. */
   checkHotkey: HotkeyStatus;
+  /** F21: settings.scraptfWindow.enabled (the opt-in scrap.tf window); its menu item shows only then. */
+  scraptfWindow: boolean;
   now: number;
 }
 
@@ -27,6 +29,8 @@ export interface TrayActions {
   setNetworkPaused(paused: boolean): void;
   /** F16: turns the clipboard watcher on or off (settings.check.watchClipboard). */
   setClipboardWatch(on: boolean): void;
+  /** F21: opens or focuses the scrap.tf window (the user's click). */
+  openScraptfWindow(): void;
   quit(): void;
 }
 
@@ -94,9 +98,12 @@ export function trayMenuTemplate(state: TrayState, actions: TrayActions): MenuIt
     quick.accelerator = state.hotkey.accelerator;
     quick.registerAccelerator = false;
   }
+  // F21: only once the user turned the window on (Settings > scrap.tf window).
+  const scraptf: MenuItemConstructorOptions[] = state.scraptfWindow ? [{ label: 'Open scrap.tf window', click: () => actions.openScraptfWindow() }] : [];
   return [
     { label: 'Show dashboard', click: () => actions.showDashboard() },
     quick,
+    ...scraptf,
     { type: 'separator' },
     {
       label: 'Pause live feed',
@@ -123,7 +130,7 @@ export function trayMenuTemplate(state: TrayState, actions: TrayActions): MenuIt
 
 /** Everything the menu shows: a field missing here leaves its item stale (the watch checkbox included). */
 export function menuKey(state: TrayState): string {
-  return JSON.stringify([state.liveFeedEnabled, state.networkPaused, state.checkWatch, state.hotkey.registered, state.hotkey.accelerator]);
+  return JSON.stringify([state.liveFeedEnabled, state.networkPaused, state.checkWatch, state.scraptfWindow, state.hotkey.registered, state.hotkey.accelerator]);
 }
 
 export function createTray(iconPath: string, actions: TrayActions, initial: TrayState, log: Logger): TrayController {

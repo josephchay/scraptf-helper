@@ -6,16 +6,16 @@
 
 | Rule | What it means |
 |---|---|
-| R1 | Nothing in this app sends a request to `scrap.tf` or any subdomain. That includes tests, fixtures and tooling. |
+| R1 | Nothing in this app sends a request of its own to `scrap.tf` or any subdomain: no HTTP client request, fetch, `/ajax`, `ws.scrap.tf` socket or download, no polling, no auto-refresh, and no load, reload or history step from a timer, an event or a promise callback. That includes tests, fixtures and tooling, and `src/service/net/policy.ts` refuses every scrap.tf host. From 0.7 (F21) the one place scrap.tf is shown is the opt-in scrap.tf window (`src/main/scraptfWindow.ts`), which the **user** browses: Chromium loads only a static start page the user opened (`SCRAPTF_WINDOW_START_URLS`), a toolbar move the user clicked (back, forward, reload, home, a bank chip, Log out & clear) or the user's own clicks in the page, plus what those pages load themselves. |
 | R2 | No HTML fetching from backpack.tf, marketplace.tf, stntrading.eu, mannco.store or steamcommunity.com. Only documented JSON APIs and websockets, reached through `src/service/net`. |
-| R3 | No userscripts, extensions or page injection. There is no embedded scrap.tf browser. |
+| R3 | No userscripts, extensions or page injection: nothing of the app's runs in another site's page except F21's `READ_SCRIPT`, and the app never clicks, types, scrolls, sends input events or writes the DOM there. The one embedded browser is F21's opt-in scrap.tf window, whose view has no preload and runs exactly that one pinned, read-only script (`document.documentElement.outerHTML`) in isolated world 1001, only on `https://scrap.tf` pages, only on a document that has stopped loading, after each scrap.tf page load or in-page navigation in the window (the user's browsing, and what the page's own scripts do, such as a reload or a `replaceState`, which the app cannot tell apart; with the 30 s per-page gap, the one settle read and the dedupe) or on the user's Read page now. A read is a local snapshot and sends nothing. Steam's sign-in and Cloudflare's challenge frame are never read; a check page served at a scrap.tf address is read and imports nothing. It never solves or skips a challenge, never calls `setUserAgent` and never touches cookies (`session.cookies`, `document.cookie`). |
 | R4 | No automated buying, selling, trading, listing, bumping or accepting. The app is read-only toward every platform. |
 | R5 | No proxy support and no multi-account features. |
-| R6 | Honest User-Agent: `TF2FlipDesk/<version> (+<contact>)`. Never a browser UA. |
+| R6 | Honest User-Agent: `TF2FlipDesk/<version> (+<contact>)`. Never a browser UA. The F21 scrap.tf window is a browser the user drives and keeps Electron's default user agent, which names the app and Electron: nothing in `src/` calls `setUserAgent` or rewrites the window's request headers. |
 | R7 | Budgets below published limits. Honour 429 and `Retry-After`. Stop on challenge pages. |
 | R8 | Secrets are encrypted at rest (main process, `safeStorage`), redacted from every log, and sent only to the host that issued them. |
-| R9 | No Steam passwords, cookies, `shared_secret` or `identity_secret` handling. |
-| R10 | scrap.tf data comes only from the user: typed entries, price-sheet rules, pages the user saved themselves (scrap.tf/items included, F14; kept as snapshots so two saves of a bank can be compared, F17; as `.html` or `.mhtml`, F18: a saved file is untrusted input, and nothing inside it, a part, a URL or a Content-Location, is ever fetched, opened or followed), or text the user copied and asked to check (Live check, F16: plain clipboard text read locally by main, never stored or sent; from F19 a price copied on its own is checked as the item the user just opened on scrap.tf from the app, whose page the app only handed to the user's browser). Import is opt-in after an explicit acknowledgement; so is the clipboard watcher. The app never reads the user's browser (no DOM, history or windows). |
+| R9 | No Steam passwords, cookies, `shared_secret` or `identity_secret` handling. In the F21 scrap.tf window the user signs in on Steam's own page; the session lives in Chromium's own partition (in memory unless the user chose to stay signed in), and the app never reads, exports or reuses it. |
+| R10 | scrap.tf data comes only from the user: typed entries, price-sheet rules, pages the user saved themselves (scrap.tf/items included, F14; kept as snapshots so two saves of a bank can be compared, F17; as `.html` or `.mhtml`, F18: a saved file is untrusted input, and nothing inside it, a part, a URL or a Content-Location, is ever fetched, opened or followed), or text the user copied and asked to check (Live check, F16: plain clipboard text read locally by main, never stored or sent; from F19 a price copied on its own is checked as the item the user just opened on scrap.tf from the app, whose page the app only handed to the user's browser). From F21, also the DOM of a scrap.tf page the user opened in the opt-in scrap.tf window, read by `READ_SCRIPT` and fed to the same saved-page import with the page's address as a hint and `origin: 'window'` (only main sets either). Import is opt-in after an explicit acknowledgement; so is the clipboard watcher, and the scrap.tf window needs import plus its own acknowledgement. The app never reads the user's own browser (no DOM, history or windows). |
 
 ## Processes
 
@@ -23,9 +23,12 @@
 Electron main (src/main)          windows, tray, notifications, global hotkeys (quick entry, live check),
   │                               the clipboard (readText only, live check), app:// protocol,
   │                               settings.json (validated), secrets (safeStorage), links.open allowlist,
-  │                               file dialogs; forwards RPC to the service
-  ├── renderer (src/renderer)     React dashboard, quick-entry window and live check popup. No network.
-  │                               Talks only via window.flipdesk (preload, contextBridge)
+  │                               file dialogs, the opt-in scrap.tf window (F21); forwards RPC to the service
+  ├── renderer (src/renderer)     React dashboard, quick-entry window, live check popup and the scrap.tf
+  │                               window's toolbar. No network. Talks only via window.flipdesk (preload,
+  │                               contextBridge)
+  ├── scrap.tf view (F21)         a WebContentsView the user browses scrap.tf in: no preload, sandboxed, its
+  │                               own partition; main reads its DOM with READ_SCRIPT only
   └── utilityProcess (src/service) all connectors, rate limits, SQLite (node:sqlite), opportunity engine,
                                    saved-page import + folder watch
 ```
@@ -49,6 +52,7 @@ Wire protocol and the RPC method list: `src/shared/rpc.ts`. Domain types: `src/s
 | `src/shared/check.ts` | Live check (F16) limits, fixed user-facing texts (refusals, reasons, item notes, the privacy sentence, `CHECK_HOTKEY_CONFLICT`), `checkTextRefusal`, `checkPriceIsOtherCopy`, `blankCheckResult` and F19's `checkHintPriceOf` (a price copied on its own); zod-free, shared by main, the service, the dashboard and the mock so all of them refuse and word things alike |
 | `src/shared/itemUrl.ts` | the item links the app reads (marketplace.tf and PriceDB item pages, backpack.tf stats pages): hosts, path shapes and next.backpack.tf's query keys, shared by the schema resolver (`parseItemUrl`) and main's clipboard filter, which lets exactly these links through |
 | `src/shared/settingsSchema.ts` | zod schema for `Settings` (owned by main) |
+| `src/shared/scraptfWindowPolicy.ts` | F21's rules for the opt-in scrap.tf window, pure and zod-free: which URLs it starts on, keeps, sends to the browser or blocks (top level and frames), which pages it reads, the pinned `READ_SCRIPT` and its forbidden tokens, the read timings, the fixed texts and the settings gate; shared by main, the settings schema, the service, the mock and the tests |
 | `src/service/net/*` | `policy.ts`, `budgets.ts`, `http.ts`, `redact.ts`, `ratelimit.ts`, `errors.ts` |
 | `src/service/db/*` | `openRepo(path)` implementing `Repo` with `node:sqlite` |
 | `src/service/connectors/schema.ts`, `schemaNames.ts` | `createSchemaService` (sku.pricedb.io), names and resolver |
@@ -58,7 +62,7 @@ Wire protocol and the RPC method list: `src/shared/rpc.ts`. Domain types: `src/s
 | `src/service/priceSheetIo.ts`, `buyerCheck.ts`, `rpcSchemas.ts` | bulk paste and backups (pure); `buyer.check` lookups; zod schemas shared by more than one handler |
 | `src/service/import/*` | saved scrap.tf page parser (`scraptfHtml.ts`, parse5, no script execution), the MHTML extractor (`mhtml.ts`, F18, pure), the one entry for both file types (`savedPage.ts`), folder watcher |
 | `src/service/core.ts`, `scheduler.ts`, `rpcHandlers.ts`, `entry.ts`, `logger.ts` | wiring and periodic jobs (integration) |
-| `src/main/*` | Electron main, preload, windows, tray, settings store, secrets, service host; the live check's controller (`liveCheck.ts`, with F19's `check.arm`), clipboard filter and watcher (`clipboardWatch.ts`) and global hotkey registration (`hotkeys.ts`) |
+| `src/main/*` | Electron main, preload, windows, tray, settings store, secrets, service host; the live check's controller (`liveCheck.ts`, with F19's `check.arm`), clipboard filter and watcher (`clipboardWatch.ts`) and global hotkey registration (`hotkeys.ts`); the opt-in scrap.tf window (`scraptfWindow.ts`, F21), the only module that may show scrap.tf |
 | `src/renderer/*` | dashboard UI; `api.ts` uses `window.flipdesk` or, in a plain browser, `mock.ts`. Page logic lives in pure, unit-tested `*Model.ts` files |
 | `test/<area>/*.test.ts`, `test/fixtures/<area>/*` | vitest tests and fixtures per area |
 
@@ -436,6 +440,54 @@ bankStockListedCell(r, now), bankStockSinceListedCell(r, keyScrap), RETENTION_NO
 MarketFilters.listedOnScraptf, LISTED_ON_SCRAPTF_LABEL               // marketModel.ts
 ImportSection({ s })                                                 // pages/SettingsPage.tsx; resaveMinutesOf, resaveBanksShown, resaveBanksHint, resaveReminderHint (settingsFields.ts)
 seedBankStockHistory(saves)                                          // mockData.ts
+```
+
+v0.7 the scrap.tf window (F21, below):
+
+```ts
+// shared/types.ts
+Settings.scraptfWindow: ScraptfWindowSettings { enabled; acknowledgedAt: UnixMs | null; keepLoggedIn; readOnLoad; openLinksInWindow }
+ScraptfWindowRead { at; path; items; bank; newFlips; warning }; ScraptfWindowNav { url; canGoBack; canGoForward; loading }
+ScraptfWindowState { open; url; canGoBack; canGoForward; lastRead }; ScraptfReadOutcome { read; reason }
+ImportOrigin = 'file' | 'window', IMPORT_ORIGINS; ImportBatch.origin?: ImportOrigin | null (V9); ImportResult.origin?, newFlips?
+// shared/links.ts
+SCRAPTF_HOME_URL = 'https://scrap.tf/'                             // a window start page only; not in STATIC_EXTERNAL_URLS
+// shared/scraptfWindowPolicy.ts (pure, zod-free)
+isScraptfPageUrl(url); shouldReadUrl(url); SCRAPTF_WINDOW_START_URLS, scraptfWindowStartUrls(), isAllowedWindowStart(url)   // exact Set.has
+topLevelNavigationDecision(url): 'allow' | 'external' | 'block'; subframeNavigationDecision(url): 'allow' | 'block'
+windowDisplayUrl(url) (origin + path); scraptfPathOf(url); windowReadFileName(url) ('scrap.tf window /buy/hats')
+READ_WORLD_ID = 1001, READ_SETTLE_MS = 4_000, READ_MANUAL_MIN_GAP_MS = 2_000, READ_AUTO_MIN_GAP_MS = 30_000, READ_DEDUPE_MS = 60_000,
+READ_MAX_CHARS = 20 MiB (= MAX_IMPORT_BYTES), EXTERNAL_OPEN_MIN_GAP_MS = 1_000
+READ_SCRIPT; READ_SCRIPT_FORBIDDEN; readScriptProblems(code); readResultHtml(v)
+SCRAPTF_READ_REASONS, SCRAPTF_WINDOW_OFF, IMPORT_HTML_ORIGIN_REFUSAL, SCRAPTF_BAR_HASH = '#/scraptf-bar'
+SCRAPTF_WINDOW_NEEDS_IMPORT, SCRAPTF_WINDOW_NEEDS_ACK; scraptfWindowEnableProblem(s); gateScraptfWindow(next, turnsOn)
+// rpc.ts
+MAIN_METHODS += 'scraptfWindow.open' { start? } | 'back' | 'forward' | 'reload' | 'home' | 'go' { url } | 'read' -> ScraptfReadOutcome | 'clear' | 'state' -> ScraptfWindowState
+'import.html' params + address?, origin? (main only); 'links.open' result + openedIn?: 'window'
+push 'scraptfWindow.read' (ScraptfWindowRead), 'scraptfWindow.nav' (ScraptfWindowNav): main only (MAIN_ONLY_PUSH_EVENTS), to the toolbar
+// main
+SCRAPTF_BAR_URL = 'app://app/index.html#/scraptf-bar'; WindowKind 'scraptf'          // paths.ts, preload.ts PRELOAD_WINDOW_KINDS
+createScraptfWindowManager(deps: { settings(); log; preloadPath; iconPath; devTools; importHtml(p: WindowImportParams); openExternal(url);
+                                   isQuitting(); onStateChanged?(); now?(); timers?: ScraptfWindowTimers }): ScraptfWindowManager
+  // open(start?); focus(); close(); back(); forward(); reload(); home(); go(url); readNow(); clear(); state(); send(event, payload); ownsContents(c); dispose()
+scraptfPartition(keepLoggedIn); scraptfViewWebPreferences(partition, devTools); SCRAPTF_MEMORY_PARTITION = 'scraptf', SCRAPTF_PERSIST_PARTITION = 'persist:scraptf'
+SCRAPTF_WINDOW_TITLE, SCRAPTF_TOOLBAR_HEIGHT = 48, SCRAPTF_START_REFUSAL, SCRAPTF_NOTHING_TO_IMPORT       // scraptfWindow.ts
+hardenWebContents(contents, log, opts?: { ownNavigation?(c) }); hardenScraptfSession(ses, log)              // windows.ts
+MainRpcDeps.scraptfWindow?: ScraptfWindowRpc; SCRAPTF_WINDOW_UNAVAILABLE                                    // ipc.ts
+TrayState.scraptfWindow; TrayActions.openScraptfWindow()                                                     // tray.ts
+// service
+parseSavedPage(text, fileName, schema, opts?: { address?: string | null }); SavedPageOptions             // import/savedPage.ts
+importSavedPage(ctx, p: ImportSavedPageParams); WINDOW_NOTHING_TO_IMPORT                                   // rpcHandlers.ts
+HandlerContext.bankStock + 'newFlips'
+// renderer
+ScraptfWindowBar()                                                   // pages/ScraptfWindowBar.tsx (window kind 'scraptf')
+ScraptfWindowSection({ s })                                          // pages/SettingsPage.tsx
+scraptfWindowOn, scraptfLinksInWindow, windowEnableView, windowRefusalText, windowAckText, barShortcut, barFocusMove, barBankChips,
+activeBankOf, addressView, readButtonView, readWarningText, readStatusView, readStatusText, bankWindowView, windowOpenTitle,
+windowOpenFailedText, importOriginView; SCRAPTF_WINDOW_RISK, SCRAPTF_WINDOW_DOES, SCRAPTF_WINDOW_NEVER, SCRAPTF_WINDOW_ACK_TEXT   // scraptfWindowModel.ts
+scraptfOpenedToast(copied, opened: { …; openedIn? }, url, back?); SCRAPTF_NAME_COPIED_WINDOW     // itemMenuModel.ts
+importBankText(bank, stored?, savedWithoutCards?, fromWindow = false)  // banksModel.ts
+createMockScraptfWindow({ now; settings; emit; itemsOn? }): MockScraptfWindow; MOCK_WINDOW_READ_WARNING   // mockScraptfWindow.ts
 ```
 
 ## Integration (src/service/core.ts and friends)
@@ -2079,6 +2131,333 @@ Decisions and deviations from the F20 spec:
     counted over kept saves, restocked needing a kept earlier save, painted copies in the drawer, reminders only while
     the app runs, the first history read).
 
+## The scrap.tf window (F21)
+
+An opt-in window in which the user browses scrap.tf themselves, while Flip Desk reads what is on screen and
+feeds it to the saved-page import, as if the user had saved the page with `Ctrl+S` ("Webpage, Complete").
+Code comments say **F21**. This is the brief's option D (§3.1, §3.5), built without scrap.tf's written
+permission at the user's explicit, informed choice on 2026-10-19 (deviation 10 below). The boundary
+paragraphs of F14 to F20 describe those features and still hold for them; F21 is the one exception they
+predate.
+
+**Decision and boundary.** The user chose this feature after being told that scrap.tf's ToS forbids
+"automation, scripts, user-scripts, auto-refreshers, external tools" for advantage, that staff ruled scripts out
+on banking pages, and that scrap.tf can see the app and may ban the account, possibly on backpack.tf too (same
+owner). Still refused, and never built:
+
+- the app fetching scrap.tf on its own: no HTTP client request, `/ajax`, `ws.scrap.tf` socket, download, polling,
+  auto-refresh, or load, reload or history step driven by a timer, an event or a promise callback;
+- reading, exporting or reusing the user's cookies or session (`session.cookies` appears nowhere in `src/`);
+- setting or spoofing the user agent (`setUserAgent` appears nowhere; Electron's default names the app and
+  Electron);
+- solving or bypassing Cloudflare or any challenge (its frame may load so that the **user** solves it);
+- clicking, typing, scrolling, input events or any DOM write in the page; buying, queueing or trading.
+
+The service's net policy (`src/service/net/policy.ts`) is unchanged and still refuses every scrap.tf host and
+`ws.scrap.tf`. Every scrap.tf page load in the window is the user opening it (a static start page), a toolbar
+click (back, forward, reload, home, a bank chip, Log out & clear) or the user's own click in the page. The one
+thing the app adds is a read-only snapshot of the DOM already loaded, which adds no network traffic.
+
+**S1 Settings** (`settings.scraptfWindow`, `settingsSchema.ts`, defaults in `defaults.ts`). `{ enabled: false,
+acknowledgedAt: null, keepLoggedIn: false, readOnLoad: true, openLinksInWindow: false }`, in the full and the
+patch schema. The strict setter (`applySettingsPatch` → `gateScraptfWindow(next, turnsOn)`) refuses turning the
+window on without `import.enabled`, `import.acknowledgedAt` and `scraptfWindow.acknowledgedAt`, with a fixed
+message (`SCRAPTF_WINDOW_NEEDS_IMPORT`, `SCRAPTF_WINDOW_NEEDS_ACK`). A change that removes a gate while the window
+is on (import off, an acknowledgement withdrawn) turns the window off instead of being refused, and main closes
+the window when `enabled` flips to false. The lenient load fills a pre-0.7 file with the defaults silently and
+loads a file with the window on but a gate missing with the window off (`invalid` gets `scraptfWindow.enabled`).
+The mock applies the same gate.
+
+**S2 Policy** (`shared/scraptfWindowPolicy.ts`, pure, zod-free; unit-tested with URL tables).
+
+- `isScraptfPageUrl` (also `shouldReadUrl` and the service's `address` rule): https on exactly `scrap.tf`, no port,
+  no userinfo, the raw string checked too.
+- Start pages: `SCRAPTF_WINDOW_START_URLS` = `SCRAPTF_HOME_URL` (`https://scrap.tf/`, not in
+  `STATIC_EXTERNAL_URLS`), the seven `SCRAPTF_BANKS` bank pages and `/items`; `isAllowedWindowStart` is an exact
+  `Set.has` (no other path, query, hash, case or trailing slash).
+- `topLevelNavigationDecision`: `'allow'` for scrap.tf and Steam's sign-in (`steamcommunity.com` `/openid`,
+  `/openid/*`, `/login`, `/login/*`); `'external'` for anything `isAllowedExternalUrl` accepts (Steam's linkfilter is
+  not); `'block'` for everything else (http, other hosts, `file:`, `javascript:`, `data:`).
+- `subframeNavigationDecision`: scrap.tf, `challenges.cloudflare.com`, Steam's sign-in, and exactly `about:blank`
+  and `about:srcdoc` (they load nothing from the network, and pages build them for their own scripts).
+- `windowDisplayUrl` (origin and path, never a query or hash) for every URL in a push or a log; `scraptfPathOf`
+  and `windowReadFileName` (`'scrap.tf window /buy/hats'`).
+- `READ_SCRIPT`, pinned verbatim: `((h) => (typeof h === 'string' && h.length <= 20971520 ? h : null))(document.documentElement ? document.documentElement.outerHTML : null)`.
+  It reads one property. `READ_SCRIPT_FORBIDDEN` / `readScriptProblems` reject assignments, `++`/`--`, request
+  APIs, events, click, focus and scroll, DOM writes, page state (location, history, cookie, storage, window…),
+  `new`, `delete` and `await`. `readResultHtml` checks the result (a non-empty string within `READ_MAX_CHARS`,
+  20 MiB, equal to main's `MAX_IMPORT_BYTES`).
+- Timings: `READ_WORLD_ID` 1001 (not the page's world 0, not Electron's preload world 999), `READ_SETTLE_MS`
+  4 s, `READ_MANUAL_MIN_GAP_MS` 2 s, `READ_AUTO_MIN_GAP_MS` 30 s, `READ_DEDUPE_MS` 60 s,
+  `EXTERNAL_OPEN_MIN_GAP_MS` 1 s. Fixed texts: `SCRAPTF_READ_REASONS`, `SCRAPTF_WINDOW_OFF`,
+  `IMPORT_HTML_ORIGIN_REFUSAL`.
+
+**M1 The window** (`main/scraptfWindow.ts`, `createScraptfWindowManager`; built at start, opened only on a click).
+A `BrowserWindow` titled "scrap.tf · Flip Desk" (kept when the page title changes) whose own page is the toolbar,
+`SCRAPTF_BAR_URL` (`app://app/index.html#/scraptf-bar`, window kind `'scraptf'`, the normal preload and
+`windowWebPreferences`, a trusted sender like every app:// page). Below its 48 px sits one `WebContentsView` built
+only from `scraptfViewWebPreferences(partition, devTools)`: **no preload**, `sandbox`, `contextIsolation`, no Node
+(also in workers and subframes), `webSecurity`, no insecure content, no webview tag, `spellcheck` off, devTools
+only in development. Its bounds follow resize, maximise, unmaximise, restore and full-screen changes.
+
+- **Session.** `session.fromPartition('scraptf')` (memory) or `'persist:scraptf'` (keepLoggedIn: Chromium's own
+  cookie store on disk, encrypted with Windows DPAPI in packaged builds by the `enableCookieEncryption` fuse in
+  `electron-builder.yml`, pinned by a test; an unpackaged development run has no fuses and stores it in plain text,
+  so the user-facing text makes no claim either way), passed
+  once through `hardenScraptfSession` (`windows.ts`) before the first load: every permission and device request
+  denied, downloads cancelled, and, unlike `hardenSession`, no request filter (the page loads its own resources;
+  the app adds none). `fromPartition` and `persist:scraptf` appear only in this module.
+- **Generic hardening.** `'web-contents-created'` fires inside the view's constructor, so main passes
+  `hardenWebContents(contents, log, { ownNavigation: (c) => scraptfWindow.ownsContents(c) })`: the view's
+  navigation is left to this module's policy (asked at event time; a throwing predicate fails closed), webviews
+  stay blocked, and every other webContents keeps app:// only.
+- **Navigation.** `will-navigate`, `will-frame-navigate` and `will-redirect` apply `topLevelNavigationDecision` to the
+  main frame and `subframeNavigationDecision` to frames. `setWindowOpenHandler` always denies. A page the policy
+  calls `'external'` reaches the user's browser only through `openOutside()`, which checks the decision again, needs
+  a real input to the view (`input-event` mouseDown, rawKeyDown, keyDown or gestureTap, never a mouse move or wheel)
+  within `USER_ACTIVATION_MS` (5 s, Chromium's transient activation, so a server redirect after a click still opens)
+  and consumes it, so one input opens one tab at most and a page's script cannot open any on its own;
+  `EXTERNAL_OPEN_MIN_GAP_MS` only dedupes the twin will-frame-navigate and will-navigate of one click
+  (`deps.openExternal` is main.ts's third `shell.openExternal`). A scrap.tf popup is dropped, never loaded. Blocked
+  URLs are logged by `windowDisplayUrl` only, and every line a page can trigger at its own rate (a blocked page,
+  frame or popup, a link out without input, and in `hardenScraptfSession` a denied permission or download) goes
+  through `main/pageLog.ts`: one line per kind a minute, the rest counted and logged with the next line or when a
+  new document commits or the window closes, so a page cannot flush `main.log`.
+- **Client certificates.** main.ts answers app `'select-client-certificate'` with `refuseClientCertificate`
+  (`windows.ts`): `preventDefault()` and no certificate. Without it Electron hands the first matching certificate in
+  the user's store to any host that asks, and the view's pages (no request filter) can reach any host.
+- **Loads.** Every `loadURL`, `reload`, `navigationHistory.goBack` / `goForward` of the view sits in
+  `function userNavigate`, called only from the user actions `open`, `back`, `forward`, `reload`, `home`, `go` and
+  `clear`. It does nothing while the window is off, quitting or disposed, checks `isAllowedWindowStart` before
+  `loadURL`, and passes the URL alone (no user agent, headers, referrer or body). `open(start?)` and `go(url)`
+  take the static list only (`SCRAPTF_START_REFUSAL`, never quoting the URL); `open` throws `SCRAPTF_WINDOW_OFF`
+  while off; a new window loads `start` or Home, an open one only the page asked for; `home` and `go` open a closed
+  window. Nothing retries on `did-fail-load` or `render-process-gone`; a dead toolbar renderer closes the window.
+- **keepLoggedIn.** A partition is fixed per view, so the next `open()` after a change replaces the view with one
+  on the new partition (it loads `start` or Home); events from the old view are ignored.
+- **Close and dispose.** Closing the window (the user, `close()` when the window is turned off, `dispose()` at
+  quit) closes the view's webContents (not destroyed with its window), clears the settle timer and forgets the
+  window; `dispose()` blocks later opens.
+
+**M2 Reads.**
+
+- **Triggers.** The main frame's `did-finish-load`, and its `did-navigate-in-page` once the document has had its
+  own `did-finish-load` (or nothing is loading; one during the load leaves the read to `did-finish-load`), when
+  `readOnLoad` is on and `shouldReadUrl` passes. These follow the user's browsing and also what the page's own
+  scripts do (a reload, a `replaceState` to a new query); the app cannot tell the two apart. Each starts a cycle: one
+  read now (`readPage('load')`) and exactly one `timers.setTimeout(() => void readPage('settle'), READ_SETTLE_MS)`,
+  the module's only timer, because scrap.tf adds cards after load. While the main frame is still loading
+  (`canRunNow`: `getURL()` and `!isLoadingMainFrame()`, Electron's own test) the cycle waits for `did-stop-loading`;
+  a commit in between drops the wait. A cycle ends (`endCycle`: no settle read, its held load snapshot imported) when
+  a new main-frame document commits (`did-navigate`), when a main-frame load fails with Chromium's error page (not
+  `ERR_ABORTED`), when the view's renderer goes, at every toolbar move (`userNavigate`: start, back, forward,
+  reload), when another cycle starts, on close and on a keepLoggedIn rebuild; dispose and Log out & clear drop it
+  unimported. A click the policy blocked or sent to the browser keeps it. **Read page now** (`readNow`) reads at once,
+  at most every `READ_MANUAL_MIN_GAP_MS`, and ends the page's cycle (its snapshot is the newest look).
+- **One look, one save.** The load read only holds its snapshot (`held`, the toolbar's nav says `reading`); the
+  settle read imports its own snapshot, or the held one when it got nothing, at the cycle's start time. A cycle
+  that ends before its settle read imports the held snapshot then: HTML already read, never a new read or load.
+  So a page whose cards arrive late is saved once, compared with the user's previous save, and never shows a card
+  as gone and restocked, or as a new flip, 4 s apart.
+- **Gap and dedupe.** Automatic read cycles of one page (its URL without the hash; up to 64 pages remembered) start
+  at least `READ_AUTO_MIN_GAP_MS` apart; the settle read belongs to its load's cycle. An automatic read whose
+  sha256 equals that page's last imported read within `READ_DEDUPE_MS` is skipped. A new document of a page whose
+  last cycle recognised no item (a Cloudflare check served at the page's own address, a failed read) starts a new
+  cycle within the gap, so the real page the user lands on after solving the check is read. A failed import is not
+  remembered, so the next read tries again. A load or settle read checks `readOnLoad` again when it runs. Read page
+  now is deduped the same way: an unchanged page within `READ_DEDUPE_MS` is not imported again, and its last read is
+  pushed again with the reason `unchanged`.
+- **The read.** `executeJavaScriptInIsolatedWorld(READ_WORLD_ID, [{ code: READ_SCRIPT }])` on the view's main frame,
+  only for the URL of the document on screen (`mainFrame.url`, the last committed one: `getURL()` already names a
+  toolbar load still pending, which would file the old DOM under the new page's bank), and only when `canRunNow`
+  holds, checked with no await before the call: Electron 44 waits for `did-stop-loading` otherwise and then runs the
+  script on whatever document is there, such as Steam's sign-in after the user clicked "Sign in through Steam"
+  (refused with `SCRAPTF_READ_REASONS.loading`). Dropped when the document changed while the script ran. One read
+  at a time per view (`readingIn`): a read whose renderer never answers (the view closed or its renderer died
+  mid-read) holds back only that view, until it is dropped or its renderer goes, with no extra timer. Then
+  `deps.importHtml({ html, fileName: windowReadFileName(url), mtimeMs, address: url, origin: 'window' })`, which
+  main.ts sends straight to the service (`host.call('import.html', p)`), never through the router. The name is cut to
+  `WINDOW_READ_NAME_MAX` (260, the service's `fileName` cap, pinned by a test), so a long path is not refused on
+  every read.
+- **Status.** Each read pushes `'scraptfWindow.read' { at, path, items, bank, newFlips, warning }` to the toolbar
+  and keeps it as `lastRead` (forgotten by Log out & clear). `warning` is the import's first warning cut at its `:`
+  (the code, never the clipped page text after it); for a read the service recorded nothing for (`batchId: 0`),
+  `no-cards-saved` on a bank or list page ("no items on screen yet; wait for them, then Read page now") and
+  `SCRAPTF_NOTHING_TO_IMPORT` elsewhere; or a fixed `SCRAPTF_READ_REASONS` text for an empty or failed read. Logs carry the path and counts only: never the
+  HTML, a URL query or an error's cause.
+
+**M3 Toolbar, tray, links and IPC.**
+
+- `'scraptfWindow.nav' { url (windowDisplayUrl), canGoBack, canGoForward, loading, reading }` goes to the toolbar on
+  `did-navigate`, in-page navigation and start/stop loading. Pushes wait (the latest per event) until the toolbar
+  page's `did-finish-load`, then go out before the current nav. `send()` forwards only main's `settings.changed`
+  (the theme) and `service.state`; both F21 pushes are in `MAIN_ONLY_PUSH_EVENTS`, so the service host and
+  `handlePush` drop them if the service sends them.
+- **Log out & clear** (`clear()`): `clearStorageData()` and `clearCache()` on both partitions (a login kept on disk
+  before keepLoggedIn was turned off goes too), the read memory, a cycle under way and `lastRead` forgotten, a null
+  `'scraptfWindow.read'` pushed (so the toolbar drops its read whether it or Settings asked), then Home if the window
+  is open (the user's click). It works while the window is off.
+- **Tray.** "Open scrap.tf window" after Quick entry, only while the window is enabled (`TrayState.scraptfWindow`,
+  part of `menuKey`); its click checks the setting again and logs a refusal safely.
+- **Router** (`ipc.ts`). `'scraptfWindow.open' { start? }`, `back`, `forward`, `reload`, `home`, `go { url }`, `read`, `clear`
+  and `state` are main methods; every action but `clear` and `state` is refused while the window is off
+  (`SCRAPTF_WINDOW_OFF`) or missing (`SCRAPTF_WINDOW_UNAVAILABLE`), and `start`/`url` pass a zod rule with a fixed
+  message. A page's `'import.html'` that carries `address` or `origin` (any value) is refused with
+  `IMPORT_HTML_ORIGIN_REFUSAL`; only main's own window read sets them. `links.open` hands a URL to the window
+  (`{ opened: true, reason: null, openedIn: 'window' }`) only when the caller sends `allowWindow: true`, the window
+  is enabled, `openLinksInWindow` is on and `isAllowedWindowStart(url)`. Only the opens worded through
+  `scraptfLinksInWindow` send it: the Live market's scrap.tf button and header bank link, Open on scrap.tf in the
+  drawer and the row menu (`openOnScraptf`), and the banks cards. Everything else (the Bank stock page, Shopping, the
+  scrap.tf/items card, the drawer's list buttons, every other link) goes to the browser exactly as its words say,
+  and Home never does.
+
+**S3 Service** (`import/savedPage.ts`, `rpcHandlers.ts`, schema V9).
+
+- `'import.html'` takes optional `address` (at most 4,096 characters, `isScraptfPageUrl`, fixed message
+  `'not a scrap.tf page address'`) and `origin` (`'file' | 'window'`). `importSavedPage` checks both again for
+  callers that skip zod: anything but `'window'` is a file, and an address `isScraptfPageUrl` rejects is no hint.
+- The address is a page-address hint only, exactly like an `.mhtml` part's Content-Location:
+  `parseSavedPage(text, fileName, schema, { address })` passes it to `parseScrapTfHtml`, read before the saved-from
+  comment, the canonical link and `og:url`. It is never stored, logged or pushed.
+- A window read is refused with `SCRAPTF_WINDOW_OFF` while the window is off, after the import gate. Its name is
+  kept whole (`'scrap.tf window /buy/hats'`, not cut to a basename), cut at the first `?` or `#`, without control
+  characters, trimmed and at most 200 characters, and never used to detect `.mhtml`.
+- A window read that gives no items (scrap.tf's front page, a profile, a bank read before its cards arrive)
+  records nothing: no batch, no push, no price, stock or event change. It answers `batchId: 0` with the one warning
+  `WINDOW_NOTHING_TO_IMPORT`. A file save of a bank page without its cards is recorded as before (F18).
+- **V9** `import_batches.origin TEXT NULL`: every batch stores `'file'` or `'window'` (`recordSkippedImport`
+  `'file'`); batches from before 0.7 read null. `ImportResult.origin` is always set, and `ImportResult.newFlips`
+  only for window reads that wrote bank stock (`BankStock.newFlips(bank, batchId).length` after
+  `bankStockChanged`; 0 on a page's first save).
+- Everything downstream is unchanged: a window read and a file save of the same page give the same parse, result,
+  batch (apart from id, name and origin), prices, bank stock rows, page keys, change events, pushes and "What's
+  new".
+
+**Renderer.**
+
+- **U1 Toolbar** (`pages/ScraptfWindowBar.tsx`, window kind `'scraptf'`, `styles/scraptf-window.css`, @imported
+  last). One 48 px line: Back, Forward, Reload, Home; bank chips from `SCRAPTF_BANKS` through `'scraptfWindow.go'`
+  (`aria-current` on the page on screen); a read-only address (origin and path); **Read page now** (disabled off
+  scrap.tf and while a read runs; main's reason shown when none is taken); the status line "Read 48 items from
+  /buy/hats · 2 new flips · 3 s ago" (the live region changes only with a new read); **Log out & clear** behind a
+  confirmation; and the always-visible "External-tool risk" pill, whose tooltip is the one-line risk and whose click
+  puts the full text in the status line. Keys: Alt+Left, Alt+Right, F5 or Ctrl+R, Alt+Home (held keys ignored), and
+  the arrow, Home and End keys between controls. It asks `'scraptfWindow.state'` once on mount (pushes that came
+  first win). Window moves and reads are called only from click and key handlers.
+- **U2 Settings → scrap.tf window (opt-in)** (`ScraptfWindowSection`, after Saved-page import). What it does and
+  never does, the risk (the ToS words, the staff stance, what scrap.tf can see, a ban possible on both sites), the
+  acknowledgement (writes `acknowledgedAt`, shows when it was accepted), the switch (disabled until import is on and
+  the box is ticked; main's refusal shown as an alert), toggles for keepLoggedIn, readOnLoad and openLinksInWindow,
+  **Open the scrap.tf window** and **Log out & clear**. The ToS link goes to the About page, which already links
+  it: Settings stays on F20's opener-free list.
+- **U3 Entry points**, only while the window is on: the "scrap.tf window" nav button under scrap.tf banks (not a
+  route; `'scraptfWindow.open'`, a toast when refused); "Open in Flip Desk window" on each Banks card (its static
+  `SCRAPTF_BANKS` page; "Open in browser" goes while openLinksInWindow is on). The Live market row, header bank
+  link, drawer and ItemMenu keep their static URLs and F19's scans; `openedIn: 'window'` only changes their toast
+  ("the Flip Desk window") and wording.
+- **U4 Import page.** Batches and results with origin `'window'` show a "Flip Desk window" pill with their page
+  (`scrap.tf/buy/hats`) in place of a file name; window reads get their own no-cards wording, and
+  `importNoticeToastText` returns null for them so the dashboard does not toast every read.
+- **U5 About page** words R1, R3, R9 and R10 as above.
+- **Mock.** `mockScraptfWindow.ts`: a fake history, main's validation, made-up reads with
+  `MOCK_WINDOW_READ_WARNING` and `openFromLink`; `mock.ts` gates `settings.set`, routes `links.open`, refuses a
+  page's `address`/`origin`, answers all nine methods, and serves the toolbar at `#/scraptf-bar` with import and the
+  window on. No page is ever loaded in the browser mock.
+
+**Compliance** (`test/compliance/static.test.ts`, "the scrap.tf window loads only what the user asks for …"; the R1
+checks rewritten precisely, nothing else weakened). Only `main/scraptfWindow.ts` may carry a scrap.tf address into
+`.loadURL(` or `new BrowserWindow(`/`new WebContentsView(`, and only it may name `WebContentsView` (`BrowserView`
+nowhere), `fromPartition`, `persist:scraptf` or `origin: 'window'`; fetch, `.request`, `downloadURL`, sockets and the
+service's net modules stay forbidden there, and so do a session's `preconnect` and `resolveHost` (in `LOADERS` too,
+so no file passes them a scrap.tf address). Every load or history step sits in `function userNavigate`, outside any
+deferred callback, called only from a user action and only after `isAllowedWindowStart` (the toolbar's own
+`loadURL(SCRAPTF_BAR_URL)` aside); a bare call of a user action (`reload()`, `home()`…) is allowed only inside another
+user action, never in a deferred callback or any other function. In the other `main/*.ts` files a call of the manager
+(`scraptfWindow?.open(`, the router's `windowOn().x(` and `w.x(`, `openScraptfWindow(`) never sits in a timer, a
+listener, a subscription (`.onX(`) or a promise callback. The module's timers are the pass-through and the one
+settle read, and `readPage`, `importRead`, `flushHeld` and `endCycle` neither navigate nor start a timer. `executeJavaScriptInIsolatedWorld` appears only there, exactly as
+`(READ_WORLD_ID, [{ code: READ_SCRIPT }])`; `executeJavaScript`, input events, `insertCSS`, edit commands and a second
+`READ_SCRIPT` appear nowhere else. `READ_SCRIPT` is pinned and token-checked. One view, built from
+`scraptfViewWebPreferences`, which has no preload and every locked-down flag; no `preload:` key in the module and
+no `setPreloads`/`registerPreloadScript` anywhere. No `setUserAgent`/`userAgentFallback`/`.userAgent =`, header option or header
+hook, and no `.cookies`, `cookies.get/set/remove/flushStore`, `document.cookie` or `cookieStore.` anywhere in
+`src/`. `openExternal(` in the module follows a `topLevelNavigationDecision(…) 'external'` check. A dashboard file
+calls a window move or read only from a click: never in an effect, a push listener, a timer or a promise callback.
+`checkUrl` still refuses `https://scrap.tf/`, `/buy/hats`, `/ajax/`, `www.scrap.tf` and `wss://ws.scrap.tf/`.
+Synthetic sources prove each scan.
+
+**Tests.**
+
+- Shared: `test/shared/scraptfWindowPolicy.test.ts` (URL tables for every rule, the pinned script run against a
+  stand-in document, the gate).
+- Main: `test/main/scraptfWindow.test.ts` (Electron fakes in `scraptfWindowFakes.ts`, whose cookies getter throws
+  and whose `executeJavaScriptInIsolatedWorld` waits for `did-stop-loading` while the main frame loads, as Electron
+  44 does, recording the document it ran on: prefs and no preload, the hardened session, bare loads, refusals,
+  off/quit/dispose, keepLoggedIn, layout, no user agent, cookie or other script over a whole session, the
+  navigation, frame and popup decisions, links out only after the user's input, query-free and throttled logs, no
+  load from any event, timer or failure, one move per control, every read rule including the Cloudflare re-read,
+  one save per look, no read during a pending navigation (never on Steam's sign-in), a hung read holding back only
+  its view, clear, close, the toolbar's pushes), `scraptfWindowRpc.test.ts`, `settingsScraptfWindow.test.ts`,
+  `tray.test.ts`, `windows.test.ts` (the session's throttled lines, `refuseClientCertificate` and its registration)
+  and `scraptfWindowWiring.test.ts`: main's real settings store and router, the real manager and the service's real
+  `'import.html'` over an in-memory repo. Enabling is refused without the acknowledgements; `open()` loads only a
+  static start page; nothing loads without a user action; a scrap.tf `did-finish-load` runs `READ_SCRIPT` in world
+  1001 and imports the page with origin `'window'` and its address, giving the same batch as a file save of that
+  page; a load whose cards arrive late is one save compared with the previous file save (no gone, restocked or new
+  card, no new flip); a bank page with no cards yet says to read again; a long path imports; Settings' Log out &
+  clear empties the toolbar; Steam's sign-in is never read; external pages reach the browser only through the
+  allowlist and after a click; `links.open` uses the window only with openLinksInWindow and `allowWindow`.
+- Service and db: `test/import/importWindowRead.test.ts` (all eight fixtures as a window read and as a file save,
+  the address hint, refusals, origins, names, nothing to import, the window off), `test/service/importOriginParams.test.ts`,
+  `test/db/importOrigin.test.ts`.
+- Renderer: `scraptfWindowModel`, `scraptfWindowBar` (mounted against the mock: no move on mount or on a push),
+  `settingsScraptfWindow`, `scraptfWindowNav`, `scraptfWindowLinks`, `mockScraptfWindow` and the F21 block of
+  `banksPage` tests.
+
+Decisions and deviations from the F21 spec:
+
+1. Removing a gate while the window is on (import off, an acknowledgement withdrawn) turns the window off instead
+   of refusing the change, so the user can always turn import off; main then closes the window.
+2. Frames may also load `about:blank` and `about:srcdoc`, which load nothing from the network.
+3. `links.open`'s result gains `openedIn: 'window'` (absent: the browser) so the toasts say where the page went, and
+   its params `allowWindow`, so only the opens worded for the window go there (the spec routed every static link).
+4. `hardenWebContents` takes an `ownNavigation` predicate for the view, and the view's session gets its own
+   `hardenScraptfSession` (no request filter, which would block scrap.tf). main.ts has a third `shell.openExternal`,
+   the window's `openExternal` dependency.
+5. Log out & clear clears both partitions and forgets the reads and the last read; it is allowed while the window
+   is off. A login kept on disk before keepLoggedIn was turned off stays until then.
+6. Reads use the main frame's committed URL, not `getURL()`, and are dropped if the document changed during the
+   script; none runs while the main frame loads, and an automatic read that came then starts at `did-stop-loading`.
+   The settle read is cleared at a commit, an error page, a renderer crash or a toolbar move rather than at
+   `did-start-navigation`, so a blocked click keeps it. An in-page navigation during the initial load is left to
+   `did-finish-load`; after it, one reads even while a frame (a challenge, an embed) is still loading.
+7. The settle read belongs to its load's cycle: exempt from the 30 s gap, still deduped. The gap and dedupe key is
+   the URL without its hash, for up to 64 pages.
+8. Beyond the spec's gap rule: a new document of a page whose last automatic cycle recognised no item reads within
+   the 30 s gap. A Cloudflare check served at the page's own address otherwise used up the gap, and the real page
+   the user reached by solving it was not read. Nothing was imported in that cycle, and in-page navigations still
+   wait out the gap.
+9. A window read with no items records nothing (`batchId: 0`, `WINDOW_NOTHING_TO_IMPORT`), so the Import page does not
+   fill with front-page and profile rows and a bank read before its cards is not a "saved without its items"
+   notice; main shows "Nothing to import on this page.", or for a recognised bank or list page the import's
+   `no-cards-saved` ("no items on screen yet; wait for them, then Read page now").
+10. The service refuses a window read while the window is off, and cuts a window read's name at `?` or `#`.
+    `ImportResult.newFlips` is filled for window reads only.
+11. Popups are always denied: one to an allowlisted site goes to the browser (only right after the user's own input
+    to the view, one tab per input), one to
+    scrap.tf is dropped. A dead toolbar renderer closes the window rather than reloading anything.
+12. The default partition is in memory; `persist:scraptf` only with keepLoggedIn, applied on the next open. Main
+    never focuses the view (`webContents.focus()`), so keyboard users click into the page first.
+13. Settings' terms link points to the About page (Settings is on F20's opener-free list).
+14. A load and its settle read are one save (the spec imported each): the settle snapshot, or the load one when it got
+    nothing, at the load's time. Read page now is deduped like automatic reads (the spec let it always import) and
+    ends the page's cycle. Without that a page whose cards arrived late was saved twice 4 s apart, and its "What's
+    new", F20 history and new-flip notice compared the two.
+15. Main refuses client certificates for the whole app and logs page-triggered lines through a per-kind throttle;
+    the window's busy state is per view.
+16. Known limits: README "Known limits" (Cloudflare challenges the user solves, tested with stand-ins, reads as
+    snapshots, popups, Stay signed in, the keyboard).
+
 ## Conventions
 
 - TypeScript strict, ESM `import` without file extensions, named exports only.
@@ -2095,7 +2474,8 @@ Decisions and deviations from the F20 spec:
 
 1. Saved-page import is available once the user ticks an explicit acknowledgement in Settings, which states that scrap.tf's ToS lists "external tools". Recording written permission is optional rather than required, because the import never contacts scrap.tf and the risk decision belongs to the user. It stays off by default.
 2. Folder watch (auto-import of pages the user saves into one folder) is part of that same opt-in.
-3. No embedded scrap.tf browser in any form (brief option D).
+3. Up to 0.6 there was no embedded scrap.tf browser in any form (brief option D). From 0.7 there is one, opt-in:
+   deviation 10.
 4. The dashboard can run in a plain browser against mock data (`npm run dev:renderer`), for UI development only.
 5. The live feed's default daily data cap is 25 GB, not the brief's 12 GB (§2.1, Appendix A). The cap counts decompressed websocket payload bytes, measured at about 13 GB on a busy day (far less on the wire with permessage-deflate), so a 12 GB default would pause the feed most evenings. Users on capped or metered connections can lower it in Settings > Live feed.
 6. `pauseOnMetered` (Appendix A) is not implemented in v1: the app does not detect metered Windows connections. The daily cap and the Pause-network switch are the controls.
@@ -2109,3 +2489,25 @@ Decisions and deviations from the F20 spec:
    all of them. HTML only still imports. The import also reads `.mhtml` and `.mht` files, through the file dialog and
    the folder watch, under the brief's §3.4 rules (20 MB, untrusted, no script execution, nothing fetched); see
    "Save modes, MHTML and the reference helper (F18)".
+10. **Option D without written permission (F21), at the user's explicit, informed choice on 2026-10-19.** Brief
+    §1.7 rates an "embedded scrap.tf browser that reads the DOM passively" *not in v1, only if scrap.tf gives
+    written permission that explicitly covers it* (§3.1 option D, §3.5): it is functionally a script on banking
+    pages, the Electron token in its user agent is visible to scrap.tf, and Steam sign-in happens inside the app.
+    On 2026-10-19 the user, told that scrap.tf's ToS forbids "automation, scripts, user-scripts, auto-refreshers,
+    external tools" for advantage, that staff ruled scripts out on banking pages, and that scrap.tf can see the app
+    and may ban the account, possibly on backpack.tf too, chose to have it built without that permission. It is
+    the scrap.tf window ("The scrap.tf window (F21)"): off by default, and gated like saved-page import (deviation
+    1), by import on and acknowledged plus the window's own risk acknowledgement, in place of §3.1's recorded
+    written permission. The rest of §1.7 stands: the app never fetches scrap.tf itself (no pages, `/items`,
+    `/ajax/*` or `ws.scrap.tf`), never injects into the page, never automates a buy, queue or trade, and never
+    spoofs the user agent, solves a challenge or reuses the session. Where it differs from §3.5:
+    - the partition is in memory (`scraptf`) unless the user chooses to stay signed in (`persist:scraptf`);
+    - the read script returns `document.documentElement.outerHTML` for the saved-page parser rather than
+      `querySelectorAll` JSON, so saves and reads share one parser; the script is pinned and token-checked;
+    - besides `did-finish-load`, `did-navigate-in-page` and the user's button, there is one settle read 4 s after a
+      load, because scrap.tf adds its cards late;
+    - frames may load Cloudflare's challenge (for the user to solve), `about:blank` and `about:srcdoc`.
+
+    §3.5's known downsides (Steam credentials typed into the app's view, the moderator's ruling on banking pages,
+    long sessions read as botting) are the user's accepted risk. Settings and the README state the risk before the
+    window can be turned on.

@@ -13,12 +13,17 @@ export const DASHBOARD_URL = 'app://app/index.html';
 export const QUICK_ENTRY_URL = 'app://app/index.html#/quick';
 /** The live check popup (F16): the same app:// page and preload as every other window. */
 export const CHECK_URL = 'app://app/index.html#/check';
+/**
+ * F21: the scrap.tf window's toolbar (window kind 'scraptf'): an app:// page with the normal preload and
+ * hardening, above the window's scrap.tf view (which is not an app:// page and has no preload).
+ */
+export const SCRAPTF_BAR_URL = 'app://app/index.html#/scraptf-bar';
 
 /** Passed through webPreferences.additionalArguments; preload.ts keeps its own copy of this prefix. */
 export const WINDOW_KIND_ARG = '--flipdesk-window=';
-export type WindowKind = 'dashboard' | 'quick-entry' | 'check';
+export type WindowKind = 'dashboard' | 'quick-entry' | 'check' | 'scraptf';
 /** Every window kind; preload.ts keeps its own copy (it may import no main-process module), pinned by a test. */
-export const WINDOW_KINDS: readonly WindowKind[] = ['dashboard', 'quick-entry', 'check'];
+export const WINDOW_KINDS: readonly WindowKind[] = ['dashboard', 'quick-entry', 'check', 'scraptf'];
 
 /** Image hosts the dashboard may load from (CSP img-src and the session request filter). */
 export const RENDERER_IMAGE_HOSTS: readonly string[] = [

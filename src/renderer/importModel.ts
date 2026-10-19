@@ -6,7 +6,8 @@
 // scrap.tf adds bank cards after its page has loaded. "Webpage, HTML only" writes the page as it
 // first loaded, so those cards (or all of them) can be missing; "Webpage, Complete" and
 // "Webpage, Single File" write the page as shown. HTML only stays accepted. Nothing here reads a
-// saved file or opens anything (R1, R10).
+// saved file or opens anything (R1, R10). F21: a read of the opt-in scrap.tf window (origin 'window')
+// is no save, so its no-cards wording differs and the dashboard does not toast it.
 
 import type { ImportResult } from '../shared/types';
 
@@ -52,6 +53,10 @@ export const NO_CARDS_ALT_HINT = `'${SAVE_MODE_ALT}' works too.`;
 
 /** The hint for a save that already was a Single File one (.mhtml): it was saved too soon. */
 export const NO_CARDS_MHTML_HINT = 'Wait until the items show on the page, then save it again.';
+
+/** F21: the same warning for a read of the scrap.tf window (ImportResult.origin 'window'): nothing was saved. */
+export const NO_CARDS_WINDOW_REASON = 'This read of the scrap.tf window found no items: scrap.tf adds its cards after the page has loaded.';
+export const NO_CARDS_WINDOW_HINT = 'Wait until the items show, then press Read page now in the window.';
 
 /** The warning code the service gives a page the folder watch would not read: over the 20 MB import limit. */
 export const TOO_LARGE = 'too-large';
@@ -105,13 +110,18 @@ export interface ImportWarningsView {
 /**
  * The Import page's warnings for one result. A save without its cards gets the banner, with the
  * fixed reason whatever text the service sent; its 'no-items' line says the same thing, so it goes.
- * The hint offers Single File, except to a save that was one: that one came too soon.
+ * The hint offers Single File, except to a save that was one: that one came too soon. F21: a read of the
+ * scrap.tf window was no save at all, so it says to read again once the items show.
  */
-export function importWarningsView(r: Pick<ImportResult, 'warnings' | 'fileName'>): ImportWarningsView {
+export function importWarningsView(r: Pick<ImportResult, 'warnings' | 'fileName' | 'origin'>): ImportWarningsView {
   const all = warningsOf(r);
   if (!importSavedWithoutCards(r)) return { noCards: null, rest: all };
+  const noCards =
+    r.origin === 'window'
+      ? { text: NO_CARDS_WINDOW_REASON, hint: NO_CARDS_WINDOW_HINT }
+      : { text: NO_CARDS_SAVED_REASON, hint: isMhtmlName(r.fileName) ? NO_CARDS_MHTML_HINT : NO_CARDS_ALT_HINT };
   return {
-    noCards: { text: NO_CARDS_SAVED_REASON, hint: isMhtmlName(r.fileName) ? NO_CARDS_MHTML_HINT : NO_CARDS_ALT_HINT },
+    noCards,
     rest: all.filter((w) => {
       const code = importWarningCode(w);
       return code !== NO_CARDS_SAVED && code !== 'no-items';
@@ -135,9 +145,12 @@ export function noCardsToastText(r: Pick<ImportResult, 'warnings' | 'fileName'> 
 
 /**
  * The dashboard's toast for an 'import.done' that asks the user to save the page again: one without
- * its cards, or one the folder watch passed over for its size. Null for any other import.
+ * its cards, or one the folder watch passed over for its size. Null for any other import. F21: never for
+ * a read of the scrap.tf window: its first read often comes before scrap.tf has added the cards (the
+ * settle read picks them up), there is nothing to save again, and the window's own status line says it.
  */
-export function importNoticeToastText(r: Pick<ImportResult, 'warnings' | 'fileName'> | null | undefined): string | null {
+export function importNoticeToastText(r: Pick<ImportResult, 'warnings' | 'fileName' | 'origin'> | null | undefined): string | null {
+  if (r?.origin === 'window') return null;
   const noCards = noCardsToastText(r);
   if (noCards !== null || !r || !importTooLarge(r)) return noCards;
   return `${clipName(typeof r.fileName === 'string' ? r.fileName : '')}: ${TOO_LARGE_REASON}`;

@@ -13,6 +13,7 @@ import { ExternalLink } from '../components/ExternalLink';
 import { SaveModeChoice, ScraptfListCard } from '../components/ScraptfListCard';
 import { chooseWatchFolder, importListRowsText, importToastText } from '../scraptfListModel';
 import { importBankText } from '../banksModel';
+import { importOriginView } from '../scraptfWindowModel';
 import {
   IMPORT_FILE_HINT,
   SAVE_MODE_FILES_NOTE,
@@ -236,11 +237,20 @@ function ImportEnabled() {
                   // A batch from before 0.5 has no bank: nothing to say rather than "not recognised".
                   // F18: a bank page that stored nothing reads "not counted", as the banks page treats it; a batch
                   // keeps no warnings, so whether its save type was to blame is unknown and the remedy is hedged.
-                  const bank = b.bank ? importBankText(b.bank, b.itemCount) : null;
+                  const bank = b.bank ? importBankText(b.bank, b.itemCount, undefined, b.origin === 'window') : null;
+                  // F21: a read of the scrap.tf window names the window and its page, not a file.
+                  const from = importOriginView(b);
                   return (
                     <tr key={b.id}>
                       <td className="num">{b.id}</td>
-                      <td className="mono small">{b.fileName}</td>
+                      <td className="small" title={from.title}>
+                        {from.origin ? (
+                          <>
+                            <span className="pill tone-info import-origin">{from.origin}</span>{' '}
+                          </>
+                        ) : null}
+                        <span className="mono">{from.file}</span>
+                      </td>
                       <td>
                         {PAGE_KIND_LABELS[b.pageKind] ?? b.pageKind}
                         {bank ? <span className="muted small" title={bank.title}> · {bank.text}</span> : null}
@@ -282,9 +292,11 @@ export function ImportResultView({ r }: { r: ImportResult }) {
   const listText = importListRowsText(r);
   // F15: which banks card this save counts for (the parser's recognised page); F18: none when it stored nothing,
   // blaming the save type only when the page came without its cards.
-  const bank = importBankText(r.bank, r.stored, importSavedWithoutCards(r));
+  const bank = importBankText(r.bank, r.stored, importSavedWithoutCards(r), r.origin === 'window');
   // F18: a bank page saved without its cards leads, with what to do; the other warnings follow.
   const warnings = importWarningsView(r);
+  // F21: a read of the scrap.tf window names the window and its page, not a file.
+  const from = importOriginView(r);
   return (
     <div className="import-result">
       {warnings.noCards ? (
@@ -293,8 +305,19 @@ export function ImportResultView({ r }: { r: ImportResult }) {
         </Banner>
       ) : null}
       <dl className="kv">
-        <dt>File</dt>
-        <dd className="mono small">{r.fileName}</dd>
+        {from.origin ? (
+          <>
+            <dt>Read from</dt>
+            <dd title={from.title}>
+              {from.origin} · <span className="mono small">{from.file}</span>
+            </dd>
+          </>
+        ) : (
+          <>
+            <dt>File</dt>
+            <dd className="mono small">{r.fileName}</dd>
+          </>
+        )}
         <dt>Page</dt>
         <dd>{PAGE_KIND_LABELS[r.pageKind] ?? r.pageKind}</dd>
         {bank ? (

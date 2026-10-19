@@ -9,7 +9,10 @@
 // search and hands the static bank page (where the user last saw the item, F15,
 // else its category's) to the user's browser; the app never visits scrap.tf (R1).
 // F19: it also arms the Live check ('check.arm', main only, in memory), so a price
-// the user copies there on its own is checked as this item.
+// the user copies there on its own is checked as this item. F21: when the user has
+// the opt-in scrap.tf window open Flip Desk's links (openLinksInWindow), main shows
+// the same static page there instead (links.open answers openedIn: 'window'), and
+// the toast and tooltips say so.
 //
 // MenuPopover is the generic part (placement, roving focus, closing rules); the
 // drawer's buyer actions menu (F3) uses it too.
@@ -44,6 +47,7 @@ import {
   type MenuSection,
 } from '../itemMenuModel';
 import { createLatestGate } from '../quickModel';
+import { scraptfLinksInWindow } from '../scraptfWindowModel';
 import { openOrCopy } from './ExternalLink';
 import { Icon } from './Icon';
 import { useRecordTrade } from './RecordTradeDialog';
@@ -84,7 +88,8 @@ export async function openOnScraptf(url: string, name: string, toast: (text: str
   const armed = params ? await rpc('check.arm', params).then((r) => r.armedUntil !== null, () => false) : false;
   // Copy first: once the browser has focus, the clipboard API refuses an unfocused page.
   const copied = await copyText(name);
-  const opened = await openLink(url);
+  // F21: worded through scraptfOpenTitle(…, inWindow), so main may put it in the scrap.tf window.
+  const opened = await openLink(url, { allowWindow: true });
   const back = arm ? scraptfBackHint(checkReturnPath(arm.settings, (await hotkeys)?.check ?? null, armed)) : null;
   const t = scraptfOpenedToast(copied, opened, url, back);
   toast(t.text, t.tone);
@@ -199,7 +204,9 @@ function ItemMenuView({ state, onDone, onRecord }: { state: OpenState; onDone: (
     };
   }, [target.sku, namedBank]);
 
-  const sections = useMemo(() => itemMenuSections(target, links, seenOn), [target, links, seenOn]);
+  // F21: the scrap.tf action's tooltip says where main opens it (the user's scrap.tf window or the browser).
+  const inWindow = scraptfLinksInWindow(settings);
+  const sections = useMemo(() => itemMenuSections(target, links, seenOn, inWindow), [target, links, seenOn, inWindow]);
 
   const run = (a: ItemMenuAction) => {
     switch (a.kind) {

@@ -77,6 +77,7 @@ import {
 } from '../itemMenuModel';
 import { drawerBankStockLine } from '../marketModel';
 import { listRowIsOtherCopy, previewRevenue } from '../quickModel';
+import { scraptfLinksInWindow } from '../scraptfWindowModel';
 
 export function ItemDrawer() {
   const { itemSku, closeItem } = useApp();
@@ -245,7 +246,7 @@ function ItemDetailView({ sku }: { sku: string }) {
             <button
               type="button"
               className="btn small ghost"
-              title={scraptfOpenTitle(stfUrl, scraptfSearchName(d))}
+              title={scraptfOpenTitle(stfUrl, scraptfSearchName(d), scraptfLinksInWindow(settings))}
               onClick={() => void openOnScraptf(stfUrl, scraptfSearchName(d), toast, { sku: d.sku, settings })}
             >
               <Icon name="external" size={13} /> {OPEN_ON_SCRAPTF_LABEL}

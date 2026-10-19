@@ -1,4 +1,4 @@
-import { useEffect, useState, useSyncExternalStore } from 'react';
+import { Fragment, useEffect, useState, useSyncExternalStore } from 'react';
 import type { PushContract } from '../shared/rpc';
 import type { ScraptfBank } from '../shared/types';
 import { rpc, windowKind, type WindowKind } from './api';
@@ -8,10 +8,11 @@ import { ErrorBanner, LoadingBlock, ToastStack } from './components/Feedback';
 import { Icon, type IconName } from './components/Icon';
 import { StatePill } from './components/Pills';
 import { Tip } from './components/Tip';
-import { CONN_STATE_LABELS, KEY_SOURCE_LABELS, accelLabel, fmtAge, fmtInt, fmtRefOnly, keyPriceSummary, serviceBannerDetail } from './format';
+import { CONN_STATE_LABELS, KEY_SOURCE_LABELS, accelLabel, errorMessage, fmtAge, fmtInt, fmtRefOnly, keyPriceSummary, serviceBannerDetail } from './format';
 import { AppProvider, useApp } from './hooks/appContext';
 import { usePush, useThrottled } from './hooks/useRpc';
 import { useNow } from './hooks/useTimers';
+import { SCRAPTF_WINDOW_NAV_LABEL, SCRAPTF_WINDOW_NAV_TITLE, scraptfWindowOn, windowOpenFailedText } from './scraptfWindowModel';
 import { serviceNotReady } from './serviceStateModel';
 import { scraptfKeyTipText } from './settingsFields';
 import { AboutPage } from './pages/AboutPage';
@@ -28,6 +29,7 @@ import { MarketPage } from './pages/MarketPage';
 import { OpportunitiesPage } from './pages/OpportunitiesPage';
 import { PricesPage } from './pages/PricesPage';
 import { QuickEntry } from './pages/QuickEntry';
+import { ScraptfWindowBar } from './pages/ScraptfWindowBar';
 import { ShoppingPage } from './pages/ShoppingPage';
 import { SettingsPage } from './pages/SettingsPage';
 
@@ -72,18 +74,21 @@ const WINDOW_TITLES: Record<WindowKind, string> = {
   dashboard: 'TF2 Flip Desk',
   'quick-entry': 'Quick entry · TF2 Flip Desk',
   check: 'Live check · TF2 Flip Desk',
+  scraptf: 'scrap.tf · Flip Desk',
 };
 
-/** Picks the dashboard, the quick-entry window or the live check popup (F16). */
+/** Picks the dashboard, the quick-entry window, the live check popup (F16) or the scrap.tf window's toolbar (F21). */
 export function Root() {
-  // Re-evaluated on hash changes so "#/quick" and "#/check" work in a plain browser too.
+  // Re-evaluated on hash changes so "#/quick", "#/check" and "#/scraptf-bar" work in a plain browser too.
   useSyncExternalStore(subscribeHash, () => window.location.hash, () => '');
   const kind = windowKind();
   useEffect(() => {
     document.documentElement.dataset['window'] = kind;
     document.title = WINDOW_TITLES[kind];
   }, [kind]);
-  return <AppProvider>{kind === 'quick-entry' ? <QuickEntry /> : kind === 'check' ? <CheckPopup /> : <Dashboard />}</AppProvider>;
+  return (
+    <AppProvider>{kind === 'quick-entry' ? <QuickEntry /> : kind === 'check' ? <CheckPopup /> : kind === 'scraptf' ? <ScraptfWindowBar /> : <Dashboard />}</AppProvider>
+  );
 }
 
 const SERVICE_STATE_TEXT: Record<string, string> = {
@@ -184,17 +189,21 @@ function Dashboard() {
           {NAV.map((n) => {
             const c = counts[n.id];
             return (
-              <li key={n.id}>
-                <a href={`#/${n.id}`} className={`nav-link${route === n.id ? ' active' : ''}`} aria-current={route === n.id ? 'page' : undefined} title={n.label}>
-                  <Icon name={n.icon} size={17} />
-                  <span className="nav-label">{n.label}</span>
-                  {c ? (
-                    <span className={`nav-count${c.tone ? ` tone-${c.tone}` : ''}`} title={c.title}>
-                      {c.text}
-                    </span>
-                  ) : null}
-                </a>
-              </li>
+              <Fragment key={n.id}>
+                <li>
+                  <a href={`#/${n.id}`} className={`nav-link${route === n.id ? ' active' : ''}`} aria-current={route === n.id ? 'page' : undefined} title={n.label}>
+                    <Icon name={n.icon} size={17} />
+                    <span className="nav-label">{n.label}</span>
+                    {c ? (
+                      <span className={`nav-count${c.tone ? ` tone-${c.tone}` : ''}`} title={c.title}>
+                        {c.text}
+                      </span>
+                    ) : null}
+                  </a>
+                </li>
+                {/* F21: right under the banks, only while the user has the opt-in window on. */}
+                {n.id === 'banks' && scraptfWindowOn(settings) ? <ScraptfWindowNavItem /> : null}
+              </Fragment>
             );
           })}
         </ul>
@@ -212,6 +221,27 @@ function Dashboard() {
       <ItemDrawer />
       <ToastStack />
     </div>
+  );
+}
+
+/**
+ * F21: opens the scrap.tf window, or brings it to the front (main's 'scraptfWindow.open' with no page:
+ * a new window starts on scrap.tf's front page). A window, not a route: it is a button, on a click only.
+ */
+function ScraptfWindowNavItem() {
+  const { toast } = useApp();
+  const open = () => {
+    rpc('scraptfWindow.open').catch((e: unknown) => toast(windowOpenFailedText(errorMessage(e)), 'bad'));
+  };
+  return (
+    <li>
+      {/* Named by aria-label: the icon-only nav (1100 px and down) hides the label, and the title is a sentence. */}
+      <button type="button" className="nav-link nav-window" aria-label={SCRAPTF_WINDOW_NAV_LABEL} title={SCRAPTF_WINDOW_NAV_TITLE} onClick={open}>
+        <Icon name="window" size={17} />
+        <span className="nav-label">{SCRAPTF_WINDOW_NAV_LABEL}</span>
+        <Icon name="external" size={12} className="nav-ext" />
+      </button>
+    </li>
   );
 }
 

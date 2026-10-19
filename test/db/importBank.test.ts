@@ -47,7 +47,7 @@ describe('migration V5 on an existing version 4 database', () => {
 
     expect(repo.getMeta('kept')).toBe('yes');
     expect(repo.listImportBatches(10)).toEqual([
-      { id: 7, fileName: 'scrap.tf - Buy Hats.html', pageKind: 'buy', fileMtime: T0 - 10 * MIN, importedAt: T0 - 9 * MIN, itemCount: 1, categories: { hats: 1 }, bank: null },
+      { id: 7, fileName: 'scrap.tf - Buy Hats.html', pageKind: 'buy', fileMtime: T0 - 10 * MIN, importedAt: T0 - 9 * MIN, itemCount: 1, categories: { hats: 1 }, bank: null, origin: null },
     ]);
     // Older batches name no page: their prices read bank null and coverage keeps the majority rule.
     expect(repo.scrapPricesForSku('378;6').map((p) => [p.id, p.source, p.importBatch, p.bank])).toEqual([
@@ -64,7 +64,8 @@ describe('migration V5 on an existing version 4 database', () => {
       .prepare('PRAGMA table_info(import_batches)')
       .all()
       .map((r) => r['name']);
-    expect(cols).toEqual(['id', 'file_name', 'page_kind', 'file_mtime', 'imported_at', 'item_count', 'categories', 'bank']);
+    // V9 (F21) adds origin after bank.
+    expect(cols).toEqual(['id', 'file_name', 'page_kind', 'file_mtime', 'imported_at', 'item_count', 'categories', 'bank', 'origin']);
   });
 
   it('stores the bank of batches imported after the upgrade next to the old ones', () => {

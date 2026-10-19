@@ -1081,7 +1081,23 @@ export interface ImportResult {
   listRows?: number;
   /** F15: the scrap.tf page recognised (ImportBatch.bank of `batchId`); null when not recognised. Absent from 0.4 results. */
   bank?: ScraptfBank | null;
+  /** F21: how the page reached the import (ImportBatch.origin of `batchId`). Absent: a file. */
+  origin?: ImportOrigin;
+  /**
+   * F21, scrap.tf window reads only: items new on this save that are flips now (BankStock.newFlips of the
+   * batch), for the window's status line; 0 on a page's first save (nothing to compare with). Absent for
+   * file imports and for window reads that wrote no bank stock (main shows 0 then).
+   */
+  newFlips?: number;
 }
+
+/**
+ * F21: how a saved page reached the import. 'file': the file picker or the folder watch (a page the user
+ * saved). 'window': a read of the opt-in scrap.tf window (the DOM the user's own browsing loaded); only
+ * main sets it. Batches from before 0.7 read null.
+ */
+export type ImportOrigin = 'file' | 'window';
+export const IMPORT_ORIGINS: readonly ImportOrigin[] = ['file', 'window'];
 
 /** Items per category (absent = none). */
 export type CategoryCounts = Partial<Record<Category, number>>;
@@ -1105,6 +1121,12 @@ export interface ImportBatch {
    * before 0.5: coverage then falls back to the majority-category rule (bankPageIndexOf).
    */
   bank: ScraptfBank | null;
+  /**
+   * F21 (schema V9): 'window' for a read of the scrap.tf window (the Import page labels it "Flip Desk
+   * window"), 'file' for a saved file; null for batches imported before 0.7. Optional so callers that
+   * predate it store null.
+   */
+  origin?: ImportOrigin | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -1781,6 +1803,79 @@ export interface CheckSettings {
   popup: boolean;
 }
 
+/**
+ * F21: the opt-in scrap.tf window (settings.scraptfWindow): a window the user browses scrap.tf in
+ * themselves, whose loaded page Flip Desk reads (never fetches). Enabling needs import.enabled, the
+ * import acknowledgement and `acknowledgedAt` (the settings setter refuses otherwise).
+ */
+export interface ScraptfWindowSettings {
+  /** Default false. */
+  enabled: boolean;
+  /** When the user ticked the window's risk acknowledgement (scrap.tf's ToS, a possible ban); null = not yet. */
+  acknowledgedAt: UnixMs | null;
+  /**
+   * Default false: an in-memory session, gone when the app quits. True: Chromium's own cookie store on
+   * disk (partition 'persist:scraptf', in the app's user data) until "Log out & clear". The app never
+   * reads either.
+   */
+  keepLoggedIn: boolean;
+  /**
+   * Default true: read after each scrap.tf page load or in-page navigation in the window (the user's browsing,
+   * and what the page's own scripts do), with the per-page gap and dedupe; false: only on "Read page now".
+   */
+  readOnLoad: boolean;
+  /** Default false. True: the app's static scrap.tf links (links.open) open in this window, not the browser. */
+  openLinksInWindow: boolean;
+}
+
+/**
+ * F21 push 'scraptfWindow.read' (main only, to the window's toolbar): one read of the page on screen, as
+ * the status line shows it ("Read 48 items from /buy/hats · 2 new flips · 3 s ago"). Never page content.
+ */
+export interface ScraptfWindowRead {
+  at: UnixMs;
+  /** The page's path, without query or hash ('/buy/hats'). */
+  path: string;
+  /** Items on the page (ImportResult.parsed). */
+  items: number;
+  /** The bank the import recognised (ImportResult.bank); null when none. */
+  bank: ScraptfBank | null;
+  /** ImportResult.newFlips, 0 when absent. */
+  newFlips: number;
+  /** One short, fixed-text warning (the import's first, or why it imported nothing); null when none. */
+  warning: string | null;
+}
+
+/** F21 push 'scraptfWindow.nav' (main only, to the toolbar): where the scrap.tf view is. */
+export interface ScraptfWindowNav {
+  /** The view's URL without query, hash or userinfo (windowDisplayUrl); null when there is none. */
+  url: string | null;
+  canGoBack: boolean;
+  canGoForward: boolean;
+  loading: boolean;
+  /**
+   * An automatic read of the page on screen is under way: its load snapshot waits for the settle read, so
+   * the page is imported once, as its newer snapshot. Absent (the mock, a closed window): false.
+   */
+  reading?: boolean;
+}
+
+/** F21 'scraptfWindow.state': the window as main holds it (a toolbar that loads late asks for it). */
+export interface ScraptfWindowState {
+  open: boolean;
+  /** As ScraptfWindowNav.url. */
+  url: string | null;
+  canGoBack: boolean;
+  canGoForward: boolean;
+  lastRead: ScraptfWindowRead | null;
+}
+
+/** F21 'scraptfWindow.read' (the toolbar's Read page now): the read taken, or why none was (fixed text). */
+export interface ScraptfReadOutcome {
+  read: ScraptfWindowRead | null;
+  reason: string | null;
+}
+
 export interface PermissionRecord {
   grantor: string;
   contact: string;
@@ -1835,6 +1930,8 @@ export interface Settings {
   app: { startAtLogin: boolean; startHidden: boolean; closeToTray: boolean; quickEntryHotkey: string };
   /** Live check (F16): the check hotkey, the opt-in clipboard watcher and the popup. */
   check: CheckSettings;
+  /** F21: the opt-in scrap.tf window. */
+  scraptfWindow: ScraptfWindowSettings;
   networkPaused: boolean;
   /** Steam IDs whose buy orders are never used. */
   blocklist: string[];

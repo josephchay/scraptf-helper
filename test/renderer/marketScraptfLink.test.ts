@@ -406,7 +406,7 @@ describe('the Live market page (mock)', () => {
     expect(arm.sku).toBe(sku);
     expect(t.copies).toEqual([arm.name]);
     expect(nameEl.textContent.startsWith(arm.name)).toBe(true);
-    expect(t.callsOf('links.open')).toEqual([{ url: bank.url }]);
+    expect(t.callsOf('links.open')).toEqual([{ url: bank.url, allowWindow: true }]);
     expect(STATIC_EXTERNAL_URLS).toContain(bank.url);
     // Not the row's click: no drawer.
     expect(t.probe.itemSku).toBeNull();
@@ -425,7 +425,7 @@ describe('the Live market page (mock)', () => {
     t.rpc.mockClear();
     fire(head, 'click');
     await settle();
-    expect(t.callsOf('links.open')).toEqual([{ url: 'https://scrap.tf/buy/items' }]);
+    expect(t.callsOf('links.open')).toEqual([{ url: 'https://scrap.tf/buy/items', allowWindow: true }]);
     // Nothing armed or copied but the address the preview could not open (openOrCopy).
     expect(t.callsOf('check.arm')).toEqual([]);
     expect(t.copies).toEqual(['https://scrap.tf/buy/items']);

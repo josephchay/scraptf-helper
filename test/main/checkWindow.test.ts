@@ -140,7 +140,8 @@ beforeEach(() => {
 
 describe('window kind check', () => {
   it('is a known kind whose page is a trusted app:// page', () => {
-    expect(WINDOW_KINDS).toEqual(['dashboard', 'quick-entry', 'check']);
+    // F21 adds the scrap.tf window's toolbar page ('scraptf').
+    expect(WINDOW_KINDS).toEqual(['dashboard', 'quick-entry', 'check', 'scraptf']);
     expect(CHECK_URL).toBe('app://app/index.html#/check');
     expect(isTrustedSenderUrl(CHECK_URL)).toBe(true);
     expect(isAppNavigationUrl(CHECK_URL)).toBe(true);

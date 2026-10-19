@@ -181,6 +181,26 @@ const PATHS = {
       <path d="M3 7.5l9 4.5 9-4.5M12 12v9M7.5 5.3l9 4.5" />
     </>
   ),
+  // The scrap.tf window (F21): its toolbar's Back and Home, the window itself and Log out & clear.
+  chevronLeft: <path d="M15 6l-6 6 6 6" />,
+  home: (
+    <>
+      <path d="M3 11l9-7 9 7" />
+      <path d="M5 9.5V20h5v-6h4v6h5V9.5" />
+    </>
+  ),
+  window: (
+    <>
+      <rect x="3" y="4" width="18" height="16" rx="2" />
+      <path d="M3 9h18M6.5 6.5h.01M9.5 6.5h.01" />
+    </>
+  ),
+  logout: (
+    <>
+      <path d="M9 21H5a2 2 0 01-2-2V5a2 2 0 012-2h4" />
+      <path d="M16 17l5-5-5-5M21 12H9" />
+    </>
+  ),
 } satisfies Record<string, ReactNode>;
 
 export type IconName = keyof typeof PATHS;

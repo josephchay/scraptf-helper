@@ -113,6 +113,7 @@ import {
 } from '../marketModel';
 import { indexOfRow, isMenuKeyEcho, isSearchShortcut, menuAnchorRect, moveCursor } from '../oppModel';
 import { allItemsChip, listPaysCell, listStockCell } from '../scraptfListModel';
+import { scraptfLinksInWindow } from '../scraptfWindowModel';
 import { MIN_CEILING_PRESETS, readMinCeiling } from '../shoppingModel';
 
 type MenuPoint = { x: number; y: number };
@@ -336,8 +337,10 @@ export function MarketPage() {
         scraptfBusy.current = false;
       });
   }, []);
+  // F21: main sends these static pages to the user's scrap.tf window when they chose that; the words follow.
+  const scraptfInWindow = scraptfLinksInWindow(settings);
   // U2: the one bank the category filter covers (a bank card's "See all" included).
-  const bankLink = marketBankLink(filters.categories);
+  const bankLink = marketBankLink(filters.categories, scraptfInWindow);
   const loadMore = win.loadMore;
 
   // "/" focuses the search box from anywhere on the page, but not from inside the item drawer.
@@ -585,7 +588,7 @@ export function MarketPage() {
         </div>
         <div className="summary-actions">
           {bankLink ? (
-            <button type="button" className="btn small market-bank-link" title={bankLink.title} aria-label={bankLink.ariaLabel} onClick={() => void openOrCopy(bankLink.url, toast)}>
+            <button type="button" className="btn small market-bank-link" title={bankLink.title} aria-label={bankLink.ariaLabel} onClick={() => void openOrCopy(bankLink.url, toast, { allowWindow: true })}>
               {bankLink.text}
               <span aria-hidden="true"> ↗</span>
             </button>
@@ -656,6 +659,7 @@ export function MarketPage() {
               onOpen={onOpen}
               onMenu={onRowMenu}
               onScraptf={onScraptf}
+              scraptfInWindow={scraptfInWindow}
               onLoadMore={loadMore}
               onSort={onSort}
             />
@@ -1254,6 +1258,8 @@ export interface MarketTableProps {
   onMenu: (r: MarketRow, at: MenuPoint) => void;
   /** F19: a row's scrap.tf button or the o key. Without it the rows show no button. */
   onScraptf?: (r: MarketRow) => void;
+  /** F21: the button's words for the user's scrap.tf window (main opens it there); default the browser. */
+  scraptfInWindow?: boolean;
   onLoadMore: () => void;
   onSort: (k: MarketSort) => void;
 }
@@ -1277,6 +1283,7 @@ export function MarketTable({
   onOpen,
   onMenu,
   onScraptf,
+  scraptfInWindow = false,
   onLoadMore,
   onSort,
 }: MarketTableProps) {
@@ -1490,6 +1497,7 @@ export function MarketTable({
               onOpen={onOpen}
               onMenu={onMenu}
               onScraptf={onScraptf}
+              scraptfInWindow={scraptfInWindow}
             />
           );
         })}
@@ -1597,6 +1605,7 @@ const ItemRow = memo(function ItemRow({
   onOpen,
   onMenu,
   onScraptf,
+  scraptfInWindow = false,
 }: {
   row: MarketRow;
   index: number;
@@ -1611,6 +1620,7 @@ const ItemRow = memo(function ItemRow({
   onOpen: (r: MarketRow) => void;
   onMenu: (r: MarketRow, at: MenuPoint) => void;
   onScraptf?: ((r: MarketRow) => void) | undefined;
+  scraptfInWindow?: boolean;
 }) {
   const order = r.revenueOrder;
   const pill = verdictPill(r, keyScrap);
@@ -1621,7 +1631,7 @@ const ItemRow = memo(function ItemRow({
   // F17: new on scrap.tf since the previous save of a bank page (MarketRow.scraptfNewAt).
   const fresh = scraptfNewBadge(r, now);
   // F19: the bank page to look for it on, in the Item cell (the grid's column budget is test-pinned).
-  const stf = onScraptf ? marketScraptfButton(r, now) : null;
+  const stf = onScraptf ? marketScraptfButton(r, now, scraptfInWindow) : null;
   // Flags that should stop a purchase get an icon; the drawer explains every flag.
   const bad = r.flags.map(flagInfo).filter((f) => f.tone === 'bad');
   const flashCls = flash ? ` flash-${flash} flash-${flashOdd ? 'b' : 'a'}` : '';

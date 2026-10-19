@@ -40,7 +40,7 @@ describe('the route', () => {
     // No nav entry of its own: it lives under scrap.tf banks.
     expect(app).not.toMatch(/\{ id: 'stock'/);
     // The live check and quick entry windows are untouched.
-    expect(app).toMatch(/kind === 'quick-entry' \? <QuickEntry \/> : kind === 'check' \? <CheckPopup \/> : <Dashboard \/>/);
+    expect(app).toMatch(/kind === 'quick-entry' \? <QuickEntry \/> : kind === 'check' \? <CheckPopup \/> : kind === 'scraptf' \? <ScraptfWindowBar \/> : <Dashboard \/>/);
   });
 });
 
@@ -93,10 +93,11 @@ describe('bank-stock.css', () => {
     expect(rules).not.toMatch(/url\(|@import/);
   });
 
-  it('is imported after every earlier sheet (only the F20 history sheet follows it)', () => {
+  it('is imported after every earlier sheet (only the F20 history and F21 window sheets follow it)', () => {
     const index = read('styles/index.css').trim().split('\n');
-    expect(index[index.length - 1]).toBe("@import './scraptf-history.css';");
-    expect(index[index.length - 2]).toBe("@import './bank-stock.css';");
+    expect(index[index.length - 1]).toBe("@import './scraptf-window.css';");
+    expect(index[index.length - 2]).toBe("@import './scraptf-history.css';");
+    expect(index[index.length - 3]).toBe("@import './bank-stock.css';");
   });
 
   it('fits every grid layout in the width its query covers, with no sideways scroll', () => {

@@ -133,6 +133,8 @@ import {
 } from './mockData';
 import { NO_CARDS_SAVED, NO_CARDS_SAVED_REASON } from './importModel';
 import { checkDemoFromHash, mockCheckDemo, mockCheckResult, mockHintedParse, mockParseCheck, type MockParsedCheck } from './mockCheck';
+import { gateScraptfWindow, IMPORT_HTML_ORIGIN_REFUSAL, SCRAPTF_BAR_HASH } from '../shared/scraptfWindowPolicy';
+import { createMockScraptfWindow } from './mockScraptfWindow';
 import { filterOpportunities, orderByGroup, sortOpportunities, summarizeGroups } from './oppModel';
 
 export interface MockOptions {
@@ -206,7 +208,12 @@ export function createMockBridge(opts: MockOptions = {}): MockBridge {
   const tickMs = opts.tickMs ?? 4000;
   const t0 = now();
 
-  let settings: Settings = mergeSettings(DEFAULT_SETTINGS, {});
+  // F21: the toolbar demo ('#/scraptf-bar') starts with the window on, so its controls answer.
+  const barDemo = typeof location !== 'undefined' && location.hash.startsWith(SCRAPTF_BAR_HASH);
+  let settings: Settings = mergeSettings(
+    DEFAULT_SETTINGS,
+    barDemo ? { import: { enabled: true, acknowledgedAt: t0 }, scraptfWindow: { enabled: true, acknowledgedAt: t0 } } : {},
+  );
   const secrets: SecretsStatus = { bptfApiKey: false, bptfAccessToken: false, steamApiKey: false };
 
   const books = new Map<string, MockBook>();
@@ -821,7 +828,7 @@ export function createMockBridge(opts: MockOptions = {}): MockBridge {
     const all = [...opps.values()];
     const profitable = all.filter((o) => o.status === 'profitable');
     return {
-      version: '0.6.0',
+      version: '0.7.0',
       networkPaused: settings.networkPaused,
       feed: feedState(),
       keyPrice: keyPrice(),
@@ -1558,6 +1565,17 @@ export function createMockBridge(opts: MockOptions = {}): MockBridge {
     return result;
   }
 
+  // F21: main's scrap.tf window methods over a fake history; nothing is loaded or read in a browser.
+  const scraptfWindow = createMockScraptfWindow({
+    now,
+    settings: () => settings,
+    emit,
+    itemsOn: (url) => {
+      const bank = SCRAPTF_BANKS.find((b) => b.url === url)?.bank;
+      return bank ? (stockSavesOf(bank)[0]?.rows.length ?? 0) : 0;
+    },
+  });
+
   const handlers: Handlers = {
     'status.get': () => status(),
     'opps.list': (q) => {
@@ -1848,7 +1866,10 @@ export function createMockBridge(opts: MockOptions = {}): MockBridge {
       for (const j of [...journal].sort((a, b) => a.ts - b.ts)) rows.push([j.id, new Date(j.ts).toISOString(), j.side, j.venue, j.sku, j.name, j.keys, (j.scrap / 9).toFixed(2), (j.keyPriceScrap / 9).toFixed(2), j.note ?? '']);
       return { csv: csv(rows), suggestedName: `flipdesk-journal-${stamp(now())}.csv` };
     },
-    'import.html': ({ fileName, mtimeMs }) => {
+    'import.html': (p) => {
+      // F21: as main's router, a page may not mark its import as a scrap.tf window read.
+      if (p.address !== undefined || p.origin !== undefined) throw new Error(IMPORT_HTML_ORIGIN_REFUSAL);
+      const { fileName, mtimeMs } = p;
       requireImportEnabled();
       // A saved scrap.tf/items page ("Items.html", "items_2.html"): the whole list counts as re-saved (F14).
       if (/items/i.test(fileName)) return importList(fileName, mtimeMs);
@@ -1878,7 +1899,7 @@ export function createMockBridge(opts: MockOptions = {}): MockBridge {
       return { evaluated: opps.size, ms: lastEngineMs ?? 1 };
     },
     'app.info': (): AppInfo => ({
-      version: '0.6.0',
+      version: '0.7.0',
       dataDir: 'C:\\Users\\you\\AppData\\Roaming\\TF2 Flip Desk',
       logDir: 'C:\\Users\\you\\AppData\\Roaming\\TF2 Flip Desk\\logs',
       platform: 'browser (mock)',
@@ -1920,9 +1941,13 @@ export function createMockBridge(opts: MockOptions = {}): MockBridge {
     'settings.get': () => settings,
     'settings.set': (patch) => {
       const importBefore = JSON.stringify(settings.import);
-      const next = mergeSettings(settings, patch);
+      const merged = mergeSettings(settings, patch);
       // As main's schema (crossFieldProblem): one chord cannot be both global hotkeys.
-      if (sameAccelerator(next.check.hotkey, next.app.quickEntryHotkey)) throw new Error(`Invalid settings: ${CHECK_HOTKEY_CONFLICT}`);
+      if (sameAccelerator(merged.check.hotkey, merged.app.quickEntryHotkey)) throw new Error(`Invalid settings: ${CHECK_HOTKEY_CONFLICT}`);
+      // F21, as main's schema: the window turns on only with its three gates, and off when one goes.
+      const gate = gateScraptfWindow(merged, patch?.scraptfWindow?.enabled === true);
+      if (!gate.ok) throw new Error(`Invalid settings: ${gate.message}`);
+      const next = gate.settings;
       settings = next;
       emit('settings.changed', settings);
       changedAndEmit();
@@ -1938,7 +1963,10 @@ export function createMockBridge(opts: MockOptions = {}): MockBridge {
       emit('status.changed', status());
       return { ...secrets };
     },
-    'links.open': ({ url }) => {
+    'links.open': ({ url, allowWindow }) => {
+      // F21: like main, the user's choice sends static scrap.tf pages to the (fake) scrap.tf window, and only
+      // from an open worded for it (allowWindow).
+      if (allowWindow === true && scraptfWindow.openFromLink(url)) return { opened: true, reason: null, openedIn: 'window' };
       let ok = false;
       try {
         ok = new URL(url).protocol === 'https:';
@@ -2005,6 +2033,15 @@ export function createMockBridge(opts: MockOptions = {}): MockBridge {
       return { folder: 'C:\\Users\\you\\Documents\\scrap.tf pages' };
     },
     'file.saveText': ({ suggestedName }) => ({ saved: true, path: `C:\\Users\\you\\Downloads\\${suggestedName}` }),
+    'scraptfWindow.open': (p) => scraptfWindow.open(p),
+    'scraptfWindow.back': () => scraptfWindow.back(),
+    'scraptfWindow.forward': () => scraptfWindow.forward(),
+    'scraptfWindow.reload': () => scraptfWindow.reload(),
+    'scraptfWindow.home': () => scraptfWindow.home(),
+    'scraptfWindow.go': (p) => scraptfWindow.go(p),
+    'scraptfWindow.read': () => scraptfWindow.read(),
+    'scraptfWindow.clear': () => scraptfWindow.clear(),
+    'scraptfWindow.state': () => scraptfWindow.state(),
   };
 
   seedEvents();
@@ -2024,7 +2061,7 @@ export function createMockBridge(opts: MockOptions = {}): MockBridge {
 
   const hash = typeof location !== 'undefined' ? location.hash : '';
   return {
-    windowKind: hash.startsWith('#/quick') ? 'quick-entry' : hash.startsWith('#/check') ? 'check' : 'dashboard',
+    windowKind: hash.startsWith('#/quick') ? 'quick-entry' : hash.startsWith('#/check') ? 'check' : hash.startsWith(SCRAPTF_BAR_HASH) ? 'scraptf' : 'dashboard',
     async rpc<M extends RpcMethod>(method: M, params: RpcParams<M>): Promise<RpcResult<M>> {
       await delay();
       const h = handlers[method] as Handler<M> | undefined;

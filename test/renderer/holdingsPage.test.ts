@@ -139,14 +139,15 @@ describe('holdings.css', () => {
     expect(reduced).toMatch(/\.holding-row\.flash-up,\s*\.holding-row\.flash-down\s*\{\s*animation: none !important;/);
   });
 
-  it('is imported after every earlier sheet by index.css (only the F14 price-list, F15 banks, F16 live check, F17 bank stock and F20 history sheets follow it)', () => {
+  it('is imported after every earlier sheet by index.css (only the F14 price-list, F15 banks, F16 live check, F17 bank stock, F20 history and F21 window sheets follow it)', () => {
     const index = read('styles/index.css').trim().split('\n');
-    expect(index[index.length - 1]).toBe("@import './scraptf-history.css';");
-    expect(index[index.length - 2]).toBe("@import './bank-stock.css';");
-    expect(index[index.length - 3]).toBe("@import './check.css';");
-    expect(index[index.length - 4]).toBe("@import './banks.css';");
-    expect(index[index.length - 5]).toBe("@import './scraptf-list.css';");
-    expect(index[index.length - 6]).toBe("@import './holdings.css';");
+    expect(index[index.length - 1]).toBe("@import './scraptf-window.css';");
+    expect(index[index.length - 2]).toBe("@import './scraptf-history.css';");
+    expect(index[index.length - 3]).toBe("@import './bank-stock.css';");
+    expect(index[index.length - 4]).toBe("@import './check.css';");
+    expect(index[index.length - 5]).toBe("@import './banks.css';");
+    expect(index[index.length - 6]).toBe("@import './scraptf-list.css';");
+    expect(index[index.length - 7]).toBe("@import './holdings.css';");
   });
 });
 

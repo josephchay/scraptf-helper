@@ -49,6 +49,12 @@ const SCRAPTF_PAGES: Readonly<Record<Category, string>> = Object.freeze({
  */
 export const SCRAPTF_ITEMS_URL = 'https://scrap.tf/items';
 
+/**
+ * F21: scrap.tf's front page, the scrap.tf window's Home. Only the window opens it (on the user's click,
+ * scraptfWindowStartUrls); it is not in STATIC_EXTERNAL_URLS, so links.open never hands it to the browser.
+ */
+export const SCRAPTF_HOME_URL = 'https://scrap.tf/';
+
 /** Static scrap.tf bank page for a category. The app only hands it to the user's browser. */
 export function scraptfPageFor(category: Category): string {
   return Object.hasOwn(SCRAPTF_PAGES, category) ? SCRAPTF_PAGES[category] : SCRAPTF_PAGES.other;

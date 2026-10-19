@@ -212,7 +212,16 @@ export interface ServiceHost {
 }
 
 /** Pushes only main sends (ARCHITECTURE: settings, the dashboard drawer, quick entry, the check popup, the service banner). */
-export const MAIN_ONLY_PUSH_EVENTS: readonly PushEvent[] = ['settings.changed', 'ui.openItem', 'ui.quickPrefill', 'ui.checkShow', 'service.state'];
+export const MAIN_ONLY_PUSH_EVENTS: readonly PushEvent[] = [
+  'settings.changed',
+  'ui.openItem',
+  'ui.quickPrefill',
+  'ui.checkShow',
+  'service.state',
+  // F21: the scrap.tf window's toolbar hears these from main's window manager only.
+  'scraptfWindow.read',
+  'scraptfWindow.nav',
+];
 /** Pushes the service may send; anything else from the service is dropped as unrecognised. */
 export const SERVICE_PUSH_EVENTS: readonly PushEvent[] = PUSH_EVENTS.filter((e) => !MAIN_ONLY_PUSH_EVENTS.includes(e));
 const pushEvents = new Set<string>(SERVICE_PUSH_EVENTS);

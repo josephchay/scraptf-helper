@@ -46,8 +46,10 @@ describe('the page', () => {
     expect(page).toContain('const b = marketScraptfButton(r, Date.now());');
     expect(page).toContain('void openOnScraptf(b.url, b.name, (text, tone) => toastRef.current(text, tone), { sku: r.sku, settings: settingsRef.current })');
     expect(page.match(/openOrCopy\(/g)).toHaveLength(1);
-    expect(page).toContain('const bankLink = marketBankLink(filters.categories);');
-    expect(page).toContain('onClick={() => void openOrCopy(bankLink.url, toast)}');
+    // F21: worded for the user's scrap.tf window when main sends Flip Desk's scrap.tf links there.
+    expect(page).toContain('const bankLink = marketBankLink(filters.categories, scraptfInWindow);');
+    expect(page).toContain('const scraptfInWindow = scraptfLinksInWindow(settings);');
+    expect(page).toContain('onClick={() => void openOrCopy(bankLink.url, toast, { allowWindow: true })}');
     expect(page).not.toMatch(/scraptfLink\.url/);
   });
 

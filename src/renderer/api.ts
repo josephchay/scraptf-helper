@@ -3,12 +3,13 @@
 // development. The renderer itself never touches the network.
 
 import type { FlipdeskBridge, PushContract, PushEvent, RpcMethod, RpcParams, RpcResult } from '../shared/rpc';
+import { SCRAPTF_BAR_HASH } from '../shared/scraptfWindowPolicy';
 import { errorMessage } from './format';
 
 type ParamArgs<M extends RpcMethod> = [RpcParams<M>] extends [void] ? [params?: undefined] : [params: RpcParams<M>];
 
-/** 'check' is the live check popup (F16). */
-export type WindowKind = 'dashboard' | 'quick-entry' | 'check';
+/** 'check' is the live check popup (F16); 'scraptf' the scrap.tf window's toolbar (F21). */
+export type WindowKind = 'dashboard' | 'quick-entry' | 'check' | 'scraptf';
 
 function nativeBridge(): FlipdeskBridge | null {
   if (typeof window === 'undefined') return null;
@@ -75,19 +76,27 @@ export function on<E extends PushEvent>(event: E, listener: (payload: PushContra
   };
 }
 
-/** The window this page runs in: the preload's kind, else the hash ("#/quick", "#/check"), which also works in a plain browser. */
+/**
+ * The window this page runs in: the preload's kind, else the hash ("#/quick", "#/check", "#/scraptf-bar"),
+ * which also works in a plain browser.
+ */
 export function windowKind(): WindowKind {
   const native = nativeBridge()?.windowKind;
-  if (native === 'quick-entry' || native === 'check') return native;
+  if (native === 'quick-entry' || native === 'check' || native === 'scraptf') return native;
   if (typeof location !== 'undefined' && location.hash.startsWith('#/quick')) return 'quick-entry';
   if (typeof location !== 'undefined' && location.hash.startsWith('#/check')) return 'check';
+  if (typeof location !== 'undefined' && location.hash.startsWith(SCRAPTF_BAR_HASH)) return 'scraptf';
   return 'dashboard';
 }
 
-/** Opens an external link through main's allowlist; never window.open. */
-export async function openLink(url: string): Promise<{ opened: boolean; reason: string | null }> {
+/**
+ * Opens an external link through main's allowlist; never window.open. F21: `allowWindow` only from an open
+ * whose words follow openLinksInWindow (scraptfLinksInWindow); then `openedIn: 'window'` when main sent the
+ * static scrap.tf page to the scrap.tf window instead. Without it the link goes to the browser.
+ */
+export async function openLink(url: string, opts: { allowWindow?: boolean } = {}): Promise<{ opened: boolean; reason: string | null; openedIn?: 'window' }> {
   try {
-    return await rpc('links.open', { url });
+    return await rpc('links.open', opts.allowWindow === true ? { url, allowWindow: true } : { url });
   } catch (e) {
     return { opened: false, reason: errorMessage(e) };
   }

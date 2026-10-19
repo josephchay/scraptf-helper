@@ -35,6 +35,15 @@ export function decodedTooLargeWarning(bytes: number, limit: number = MAX_IMPORT
   return `too-large: the page decodes to ${Math.ceil(bytes / 1024 / 1024)} MB, over the ${Math.round(limit / 1024 / 1024)} MB import limit; save the page again`;
 }
 
+export interface SavedPageOptions {
+  /**
+   * F21: the address the page was read at, given from outside the HTML (main's read of the opt-in scrap.tf
+   * window). Used exactly as an .mhtml part's Content-Location: a page-address hint for page and bank
+   * detection, read first, only parsed as text, never fetched. An .mhtml file keeps its own part's address.
+   */
+  address?: string | null;
+}
+
 /** A file that is no page at all: imported as nothing, with one clear warning (the batch keeps its name). */
 function unreadable(warning: string): SavedPageParse {
   return { format: 'mhtml', pageKind: 'unknown', bank: null, page: '', items: [], warnings: [warning] };
@@ -43,17 +52,19 @@ function unreadable(warning: string): SavedPageParse {
 /**
  * Parses a saved page. MHTML is told by its MIME headers, whatever the file is called; an .mhtml or
  * .mht name without them is still read as HTML when it starts like a web page. The web page inside is
- * parsed with its Content-Location as the address hint (F15 bank detection). Throws
+ * parsed with its Content-Location as the address hint (F15 bank detection), a web page with
+ * `opts.address` (F21) when given. Throws
  * ImportTooLargeError over MAX_IMPORT_BYTES (the file, then the page); a file that is malformed, has
  * too many parts, holds no web page or ends inside it (mhtml-truncated) imports nothing, with a
  * warning saying so.
  */
-export function parseSavedPage(text: string, fileName: string, schema: SchemaService): SavedPageParse {
+export function parseSavedPage(text: string, fileName: string, schema: SchemaService, opts: SavedPageOptions = {}): SavedPageParse {
   if (typeof text !== 'string') throw new TypeError('parseSavedPage expects the file as a string');
   const named = isMhtmlFileName(fileName);
   if (!looksLikeMhtml(text)) {
     if (named && !startsLikeHtml(text)) return unreadable('mhtml-invalid: the file does not start with MIME headers; save the page again');
-    return { format: 'html', ...parseScrapTfHtml(text, schema) };
+    const address = typeof opts.address === 'string' ? opts.address : null;
+    return { format: 'html', ...parseScrapTfHtml(text, schema, { address }) };
   }
   const r = readMhtml(text, { maxBytes: MAX_IMPORT_BYTES });
   if (!r.ok) {

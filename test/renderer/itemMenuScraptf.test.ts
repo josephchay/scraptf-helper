@@ -118,7 +118,7 @@ describe('the action', () => {
     const { openOnScraptf } = await import('../../src/renderer/components/ItemMenu');
     const toast = vi.fn();
     await openOnScraptf(SCRAPTF_ITEMS_URL, 'Team Captain', toast);
-    expect(rpc).toHaveBeenCalledWith('links.open', { url: SCRAPTF_ITEMS_URL });
+    expect(rpc).toHaveBeenCalledWith('links.open', { url: SCRAPTF_ITEMS_URL, allowWindow: true });
     expect(toast.mock.calls[0]![1]).toBe('warn');
     expect(String(toast.mock.calls[0]![0])).toMatch(/could not be copied/);
   });
@@ -272,7 +272,8 @@ describe('ItemMenu wiring', () => {
     expect(menu).toMatch(/case 'scraptf':\s+(\/\/.*\s+)*void openOnScraptf\(a\.url, a\.name, toast, \{ sku: target\.sku, settings \}\);/);
     const fn = menu.slice(menu.indexOf('export async function openOnScraptf'), menu.indexOf('interface OpenState'));
     expect(fn.indexOf('copyText(name)')).toBeGreaterThan(0);
-    expect(fn.indexOf('openLink(url)')).toBeGreaterThan(fn.indexOf('copyText(name)'));
+    // F21: worded for the scrap.tf window (scraptfOpenTitle), so main may open it there.
+    expect(fn.indexOf('openLink(url, { allowWindow: true })')).toBeGreaterThan(fn.indexOf('copyText(name)'));
     // The arm lands before the copy (main's watcher must know the name first), and names the copied string.
     expect(fn.indexOf("rpc('check.arm', params)")).toBeGreaterThan(0);
     expect(fn.indexOf("rpc('check.arm', params)")).toBeLessThan(fn.indexOf('copyText(name)'));
@@ -287,7 +288,9 @@ describe('ItemMenu wiring', () => {
     const view = menu.slice(menu.indexOf('function ItemMenuView'), menu.indexOf('// Generic menu popover'));
     expect(view).toMatch(/if \(namedBank\) return;\s*let alive = true;\s*rpc\('item\.detail', \{ sku: target\.sku, history: false \}\)/);
     expect(view).toContain('if (alive) setSeenOn(d?.seenOn ?? null);');
-    expect(view).toContain('itemMenuSections(target, links, seenOn)');
+    // F21: the scrap.tf window's openLinksInWindow words the action's tooltip only.
+    expect(view).toContain('itemMenuSections(target, links, seenOn, inWindow)');
+    expect(view).toContain('const inWindow = scraptfLinksInWindow(settings);');
   });
 
   it('lets a row pass its category (optional, so every existing caller still works)', () => {

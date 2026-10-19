@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { DASHBOARD_URL, QUICK_ENTRY_URL, WINDOW_KIND_ARG } from '../../src/main/paths';
 
@@ -114,7 +116,7 @@ vi.mock('electron', () => ({
   },
 }));
 
-const { createWindowManager, hardenSession, hardenWebContents, windowWebPreferences, DARK_BACKGROUND, MAX_CRASH_RELOADS, CRASH_RELOAD_WINDOW_MS } = await import(
+const { createWindowManager, hardenScraptfSession, hardenSession, hardenWebContents, refuseClientCertificate, windowWebPreferences, DARK_BACKGROUND, MAX_CRASH_RELOADS, CRASH_RELOAD_WINDOW_MS } = await import(
   '../../src/main/windows'
 );
 
@@ -182,6 +184,112 @@ describe('hardenWebContents', () => {
       expect(r.preventDefault).toHaveBeenCalled();
     }
     expect(l.warn).toHaveBeenCalled();
+  });
+
+  // F21: the scrap.tf window's view has its own policy (scraptfWindowPolicy), installed by its module.
+  it('leaves only the scrap.tf view to its own navigation policy, asked at event time', () => {
+    const view = contents();
+    const other = contents();
+    let owned: unknown = null;
+    const opts = { ownNavigation: (c: unknown) => c === owned };
+    hardenWebContents(view as never, log(), opts);
+    hardenWebContents(other as never, log(), opts);
+    // 'web-contents-created' fires inside the view's constructor; the module registers it afterwards.
+    owned = view;
+    for (const event of ['will-navigate', 'will-redirect']) {
+      const mine = navEvent('https://scrap.tf/buy/hats');
+      view.emit(event, mine);
+      expect(mine.preventDefault).not.toHaveBeenCalled();
+      const theirs = navEvent('https://scrap.tf/buy/hats');
+      other.emit(event, theirs);
+      expect(theirs.preventDefault).toHaveBeenCalled();
+    }
+    // Webviews and window.open stay blocked for the view too (its module installs its own open handler).
+    const w = navEvent('');
+    view.emit('will-attach-webview', w);
+    expect(w.preventDefault).toHaveBeenCalled();
+    expect(view.openHandler!({ url: 'https://scrap.tf/' })).toEqual({ action: 'deny' });
+  });
+
+  it('fails closed when the ownership check throws or is absent', () => {
+    const c = contents();
+    hardenWebContents(c as never, log(), {
+      ownNavigation: () => {
+        throw new Error('gone');
+      },
+    });
+    const e = navEvent('https://scrap.tf/');
+    c.emit('will-navigate', e);
+    expect(e.preventDefault).toHaveBeenCalled();
+    const d = contents();
+    hardenWebContents(d as never, log(), {});
+    const f = navEvent('https://scrap.tf/');
+    d.emit('will-redirect', f);
+    expect(f.preventDefault).toHaveBeenCalled();
+  });
+});
+
+describe('hardenScraptfSession (F21)', () => {
+  function session() {
+    const s: Record<string, any> = new fake.Emitter();
+    s.setPermissionRequestHandler = (fn: unknown) => (s.request = fn);
+    s.setPermissionCheckHandler = (fn: unknown) => (s.check = fn);
+    s.setDevicePermissionHandler = (fn: unknown) => (s.device = fn);
+    s.webRequest = { onBeforeRequest: vi.fn() };
+    return s;
+  }
+
+  it('denies every permission (clipboard included) and every download, and filters no request', () => {
+    const s = session();
+    hardenScraptfSession(s as never, log());
+    for (const p of ['media', 'geolocation', 'notifications', 'openExternal', 'clipboard-read', 'clipboard-sanitized-write', 'fullscreen', 'hid', 'pointerLock']) {
+      let granted: boolean | null = null;
+      s.request({}, p, (g: boolean) => (granted = g), { requestingUrl: 'https://scrap.tf/', isMainFrame: true });
+      expect(granted, p).toBe(false);
+      expect(s.check({}, p, 'https://scrap.tf', {})).toBe(false);
+    }
+    expect(s.device({})).toBe(false);
+    const dl = { preventDefault: vi.fn() };
+    s.emit('will-download', dl);
+    expect(dl.preventDefault).toHaveBeenCalled();
+    // The page the user browses loads its own resources; the app adds no filter (and no request).
+    expect(s.webRequest.onBeforeRequest).not.toHaveBeenCalled();
+  });
+
+  it('logs what a page asks for at its own rate once a minute per kind, counting the rest', () => {
+    const s = session();
+    const l = log();
+    let t = 0;
+    hardenScraptfSession(s as never, l, () => t);
+    const ask = (p: string) => s.request({}, p, () => undefined, { requestingUrl: 'https://scrap.tf/', isMainFrame: true });
+    for (let i = 0; i < 10_000; i++) {
+      ask('notifications');
+      s.emit('will-download', { preventDefault: vi.fn() });
+    }
+    ask('geolocation');
+    expect(l.info.mock.calls.map(([m]) => m)).toEqual(['scrap.tf window: denied permission request: notifications', 'scrap.tf window: denied permission request: geolocation']);
+    expect(l.warn.mock.calls.map(([m]) => m)).toEqual(['scrap.tf window: blocked a download']);
+    t += 60_000;
+    ask('notifications');
+    expect(l.info.mock.calls.at(-1)![0]).toBe('scrap.tf window: denied permission request: notifications (and 9999 more like it since the last such line)');
+    expect(l.info.mock.calls.length + l.warn.mock.calls.length).toBe(4);
+  });
+});
+
+describe('refuseClientCertificate (F21)', () => {
+  it('stops Electron handing the first certificate in the store to whoever asks, and goes on without one', () => {
+    const event = { preventDefault: vi.fn() };
+    const callback = vi.fn();
+    refuseClientCertificate(event, null, 'https://evil.example/', [{ subjectName: 'CN=Jane Doe' }], callback);
+    expect(event.preventDefault).toHaveBeenCalledTimes(1);
+    expect(callback).toHaveBeenCalledTimes(1);
+    expect(callback.mock.calls[0]).toEqual([]);
+  });
+
+  it('is registered by main for the whole app', () => {
+    const main = readFileSync(fileURLToPath(new URL('../../src/main/main.ts', import.meta.url)), 'utf8');
+    expect(main).toContain("app.on('select-client-certificate', refuseClientCertificate);");
+    expect(main.indexOf("app.on('select-client-certificate'")).toBeLessThan(main.indexOf('app\n    .whenReady()'));
   });
 });
 

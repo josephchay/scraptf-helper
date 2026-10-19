@@ -12,6 +12,7 @@ import {
 } from '../shared/bankStock';
 import { CHECK_MAX_CHARS } from '../shared/check';
 import { SCRAPTF_CHANGES_MAX_LIMIT, SCRAPTF_EVENTS_MAX_AGE_MS } from '../shared/scraptfHistory';
+import { isScraptfPageUrl, SCRAPTF_WINDOW_OFF } from '../shared/scraptfWindowPolicy';
 import { buildLinks } from '../shared/links';
 import type { PushContract, PushEvent } from '../shared/rpc';
 import { SERVICE_METHODS } from '../shared/rpc';
@@ -22,6 +23,7 @@ import {
   BANK_STOCK_SORTS,
   CHECK_SOURCES,
   EMPTY_SPECIAL,
+  IMPORT_ORIGINS,
   MARKET_SOURCES,
   MARKET_VERDICTS,
   SCRAPTF_BANK_IDS,
@@ -39,6 +41,7 @@ import {
   type CheckSource,
   type HealthReport,
   type HistoryPoint,
+  type ImportOrigin,
   type ImportResult,
   type MarketSort,
   type MarketSource,
@@ -106,8 +109,11 @@ export interface HandlerContext {
   scraptfListChanged(): void;
   /** F15: the per-bank summary ('scraptf.banks'), in memory; core invalidates it and pushes 'scraptf.banksChanged'. */
   banks: Pick<BanksSummary, 'summary'>;
-  /** F17: each bank's newest pair of saves, diffed and joined to the Live market per read ('scraptf.bankStock'); no network. */
-  bankStock: Pick<BankStock, 'list' | 'all' | 'detailFor'>;
+  /**
+   * F17: each bank's newest pair of saves, diffed and joined to the Live market per read ('scraptf.bankStock'); no network.
+   * F21: importSavedPage counts a window read's new flips with newFlips (ImportResult.newFlips).
+   */
+  bankStock: Pick<BankStock, 'list' | 'all' | 'detailFor' | 'newFlips'>;
   /**
    * F17: bank_stock rows were written (an import of a recognised page: `imported` names its bank and batch)
    * or pruned (no argument). Called before pricesChanged, so pages refetching on its pushes read the new
@@ -315,7 +321,18 @@ const importParams = z.object({
   html: z.string().max(MAX_IMPORT_BYTES, 'the page is larger than 20 MB'),
   fileName: z.string().max(260),
   mtimeMs: finite,
+  // F21, set by main only (its router refuses both from a page): a read of the scrap.tf window. The address
+  // is a page-address hint for bank and page detection, like an MHTML Content-Location; never fetched.
+  address: z
+    .string()
+    .max(4096, 'not a scrap.tf page address')
+    .refine((u) => isScraptfPageUrl(u), 'not a scrap.tf page address')
+    .optional(),
+  origin: z.enum(IMPORT_ORIGINS as unknown as [ImportOrigin, ...ImportOrigin[]]).optional(),
 });
+
+/** F21: 'import.html' and the folder watch's input. `address` and `origin` come from main's window read only. */
+export type ImportSavedPageParams = z.output<typeof importParams>;
 
 const skuOnly = z.object({ sku: skuText });
 const idOnly = z.object({ id });
@@ -515,6 +532,26 @@ function bankStockRowsOf(schema: SchemaService, items: readonly ParsedScrapItem[
 }
 
 /**
+ * F21: the one warning of a window read that recorded nothing (ImportResult.batchId 0): a scrap.tf page
+ * that shows no items to import. Fixed text, so no path or page content travels with it.
+ */
+export const WINDOW_NOTHING_TO_IMPORT = 'nothing-to-import: this scrap.tf page shows no items to import (yet); nothing was recorded';
+
+/**
+ * F21: a window read's name as main built it, whole: no control characters, trimmed, at most 200 characters.
+ * Cut at a '?' or '#': main names a read by its path alone, and the name is stored and logged, so a URL
+ * query or hash that ever reached it would leave the service (a path never holds either unescaped).
+ */
+function windowReadName(name: string): string {
+  return name
+    .replace(/[\u0000-\u001f\u007f-\u009f]/g, '')
+    .replace(/[?#][\s\S]*$/, '')
+    .trim()
+    .slice(0, 200)
+    .trimEnd();
+}
+
+/**
  * Parses a page the user saved from scrap.tf and stores its prices as source
  * 'import'. Per SKU and set of extras the cheapest card wins, and it replaces
  * the earlier imported price for that SKU instead of adding duplicates.
@@ -524,20 +561,43 @@ function bankStockRowsOf(schema: SchemaService, items: readonly ParsedScrapItem[
  * included, at the file's time; rows from a list saved later are kept (repo guard).
  * `html` is the saved file as text: an .html page, or an .mhtml file whose web page parseSavedPage
  * unpacks here, in the service (F18), so the file picker and the folder watch read it alike.
- * Refused unless the user enabled import and acknowledged the ToS note (R10).
+ * F21: a read of the opt-in scrap.tf window (`origin: 'window'`, set by main only) is the DOM the user's
+ * own browsing loaded, imported exactly like a saved file of that page; `address`, the page it was read
+ * at, is only a page-address hint (as an .mhtml part's Content-Location), never stored, logged or
+ * fetched. The batch records its origin ('file' by default). A window read of a page that shows no items
+ * records nothing (WINDOW_NOTHING_TO_IMPORT).
+ * Refused unless the user enabled import and acknowledged the ToS note (R10); a window read also needs
+ * the window itself on (settings.scraptfWindow.enabled, behind its own risk acknowledgement).
  */
-export function importSavedPage(ctx: HandlerContext, p: { html: string; fileName: string; mtimeMs: number }): ImportResult {
+export function importSavedPage(ctx: HandlerContext, p: ImportSavedPageParams): ImportResult {
   const s = ctx.settings();
   if (!s.import.enabled || s.import.acknowledgedAt === null) {
     throw new Error('Saved-page import is turned off. Enable it (and accept the note) in Settings first.');
   }
+  // F21: zod checked both on 'import.html'; checked again for direct callers. Anything but a window read
+  // is a file, and an address that is not a scrap.tf page is no hint at all.
+  const origin: ImportOrigin = p.origin === 'window' ? 'window' : 'file';
+  // F21: main reads only while the window is on; checked here too, so no window read is ever recorded
+  // without the user's opt-in to the window's ban risk (a read in flight when they turn it off included).
+  if (origin === 'window' && s.scraptfWindow?.enabled !== true) throw new Error(SCRAPTF_WINDOW_OFF);
   const now = ctx.clock.now();
+  const address = isScraptfPageUrl(p.address) ? p.address : null;
   const baseName = p.fileName.replace(/^.*[\\/]/, '');
-  const fileName = baseName.slice(0, 200) || 'saved page';
+  // A window read is named after its page ('scrap.tf window /buy/hats'), which the basename would cut to 'hats'.
+  const fileName = origin === 'window' ? windowReadName(p.fileName) || 'scrap.tf window' : baseName.slice(0, 200) || 'saved page';
   const mtime = Number.isFinite(p.mtimeMs) && p.mtimeMs > 0 ? Math.min(Math.round(p.mtimeMs), now) : now;
   // F18 S3: a bank page saved without its cards stores nothing and warns 'no-cards-saved'; its batch
   // still records the bank and time, and coverage, the banks cards and bank stock pass over it.
-  const parsed = parseSavedPage(p.html, baseName, ctx.schema);
+  // A window read is the page's DOM, not a file, so its name never makes it an .mhtml.
+  const parsed = parseSavedPage(p.html, origin === 'window' ? '' : baseName, ctx.schema, { address });
+  if (origin === 'window' && parsed.items.length === 0) {
+    // F21: the user browses scrap.tf's front page, a profile or a bank whose cards have not arrived yet
+    // (the settle read gets them). Such a read stores nothing either way, so it records no batch and
+    // pushes nothing: the Import page lists no row per page browsed, and no "saved without its cards"
+    // notice tells the user to save a page they never saved. Nothing of the page is logged.
+    ctx.log.debug('scrap.tf window read: nothing to import on this page, nothing recorded');
+    return { batchId: 0, fileName, pageKind: parsed.pageKind, bank: parsed.bank, parsed: 0, stored: 0, skipped: [], warnings: [WINDOW_NOTHING_TO_IMPORT], origin };
+  }
   const skipped: ImportResult['skipped'] = [];
   type Item = (typeof parsed.items)[number];
 
@@ -616,6 +676,7 @@ export function importSavedPage(ctx: HandlerContext, p: { html: string; fileName
     // shares with this one, and the coverage strip must still know which bank page this was (F13).
     const categories = storedCategories(ctx.schema, writes.map((w) => w.sku));
     // F15: the page as the parser recognised it, fixed now for the same reason as the categories.
+    // F21: and how it came in, so the Import page can label a window read.
     batchId = ctx.repo.createImportBatch({
       fileName,
       pageKind: parsed.pageKind,
@@ -624,6 +685,7 @@ export function importSavedPage(ctx: HandlerContext, p: { html: string; fileName
       itemCount: writes.length,
       categories,
       bank: parsed.bank,
+      origin,
     });
     for (const { id: priceId, sku, item } of writes) {
       ctx.repo.upsertScrapPrice({
@@ -668,6 +730,25 @@ export function importSavedPage(ctx: HandlerContext, p: { html: string; fileName
     ctx.log.warn(`bank stock prune failed: ${err instanceof Error ? err.message : String(err)}`);
   }
 
+  // F17: before pricesChanged and 'import.done', so a page refetching on their pushes reads the new stock.
+  // The import is committed by now: a failure here must not keep the engine from the new prices.
+  try {
+    if (stockWritten > 0 && parsed.bank !== null) ctx.bankStockChanged({ bank: parsed.bank, batchId });
+    else if (stockPruned > 0) ctx.bankStockChanged();
+  } catch (err) {
+    ctx.log.warn(`bank stock refresh failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  // F21: the window's status line ("2 new flips"), read after the refresh above. Window reads only, so
+  // a file's result is unchanged; absent when this read wrote no bank stock.
+  let newFlips: number | undefined;
+  if (origin === 'window' && stockWritten > 0 && parsed.bank !== null) {
+    try {
+      newFlips = ctx.bankStock.newFlips(parsed.bank, batchId).length;
+    } catch (err) {
+      ctx.log.warn(`bank stock new flips failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
   const result: ImportResult = {
     batchId,
     fileName,
@@ -679,15 +760,9 @@ export function importSavedPage(ctx: HandlerContext, p: { html: string; fileName
     warnings: parsed.warnings.slice(0, 100),
     // Out-of-stock rows are skipped as prices but kept on the list, so `stored` alone undersells the save.
     ...(parsed.pageKind === 'items-list' ? { listRows: listWritten } : {}),
+    origin,
+    ...(newFlips !== undefined ? { newFlips } : {}),
   };
-  // F17: before pricesChanged and 'import.done', so a page refetching on their pushes reads the new stock.
-  // The import is committed by now: a failure here must not keep the engine from the new prices.
-  try {
-    if (stockWritten > 0 && parsed.bank !== null) ctx.bankStockChanged({ bank: parsed.bank, batchId });
-    else if (stockPruned > 0) ctx.bankStockChanged();
-  } catch (err) {
-    ctx.log.warn(`bank stock refresh failed: ${err instanceof Error ? err.message : String(err)}`);
-  }
   // F20: after bankStockChanged (core rebuilt the history index there), so the feed reads the new events.
   if (eventsWritten > 0) ctx.push('scraptf.changed', { at: mtime, count: eventsWritten });
   ctx.pricesChanged();
@@ -715,8 +790,9 @@ export function recordSkippedImport(ctx: HandlerContext, p: { fileName: string; 
   const now = ctx.clock.now();
   const fileName = p.fileName.replace(/^.*[\\/]/, '').slice(0, 200) || 'saved page';
   const mtime = Number.isFinite(p.mtimeMs) && p.mtimeMs > 0 ? Math.min(Math.round(p.mtimeMs), now) : now;
-  const batchId = ctx.repo.createImportBatch({ fileName, pageKind: 'unknown', fileMtime: mtime, importedAt: now, itemCount: 0, categories: {}, bank: null });
-  const result: ImportResult = { batchId, fileName, pageKind: 'unknown', bank: null, parsed: 0, stored: 0, skipped: [], warnings: [p.warning.slice(0, 500)] };
+  // A folder-watch file, so always a 'file' (F21).
+  const batchId = ctx.repo.createImportBatch({ fileName, pageKind: 'unknown', fileMtime: mtime, importedAt: now, itemCount: 0, categories: {}, bank: null, origin: 'file' });
+  const result: ImportResult = { batchId, fileName, pageKind: 'unknown', bank: null, parsed: 0, stored: 0, skipped: [], warnings: [p.warning.slice(0, 500)], origin: 'file' };
   ctx.push('import.done', result);
   ctx.log.info(`recorded ${fileName} as not imported: ${result.warnings[0]}`);
   return result;

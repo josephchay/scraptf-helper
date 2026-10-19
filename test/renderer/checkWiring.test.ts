@@ -15,7 +15,7 @@ describe('window kind', () => {
     expect(app).toMatch(/kind === 'check' \? <CheckPopup \/>/);
     expect(app).toContain("check: 'Live check · TF2 Flip Desk'");
     const api = read('api.ts');
-    expect(api).toContain("export type WindowKind = 'dashboard' | 'quick-entry' | 'check';");
+    expect(api).toContain("export type WindowKind = 'dashboard' | 'quick-entry' | 'check' | 'scraptf';");
     expect(api).toContain("location.hash.startsWith('#/check')");
   });
 });

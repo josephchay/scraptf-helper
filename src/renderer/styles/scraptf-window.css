@@ -1,0 +1,291 @@
+/* scrap.tf window (F21): the toolbar page of the opt-in scrap.tf window (pages/ScraptfWindowBar.tsx,
+   window kind 'scraptf', 48 px tall above main's scrap.tf view; classes stfw-*), and the dashboard's
+   entry points to it (the nav item, the banks cards' button). Colours come from tokens.css only, so
+   both themes work. Nothing here loads anything: no url() and no @import (the compliance scan reads
+   style sheets too). The scrap.tf page itself is never styled by the app.
+
+   The bar is exactly 48 px including its border: main lays the view from y = 48 down, and anything
+   drawn below that line is under the view. So the bar never wraps; it gives way in this order as the
+   window narrows: tighter chips, Log out & clear down to its icon, the bank chips scrolling sideways,
+   then the short labels of Read page now and the risk pill. Nothing animates. */
+
+html[data-window='scraptf'] body {
+  overflow: hidden;
+  background: var(--surface);
+}
+
+.stfw-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 48px;
+  box-sizing: border-box;
+  padding: 0 8px;
+  overflow: hidden;
+  border-bottom: 1px solid var(--border-strong);
+  background: var(--surface);
+  white-space: nowrap;
+}
+
+.stfw-nav {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex: none;
+}
+
+.stfw-navbtn {
+  width: 30px;
+  height: 30px;
+}
+
+.stfw-navbtn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.stfw-navbtn:disabled:hover {
+  background: transparent;
+  color: var(--text-muted);
+}
+
+/* The bank shortcuts: a row that scrolls sideways when the window is narrow (never a second line). */
+.stfw-chips {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex: 0 1 auto;
+  min-width: 0;
+  height: 100%;
+  padding: 0 6px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+  border-left: 1px solid var(--border);
+  border-right: 1px solid var(--border);
+}
+
+.stfw-chips::-webkit-scrollbar {
+  display: none;
+}
+
+.stfw-chip {
+  flex: none;
+  height: 26px;
+  padding: 0 9px;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 550;
+  cursor: pointer;
+}
+
+.stfw-chip:hover {
+  background: var(--surface-2);
+  color: var(--text);
+}
+
+.stfw-chip.active {
+  border-color: var(--accent);
+  background: var(--accent-weak);
+  color: var(--text);
+}
+
+/* Inside the scroller, so the focus ring is not clipped by it. */
+.stfw-chip:focus-visible {
+  outline-offset: -2px;
+}
+
+/* Address over the status line, two short lines in the middle of the bar. */
+.stfw-info {
+  display: flex;
+  flex: 1 1 260px;
+  flex-direction: column;
+  justify-content: center;
+  gap: 1px;
+  min-width: 160px;
+  overflow: hidden;
+}
+
+.stfw-address-row {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  color: var(--text-muted);
+}
+
+.stfw-address-row > .icon {
+  flex: none;
+}
+
+.stfw-address-row.kind-scraptf > .icon {
+  color: var(--good);
+}
+
+.stfw-address-row.kind-steam > .icon,
+.stfw-address-row.kind-other > .icon {
+  color: var(--warn);
+}
+
+.stfw-address {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 18px;
+  margin: 0;
+  padding: 0 4px;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text);
+  font: 12px/16px var(--mono);
+  text-overflow: ellipsis;
+}
+
+.stfw-address:focus {
+  border-color: var(--border-strong);
+  background: var(--input-bg);
+}
+
+.stfw-address::placeholder {
+  color: var(--text-faint);
+}
+
+.stfw-loading {
+  flex: none;
+  color: var(--info);
+  font-size: 11px;
+}
+
+.stfw-statusline {
+  display: flex;
+  min-width: 0;
+  padding-left: 17px;
+  color: var(--text-muted);
+  font-size: 11.5px;
+  line-height: 16px;
+}
+
+.stfw-status {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.stfw-age {
+  flex: none;
+}
+
+.stfw-read,
+.stfw-clear {
+  flex: none;
+}
+
+/* The always-visible risk pill is a button: a click puts the whole risk in the status line. */
+.stfw-risk {
+  flex: none;
+  border: 1px solid color-mix(in srgb, var(--tone) 40%, transparent);
+  font-family: inherit;
+  cursor: help;
+}
+
+.stfw-short {
+  display: none;
+}
+
+/* Room for the status line first: tighter chips, then Log out & clear as its icon (named by aria-label). */
+@media (max-width: 1440px) {
+  .stfw-chip {
+    padding: 0 7px;
+  }
+}
+
+@media (max-width: 1320px) {
+  .stfw-clear .stfw-long {
+    display: none;
+  }
+}
+
+@media (max-width: 1180px) {
+  .stfw-read .stfw-long,
+  .stfw-risk .stfw-long {
+    display: none;
+  }
+
+  .stfw-read .stfw-short,
+  .stfw-risk .stfw-short {
+    display: inline;
+  }
+}
+
+/* Only in the browser preview (#/scraptf-bar): what would show under the bar in the app. */
+.stfw-mock {
+  margin: 0;
+  padding: 16px;
+}
+
+/* ---- Entry points in the dashboard ------------------------------------------------------------ */
+
+/* The nav item opens a window instead of a page: a button that looks like the links around it. */
+.nav-link.nav-window {
+  width: 100%;
+  border: 0;
+  background: transparent;
+  font: inherit;
+  font-weight: 550;
+  text-align: left;
+  cursor: pointer;
+}
+
+.nav-link.nav-window .nav-ext {
+  margin-left: auto;
+  color: var(--text-faint);
+}
+
+/* The icon-only nav (layout.css, 1100 px and down) keeps the window's own icon only. */
+@media (max-width: 1100px) {
+  .nav-link.nav-window {
+    text-align: center;
+  }
+
+  .nav-link.nav-window .nav-ext {
+    display: none;
+  }
+}
+
+/* Settings → scrap.tf window (opt-in). */
+.stfw-settings-lists {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 260px), 1fr));
+  gap: 12px;
+  margin: 10px 0;
+}
+
+.stfw-settings-lists h3 {
+  margin: 0 0 4px;
+  font-size: 12.5px;
+}
+
+.stfw-settings-lists ul {
+  margin: 0;
+  padding-left: 18px;
+}
+
+.stfw-settings-lists li + li {
+  margin-top: 3px;
+}
+
+.stfw-risk-text p {
+  margin: 0;
+}
+
+.stfw-risk-text p + p {
+  margin-top: 4px;
+}
+
+.stfw-ack-when {
+  margin: -6px 0 10px;
+}

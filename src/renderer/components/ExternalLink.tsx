@@ -7,10 +7,10 @@ import { Icon } from './Icon';
 /**
  * Opens an https link through main's allowlist ('links.open'). When main
  * refuses (host not allowlisted, mock mode), the address is copied instead
- * and the reason is shown.
+ * and the reason is shown. F21 `allowWindow`: see openLink (only for an open worded for the scrap.tf window).
  */
-export async function openOrCopy(url: string, toast: (text: string, tone?: ToastTone) => void): Promise<void> {
-  const r = await openLink(url);
+export async function openOrCopy(url: string, toast: (text: string, tone?: ToastTone) => void, opts: { allowWindow?: boolean } = {}): Promise<void> {
+  const r = await openLink(url, opts);
   if (r.opened) return;
   const copied = await copyText(url);
   const why = r.reason ?? 'The link could not be opened.';

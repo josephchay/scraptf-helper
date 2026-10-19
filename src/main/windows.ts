@@ -1,8 +1,9 @@
 // Dashboard, quick-entry and live check popup windows, plus the hardening
 // applied to every webContents and to the default session.
 
-import { BrowserWindow, screen, type Session, type WebContents, type WebPreferences } from 'electron';
+import { BrowserWindow, screen, type Certificate, type Session, type WebContents, type WebPreferences } from 'electron';
 import type { Logger } from '../service/contracts';
+import { createPageLog } from './pageLog';
 import type { PushContract, PushEvent } from '../shared/rpc';
 import type { CheckResult } from '../shared/types';
 import {
@@ -111,20 +112,37 @@ export function windowWebPreferences(kind: WindowKind, preloadPath: string, devT
   };
 }
 
+export interface HardenOptions {
+  /**
+   * F21: true for the scrap.tf window's view (ScraptfWindowManager.ownsContents), asked at event time
+   * because 'web-contents-created' fires inside the view's constructor. Its navigation is then left to
+   * that module's own policy (scraptfWindowPolicy), which installs its handlers after creation; webviews
+   * stay blocked. Anything that throws counts as false, so every other webContents keeps app:// only.
+   */
+  ownNavigation?(contents: WebContents): boolean;
+}
+
 /** Applied to every webContents (app 'web-contents-created'). */
-export function hardenWebContents(contents: WebContents, log: Logger): void {
+export function hardenWebContents(contents: WebContents, log: Logger, opts: HardenOptions = {}): void {
+  const own = (): boolean => {
+    try {
+      return opts.ownNavigation?.(contents) === true;
+    } catch {
+      return false;
+    }
+  };
   contents.setWindowOpenHandler(({ url }) => {
     log.warn('blocked window.open', { url: url.slice(0, 200) });
     return { action: 'deny' };
   });
   contents.on('will-attach-webview', (event) => event.preventDefault());
   contents.on('will-navigate', (event) => {
-    if (isAppNavigationUrl(event.url)) return;
+    if (isAppNavigationUrl(event.url) || own()) return;
     event.preventDefault();
     log.warn('blocked navigation', { url: event.url.slice(0, 200) });
   });
   contents.on('will-redirect', (event) => {
-    if (isAppNavigationUrl(event.url)) return;
+    if (isAppNavigationUrl(event.url) || own()) return;
     event.preventDefault();
     log.warn('blocked redirect', { url: event.url.slice(0, 200) });
   });
@@ -154,6 +172,44 @@ export function hardenSession(ses: Session, log: Logger): void {
     if (!allowed) log.warn('blocked renderer network request', { url: details.url.slice(0, 200) });
     callback({ cancel: !allowed });
   });
+}
+
+/**
+ * F21: the scrap.tf window's own session (partition 'scraptf' or 'persist:scraptf'): every permission and
+ * device request denied (clipboard included: nothing of ours runs there), downloads cancelled. Unlike
+ * hardenSession there is no request filter, because the page the user browses loads its own resources;
+ * the app adds no request of its own, and the session's cookies are never read (R9). A page asks for
+ * these at its own rate, so their log lines go through a PageLog (one per kind a minute, the rest counted).
+ */
+export function hardenScraptfSession(ses: Session, log: Logger, now: () => number = Date.now): void {
+  const pageLog = createPageLog(log, now);
+  ses.setPermissionRequestHandler((_wc, permission, callback) => {
+    pageLog.line('info', `permission ${permission}`, `scrap.tf window: denied permission request: ${permission}`);
+    callback(false);
+  });
+  ses.setPermissionCheckHandler(() => false);
+  ses.setDevicePermissionHandler(() => false);
+  ses.on('will-download', (event) => {
+    event.preventDefault();
+    pageLog.line('warn', 'download', 'scrap.tf window: blocked a download');
+  });
+}
+
+/**
+ * F21: app 'select-client-certificate'. Without a handler Electron silently presents the first matching
+ * certificate in the user's certificate store to any host that asks (Chrome would show a picker), and the
+ * scrap.tf view's pages, with no request filter, can reach any host. Flip Desk needs no client certificate,
+ * so every request goes on without one.
+ */
+export function refuseClientCertificate(
+  event: { preventDefault(): void },
+  _contents: unknown,
+  _url: string,
+  _certificates: unknown,
+  callback: (certificate?: Certificate) => void,
+): void {
+  event.preventDefault();
+  callback();
 }
 
 export function createWindowManager(opts: WindowManagerOptions): WindowManager {

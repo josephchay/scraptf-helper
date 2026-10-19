@@ -11,6 +11,7 @@ import { SCRAPTF_BANK_IDS, type DeepPartial, type ScraptfBank, type Settings } f
 import { isValidAccelerator, sameAccelerator } from './accelerator';
 import { CHECK_HOTKEY_CONFLICT } from './check';
 import { CONTACT_MAX, CONTACT_RE } from './contact';
+import { gateScraptfWindow, scraptfWindowEnableProblem } from './scraptfWindowPolicy';
 
 const MAX_SCRAP = 1_000_000_000;
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -143,6 +144,15 @@ const checkSchema = z.object({
   popup: bool,
 });
 
+// F21: the opt-in scrap.tf window. Missing from files before 0.7, so the lenient load falls back to off.
+const scraptfWindowSchema = z.object({
+  enabled: bool,
+  acknowledgedAt: timestamp.nullable(),
+  keepLoggedIn: bool,
+  readOnLoad: bool,
+  openLinksInWindow: bool,
+});
+
 const uiSchema = z.object({
   theme: z.enum(['system', 'dark', 'light']),
   density: z.enum(['comfortable', 'compact']),
@@ -158,6 +168,7 @@ export const settingsSchema = z.object({
   notifications: notificationsSchema,
   app: appSchema,
   check: checkSchema,
+  scraptfWindow: scraptfWindowSchema,
   networkPaused: bool,
   blocklist: z.array(steamId64).max(10_000),
   ui: uiSchema,
@@ -174,6 +185,7 @@ export const settingsPatchSchema = z.object({
   notifications: notificationsSchema.partial().optional(),
   app: appSchema.partial().optional(),
   check: checkSchema.partial().optional(),
+  scraptfWindow: scraptfWindowSchema.partial().optional(),
   networkPaused: bool.optional(),
   blocklist: z.array(steamId64).max(10_000).optional(),
   ui: uiSchema.partial().optional(),
@@ -291,6 +303,11 @@ export function parseSettingsWithReport(raw: unknown): { settings: Settings; inv
     settings.check.hotkey = '';
     invalid.push('check.hotkey');
   }
+  // F21: a file with the window on but a gate missing (edited by hand, import turned off) loads it off.
+  if (settings.scraptfWindow.enabled && scraptfWindowEnableProblem(settings) !== null) {
+    settings.scraptfWindow.enabled = false;
+    invalid.push('scraptfWindow.enabled');
+  }
   return { settings, invalid };
 }
 
@@ -337,5 +354,8 @@ export function applySettingsPatch(base: Settings, patch: unknown): Settings {
   if (!r.success) throw new SettingsValidationError(describeIssues(r.error));
   const problem = crossFieldProblem(r.data);
   if (problem) throw new SettingsValidationError(`Invalid settings: ${problem}`);
-  return r.data;
+  // F21: turning the window on needs import, its acknowledgement and the window's own; losing one turns it off.
+  const gate = gateScraptfWindow(r.data, valid.scraptfWindow?.enabled === true);
+  if (!gate.ok) throw new SettingsValidationError(`Invalid settings: ${gate.message}`);
+  return gate.settings;
 }

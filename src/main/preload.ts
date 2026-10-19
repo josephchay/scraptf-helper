@@ -7,7 +7,7 @@ import { MAIN_METHODS, PUSH_EVENTS, SERVICE_METHODS, type FlipdeskBridge, type P
 
 // Keep in sync with WINDOW_KIND_ARG and WINDOW_KINDS in src/main/paths.ts (a test compares them).
 const WINDOW_KIND_ARG = '--flipdesk-window=';
-export const PRELOAD_WINDOW_KINDS: readonly string[] = ['dashboard', 'quick-entry', 'check'];
+export const PRELOAD_WINDOW_KINDS: readonly string[] = ['dashboard', 'quick-entry', 'check', 'scraptf'];
 
 const pushEvents = new Set<string>(PUSH_EVENTS);
 

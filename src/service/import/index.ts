@@ -31,7 +31,7 @@ export {
   type MhtmlRead,
 } from './mhtml';
 
-export { decodedTooLargeWarning, parseSavedPage, tooLargeWarning, type SavedPageParse } from './savedPage';
+export { decodedTooLargeWarning, parseSavedPage, tooLargeWarning, type SavedPageOptions, type SavedPageParse } from './savedPage';
 
 export {
   WATCH_DEBOUNCE_MS,

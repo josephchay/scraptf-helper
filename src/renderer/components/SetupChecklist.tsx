@@ -61,7 +61,7 @@ export function SetupChecklist() {
         <div>
           <h2 id="setup-title">Get set up</h2>
           <p className="muted">
-            {doneCount} of {steps.length} done. The app only reads public APIs and never contacts scrap.tf.
+            {doneCount} of {steps.length} done. The app only reads public APIs and never fetches scrap.tf itself.
           </p>
         </div>
         <button type="button" className="btn ghost small" onClick={() => setDismissedKey(key)}>

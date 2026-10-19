@@ -4,9 +4,12 @@
 // opt-in watch folder (R10). "Open in browser" hands the static page to links.open (openOrCopy);
 // the app never visits scrap.tf (R1): no fetch, no embedded view, nothing polled. Pure helpers
 // live in banksModel.ts, styles in styles/banks.css. F17: each card says what changed since the
-// previous save and links to the bank's stock page (#/banks/<bank>/stock).
+// previous save and links to the bank's stock page (#/banks/<bank>/stock). F21: while the user has
+// the opt-in scrap.tf window on, each card also has "Open in Flip Desk window" ('scraptfWindow.open'
+// with the bank's static SCRAPTF_BANKS page, on a click only); main loads it there for the user.
 
 import { useCallback, useEffect, useId, useMemo, useRef, useState, type KeyboardEvent, type MouseEvent } from 'react';
+import { scraptfBankInfo } from '../../shared/links';
 import type { Scrap, ScraptfBank, ScraptfBanksResult, ScraptfListStatus, UnixMs } from '../../shared/types';
 import { rpc } from '../api';
 import {
@@ -29,12 +32,14 @@ import { Icon } from '../components/Icon';
 import { useItemMenu, type ItemMenuTarget } from '../components/ItemMenu';
 import { ItemName } from '../components/ItemName';
 import { SaveModeChoice, SetupNoteView, copyFolderPath, useScraptfListStatus, useWatchFolderPicker } from '../components/ScraptfListCard';
+import { errorMessage } from '../format';
 import { useApp } from '../hooks/appContext';
 import { useThrottled, useVisiblePush } from '../hooks/useRpc';
 import { useNow } from '../hooks/useTimers';
 import { SAVE_MODE, SAVE_MODE_LIST_ONLY } from '../importModel';
 import { marketBankPath } from '../marketModel';
 import { LIST_BOUNDARY_NOTE, listSetupNote, listSetupState, listStatusLine } from '../scraptfListModel';
+import { bankWindowView, OPEN_IN_WINDOW_LABEL, windowOpenFailedText, windowOpenTitle, type BankWindowView } from '../scraptfWindowModel';
 
 type MenuPoint = { x: number; y: number };
 
@@ -75,7 +80,7 @@ function useBanks(): { data: ScraptfBanksResult | null; error: string | null; re
 }
 
 export function BanksPage() {
-  const { keyScrap, segments, navigate, openItem, toast } = useApp();
+  const { keyScrap, segments, navigate, openItem, toast, settings } = useApp();
   const banks = useBanks();
   const list = useScraptfListStatus();
   const folder = useWatchFolderPicker();
@@ -83,6 +88,14 @@ export function BanksPage() {
   const menu = useItemMenu();
   const openMenu = useRef(menu.open);
   openMenu.current = menu.open;
+  const scraptfWindow = bankWindowView(settings);
+
+  const openInWindow = (c: BankCardView) => {
+    // The page from the static list by the card's bank id, never one an answer carried.
+    const info = scraptfBankInfo(c.bank);
+    if (!info) return;
+    rpc('scraptfWindow.open', { start: info.url }).catch((e: unknown) => toast(windowOpenFailedText(errorMessage(e)), 'bad'));
+  };
 
   return (
     <div className="page banks-page">
@@ -94,11 +107,13 @@ export function BanksPage() {
         keyScrap={keyScrap}
         picking={folder.picking}
         focusBank={banksRouteBank(segments)}
+        scraptfWindow={scraptfWindow}
         onRetry={banks.refresh}
         onPickFolder={folder.pick}
         onGoImport={() => navigate('import')}
         onCopyPath={(path) => copyFolderPath(path, toast)}
-        onOpenBank={(c) => void openOrCopy(c.url, toast)}
+        onOpenBank={(c) => void openOrCopy(c.url, toast, { allowWindow: true })}
+        onOpenInWindow={openInWindow}
         onImportOff={() => toast(IMPORT_OFF_TIP, 'warn')}
         onItem={openItem}
         onItemMenu={(target, at) => openMenu.current(target, at)}
@@ -112,8 +127,8 @@ export function BanksPage() {
         }}
       />
       <p className="hint-line muted small">
-        Keyboard: arrows move between the pages, <kbd>Enter</kbd> opens the focused one in your browser, <kbd>Shift</kbd>+<kbd>F10</kbd> or right-click on an item for its
-        actions.
+        Keyboard: arrows move between the pages, <kbd>Enter</kbd> opens the focused one in {openTarget(scraptfWindow)}, <kbd>Shift</kbd>+<kbd>F10</kbd> or right-click on an item
+        for its actions.
       </p>
       {menu.element}
     </div>
@@ -132,12 +147,16 @@ export interface BanksViewProps {
   picking: boolean;
   /** #/banks/<bank>: focus that card once (a Live market coverage chip). */
   focusBank: ScraptfBank | null;
+  /** F21: the user's opt-in scrap.tf window (bankWindowView); null or absent while it is off. */
+  scraptfWindow?: BankWindowView | null;
   onRetry(): void;
   onPickFolder(): void;
   onGoImport(): void;
   onCopyPath(path: string): void;
   /** Hands card.url (a static SCRAPTF_BANKS page) to the user's browser. */
   onOpenBank(card: BankCardView): void;
+  /** F21: "Open in Flip Desk window" (shown only with `scraptfWindow`). */
+  onOpenInWindow?(card: BankCardView): void;
   /** Enter on a card while import is off (its Open button is disabled). */
   onImportOff(): void;
   onItem(sku: string): void;
@@ -161,7 +180,18 @@ export function BanksView(p: BanksViewProps) {
         <BankGrid
           cards={cards}
           focusBank={p.focusBank}
-          actions={{ importOff, listDetail, onOpenBank: p.onOpenBank, onImportOff: p.onImportOff, onItem: p.onItem, onItemMenu: p.onItemMenu, onSeeAll: p.onSeeAll, onViewStock: p.onViewStock }}
+          actions={{
+            importOff,
+            listDetail,
+            scraptfWindow: p.scraptfWindow ?? null,
+            onOpenBank: p.onOpenBank,
+            onOpenInWindow: p.onOpenInWindow,
+            onImportOff: p.onImportOff,
+            onItem: p.onItem,
+            onItemMenu: p.onItemMenu,
+            onSeeAll: p.onSeeAll,
+            onViewStock: p.onViewStock,
+          }}
         />
       ) : p.error ? null : (
         <LoadingBlock label="Reading your saved scrap.tf pages…" />
@@ -215,11 +245,18 @@ function BanksHeader(p: BanksViewProps) {
 const MOVE_KEYS: ReadonlySet<string> = new Set(['ArrowRight', 'ArrowLeft', 'ArrowDown', 'ArrowUp', 'Home', 'End']);
 
 /** What a card does and shows besides its own data. */
-type CardActions = Pick<BanksViewProps, 'onOpenBank' | 'onImportOff' | 'onItem' | 'onItemMenu' | 'onSeeAll' | 'onViewStock'> & {
+type CardActions = Pick<BanksViewProps, 'onOpenBank' | 'onOpenInWindow' | 'onImportOff' | 'onItem' | 'onItemMenu' | 'onSeeAll' | 'onViewStock'> & {
   importOff: boolean;
   /** The list card's F14 detail ("3 saved pages, the oldest 26 h ago"), or null. */
   listDetail: string | null;
+  /** F21: the user's scrap.tf window, null while it is off. */
+  scraptfWindow: BankWindowView | null;
 };
+
+/** Where Enter (links.open) sends a card's page: main opens it in the scrap.tf window when the user chose that. */
+function openTarget(w: BankWindowView | null | undefined): string {
+  return w?.linksHere ? 'the Flip Desk window' : 'your browser';
+}
 
 /** The responsive card grid: one roving tab stop, arrows between cards, Enter opens the focused bank. */
 function BankGrid({ cards, focusBank, actions: a }: { cards: BankCardView[]; focusBank: ScraptfBank | null; actions: CardActions }) {
@@ -268,7 +305,7 @@ function BankGrid({ cards, focusBank, actions: a }: { cards: BankCardView[]; foc
   };
 
   return (
-    <div className="banks-grid" role="group" aria-label="Your scrap.tf pages. Arrow keys move between them, Enter opens one in your browser.">
+    <div className="banks-grid" role="group" aria-label={`Your scrap.tf pages. Arrow keys move between them, Enter opens one in ${openTarget(a.scraptfWindow)}.`}>
       {cards.map((c, i) => (
         <BankCard
           key={c.bank}
@@ -295,6 +332,7 @@ function BankCard(p: {
   actions: CardActions;
 }) {
   const { card: c, actions: a } = p;
+  const w = a.scraptfWindow;
   const ids = useId();
   const titleId = `${ids}-title`;
   const savedId = `${ids}-saved`;
@@ -358,19 +396,43 @@ function BankCard(p: {
       ) : null}
 
       <div className="bank-open">
-        {/* Eight buttons read alike: the name says which page, starting with the visible text. */}
-        <button
-          type="button"
-          className={`btn small${fresh ? '' : ' primary'}`}
-          disabled={a.importOff}
-          title={a.importOff ? IMPORT_OFF_TIP : c.openTitle}
-          aria-label={`Open in browser: ${c.path}`}
-          onClick={() => a.onOpenBank(c)}
-        >
-          <Icon name="external" size={13} /> Open in browser
-        </button>
+        {/* Eight buttons read alike: the name says which page, starting with the visible text. F21: when
+            main sends Flip Desk's scrap.tf links to the user's window, this one would land there too. */}
+        {w?.linksHere ? null : (
+          <button
+            type="button"
+            className={`btn small${fresh ? '' : ' primary'}`}
+            disabled={a.importOff}
+            title={a.importOff ? IMPORT_OFF_TIP : c.openTitle}
+            aria-label={`Open in browser: ${c.path}`}
+            onClick={() => a.onOpenBank(c)}
+          >
+            <Icon name="external" size={13} /> Open in browser
+          </button>
+        )}
+        {w ? (
+          <button
+            type="button"
+            className={`btn small bank-open-window${w.linksHere && !fresh ? ' primary' : ''}`}
+            disabled={a.importOff}
+            title={a.importOff ? IMPORT_OFF_TIP : windowOpenTitle(c.path, w.readOnLoad)}
+            aria-label={`${OPEN_IN_WINDOW_LABEL}: ${c.path}`}
+            onClick={() => a.onOpenInWindow?.(c)}
+          >
+            <Icon name="window" size={13} /> {OPEN_IN_WINDOW_LABEL}
+          </button>
+        ) : null}
         <span className="bank-tip muted small" title={c.isList ? LIST_SAVE_TIP : BANK_SAVE_TIP}>
-          Save it with <kbd>Ctrl</kbd>+<kbd>S</kbd> as <strong>{SAVE_MODE}</strong> into your watch folder; it updates here within seconds.
+          {w ? (
+            <>
+              In the Flip Desk window it is {w.readOnLoad ? 'read as it loads' : 'read when you press Read page now'}; or save it with <kbd>Ctrl</kbd>+<kbd>S</kbd> as{' '}
+              <strong>{SAVE_MODE}</strong> into your watch folder.
+            </>
+          ) : (
+            <>
+              Save it with <kbd>Ctrl</kbd>+<kbd>S</kbd> as <strong>{SAVE_MODE}</strong> into your watch folder; it updates here within seconds.
+            </>
+          )}
         </span>
       </div>
 
