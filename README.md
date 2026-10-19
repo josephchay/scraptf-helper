@@ -304,7 +304,7 @@ npm run dev:renderer
 npm run dist
 ```
 
-- `npm test` runs about 5,400 vitest tests, including the compliance tests: network policy, static scans for forbidden calls and for scrap.tf pages opened from anything but the fixed list, the saved-page readers (pure, and nothing named inside a saved `.html` or `.mhtml` file is ever loaded), the clipboard rules (plain text only, read in main only, never logged), notification links (only a bank page's fixed address, checked again when clicked), the scrap.tf window (only one module may show scrap.tf, every page load comes from a user action and never a timer or an event, the one pinned read script, no preload, no user agent, header or cookie calls anywhere), and secret redaction. The tests that measure timings run last, as their own group.
+- `npm test` runs about 5,400 vitest tests, including the compliance tests: network policy, static scans for forbidden calls and for scrap.tf pages opened from anything but the fixed list, the saved-page readers (pure, and nothing named inside a saved `.html` or `.mhtml` file is ever loaded), the clipboard rules (plain text only, read in main only, never logged), notification links (only a bank page's fixed address, checked again when clicked), the scrap.tf window (only one module may show scrap.tf, every page load comes from a user action and never a timer or an event, the one pinned read script, no preload, no user agent, header or cookie calls anywhere), the window test (only its harness may drive the window or answer its requests, and only main's diagnostics-gated branch loads it), and secret redaction. The tests that measure timings run last, as their own group.
 - `npm run dev:renderer` serves the dashboard in a browser with mock data, at http://127.0.0.1:5199.
 - `npm run dist` builds the NSIS installer into `release/`.
 - **Smoke test** against the real app and live feeds (development builds):
@@ -312,6 +312,22 @@ npm run dist
   ```bash
   npx electron . --smoke-test=test/.tmp/smoke.json --user-data-dir=test/.tmp/ud --smoke-wait=45
   ```
+
+- **Window test** of the scrap.tf window (development builds). It runs the real window, toolbar, page view and import against local copies of the test pages, and never contacts scrap.tf or any other site from the window:
+
+  ```bash
+  npm run build
+  npx electron . --smoke-window=test/.tmp/window.json --user-data-dir=test/.tmp/ud-window
+  ```
+
+  - **What it proves.** Every request from the window is answered by a local router, and anything that is not http(s) is cancelled. During the run Chromium resolves no host name and uses no proxy, and nothing is handed to your browser. The report lists every request.
+  - **Reads.** Two bank pages are read on load. Each is imported as a window read that matches a file import of the same page.
+  - **Keys.** F5, Ctrl+R, Alt+Left, Alt+Right and Alt+Home in the page move the window, and a held key does nothing. If Electron's synthetic key presses never reach the window's key handler, those steps are reported as *not testable*, not as failures.
+  - **Other pages.** Steam's sign-in stays in the window and is never read. A Cloudflare-style 403 shows its notice and is neither read nor imported, even at a bank page's address. A partial look at the hats page stores no stock snapshot and marks nothing as gone.
+  - **Clean-up.** *Log out & clear* empties the window's storage, closing it leaves nothing open, and only the pinned read script ever ran in the page.
+  - **Result.** The JSON report lists each step with its result. The exit code is 0 when no step failed.
+  - **When it refuses.** It turns the window on in the profile it runs in, so it refuses to start (exit 1) in a packaged build without `FLIPDESK_DIAGNOSTICS=1`, next to `--smoke-test`, or without a `--user-data-dir` of its own. The app's normal profile is refused.
+  - **Before you run it.** Close Flip Desk first, because only one copy runs per machine. Keep the window in front for the key steps. The background service still loads item data from PriceDB and backpack.tf as usual.
 
 **Documentation:**
 - `docs/ARCHITECTURE.md`: processes, modules, rules R1–R10.

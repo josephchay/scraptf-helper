@@ -63,7 +63,7 @@ Wire protocol and the RPC method list: `src/shared/rpc.ts`. Domain types: `src/s
 | `src/service/priceSheetIo.ts`, `buyerCheck.ts`, `rpcSchemas.ts` | bulk paste and backups (pure); `buyer.check` lookups; zod schemas shared by more than one handler |
 | `src/service/import/*` | saved scrap.tf page parser (`scraptfHtml.ts`, parse5, no script execution), the MHTML extractor (`mhtml.ts`, F18, pure), the one entry for both file types (`savedPage.ts`), folder watcher; from 0.7.1 the in-memory ring of sanitized parser reports behind `'import.report'` (`reports.ts`, P4, never persisted) |
 | `src/service/core.ts`, `scheduler.ts`, `rpcHandlers.ts`, `entry.ts`, `logger.ts` | wiring and periodic jobs (integration) |
-| `src/main/*` | Electron main, preload, windows, tray, settings store, secrets, service host; the live check's controller (`liveCheck.ts`, with F19's `check.arm`), clipboard filter and watcher (`clipboardWatch.ts`) and global hotkey registration (`hotkeys.ts`); the opt-in scrap.tf window (`scraptfWindow.ts`, F21), the only module that may show scrap.tf, and from 0.7.1 its remembered size and place (`windowBounds.ts`, F21-12) |
+| `src/main/*` | Electron main, preload, windows, tray, settings store, secrets, service host; the live check's controller (`liveCheck.ts`, with F19's `check.arm`), clipboard filter and watcher (`clipboardWatch.ts`) and global hotkey registration (`hotkeys.ts`); the opt-in scrap.tf window (`scraptfWindow.ts`, F21), the only module that may show scrap.tf, and from 0.7.1 its remembered size and place (`windowBounds.ts`, F21-12); diagnostics only, the window's hermetic test (`smokeWindow.ts`, loaded by main's gated `--smoke-window` branch alone, and its pure local router `smokeWindowFixtures.ts`) |
 | `src/renderer/*` | dashboard UI; `api.ts` uses `window.flipdesk` or, in a plain browser, `mock.ts`. Page logic lives in pure, unit-tested `*Model.ts` files |
 | `test/<area>/*.test.ts`, `test/fixtures/<area>/*` | vitest tests and fixtures per area |
 
@@ -2606,6 +2606,52 @@ Synthetic sources prove each scan.
 - Renderer: `scraptfWindowModel`, `scraptfWindowBar` (mounted against the mock: no move on mount or on a push),
   `settingsScraptfWindow`, `scraptfWindowNav`, `scraptfWindowLinks`, `mockScraptfWindow` and the F21 block of
   `banksPage` tests.
+
+**Window test** (0.7.1, `--smoke-window=<report.json>`, `main/smokeWindow.ts` with the pure router
+`main/smokeWindowFixtures.ts`). It is a diagnostics-only live run of the real window, toolbar, view and service
+import, and it never contacts scrap.tf or any other site from the window.
+
+- **Gate** (`smokeWindowRefusal`, paths.ts). The run needs diagnostics (as `--smoke-test`), a report path and a
+  `--user-data-dir` that is not, is not inside and does not hold `appData/<app name>`. It cannot run beside
+  `--smoke-test`. Otherwise main prints a fixed refusal and exits 1 before the profile, the lock or any window.
+  Only then does main load the harness, with a gated `import()` before `start()`.
+- **Local network.** The harness's `session-created` and `web-contents-created` hooks give every non-default
+  session `protocol.handle('https'|'http')` through the router, never a real fetch. A `webRequest.onBeforeRequest`
+  filter, installed first, cancels every other scheme, and http(s) too until both handlers are in (fail closed).
+  main also sets `host-resolver-rules` `MAP * ~NOTFOUND` and `no-proxy-server` (Chromium only; the service's
+  Node traffic is unchanged), so a request no handler sees, such as a resource-hint preconnect, has no name to
+  connect to and no proxy to resolve one. Preconnects are recorded and fail the run.
+- **Nothing to the user's browser.** The window hands a page its policy calls `external` to the browser after a
+  click or key, and synthetic input counts. The harness replaces `shell.openExternal` with a recorder before
+  `start()`, checks the replacement before the window opens, and fails the run on any attempt.
+- **What it records.** It taps the toolbar's `push` sends, the view's navigations and `before-input-event`, and the
+  view's script calls. Each is passed through unchanged.
+- **Steps.** It sets the window's settings in that profile and waits up to 60 s for the item schema. It then
+  file-imports `buy_hats.html` and `unusuals.html` an hour back, and runs the nine steps of its spec.
+- **Reads.** Each window read must match the file save of its fixture: the same on-sale rows, no change event
+  and the same card count.
+- **Keys.** These steps are reported `untestable`, not failed, when synthetic input does not reach
+  `before-input-event` or lacks a real key's fields.
+- **Report.** Steps, every request, script runs and a search for the Steam page's sentinel in the toolbar's
+  pushes, batches, parser reports, logs and database. The network check also needs every document the view
+  showed to be one the router served, and the script check needs the spy to have seen the reads the toolbar
+  got. The sentinel is cut out of the report file if anything carried it there, which fails the run. The
+  report has its own two-minute ceiling. A diagnostic run also registers no hotkey, clipboard watcher or
+  notification (`diagnosticRun`).
+- **Compliance.** Only `smokeWindow.ts` may send input events, focus a page, `loadURL` outside `windows.ts` and
+  `scraptfWindow.ts` (into the view, `SMOKE_…_URL` only), call `protocol.handle` (besides app://) or use
+  `webRequest` (besides `hardenSession`). Only main.ts imports it (a type, plus the one gated `import()`), and only
+  the harness imports the router. The gate's lines in main.ts are pinned.
+- **Deviations from its spec.**
+  - The window reads only importable paths (F21-4), so step 6 first checks that `/smoke/partial-hats` is not
+    read, then loads the same partial page at `/buy/hats?smoke=partial-hats`. That address is importable, and its
+    hint and page key are `/buy/hats`.
+  - Step 5 also loads the challenge at `/buy/hats?smoke=challenge`. `/smoke/challenge` is not importable, so
+    only at an importable address does "a challenge is never read" depend on the window seeing the 403.
+  - Step 4 clicks the local home page's Steam link, so `will-navigate` asks the policy (Electron asks it nothing
+    for a `loadURL`). A click the policy was asked about and that did not load fails the step. Only a click
+    that never reached the link falls back to `loadURL`, after checking the policy's answer for the address.
+  - `scraptfWindow.ts` and `READ_SCRIPT` are unchanged.
 
 Decisions and deviations from the F21 spec:
 

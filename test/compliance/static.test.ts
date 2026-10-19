@@ -1612,3 +1612,225 @@ describe('the scrap.tf window loads only what the user asks for and reads only t
     expect(deferredWindowOpens([opens]).map((h) => h.split(':')[1])).toEqual(['1', '2', '3', '4']);
   });
 });
+
+// ---------------------------------------------------------------------------
+// --smoke-window: the F21 window's hermetic test (diagnostics only). main/smokeWindow.ts is the one file
+// besides the window module that drives the window: it calls the manager outside a click, focuses the view,
+// sends it input events, loads the fixture pages into it and answers its sessions' requests locally
+// (protocol.handle, webRequest). main.ts loads it only in its gated branch, and no production module imports
+// it or its router. Nothing else gains an allowance; the scans above hold the harness to the rest.
+// ---------------------------------------------------------------------------
+
+const SMOKE_WINDOW = 'main/smokeWindow.ts';
+const SMOKE_FIXTURES = 'main/smokeWindowFixtures.ts';
+/** A page's own focus (a webContents'); BrowserWindow.focus() (`w`, `win`) is the window's and is not one. */
+const CONTENTS_FOCUS = /(?:\bwc|\bview|\bcontents|\bwebContents)\s*\.\s*focus\s*\(/g;
+const INPUT_EVENT = /\.\s*sendInputEvent\s*\(/g;
+const LOAD_URL = /\.\s*loadURL\s*\(/g;
+const PROTOCOL_HANDLE = /\bprotocol\s*\.\s*handle\s*\(/g;
+const OLD_PROTOCOL_API = /\b(?:register|intercept)(?:String|Buffer|File|Http|Stream)Protocol\s*\(/g;
+const WEB_REQUEST = /\bwebRequest\b/g;
+/** A module specifier naming the harness or its router. */
+const SMOKE_SPECIFIER = /['"](?:\.{1,2}\/)+(?:[\w.-]+\/)*smokeWindow(Fixtures)?['"]/g;
+
+/** True when the call at `at` (its ".") is made on `receiver` (the view's webContents is `wc` in the harness). */
+function calledOn(code: string, at: number, receiver: RegExp): boolean {
+  return new RegExp(`(?<![\\w$.])${receiver.source}\\s*$`).test(code.slice(Math.max(0, at - 40), at));
+}
+
+/**
+ * What only the window test may do, found anywhere else, and the harness's own calls off their pinned shape:
+ * input events and focus only to the view (`wc`), loads only of a fixture page (SMOKE_…_URL) into it, a
+ * session's https and http answered by the router (`answer`), only the request filter's onBeforeRequest, and
+ * the harness imported by main.ts alone (a type, and one import()) and its router by the harness alone.
+ */
+function smokeWindowProblems(files: readonly SourceFile[]): string[] {
+  const out: string[] = [];
+  for (const f of files) {
+    const at = (i: number) => `${f.rel}:${lineAt(f.code, i)}`;
+    const harness = f.rel === SMOKE_WINDOW;
+    for (const m of f.code.matchAll(INPUT_EVENT)) {
+      if (!harness) out.push(`${at(m.index)}: sendInputEvent outside the window test`);
+      else if (!calledOn(f.code, m.index, /wc/)) out.push(`${at(m.index)}: sendInputEvent to something but the view`);
+    }
+    if (f.rel.startsWith('main/')) {
+      for (const m of f.code.matchAll(CONTENTS_FOCUS)) if (!harness || !m[0].startsWith('wc')) out.push(`${at(m.index)}: ${m[0].replace(/\s+/g, '')}) moves a page's focus`);
+    }
+    for (const m of f.code.matchAll(LOAD_URL)) {
+      const open = m.index + m[0].length - 1;
+      if (isSignature(f.code, open) || f.rel === 'main/windows.ts' || f.rel === SCRAPTF_WINDOW) continue;
+      const args = callArgs(f.code, open).trim();
+      if (!harness) out.push(`${at(m.index)}: loadURL(${args.slice(0, 60)}) outside the window modules`);
+      else if (!calledOn(f.code, m.index, /wc/) || !/^SMOKE_\w+_URL$/.test(args)) out.push(`${at(m.index)}: loadURL(${args.slice(0, 60)}) is not a fixture page into the view`);
+    }
+    for (const m of f.code.matchAll(PROTOCOL_HANDLE)) {
+      if (f.rel === 'main/protocol.ts') continue;
+      const args = topLevelArgs(callArgs(f.code, m.index + m[0].length - 1));
+      if (!harness) out.push(`${at(m.index)}: protocol.handle outside the app:// scheme and the window test`);
+      else if (!calledOn(f.code, m.index, /ses\./) || args.length !== 2 || !["'https'", "'http'"].includes(args[0]!) || args[1] !== 'answer') {
+        out.push(`${at(m.index)}: protocol.handle(${args.join(', ').slice(0, 60)}) is not a window session's http(s) answered by the router`);
+      }
+    }
+    for (const m of f.code.matchAll(OLD_PROTOCOL_API)) out.push(`${at(m.index)}: ${m[0]}`);
+    for (const m of f.code.matchAll(WEB_REQUEST)) {
+      if (f.rel === 'main/windows.ts') continue;
+      if (!harness) out.push(`${at(m.index)}: webRequest outside the app's request filter and the window test`);
+      else if (!/^webRequest\s*\.\s*onBeforeRequest\s*\(/.test(f.code.slice(m.index))) out.push(`${at(m.index)}: a webRequest hook other than onBeforeRequest`);
+    }
+    for (const m of f.code.matchAll(SMOKE_SPECIFIER)) {
+      const before = f.code.slice(Math.max(0, m.index - 80), m.index);
+      if (m[1] !== undefined) {
+        if (!harness) out.push(`${at(m.index)}: imports the window test's router`);
+      } else if (f.rel !== 'main/main.ts') out.push(`${at(m.index)}: imports the window test`);
+      else if (!/\bimport\s*\(\s*$/.test(before) && !/\bimport\s+type\s*\{[^}]*\}\s*from\s*$/.test(before)) out.push(`${at(m.index)}: main.ts imports the window test outside its gated import()`);
+    }
+  }
+  return out;
+}
+
+describe('the window test (--smoke-window) is diagnostics-only and answers every request of the window locally (F21)', () => {
+  const file = (rel: string) => FILES.find((f) => f.rel === rel)!;
+
+  it('finds the harness and its router', () => {
+    expect(file(SMOKE_WINDOW)).toBeDefined();
+    expect(file(SMOKE_FIXTURES)).toBeDefined();
+  });
+
+  it('lets only the harness focus the view, send it input, load pages into it and answer its requests', () => {
+    expect(smokeWindowProblems(FILES)).toEqual([]);
+    // The scans see the harness's real calls.
+    const h = file(SMOKE_WINDOW).code;
+    expect([...h.matchAll(INPUT_EVENT)].length).toBeGreaterThan(0);
+    expect([...h.matchAll(LOAD_URL)].length).toBeGreaterThan(0);
+    expect([...h.matchAll(PROTOCOL_HANDLE)]).toHaveLength(2);
+    expect([...h.matchAll(WEB_REQUEST)]).toHaveLength(1);
+    // The request filter cancels every scheme but http(s), which the router answers, and http(s) too until
+    // both handlers are in (fail closed).
+    expect(h).toMatch(/onBeforeRequest\(\(details, callback\) => \{[^]*?if \(local && \(scheme === 'https:' \|\| scheme === 'http:'\)\)[^]*?callback\(\{ cancel: true \}\);/);
+    expect(h).toMatch(/ses\.protocol\.handle\('https', answer\);\s*ses\.protocol\.handle\('http', answer\);\s*local = true;/);
+    // Nothing goes to the user's browser in the run: the opener is replaced, and checked before the window opens.
+    expect(h).toContain('shell.openExternal = refuse;');
+    expect(h).toContain('outsideRefused = shell.openExternal === refuse;');
+    expect(h).toMatch(/if \(!outsideRefused\) return fail\(/);
+  });
+
+  it('never reaches the network from the harness or its router', () => {
+    const both = [file(SMOKE_WINDOW), file(SMOKE_FIXTURES)];
+    expect(offenders(WINDOW_REQUEST, () => false, both)).toEqual([]);
+    expect(
+      offenders(
+        /\bnet\s*\.\s*\w+\s*\(|import\s*\{[^}]*\bnet\b[^}]*\}\s*from\s*['"]electron['"]|from\s+['"](?:node:)?(?:http|https|http2|net|tls|dgram|child_process)['"]|from\s+['"](?:ws|socket\.io-client)['"]|(?:\.\.\/)+service\/net/,
+        () => false,
+        both,
+      ),
+    ).toEqual([]);
+    // The router is pure: shared rules only, no Electron, file or process access.
+    expect(offenders(/from\s+['"](?!\.\.\/shared\/)[^'"]+['"]|\bprocess\.|\brequire\s*\(/, () => false, [file(SMOKE_FIXTURES)])).toEqual([]);
+    // Neither writes a scrap.tf address of its own: every one is built from the shared constants.
+    expect(offenders(/\b(?:https?|wss?):\/\/([a-z0-9-]+\.)*scrap\.tf\b|['"`]scrap\.tf\//i, () => false, both)).toEqual([]);
+  });
+
+  it('calls the window manager only from the tray, the router and the harness, never deferred', () => {
+    // The tray's menu click (tray.ts) and main's action behind it, the router's cases, and the harness.
+    const callers = new Set(offenders(MAIN_WINDOW_CALL, (r) => !r.startsWith('main/') || r === SCRAPTF_WINDOW).map((h) => h.split(':')[0]));
+    expect([...callers].sort()).toEqual(['main/ipc.ts', 'main/main.ts', SMOKE_WINDOW, 'main/tray.ts']);
+    expect(offenders(MAIN_WINDOW_CALL, () => false, [file('main/main.ts')]).map((h) => h.split(': ')[1])).toEqual(['scraptfWindow?.open(']);
+    expect(mainWindowCallProblems([file(SMOKE_WINDOW)])).toEqual([]);
+    expect(offenders(MAIN_WINDOW_CALL, () => false, [file(SMOKE_WINDOW)]).length).toBeGreaterThanOrEqual(4);
+  });
+
+  it('is loaded only by main.ts, behind the diagnostics gate and the profile check, and nothing starts when the gate refuses', () => {
+    const main = file('main/main.ts').code;
+    expect(main).toContain("const allowDiagnostics = !app.isPackaged || process.env['FLIPDESK_DIAGNOSTICS'] === '1';");
+    expect(main).toContain('const args = parseLaunchArgs(process.argv, process.cwd(), { allowDiagnostics });');
+    expect(main).toMatch(
+      /const smokeWindowRefused = smokeWindowRefusal\(args, \{\s*allowDiagnostics,\s*defaultUserData: \[path\.join\(app\.getPath\('appData'\), app\.getName\(\)\)\],\s*platform: process\.platform,\s*\}\);/,
+    );
+    // The one import of the harness's code, inside the branch the gate allows.
+    const GATE = 'if (args.smokeWindow !== null && smokeWindowRefused === null) {';
+    const imports = [...main.matchAll(/\bimport\s*\(\s*['"]\.\/smokeWindow['"]\s*\)/g)];
+    expect(imports).toHaveLength(1);
+    const branch = main.indexOf(GATE);
+    expect(branch).toBeGreaterThan(-1);
+    expect(main.indexOf(GATE, branch + 1)).toBe(-1);
+    expect(imports[0]!.index).toBeGreaterThan(branch);
+    expect(imports[0]!.index).toBeLessThan(blockEnd(main, branch + GATE.length - 1));
+    expect([...main.matchAll(/['"]\.\/smokeWindow['"]/g)]).toHaveLength(2);
+    expect(main).toContain("import type { SmokeWindowRun } from './smokeWindow';");
+    // The run's Chromium resolves no host name and uses no proxy (which would resolve names for it), under the
+    // same condition.
+    expect(main).toContain("if (args.smokeWindow !== null && smokeWindowRefused === null) app.commandLine.appendSwitch('host-resolver-rules', SMOKE_WINDOW_HOST_RULES);");
+    expect(main).toContain('if (args.smokeWindow !== null && smokeWindowRefused === null) app.commandLine.appendSwitch(SMOKE_WINDOW_NO_PROXY);');
+    expect([...main.matchAll(/appendSwitch\(/g)]).toHaveLength(2);
+    // A refusal exits before the instance lock and bootstrap, which run only in the branches after it.
+    const REFUSED = 'if (smokeWindowRefused !== null) {';
+    const refusal = main.indexOf(REFUSED);
+    expect(refusal).toBeGreaterThan(-1);
+    const end = blockEnd(main, refusal + REFUSED.length - 1);
+    expect(main.slice(refusal, end)).toContain('app.exit(1);');
+    expect(main.slice(refusal, end)).not.toMatch(/bootstrap\(|start\(|requestSingleInstanceLock|setPath/);
+    expect(main.slice(end + 1)).toMatch(/^\s*else if \(!app\.requestSingleInstanceLock\(\)\)/);
+    const boots = [...main.matchAll(/(?<![\w$.])bootstrap\(\);/g)];
+    expect(boots).toHaveLength(1);
+    expect(boots[0]!.index).toBeGreaterThan(end);
+    // The profile is switched to the run's folder only when the gate let it through.
+    expect(main).toContain('if (args.userDataDir && smokeWindowRefused === null) {');
+    // And paths.ts reads the report path only with diagnostics, like --smoke-test.
+    expect(file('main/paths.ts').code).toContain("const smokeWindow = diag ? flagValue(argv, 'smoke-window') : null;");
+  });
+
+  it('catches what it claims to', () => {
+    const bad = [
+      sourceFile(SCRAPTF_WINDOW, 'wc.sendInputEvent({ type: "keyDown", keyCode: "F5" });\nwc.focus();'),
+      sourceFile('main/ipc.ts', 'view.webContents.focus();\nwin.loadURL(DASHBOARD_URL);\nw.focus();'),
+      sourceFile('main/windows.ts', 'ses.webRequest.onBeforeRequest(f);\nwin.loadURL(DASHBOARD_URL);'),
+      sourceFile('main/tray.ts', "ses.protocol.handle('https', answer);\nses.webRequest.onBeforeRequest(f);\nimport { prepareSmokeWindow } from './smokeWindow';"),
+      sourceFile('service/core.ts', "import { routeSmokeRequest } from '../main/smokeWindowFixtures';\nprotocol.registerHttpProtocol('x', h);"),
+      sourceFile(
+        SMOKE_WINDOW,
+        [
+          'wc.loadURL(SMOKE_HATS_URL);',
+          'wc.loadURL(SCRAPTF_HOME_URL);',
+          'other.loadURL(SMOKE_HATS_URL);',
+          'other.sendInputEvent(e);',
+          "ses.protocol.handle('file', answer);",
+          "protocol.handle('https', answer);",
+          'ses.webRequest.onHeadersReceived(f);',
+          'wc.focus();',
+          'wc.sendInputEvent(e);',
+          "ses.protocol.handle('https', (r) => fetchOut(r));",
+          'view.focus();',
+          'notwc.sendInputEvent(e);',
+        ].join('\n'),
+      ),
+      sourceFile('main/main.ts', "import { prepareSmokeWindow } from './smokeWindow';\nconst m = await import('./smokeWindow');\nimport type { SmokeWindowRun } from './smokeWindow';"),
+    ];
+    expect(smokeWindowProblems(bad).map((h) => h.split(': ')[0])).toEqual([
+      // The window module may neither send input nor focus its page.
+      'main/scraptfWindow.ts:1',
+      'main/scraptfWindow.ts:2',
+      // Another main file: a page's focus and a load (a BrowserWindow's own focus is fine).
+      'main/ipc.ts:1',
+      'main/ipc.ts:2',
+      // windows.ts keeps its request filter and its app:// loads.
+      'main/tray.ts:1',
+      'main/tray.ts:2',
+      'main/tray.ts:3',
+      'service/core.ts:2',
+      'service/core.ts:1',
+      // The harness: input to another target, a page that is not a fixture or a load into another view,
+      // another scheme, the app's own protocol module or a handler other than the router, another hook.
+      'main/smokeWindow.ts:4',
+      'main/smokeWindow.ts:12',
+      'main/smokeWindow.ts:11',
+      'main/smokeWindow.ts:2',
+      'main/smokeWindow.ts:3',
+      'main/smokeWindow.ts:5',
+      'main/smokeWindow.ts:6',
+      'main/smokeWindow.ts:10',
+      'main/smokeWindow.ts:7',
+      // main.ts may import a type and import() the harness, never its code statically.
+      'main/main.ts:1',
+    ]);
+  });
+});

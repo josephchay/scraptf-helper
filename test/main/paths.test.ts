@@ -238,6 +238,8 @@ describe('parseLaunchArgs', () => {
       smokeTest: path.join(cwd, 'out', 'report.json'),
       userDataDir: path.join(cwd, 'ud'),
       smokeWaitSec: 45,
+      smokeWindow: null,
+      smokeWindowAsked: false,
     });
     expect(parseLaunchArgs(['--smoke-wait=9999'], cwd).smokeWaitSec).toBe(300);
     expect(parseLaunchArgs(['--smoke-wait=abc'], cwd).smokeWaitSec).toBe(0);
@@ -250,6 +252,8 @@ describe('parseLaunchArgs', () => {
       smokeTest: null,
       userDataDir: null,
       smokeWaitSec: 0,
+      smokeWindow: null,
+      smokeWindowAsked: false,
     });
   });
 
@@ -266,6 +270,8 @@ describe('parseLaunchArgs', () => {
       smokeTest: null,
       userDataDir: path.join(cwd, 'ud'),
       smokeWaitSec: 0,
+      smokeWindow: null,
+      smokeWindowAsked: false,
     });
     expect(parseLaunchArgs(argv, cwd, { allowDiagnostics: true })).toMatchObject({ dev: true, smokeWaitSec: 120 });
   });

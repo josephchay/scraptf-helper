@@ -45,8 +45,9 @@ describe('main.ts live check wiring', () => {
     expect(MAIN).toContain('const checkClipboard = () => void liveCheck?.hotkey();');
     expect(MAIN).toContain('applyCheckHotkey: (next, prev) => applyHotkey(next, prev, checkClipboard),');
     expect(MAIN).toContain('applyHotkey: (next, prev) => applyHotkey(next, prev, toggleQuick),');
-    // A smoke test registers no hotkey at all (so it never reads the clipboard).
-    expect(MAIN).toMatch(/effects: args\.smokeTest \? undefined : \{/);
+    // A smoke test (or the window test) registers no hotkey at all (so it never reads the clipboard).
+    expect(MAIN).toMatch(/effects: diagnosticRun \? undefined : \{/);
+    expect(MAIN).toContain('const diagnosticRun = args.smokeTest !== null || args.smokeWindow !== null;');
   });
 
   it('the controller reads plain text, checks through the service with a short timeout, and shows the popup', () => {
@@ -66,8 +67,8 @@ describe('main.ts live check wiring', () => {
     expect(deps).toMatch(/\blog,?\s*\}/);
   });
 
-  it('builds the controller and the lock/suspend watch only outside a smoke test, after ready', () => {
-    const block = section('if (!args.smokeTest) {');
+  it('builds the controller and the lock/suspend watch only outside a smoke test or the window test, after ready', () => {
+    const block = section('if (!diagnosticRun) {');
     expect(block).toContain('createSystemPause(powerMonitor)');
     expect(block).toContain('liveCheck = createLiveCheckMain(');
     expect(block).toContain('rt.liveCheck = liveCheck;');

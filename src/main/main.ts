@@ -3,7 +3,8 @@
 // quick-entry hotkey and the live check (F16: its hotkey, the opt-in clipboard
 // watcher and the check popup). Flags: --hidden (login item), --user-data-dir=<path>;
 // development builds only (or FLIPDESK_DIAGNOSTICS=1): --dev (DevTools),
-// --smoke-test=<report.json>, --smoke-wait=<seconds>.
+// --smoke-test=<report.json>, --smoke-wait=<seconds>, and --smoke-window=<report.json> (the F21
+// window's hermetic test, smokeWindow.ts; it also needs a --user-data-dir that is not the app's own).
 
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { stat, writeFile } from 'node:fs/promises';
@@ -38,10 +39,22 @@ import { acquireMachineLock, type MachineLock } from './instanceLock';
 import { createRpcRouter, isJsonExportName, registerRpcHandler } from './ipc';
 import { CHECK_CALL_TIMEOUT_MS, createLiveCheckMain, type LiveCheckMain } from './liveCheck';
 import { clip, droppedOpenUrl, handleNotificationClick, notificationContent, notificationOptions } from './notify';
-import { APP_USER_MODEL_ID, parseLaunchArgs, readFileBounded, resolveAppPaths, safeErrorMessage, type AppPaths } from './paths';
+import {
+  APP_USER_MODEL_ID,
+  parseLaunchArgs,
+  readFileBounded,
+  resolveAppPaths,
+  safeErrorMessage,
+  SMOKE_WINDOW_HOST_RULES,
+  SMOKE_WINDOW_NO_PROXY,
+  smokeWindowRefusal,
+  type AppPaths,
+} from './paths';
 import { APP_SCHEME_PRIVILEGES, registerAppProtocol } from './protocol';
 import { createScraptfWindowManager, SCRAPTF_WINDOW_BOUNDS_FILE, type ScraptfWindowManager } from './scraptfWindow';
 import { createSecretsStore, type SecretsStore } from './secrets';
+// A type only: the window test's code is loaded by the gated import() in bootstrap() alone.
+import type { SmokeWindowRun } from './smokeWindow';
 import {
   createMainLog,
   createServiceHost,
@@ -61,15 +74,29 @@ declare const __APP_VERSION__: string;
 const VERSION = typeof __APP_VERSION__ === 'string' ? __APP_VERSION__ : app.getVersion();
 const SMOKE_WATCHDOG_MS = 120_000;
 
-// Diagnostic switches (DevTools, smoke-test report paths) are for development builds.
-const args = parseLaunchArgs(process.argv, process.cwd(), {
-  allowDiagnostics: !app.isPackaged || process.env['FLIPDESK_DIAGNOSTICS'] === '1',
+// Diagnostic switches (DevTools, smoke-test report paths, the window test) are for development builds.
+const allowDiagnostics = !app.isPackaged || process.env['FLIPDESK_DIAGNOSTICS'] === '1';
+const args = parseLaunchArgs(process.argv, process.cwd(), { allowDiagnostics });
+// The window test turns the scrap.tf window on in the profile it runs in: refused (exit 1, nothing started)
+// without diagnostics, beside --smoke-test, or in the app's own profile (appData plus the app's name).
+const smokeWindowRefused = smokeWindowRefusal(args, {
+  allowDiagnostics,
+  defaultUserData: [path.join(app.getPath('appData'), app.getName())],
+  platform: process.platform,
 });
-if (args.userDataDir) {
+/** A smoke test or the window test: no hotkeys, clipboard, notifications or dashboard. */
+const diagnosticRun = args.smokeTest !== null || args.smokeWindow !== null;
+/** Where a diagnostic run's report goes when it cannot start. */
+const reportFile = args.smokeTest ?? args.smokeWindow;
+if (args.userDataDir && smokeWindowRefused === null) {
   mkdirSync(args.userDataDir, { recursive: true });
   app.setPath('userData', args.userDataDir);
   app.setPath('sessionData', args.userDataDir);
 }
+// The window test's Chromium resolves no host name and uses no proxy (which would resolve names for it): its
+// pages are answered locally (smokeWindow.ts).
+if (args.smokeWindow !== null && smokeWindowRefused === null) app.commandLine.appendSwitch('host-resolver-rules', SMOKE_WINDOW_HOST_RULES);
+if (args.smokeWindow !== null && smokeWindowRefused === null) app.commandLine.appendSwitch(SMOKE_WINDOW_NO_PROXY);
 protocol.registerSchemesAsPrivileged([APP_SCHEME_PRIVILEGES]);
 
 interface Runtime {
@@ -94,6 +121,8 @@ let shutdownPromise: Promise<void> | null = null;
 let lastStatus: AppStatus | null = null;
 /** Held for the life of the process; the OS frees it on exit. */
 let machineLock: MachineLock | null = null;
+/** --smoke-window only: the window test, its local network installed before start(). */
+let smokeWindowRun: SmokeWindowRun | null = null;
 const liveNotifications = new Set<Notification>();
 
 function writeReport(file: string, report: unknown): void {
@@ -134,7 +163,7 @@ function showNotification(rt: Runtime, payload: unknown): void {
   // F20: the toast still shows; its click just does what it did before 0.6. Never the URL in the log.
   if (droppedOpenUrl(payload, data)) log.warn('dropped a notify link that is not a static scrap.tf bank page');
   const prefs = rt.settings.get().notifications;
-  if (args.smokeTest || !prefs.enabled || !Notification.isSupported()) return;
+  if (diagnosticRun || !prefs.enabled || !Notification.isSupported()) return;
   const n = new Notification(notificationOptions(data, prefs, rt.paths.iconPng));
   // Holding a reference keeps the click handler alive until the toast is gone.
   liveNotifications.add(n);
@@ -166,7 +195,7 @@ function showNotification(rt: Runtime, payload: unknown): void {
  * turned on from the tray): shown even with alerts off in Settings > Notifications, only `silent` applies.
  */
 function showNotice(rt: Runtime, notice: { title: string; body: string }): void {
-  if (args.smokeTest || !Notification.isSupported()) return;
+  if (diagnosticRun || !Notification.isSupported()) return;
   try {
     new Notification(notificationOptions(notice, rt.settings.get().notifications, rt.paths.iconPng)).show();
   } catch (err) {
@@ -542,6 +571,7 @@ function start(): void {
     pid: process.pid,
     hidden: args.hidden,
     smokeTest: args.smokeTest !== null,
+    smokeWindow: args.smokeWindow !== null,
   });
 
   if (!args.dev) Menu.setApplicationMenu(null);
@@ -560,8 +590,8 @@ function start(): void {
   const settings = createSettingsStore({
     file: paths.settingsFile,
     log,
-    // A smoke test registers no hotkey, so it never reads the clipboard either.
-    effects: args.smokeTest
+    // A smoke test (or the window test) registers no hotkey, so it never reads the clipboard either.
+    effects: diagnosticRun
       ? undefined
       : {
           applyHotkey: (next, prev) => applyHotkey(next, prev, toggleQuick),
@@ -574,7 +604,7 @@ function start(): void {
     preloadPath: paths.preload,
     iconPath: paths.iconPng,
     devTools: args.dev,
-    shouldHideOnClose: () => !quitting && args.smokeTest === null && settings.get().app.closeToTray,
+    shouldHideOnClose: () => !quitting && !diagnosticRun && settings.get().app.closeToTray,
     isQuitting: () => quitting,
     onDashboardClosed: () => {
       if (!quitting && !settings.get().app.closeToTray) app.quit();
@@ -616,7 +646,7 @@ function start(): void {
   });
   rt.scraptfWindow = scraptfWindow;
 
-  if (!args.smokeTest) {
+  if (!diagnosticRun) {
     // powerMonitor is usable now (after 'ready'): the watcher reads nothing while locked or suspended.
     const systemPause = createSystemPause(powerMonitor);
     rt.systemPause = systemPause;
@@ -773,6 +803,19 @@ function start(): void {
     void runSmokeTest(rt, args.smokeTest);
     return;
   }
+  // --smoke-window: the harness drives the window itself (its manager calls are the test's clicks).
+  if (smokeWindowRun) {
+    void smokeWindowRun.run({
+      settings,
+      host,
+      scraptfWindow,
+      logDir: paths.logDir,
+      dataDir: paths.dataDir,
+      shutdown,
+      exit: (code) => app.exit(code),
+    });
+    return;
+  }
 
   const hotkey: HotkeyStatus = settings.applyStartupEffects();
   rt.liveCheck?.syncWatch();
@@ -794,7 +837,7 @@ function bootstrap(): void {
   process.on('unhandledRejection', (reason) => log.error('unhandled rejection in main', reason));
 
   app.on('second-instance', () => {
-    if (runtime && !args.smokeTest) runtime.windows.showDashboard();
+    if (runtime && !diagnosticRun) runtime.windows.showDashboard();
   });
   // Keep running in the tray when every window is closed or hidden.
   app.on('window-all-closed', () => undefined);
@@ -825,8 +868,8 @@ function bootstrap(): void {
         const reason = 'another TF2 Flip Desk instance is running on this machine';
         log.warn(`not starting: ${reason}`);
         log.flushSync();
-        if (args.smokeTest) {
-          writeReport(args.smokeTest, { ok: false, errors: [reason] });
+        if (reportFile) {
+          writeReport(reportFile, { ok: false, errors: [reason] });
         } else {
           dialog.showErrorBox(
             'TF2 Flip Desk is already running',
@@ -834,16 +877,23 @@ function bootstrap(): void {
           );
         }
         // Skips before-quit: nothing was started.
-        app.exit(args.smokeTest ? 1 : 0);
+        app.exit(reportFile ? 1 : 0);
         return;
+      }
+      // --smoke-window (allowed by the gate above): its local network is in place before start() builds the
+      // window manager, so no page of the window's sessions can be asked of a real host. The only import of
+      // the harness's code.
+      if (args.smokeWindow !== null && smokeWindowRefused === null) {
+        const { prepareSmokeWindow } = await import('./smokeWindow');
+        smokeWindowRun = prepareSmokeWindow({ reportPath: args.smokeWindow, version: VERSION, appPath: app.getAppPath(), log });
       }
       start();
     })
     .catch((err: unknown) => {
       log.error('startup failed', err);
       log.flushSync();
-      if (args.smokeTest) {
-        writeReport(args.smokeTest, { ok: false, errors: [`startup failed: ${safeErrorMessage(err)}`] });
+      if (reportFile) {
+        writeReport(reportFile, { ok: false, errors: [`startup failed: ${safeErrorMessage(err)}`] });
       } else {
         dialog.showErrorBox('TF2 Flip Desk could not start', safeErrorMessage(err));
       }
@@ -851,9 +901,14 @@ function bootstrap(): void {
     });
 }
 
-if (!app.requestSingleInstanceLock()) {
-  if (args.smokeTest) {
-    writeReport(args.smokeTest, { ok: false, errors: ['another instance is already using this user data directory'] });
+if (smokeWindowRefused !== null) {
+  // Refused before the profile, the instance lock or any window: nothing of the app starts.
+  console.error(`TF2 Flip Desk: ${smokeWindowRefused}`);
+  if (args.smokeWindow !== null) writeReport(args.smokeWindow, { ok: false, errors: [smokeWindowRefused] });
+  app.exit(1);
+} else if (!app.requestSingleInstanceLock()) {
+  if (reportFile) {
+    writeReport(reportFile, { ok: false, errors: ['another instance is already using this user data directory'] });
     app.exit(1);
   } else {
     app.quit();

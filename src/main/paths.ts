@@ -84,6 +84,13 @@ export interface LaunchArgs {
   userDataDir: string | null;
   /** Smoke test only: seconds to keep running after 'ready' before recording health (0 = none, max 300). */
   smokeWaitSec: number;
+  /**
+   * F21 window test (`--smoke-window`): absolute path of its JSON report, or null. Like --smoke-test it is
+   * read only when diagnostics are allowed; smokeWindowRefusal decides whether the run may start at all.
+   */
+  smokeWindow: string | null;
+  /** --smoke-window was given in any form, allowed or not: a build that does not allow it refuses instead of starting. */
+  smokeWindowAsked: boolean;
 }
 
 function flagValue(argv: readonly string[], name: string): string | null {
@@ -99,7 +106,7 @@ function flagValue(argv: readonly string[], name: string): string | null {
 
 export interface LaunchArgOptions {
   /**
-   * Honour --dev, --smoke-test and --smoke-wait. Main passes false for packaged
+   * Honour --dev, --smoke-test, --smoke-wait and --smoke-window. Main passes false for packaged
    * builds, so a shortcut or Run entry cannot turn DevTools on or make the app
    * overwrite a file with a report. --hidden (login item) always works, and
    * --user-data-dir is a Chromium switch Electron applies anyway.
@@ -110,6 +117,7 @@ export interface LaunchArgOptions {
 export function parseLaunchArgs(argv: readonly string[], cwd: string, opts: LaunchArgOptions = { allowDiagnostics: true }): LaunchArgs {
   const diag = opts.allowDiagnostics;
   const smoke = diag ? flagValue(argv, 'smoke-test') : null;
+  const smokeWindow = diag ? flagValue(argv, 'smoke-window') : null;
   const udd = flagValue(argv, 'user-data-dir');
   const wait = diag ? Number(flagValue(argv, 'smoke-wait') ?? '0') : 0;
   return {
@@ -118,7 +126,76 @@ export function parseLaunchArgs(argv: readonly string[], cwd: string, opts: Laun
     smokeTest: smoke ? path.resolve(cwd, smoke) : null,
     userDataDir: udd ? path.resolve(cwd, udd) : null,
     smokeWaitSec: Number.isFinite(wait) && wait > 0 ? Math.min(300, Math.floor(wait)) : 0,
+    smokeWindow: smokeWindow ? path.resolve(cwd, smokeWindow) : null,
+    smokeWindowAsked: argv.some((a) => a === '--smoke-window' || a.startsWith('--smoke-window=')),
   };
+}
+
+// ---------------------------------------------------------------------------
+// The window test's gate (--smoke-window)
+// ---------------------------------------------------------------------------
+
+/** Why main refuses a --smoke-window run (printed, and written to the report when one was named). Fixed texts. */
+export const SMOKE_WINDOW_REFUSALS = Object.freeze({
+  notAllowed: '--smoke-window runs only in a development build, or in a packaged one started with FLIPDESK_DIAGNOSTICS=1.',
+  noReport: '--smoke-window needs a report path: --smoke-window=<report.json>.',
+  withSmokeTest: '--smoke-window cannot be combined with --smoke-test.',
+  noProfile: '--smoke-window needs --user-data-dir=<a new folder>: the test writes its own settings into that profile.',
+  defaultProfile: "--smoke-window refuses the app's own profile: pass --user-data-dir=<a new folder> outside it.",
+} as const);
+
+/**
+ * The window test's Chromium resolves no host name: everything its pages ask for is answered by the local
+ * fixture router, and this makes sure nothing that bypasses a protocol handler (a preconnect, a DNS
+ * prefetch) can reach a real host either. The service's own traffic runs in Node, which this does not touch.
+ */
+export const SMOKE_WINDOW_HOST_RULES = 'MAP * ~NOTFOUND';
+/**
+ * And it uses no proxy: a system proxy (or a PAC file it fetches) resolves host names itself, so a request
+ * that bypasses the protocol handlers would get past the host rules through it.
+ */
+export const SMOKE_WINDOW_NO_PROXY = 'no-proxy-server';
+
+export interface SmokeWindowGate {
+  /** As LaunchArgOptions.allowDiagnostics: a development build, or FLIPDESK_DIAGNOSTICS=1. */
+  allowDiagnostics: boolean;
+  /** The app's default userData folder(s) (appData plus the app's name): the user's real profile. */
+  defaultUserData: readonly string[];
+  /** The path rules to compare with (process.platform): Windows paths ignore case. */
+  platform: NodeJS.Platform;
+}
+
+/** True when `a` and `b` are the same folder, or one holds the other. */
+function overlaps(a: string, b: string, platform: NodeJS.Platform): boolean {
+  const p = platform === 'win32' ? path.win32 : path.posix;
+  const norm = (x: string) => {
+    const r = p.resolve(x);
+    return platform === 'win32' ? r.toLowerCase() : r;
+  };
+  const inside = (child: string, parent: string) => {
+    const rel = p.relative(parent, child);
+    return rel === '' || (rel !== '..' && !rel.startsWith(`..${p.sep}`) && !p.isAbsolute(rel));
+  };
+  const na = norm(a);
+  const nb = norm(b);
+  return inside(na, nb) || inside(nb, na);
+}
+
+/**
+ * Null when a --smoke-window run may start, else the refusal main prints before it starts anything (no
+ * profile, lock or window) and exits 1. The run writes settings into its profile and turns the scrap.tf
+ * window on there, so it needs diagnostics, a report path, a profile of its own (never the app's default
+ * folder, one inside it or one holding it) and no --smoke-test beside it. Null without the flag.
+ */
+export function smokeWindowRefusal(args: Pick<LaunchArgs, 'smokeWindow' | 'smokeWindowAsked' | 'smokeTest' | 'userDataDir'>, gate: SmokeWindowGate): string | null {
+  if (!args.smokeWindowAsked) return null;
+  if (!gate.allowDiagnostics) return SMOKE_WINDOW_REFUSALS.notAllowed;
+  if (args.smokeWindow === null) return SMOKE_WINDOW_REFUSALS.noReport;
+  if (args.smokeTest !== null) return SMOKE_WINDOW_REFUSALS.withSmokeTest;
+  const profile = args.userDataDir;
+  if (profile === null) return SMOKE_WINDOW_REFUSALS.noProfile;
+  if (gate.defaultUserData.length === 0 || gate.defaultUserData.some((d) => overlaps(profile, d, gate.platform))) return SMOKE_WINDOW_REFUSALS.defaultProfile;
+  return null;
 }
 
 // ---------------------------------------------------------------------------
