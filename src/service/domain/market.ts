@@ -1,9 +1,12 @@
 // Live market index (F10): one in-memory entry per base SKU that has at least
 // one eligible backpack.tf buy order in the local book, evaluated with the
 // engine's own pricing, plus the user's scrap.tf side (typed prices, saved
-// pages, rules) joined per row at read time. It only reads the book the
-// websocket already fills: no network traffic of its own, and nothing ever
-// goes to scrap.tf (R1, R10).
+// pages, rules, the saved scrap.tf/items price list of F14, F17's "new on
+// scrap.tf" date from the bank stock cache, F19's static scrap.tf page link and
+// F20's time listed from the history's runs) joined per row at read time. It
+// only reads the book the websocket already
+// fills: no network traffic of its own, and nothing ever goes to scrap.tf (R1,
+// R10).
 //
 // Cadence: dirty bases are re-evaluated in batches at most every 2 s; a full
 // rebuild runs on start (once the schema has loaded), on markAllDirty and every
@@ -14,6 +17,9 @@
 
 import { categoryOfSkuOnly } from '../../shared/categories';
 import { valueScrap } from '../../shared/currency';
+import { marketNewSideMatches } from '../../shared/bankStock';
+import { preferScraptfSeen, scraptfBankInfo, scraptfLinkFor, type ScraptfSeen } from '../../shared/links';
+import { marketListedSideMatches } from '../../shared/scraptfHistory';
 import {
   MARKET_CSV_COLUMNS,
   MARKET_SORTS,
@@ -28,6 +34,7 @@ import {
   marketVerdict,
   scraptfCoverage,
 } from '../../shared/market';
+import { marketListFields, scraptfListCoverage } from '../../shared/scraptfList';
 import { baseSku as toBaseSku, fromString } from '../../shared/sku';
 import { CATEGORIES, CURRENCY_SKUS } from '../../shared/types';
 import type {
@@ -60,7 +67,10 @@ import { toCsv } from './csv';
 import { bookFlags, buyerCountOf, cleanTarget, explicitInput, priceBook, validRule } from './engine';
 import { anyEffectBaseOf, matchContext, ruleMatches } from './matcher';
 import type { MatchContext } from './matcher';
-import { lookupReferences, pickRevenueOrder, referencePrices, toOrderSummary } from './pricing';
+import type { BankStock } from './bankStock';
+import { hasReferenceValue, lookupReferences, pickRevenueOrder, referencePrices, toOrderSummary, usableReferences } from './pricing';
+import type { ScraptfHistory } from './scraptfHistory';
+import type { ScraptfListCache } from './scraptfList';
 import { itemRevenue } from './views';
 
 /** Dirty bases wait at most this long and are evaluated together. */
@@ -74,8 +84,11 @@ export const MARKET_SLICE_MS = 40;
 /** A rebuild whose candidate scan failed (a local read error) is retried after this, doubling per failure (H1). */
 export const MARKET_RETRY_MIN_MS = 30_000;
 export const MARKET_RETRY_MAX_MS = 10 * 60_000;
-/** Saved-page batches the coverage strip reads (newest first); a bank page saved only before them reads "never saved". */
-const COVERAGE_BATCHES = 500;
+/**
+ * Saved-page batches the coverage strip (and the F15 banks summary) reads, newest first; a bank page
+ * saved only before them reads "never saved".
+ */
+export const COVERAGE_BATCHES = 500;
 const MIN_CHUNK = 100;
 const MAX_CHUNK = 2_000;
 const START_CHUNK = 1_000;
@@ -107,7 +120,26 @@ export interface MarketIndex {
    * reached it yet. Holdings (F11) price held items from it.
    */
   entryFor(base: string): Readonly<MarketEval> | null;
+  /**
+   * F15 (scrap.tf banks): the rows with the verdict 'unchecked' (the "Not checked" filter: buyers, no
+   * scrap.tf price of yours, no rule flip), split by `groupOf(category)`. Per group: how many, and the
+   * first `top` with a Pay up to above 0 and a revenue, highest Pay up to first, ties by name then SKU
+   * (bankLookFor's order), as full rows. One pass like list(), but list()'s cached pass is left to the
+   * Live market page, and full rows are built only for the few returned.
+   */
+  uncheckedBy<K>(groupOf: (category: Category) => K, top: number, now: UnixMs): Map<K, UncheckedGroup>;
 }
+
+/** One group of MarketIndex.uncheckedBy. */
+export interface UncheckedGroup {
+  /** Rows with the verdict 'unchecked' in the group. */
+  count: number;
+  /** At most `top` of them, highest Pay up to (> 0, with a revenue) first. */
+  rows: MarketRow[];
+}
+
+/** The Live market's "Not checked" filter in its default order (Pay up to, highest first). */
+const UNCHECKED_QUERY: Readonly<MarketQuery> = { verdicts: ['unchecked'] };
 
 export interface MarketIndexDeps extends ServiceDeps {
   schema: SchemaService;
@@ -126,6 +158,26 @@ export interface MarketIndexDeps extends ServiceDeps {
    * Called right before onChanged, under the same throttle.
    */
   onBasesChanged?(bases: ReadonlySet<string>): void;
+  /**
+   * F14: the saved scrap.tf/items list (core's createScraptfListCache), joined per returned row like the
+   * user's prices and read for the strip's "All items" chip. Omitted: rows read no list (tests).
+   */
+  scraptfList?: Pick<ScraptfListCache, 'rowFor' | 'has' | 'summary' | 'version'>;
+  /**
+   * F17: the bank stock cache (core's createBankStock, late-bound: it reads entryFor). newAtFor is joined per
+   * returned row as MarketRow.scraptfNewAt and filters MarketQuery.newOnScraptf; a filtered pass is keyed on
+   * version(). Read only from list()/all(), never while building. Omitted: no row is new (tests, 0.5).
+   * F19: seenFor, when given, is joined per returned row into MarketRow.scraptfLink with the imported
+   * prices' banks; without it only those count.
+   */
+  bankStock?: Pick<BankStock, 'newAtFor' | 'version'> & Partial<Pick<BankStock, 'seenFor'>>;
+  /**
+   * F20: the runs index of the user's saves (core's ScraptfHistory, late-bound like bankStock).
+   * listedSinceFor(base, link bank) is joined per returned row as MarketRow.scraptfListedSince and filters
+   * MarketQuery.listedOnScraptf; only that filtered pass is keyed on version() and the minute. Omitted: no
+   * row has a listed time (tests, 0.6).
+   */
+  history?: Pick<ScraptfHistory, 'listedSinceFor' | 'version'>;
   /** Injected in tests; defaults to unref'd real timers (realTimers). */
   timers?: TimerApi;
 }
@@ -151,6 +203,11 @@ export interface MarketEval {
   flags: string[];
   /** Newest lastEventAt among the eligible orders. */
   lastOrderChangeAt: UnixMs | null;
+  /**
+   * A usable (age-gated) PriceDB or community price exists: with eligibleCount, the input of F5's
+   * suspect-margin guard (isSuspectMargin) for a cost the entry never sees ("New on scrap.tf", F17).
+   */
+  referenced: boolean;
 }
 
 export interface MarketEvalArgs {
@@ -214,6 +271,7 @@ export function evaluateMarketBase(a: MarketEvalArgs): MarketEval | null {
     confidenceLevel: conf.level,
     flags: bookFlags(book, conf.flags, rev.revenueScrap, a.keyScrap),
     lastOrderChangeAt: last,
+    referenced: hasReferenceValue(usableReferences(a.references, p.referenceMaxAgeMs, a.now).references),
   };
 }
 
@@ -265,6 +323,31 @@ interface KnownState {
    * a batch from before 0.3, which has no ImportBatch.categories of its own.
    */
   batchBases: Map<number, string[]>;
+  /**
+   * F19: per base SKU, the saved page whose import last listed it (ScrapPrice.bank, joined by the repo),
+   * bank pages before the /items list (preferScraptfSeen). MarketRow.scraptfLink, with the bank stock's.
+   */
+  seen: Map<string, SeenPrice>;
+}
+
+/** An imported price's sighting; the id breaks a tie at one time, as scraptfSeenOn (ItemDetail.seenOn) does. */
+interface SeenPrice extends ScraptfSeen {
+  id: number;
+}
+
+/** Folds one price into `seen` under `base`: typed prices and unknown banks name no page. */
+function foldSeen(seen: Map<string, SeenPrice>, base: string, sp: Pick<ScrapPrice, 'id' | 'source' | 'bank' | 'observedAt'>): void {
+  const info = sp.source === 'import' ? scraptfBankInfo(sp.bank) : null;
+  if (!info || !Number.isFinite(sp.observedAt)) return;
+  const next: SeenPrice = { bank: info.bank, at: sp.observedAt, id: sp.id };
+  const cur = seen.get(base);
+  if (!cur) {
+    seen.set(base, next);
+    return;
+  }
+  // preferScraptfSeen keeps its first argument on a tie, so the higher id goes first.
+  const [a, b] = next.id > cur.id ? [next, cur] : [cur, next];
+  seen.set(base, preferScraptfSeen(a, b) === b ? b : a);
 }
 
 interface Work {
@@ -309,6 +392,7 @@ function buildKnown(prices: readonly ScrapPrice[]): KnownState {
   const page = new Map<string, Known>();
   let newestPageAt: UnixMs | null = null;
   const batchBases = new Map<number, string[]>();
+  const seen = new Map<string, SeenPrice>();
   for (const sp of prices) {
     // Every stored item counts for its page's coverage, priced by the engine or not.
     if (sp.source === 'import' && typeof sp.importBatch === 'number' && typeof sp.sku === 'string') {
@@ -316,6 +400,8 @@ function buildKnown(prices: readonly ScrapPrice[]): KnownState {
       if (list) list.push(baseOf(sp.sku));
       else batchBases.set(sp.importBatch, [baseOf(sp.sku)]);
     }
+    // F19: the same way, every imported row names the page that listed its item (ItemDetail.seenOn's rule).
+    if (sp.source === 'import' && typeof sp.sku === 'string') foldSeen(seen, baseOf(sp.sku), sp);
     // Skips currencies and SKUs the engine would not price either.
     const inp = explicitInput(sp);
     if (!inp) continue;
@@ -347,7 +433,7 @@ function buildKnown(prices: readonly ScrapPrice[]): KnownState {
     if (list) list.push(b);
     else byGeneric.set(any, [b]);
   }
-  return { byBase, typed: typed.size, pages: page.size, newestPageAt, byGeneric, batchBases };
+  return { byBase, typed: typed.size, pages: page.size, newestPageAt, byGeneric, batchBases, seen };
 }
 
 /**
@@ -480,6 +566,10 @@ export function createMarketIndex(deps: MarketIndexDeps): MarketIndex {
   let infoGen = 0;
   let coverage: { kn: KnownState; gen: number; value: ScraptfCoverage[] } | null = null;
   let coverageFailing = false;
+
+  // F14 "On scrap.tf's list" filter: membership per base, kept until the saved list's version moves.
+  // has() parses every SKU it does not hold, and the filter asks for every entry on each pass.
+  let listMemo: { ver: number; on: Map<string, boolean> } | null = null;
 
   // Dirty batching.
   const dirty = new Set<string>();
@@ -993,15 +1083,18 @@ export function createMarketIndex(deps: MarketIndexDeps): MarketIndex {
   }
 
   /**
-   * One ScraptfCoverage per bank page (F13), from the categories each batch stored when imported (rows
-   * carrying its id today only for a batch from before 0.3); cached, see `coverage`.
+   * One ScraptfCoverage per bank page (F13), by the bank each batch recorded when imported (F15); only
+   * a batch without one falls back to the categories it stored (rows carrying its id today for a batch
+   * from before 0.3). Cached, see `coverage`.
    */
   function coverageOf(kn: KnownState): ScraptfCoverage[] {
     if (coverage === null || coverage.kn !== kn || coverage.gen !== infoGen) {
       let value: ScraptfCoverage[];
       try {
-        // No stored saved-page item: every page reads "never saved" without reading the batches.
-        const batches = kn.batchBases.size > 0 ? repo.listImportBatches(COVERAGE_BATCHES) : [];
+        // Read even with no saved-page price stored: the /items list counts when every row was sold
+        // out (a bank page that stored nothing does not, F18 S3: scraptfBankSaves). Once per price
+        // change (the cache), not per list().
+        const batches = repo.listImportBatches(COVERAGE_BATCHES);
         value = scraptfCoverage(batches, (id) => {
           const cats: Category[] = [];
           for (const b of kn.batchBases.get(id) ?? []) {
@@ -1045,11 +1138,100 @@ export function createMarketIndex(deps: MarketIndexDeps): MarketIndex {
     }
   }
 
+  /** The saved list's version (ScraptfListCache.version); 0 without a list, -1 when it cannot be read. */
+  function listVersion(): number {
+    try {
+      return deps.scraptfList?.version() ?? 0;
+    } catch {
+      return -1;
+    }
+  }
+
+  /** F17: the bank stock cache's version (BankStock.version); 0 without one, -1 when it cannot be read. */
+  function bankStockVersion(): number {
+    try {
+      return deps.bankStock?.version() ?? 0;
+    } catch {
+      return -1;
+    }
+  }
+
+  /** F17: MarketRow.scraptfNewAt of a base (BankStock.newAtFor); a failed read shows it as not new. */
+  function newAtOf(sku: string): UnixMs | null {
+    try {
+      return finiteOrNull(deps.bankStock?.newAtFor(sku));
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * F19: the saved page that last listed a base, from the imported prices (`kn`) and the bank stock's
+   * saves, bank pages before the list; two in-memory lookups, never a query. A failed bank stock read
+   * leaves the prices' sighting (and none at all falls back to the category in scraptfLinkFor).
+   */
+  function seenOf(sku: string, kn: KnownState): ScraptfSeen | null {
+    let stock: ScraptfSeen | null = null;
+    try {
+      stock = deps.bankStock?.seenFor?.(sku) ?? null;
+    } catch {
+      stock = null;
+    }
+    return preferScraptfSeen(kn.seen.get(sku), stock);
+  }
+
+  /** F20: the history's version (ScraptfHistory.version); 0 without one, -1 when it cannot be read. */
+  function historyVersion(): number {
+    try {
+      return deps.history?.version() ?? 0;
+    } catch {
+      return -1;
+    }
+  }
+
+  /**
+   * F20, MarketRow.scraptfListedSince: since when the bank the row links to (a 'seen' link's bank, else
+   * whichever bank lists it now) has had a copy of the base on sale, from the history's runs in memory.
+   * A failed read shows no listed time.
+   */
+  function listedSinceOf(sku: string, link: Pick<MarketRow['scraptfLink'], 'bank' | 'source'>): UnixMs | null {
+    try {
+      return finiteOrNull(deps.history?.listedSinceFor(sku, link.source === 'seen' ? link.bank : null));
+    } catch {
+      return null;
+    }
+  }
+
+  /** Whether the saved list has a row for this base (marketListSideMatches' test: rowFor would find one). */
+  function onList(sku: string, ver: number): boolean {
+    const list = deps.scraptfList;
+    if (!list) return false;
+    if (listMemo === null || listMemo.ver !== ver) listMemo = { ver, on: new Map() };
+    const hit = listMemo.on.get(sku);
+    if (hit !== undefined) return hit;
+    let v: boolean;
+    try {
+      v = list.has(sku) === true;
+    } catch {
+      // Not remembered: the next pass asks again.
+      return false;
+    }
+    if (listMemo.on.size >= INFO_CACHE_MAX) listMemo.on.clear();
+    listMemo.on.set(sku, v);
+    return v;
+  }
+
   /**
    * Every row matching q in marketComparator order, the verdict counts, and the key price used.
    * Paging is not part of it: the pages of one window share one pass while nothing changed.
+   * `keep` false (the banks summary) reuses a kept pass but never replaces it: the Live market
+   * page's window refresh and Load more would otherwise pay a second pass.
    */
-  function select(q: MarketQuery): { matched: readonly Cand[]; counts: Record<MarketVerdict, number>; kp: KeyPriceState; kn: KnownState } {
+  function select(
+    q: MarketQuery,
+    now: UnixMs,
+    keep = true,
+  ): { matched: readonly Cand[]; counts: Record<MarketVerdict, number>; kp: KeyPriceState; kn: KnownState } {
     checkSchema();
     const kp = readKeyPrice();
     const K = kp.valueScrap;
@@ -1057,8 +1239,20 @@ export function createMarketIndex(deps: MarketIndexDeps): MarketIndex {
     const kn = knownState();
     ensureRules(K);
     const { limit: _limit, offset: _offset, ...filters } = q;
+    // F14: only the list filter reads the saved list here (rows join it in toRow), so only a filtered
+    // pass is keyed on its version: a new saved list re-filters, and nothing else drops the cache.
+    const listOnly = q.onScraptfList === true;
+    const ver = listOnly ? listVersion() : null;
+    // F17, the same way: only the "New on scrap.tf" filter reads the bank stock here (rows join
+    // scraptfNewAt in toRow), so only that pass is keyed on its version and re-filtered after a refresh.
+    const newOnly = q.newOnScraptf === true;
+    const stockVer = newOnly ? bankStockVersion() : null;
+    // F20: "Listed > 24 h" reads the history's runs and the row's link (the bank stock's sightings), and
+    // its answer moves with the clock, so only that pass is keyed on both versions and the minute.
+    const listedOnly = q.listedOnScraptf === true;
+    const listedSig = listedOnly ? [historyVersion(), bankStockVersion(), Math.floor(now / 60_000)] : null;
     // The profit settings set every profit (and are read here, not through a rebuild).
-    const sig = JSON.stringify([filters, K, p]);
+    const sig = JSON.stringify([filters, K, p, ver, stockVer, listedSig]);
     if (selected !== null && selected.sig === sig) return { matched: selected.matched, counts: { ...selected.counts }, kp, kn };
     const tokens = marketSearchTokens(q.search);
     const key: MarketSort = q.sort && MARKET_SORTS.includes(q.sort) ? q.sort : 'ceiling';
@@ -1074,6 +1268,15 @@ export function createMarketIndex(deps: MarketIndexDeps): MarketIndex {
       if (!marketBuySideMatches(row, q, NO_TOKENS)) return;
       // Same test as marketBuySideMatches' search, on the haystack built once per entry.
       for (const t of tokens) if (!hay.includes(t)) return;
+      // With the buy-side filters, before the verdict counts, as the mock applies marketListSideMatches.
+      if (listOnly && !onList(row.sku, ver!)) return;
+      // Same place as the list filter (before the counts), as the mock applies marketNewSideMatches.
+      if (newOnly && !marketNewSideMatches({ scraptfNewAt: newAtOf(row.sku) }, q)) return;
+      // F20, the same place: the listed time toRow joins (the row's link bank).
+      if (listedOnly) {
+        const link = scraptfLinkFor(row.category, seenOf(row.sku, kn));
+        if (!marketListedSideMatches({ scraptfListedSince: listedSinceOf(row.sku, link) }, q, now)) return;
+      }
       const k = kn.byBase.get(row.sku) ?? null;
       const knownCost = k ? valueScrap(k.costKeys, k.costScrapRaw, K) : null;
       // The rule estimate decides the verdict only without a known cost, with buyers and a ceiling.
@@ -1133,13 +1336,34 @@ export function createMarketIndex(deps: MarketIndexDeps): MarketIndex {
         return sign * (va - vb) || tie(a, b);
       });
     }
-    selected = { sig, matched, counts };
+    if (keep) selected = { sig, matched, counts };
     return { matched, counts: { ...counts }, kp, kn };
   }
 
-  function toRow(c: Cand, now: UnixMs): MarketRow {
+  /** F14: the base's saved-list row at the read's key price; a failed read shows no list data for it. */
+  function listRowOf(sku: string, K: Scrap) {
+    try {
+      return deps.scraptfList?.rowFor(sku, K) ?? null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** The strip's "All items" chip; a failed read shows the list as not saved. */
+  function allItemsOf() {
+    try {
+      return scraptfListCoverage(deps.scraptfList?.summary() ?? null);
+    } catch {
+      return scraptfListCoverage(null);
+    }
+  }
+
+  function toRow(c: Cand, now: UnixMs, K: Scrap, kn: KnownState): MarketRow {
     const e = c.e;
     const flags = e ? [...e.flags] : [];
+    // F19: the static bank page the row's scrap.tf button opens (SCRAPTF_BANKS only, never item data):
+    // where a saved page last listed it, joined at read time like scraptfNewAt, else its category's.
+    const link = scraptfLinkFor(c.category, seenOf(c.sku, kn));
     // The ceiling is for a clean copy; a price for a painted or spelled copy is still shown, but marked.
     if (c.known?.hasExtras && !flags.includes('has-extras')) flags.push('has-extras');
     return {
@@ -1165,6 +1389,13 @@ export function createMarketIndex(deps: MarketIndexDeps): MarketIndex {
       verdict: c.verdict,
       lastOrderChangeAt: e?.lastOrderChangeAt ?? null,
       evaluatedAt: e?.evaluatedAt ?? now,
+      // Joined at read time like the user's prices, so a new saved list shows on the next read.
+      ...marketListFields(listRowOf(c.sku, K)),
+      // F17: joined at read time from the bank stock cache, like the list fields (never stored in entries).
+      scraptfNewAt: newAtOf(c.sku),
+      scraptfLink: link,
+      // F20: since when that bank's saves list it (the history's runs), joined at read time like scraptfNewAt.
+      scraptfListedSince: listedSinceOf(c.sku, link),
     };
   }
 
@@ -1247,12 +1478,12 @@ export function createMarketIndex(deps: MarketIndexDeps): MarketIndex {
     },
 
     list(q, now) {
-      const { matched, counts, kp, kn } = select(q);
+      const { matched, counts, kp, kn } = select(q, now);
       const { limit, offset } = marketPage(q);
       const s = deps.settings();
       const importEnabled = s.import.enabled && s.import.acknowledgedAt !== null;
       return {
-        rows: matched.slice(offset, offset + limit).map((c) => toRow(c, now)),
+        rows: matched.slice(offset, offset + limit).map((c) => toRow(c, now, kp.valueScrap, kn)),
         total: matched.length,
         counts,
         scraptf: {
@@ -1263,6 +1494,7 @@ export function createMarketIndex(deps: MarketIndexDeps): MarketIndex {
           // The watch as it runs, not as configured: a missing folder or a failed watch is off.
           watchFolder: importEnabled && folderWatchOn(),
           coverage: coverageOf(kn),
+          allItems: allItemsOf(),
         },
         stats: stats(),
         keyPrice: kp,
@@ -1271,7 +1503,8 @@ export function createMarketIndex(deps: MarketIndexDeps): MarketIndex {
     },
 
     all(q, now) {
-      return select(q).matched.map((c) => toRow(c, now));
+      const { matched, kp, kn } = select(q, now);
+      return matched.map((c) => toRow(c, now, kp.valueScrap, kn));
     },
 
     stats,
@@ -1279,6 +1512,26 @@ export function createMarketIndex(deps: MarketIndexDeps): MarketIndex {
     entryFor(base) {
       if (typeof base !== 'string') return null;
       return entries.get(base) ?? entries.get(baseOf(base.trim())) ?? null;
+    },
+
+    uncheckedBy(groupOf, top, now) {
+      const n = Number.isFinite(top) ? Math.max(0, Math.floor(top)) : 0;
+      // The default sort is Pay up to, highest first, ties by name then SKU: bankLookFor's order, so
+      // each group's first qualifying rows are its top ones and no second sort is needed.
+      const { matched, kp, kn } = select(UNCHECKED_QUERY, now, false);
+      const groups = new Map<ReturnType<typeof groupOf>, { count: number; best: Cand[] }>();
+      for (const c of matched) {
+        const g = groupOf(c.category);
+        let s = groups.get(g);
+        if (!s) groups.set(g, (s = { count: 0, best: [] }));
+        s.count++;
+        if (s.best.length >= n) continue;
+        const ceiling = c.e?.maxCostScrap ?? null;
+        if (ceiling !== null && ceiling > 0 && (c.e?.revenueScrap ?? null) !== null) s.best.push(c);
+      }
+      const out = new Map<ReturnType<typeof groupOf>, UncheckedGroup>();
+      for (const [g, s] of groups) out.set(g, { count: s.count, rows: s.best.map((c) => toRow(c, now, kp.valueScrap, kn)) });
+      return out;
     },
   };
 }

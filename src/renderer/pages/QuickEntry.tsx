@@ -14,6 +14,7 @@ import { STATUS_LABELS, errorMessage, fmtKeysMetal, fmtMoney, fmtPct, fmtSignedM
 import { useApp } from '../hooks/appContext';
 import { usePersistentState } from '../hooks/usePersistentState';
 import { usePush, useThrottled, useVisiblePush } from '../hooks/useRpc';
+import { useNow } from '../hooks/useTimers';
 import { REVENUE_ORDER_TITLES, revenueOrderOf } from '../oppModel';
 import {
   PREVIEW_DEBOUNCE_MS,
@@ -28,12 +29,16 @@ import {
   freshSavedPrice,
   isCheckKey,
   isChecked,
+  listPriceStamp,
+  prefillPriceText,
   previewRevenue,
   previewTone,
   profitPreview,
+  quickListHint,
   revenueBreakdown,
   type BoughtState,
   type CheckedEntry,
+  type ListPriceUse,
 } from '../quickModel';
 
 function sanitizeUnit(v: unknown): BareUnit {
@@ -66,6 +71,8 @@ export function QuickEntry() {
   const [preview, setPreview] = useState<PreviewState | null>(null);
   const [checked, setChecked] = useState<CheckedEntry | null>(null);
   const [bought, setBought] = useState<BoughtState | null>(null);
+  // F14: the scrap.tf list price Use put in the price field, so a save of it keeps the list's date.
+  const [listUse, setListUse] = useState<ListPriceUse | null>(null);
   // A double click must not record the buy twice (Holdings would count two units).
   const boughtBusy = useRef(false);
   const [focusPriceTick, setFocusPriceTick] = useState(0);
@@ -150,11 +157,13 @@ export function QuickEntry() {
   }, 2000);
   // Buy orders move with the live feed; a hidden window catches up once when shown.
   useVisiblePush('opps.changed', refreshPreview, sku !== null);
+  // A newly saved scrap.tf/items list (F14) updates the list hint; a local read, like the rest.
+  useVisiblePush('scraptf.listChanged', refreshPreview, sku !== null);
 
   // ----- prefill ('app.showQuickEntry' with a SKU) -----
 
   const applyPrefill = useCallback(
-    async (pushedSku: string) => {
+    async (pushedSku: string, priceText = '') => {
       // Main already validates and lower-cases it; SKUs are canonical in lower case.
       const prefillSku = pushedSku.trim().toLowerCase();
       const ticket = prefillGate.next();
@@ -173,10 +182,13 @@ export function QuickEntry() {
           setError(`No item matches ${prefillSku}. Type its name instead.`);
           return;
         }
-        // A price typed for another item would be wrong for this one.
-        setText('');
+        // A price typed for another item would be wrong for this one. The live check popup (F16)
+        // sends the price it checked, so it lands in the field with the item.
+        setText(priceText);
         setNote('');
         setResult(null);
+        setChecked(null);
+        setListUse(null);
         setItem(picked);
         prefilled.current = 'applied';
         setFocusPriceTick((n) => n + 1);
@@ -189,7 +201,7 @@ export function QuickEntry() {
     [prefillGate],
   );
 
-  usePush('ui.quickPrefill', ({ sku: prefillSku }) => void applyPrefill(prefillSku));
+  usePush('ui.quickPrefill', ({ sku: prefillSku, price }) => void applyPrefill(prefillSku, prefillPriceText(price)));
 
   const onPick = (v: PickedItem | null) => {
     // The user's own pick wins over a prefill still resolving.
@@ -259,6 +271,8 @@ export function QuickEntry() {
     const entry = await readEntry();
     if (!entry) return;
     const { it, parsed } = entry;
+    // A list price saved as Use put it keeps the list's date and note (F14); anything else is seen now.
+    const stamp = listPriceStamp(listUse, { sku: it.sku, text }, note, Date.now());
     setSaving(true);
     try {
       const price = await rpc('prices.upsert', {
@@ -267,14 +281,15 @@ export function QuickEntry() {
         costKeys: parsed.keys,
         costScrap: parsed.scrap,
         source: 'user',
-        observedAt: Date.now(),
-        note: note.trim() || null,
+        observedAt: stamp.observedAt,
+        note: stamp.note,
       });
       setResult({ price, detail: null });
       setItem(null);
       setText('');
       setNote('');
       setChecked(null);
+      setListUse(null);
       prefilled.current = 'off';
       picker.current?.focus();
       void loadDetail(price);
@@ -418,6 +433,13 @@ export function QuickEntry() {
           checked={isChecked(checked, { sku: item.sku, text, unit })}
           onCopy={(value, what) => void copy(value, what)}
           onRetry={() => void loadPreview(item.sku)}
+          onUseListPrice={(price, observedAt, otherCopy) => {
+            // Written with units, so the bare-number unit toggle does not change what it means.
+            setText(price);
+            setListUse({ sku: item.sku, text: price, observedAt, otherCopy });
+            setError(null);
+            priceRef.current?.focus();
+          }}
         />
       ) : result ? (
         <section className="quick-result" aria-live="polite" aria-label="Saved price">
@@ -505,6 +527,7 @@ function QuickPreview({
   checked,
   onCopy,
   onRetry,
+  onUseListPrice,
 }: {
   item: PickedItem;
   preview: PreviewState | null;
@@ -515,9 +538,14 @@ function QuickPreview({
   checked: boolean;
   onCopy: (value: string, what: string) => void;
   onRetry: () => void;
+  /** F14: put the saved scrap.tf list's price to buy into the price field. */
+  onUseListPrice: (price: string, observedAt: number, otherCopy: boolean) => void;
 }) {
   const { toast } = useApp();
+  const now = useNow(30_000);
   const d = preview?.detail ?? null;
+  // The picked item's row of the user's saved scrap.tf/items list (F14); local, like the rest of the preview.
+  const listHint = d ? quickListHint(d.scraptfList, item.sku, now) : null;
   const k = d?.keyPrice?.valueScrap ?? keyScrap;
   const rev = d ? previewRevenue(d, profit) : null;
   const order = rev?.order ?? null;
@@ -607,6 +635,23 @@ function QuickPreview({
             <span className="muted small">Type the scrap.tf price to see it.</span>
           )}
         </div>
+        {listHint ? (
+          <div className="qp-line qp-list" title={listHint.title}>
+            <span className="qp-label">scrap.tf list</span>
+            <span className={`small qp-list-text${listHint.tone === 'warn' ? ' tone-text-warn' : ''}`}>{listHint.text}</span>
+            {listHint.price ? (
+              <button
+                type="button"
+                className="btn small ghost qp-use"
+                aria-label={`Use scrap.tf's list price ${listHint.price}`}
+                title={`Put ${listHint.price} in the price field (Enter saves it, dated when you saved the list)`}
+                onClick={() => listHint.price && onUseListPrice(listHint.price, listHint.observedAt, listHint.otherCopy)}
+              >
+                Use
+              </button>
+            ) : null}
+          </div>
+        ) : null}
       </>
     );
   })();

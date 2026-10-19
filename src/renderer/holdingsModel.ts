@@ -1,13 +1,16 @@
 // Pure helpers for the Holdings page (F11): status pills, the header totals,
 // cell text and tooltips, the Record sale prefill, the buyer's profile link and
-// the live flash. The figures themselves come from the service (or the mock)
-// through the shared rules in src/shared/holdings.ts; nothing is recomputed here.
+// the live flash; and the better exit through scrap.tf's saved price list (F14).
+// The figures themselves come from the service (or the mock) through the shared
+// rules in src/shared/holdings.ts; nothing is recomputed here.
 
 import { frictionOf } from '../shared/ceiling';
+import { SCRAPTF_LIST_FRESH_MS, scraptfListFresh } from '../shared/scraptfList';
+import { HOLDING_EXIT_VENUES } from '../shared/types';
 import type { HoldingRow, HoldingStatus, HoldingsQuery, HoldingsResult, OrderSummary, ProfitSettings, Scrap, UnixMs } from '../shared/types';
-import { DASH, fmtAge, fmtDateTime, fmtInt, fmtMoney, fmtPct, fmtSignedMoney, type Tone } from './format';
-import { buyerProfileUrls } from './itemMenuModel';
-import type { RecordTradeInit } from './recordTradeModel';
+import { DASH, fmtAge, fmtAgo, fmtDateTime, fmtInt, fmtMoney, fmtPct, fmtSignedMoney, type Tone } from './format';
+import { SCRAPTF_SALE_NOTE, buyerProfileUrls, scraptfSaleInit } from './itemMenuModel';
+import { splitAtKey, type RecordTradeInit } from './recordTradeModel';
 
 /** Same cap as 'holdings.list' (zod: search ≤ 200). */
 export const HOLDINGS_MAX_SEARCH_CHARS = 200;
@@ -26,11 +29,12 @@ export const HOLDING_STATUS_TONES: Readonly<Record<HoldingStatus, Tone>> = {
   'no-buyers': 'muted',
 };
 
+// Judged on the better exit (F14): a backpack.tf buyer, or scrap.tf when your saved price list pays more.
 export const HOLDING_STATUS_HELP: Readonly<Record<HoldingStatus, string>> = {
-  sell: 'Selling the oldest unit to this buyer now clears your profit thresholds.',
+  sell: 'Selling the oldest unit at the better exit now (this buyer, or scrap.tf when your saved price list pays more) clears your profit thresholds.',
   hold: 'A sale now makes a profit, but less than your thresholds ask for.',
-  loss: 'The best buyer now pays no more than the oldest unit cost you.',
-  'no-buyers': 'No eligible backpack.tf buy order for this item in the live book.',
+  loss: 'The best exit now (a backpack.tf buyer or scrap.tf) pays no more than the oldest unit cost you.',
+  'no-buyers': 'No eligible backpack.tf buy order for this item in the live book, and no usable scrap.tf price from your saved list.',
 };
 
 export function holdingsQuery(search: string): HoldingsQuery {
@@ -59,12 +63,12 @@ export function plTone(scrap: Scrap | null): 'good' | 'bad' | null {
 }
 
 export function worthTitle(t: Pick<HoldingsResult['totals'], 'worthNowScrap' | 'costScrap'>, keyScrap: Scrap | null): string {
-  return `What today's buyers pay for every unit that has one: ${fmtMoney(t.worthNowScrap, keyScrap)}, against ${fmtMoney(t.costScrap, keyScrap)} you paid for everything held. Items with no buyer count at nothing.`;
+  return `What every unit sells for now at its better exit (a backpack.tf buyer, or scrap.tf by your saved price list): ${fmtMoney(t.worthNowScrap, keyScrap)}, against ${fmtMoney(t.costScrap, keyScrap)} you paid for everything held. Items with neither count at nothing.`;
 }
 
 export function plTitle(t: Pick<HoldingsResult['totals'], 'profitNowScrap'>, keyScrap: Scrap | null, p: Pick<ProfitSettings, 'frictionScrap'> | null): string {
   const friction = p ? frictionOf(p) : 0;
-  return `Unrealised profit or loss if every unit with a buyer sold now: ${fmtSignedMoney(t.profitNowScrap, keyScrap)}${friction ? `, after ${fmtMoney(friction, keyScrap)} friction per unit` : ''}. Items with no buyer are left out.`;
+  return `Unrealised profit or loss if every unit with a buyer (or a fresh scrap.tf price) sold now: ${fmtSignedMoney(t.profitNowScrap, keyScrap)}${friction ? `, after ${fmtMoney(friction, keyScrap)} friction per unit` : ''}. Items with no buyer are left out.`;
 }
 
 // ---------------------------------------------------------------------------
@@ -102,17 +106,109 @@ export function holdingSellsForTitle(r: Pick<HoldingRow, 'revenueScrap' | 'bestS
 
 /** Tooltip for "Profit now": the next unit, every unit, the margin, and what the status means. */
 export function profitNowTitle(
-  r: Pick<HoldingRow, 'status' | 'profitNowScrap' | 'profitAllScrap' | 'margin' | 'qty'>,
+  r: Pick<HoldingRow, 'status' | 'profitNowScrap' | 'profitAllScrap' | 'margin' | 'qty'> & Partial<Pick<HoldingRow, 'bestExit'>>,
   keyScrap: Scrap | null,
   p: Pick<ProfitSettings, 'frictionScrap'> | null,
 ): string {
   const help = HOLDING_STATUS_HELP[r.status];
   if (r.profitNowScrap === null) return help;
   const friction = p ? frictionOf(p) : 0;
-  const parts = [`Selling the oldest unit now: ${fmtSignedMoney(r.profitNowScrap, keyScrap)}${r.margin !== null ? ` (${fmtPct(r.margin)} margin)` : ''}${friction ? ` after ${fmtMoney(friction, keyScrap)} friction` : ''}.`];
+  const to = r.bestExit === 'scraptf' ? ' to scrap.tf' : '';
+  const parts = [`Selling the oldest unit${to} now: ${fmtSignedMoney(r.profitNowScrap, keyScrap)}${r.margin !== null ? ` (${fmtPct(r.margin)} margin)` : ''}${friction ? ` after ${fmtMoney(friction, keyScrap)} friction` : ''}.`];
   if (r.qty > 1 && r.profitAllScrap !== null) parts.push(`All ${fmtInt(r.qty)} units at this price: ${fmtSignedMoney(r.profitAllScrap, keyScrap)}.`);
   parts.push(help);
   return parts.join(' ');
+}
+
+// ---------------------------------------------------------------------------
+// The better exit (F14): a backpack.tf buyer, or scrap.tf by the saved price list
+// ---------------------------------------------------------------------------
+
+export type HoldingExitFields = Pick<HoldingRow, 'revenueScrap' | 'bestScrap' | 'instantScrap' | 'revenueOrder' | 'buyerCount'> &
+  Partial<Pick<HoldingRow, 'bestExit' | 'exitScrap' | 'scraptfPaysScrap' | 'scraptfFull' | 'scraptfListAt'>>;
+
+/**
+ * The service judges a scrap.tf exit fresh when it builds the rows, and no push follows when the list
+ * turns a day old. A row still saying 'scraptf' after that, at the page's own `now`, has lapsed: the
+ * cell and Record sale stop offering scrap.tf until the refetch (scraptfExitLapseAt) arrives.
+ */
+export function scraptfExitLapsed(r: Partial<Pick<HoldingRow, 'bestExit' | 'scraptfListAt'>>, now: UnixMs | null): boolean {
+  return r.bestExit === 'scraptf' && now !== null && finiteScrap(r.scraptfListAt) && !scraptfListFresh({ observedAt: r.scraptfListAt }, now);
+}
+
+/** When the first scrap.tf exit among `rows` lapses (its list row turns SCRAPTF_LIST_FRESH_MS old); null without one. */
+export function scraptfExitLapseAt(rows: readonly Partial<Pick<HoldingRow, 'bestExit' | 'scraptfListAt'>>[]): UnixMs | null {
+  let first: UnixMs | null = null;
+  for (const r of rows) {
+    if (r.bestExit !== 'scraptf' || !finiteScrap(r.scraptfListAt)) continue;
+    const at = r.scraptfListAt + SCRAPTF_LIST_FRESH_MS + 1;
+    if (first === null || at < first) first = at;
+  }
+  return first;
+}
+
+/** At most a day ahead: a list dated in the future (a clock moved back) is re-checked daily, not never. */
+export const HOLDINGS_LAPSE_MAX_DELAY_MS = 24 * 60 * 60_000;
+
+/** How long until the page refetches for a lapse at `at` (0 once it has passed). */
+export function scraptfLapseDelay(at: UnixMs, now: UnixMs): number {
+  return Math.min(Math.max(0, at - now), HOLDINGS_LAPSE_MAX_DELAY_MS);
+}
+
+export interface HoldingExitView {
+  /** The per-unit price "Sells now for" shows: the better exit (exitScrap), else the backpack.tf revenue. */
+  priceScrap: Scrap | null;
+  /** scrap.tf's bank is the better exit: the cell shows the scrap.tf pill instead of the buyer. */
+  scraptf: boolean;
+  /** The other venue on a second line: "scrap.tf pays Y" / "scrap.tf full" beside a buyer, "backpack.tf pays X" beside scrap.tf. */
+  sub: { text: string; tone: 'muted' | 'warn' } | null;
+  /** Hover for the whole cell. */
+  title: string;
+}
+
+function finiteScrap(v: unknown): v is Scrap {
+  return typeof v === 'number' && Number.isFinite(v);
+}
+
+/** The "Sells now for" cell: the better exit, its venue, and what the other venue offers. */
+export function holdingExitView(r: HoldingExitFields, keyScrap: Scrap | null, now: UnixMs): HoldingExitView {
+  // A lapsed scrap.tf exit reads as the day-old list it now is (below) until the refetch lands.
+  const lapsed = scraptfExitLapsed(r, now);
+  const scraptf = r.bestExit === 'scraptf' && !lapsed;
+  const priceScrap = !lapsed && finiteScrap(r.exitScrap) ? r.exitScrap : r.revenueScrap;
+  const listAt = finiteScrap(r.scraptfListAt) ? r.scraptfListAt : null;
+  const saved = listAt !== null ? `price list saved ${fmtAgo(listAt, now)}` : null;
+  if (scraptf) {
+    const bp = r.revenueScrap !== null ? `The best backpack.tf buyer pays ${fmtMoney(r.revenueScrap, keyScrap)}.` : 'No backpack.tf buyer right now.';
+    return {
+      priceScrap,
+      scraptf,
+      sub: { text: r.revenueScrap !== null ? `backpack.tf pays ${fmtMoney(r.revenueScrap, keyScrap)}` : 'no backpack.tf buyer', tone: 'muted' },
+      title: `Sells now for ${fmtMoney(priceScrap, keyScrap)} to scrap.tf's bank (your ${saved ?? 'saved price list'}). ${bp} scrap.tf pays more, so status and profit use it; its stock may have changed since the save.`,
+    };
+  }
+  const base = holdingSellsForTitle(r, keyScrap);
+  if (listAt === null) return { priceScrap, scraptf, sub: null, title: base };
+  const fresh = scraptfListFresh({ observedAt: listAt }, now);
+  if (r.scraptfFull) {
+    return { priceScrap, scraptf, sub: { text: 'scrap.tf full', tone: 'muted' }, title: `${base} scrap.tf is full for this item, so it buys no more (${saved}).` };
+  }
+  if (!finiteScrap(r.scraptfPaysScrap)) return { priceScrap, scraptf, sub: null, title: base };
+  const pays = fmtMoney(r.scraptfPaysScrap, keyScrap);
+  if (!fresh) {
+    return {
+      priceScrap,
+      scraptf,
+      sub: { text: `scrap.tf paid ${pays}, ${fmtAge(now - listAt)} ago`, tone: 'warn' },
+      title: `${base} scrap.tf paid ${pays} (${saved}): older than a day, so it is not counted as an exit. Save scrap.tf/items again.`,
+    };
+  }
+  return { priceScrap, scraptf, sub: { text: `scrap.tf pays ${pays}`, tone: 'muted' }, title: `${base} scrap.tf pays ${pays} (${saved}).` };
+}
+
+/** The status pill's hover: what the status means, naming scrap.tf when it is the exit. */
+export function holdingStatusTitle(r: Pick<HoldingRow, 'status'> & Partial<Pick<HoldingRow, 'bestExit'>>): string {
+  return r.status === 'sell' && r.bestExit === 'scraptf' ? `Sell now (scrap.tf). ${HOLDING_STATUS_HELP.sell}` : HOLDING_STATUS_HELP[r.status];
 }
 
 // ---------------------------------------------------------------------------
@@ -120,14 +216,37 @@ export function profitNowTitle(
 // ---------------------------------------------------------------------------
 
 /**
- * Record sale… prefilled for the buyer you would sell to: venue backpack.tf, that order's own
- * keys + metal and "Sold to <buyer>". Without a buyer only the item and venue are filled.
+ * Record sale… prefilled for the better exit (F14). For a backpack.tf buyer: venue backpack.tf,
+ * that order's own keys + metal and "Sold to <buyer>". When scrap.tf's saved list is the better exit:
+ * venue scrap.tf at what it pays, keys and metal as the list shows them (scraptfSaleInit, the drawer's
+ * and item menu's prefill), so the journal books what scrap.tf hands over. A row without the listed
+ * split falls back to the value split into whole keys and metal at `keyScrap` (the key price the row
+ * is valued at, so the dialog values it back to the same amount). A scrap.tf exit that has lapsed at
+ * `now` (scraptfExitLapsed) prefills the buyer instead. Without either only the item and venue are filled.
  */
-export function recordSaleInit(r: Pick<HoldingRow, 'sku' | 'name' | 'revenueOrder'>): RecordTradeInit {
+export function recordSaleInit(
+  r: Pick<HoldingRow, 'sku' | 'name' | 'revenueOrder'> &
+    Partial<Pick<HoldingRow, 'bestExit' | 'exitScrap' | 'exitVenue' | 'scraptfPaysScrap' | 'scraptfPaysKeys' | 'scraptfPaysScrapRaw' | 'scraptfListAt'>>,
+  keyScrap: Scrap | null = null,
+  now: UnixMs | null = null,
+): RecordTradeInit {
+  if (r.bestExit === 'scraptf' && !scraptfExitLapsed(r, now)) {
+    if (finiteScrap(r.scraptfPaysScrapRaw)) return scraptfSaleInit(r, { paysKeys: r.scraptfPaysKeys ?? null, paysScrapRaw: r.scraptfPaysScrapRaw });
+    const pays = finiteScrap(r.scraptfPaysScrap) ? r.scraptfPaysScrap : r.exitScrap;
+    const base: RecordTradeInit = { side: 'sell', sku: r.sku, name: r.name, venue: r.exitVenue || HOLDING_EXIT_VENUES.scraptf };
+    if (!finiteScrap(pays) || pays <= 0) return base;
+    return { ...base, ...splitAtKey(pays, keyScrap), note: SCRAPTF_SALE_NOTE };
+  }
   const o = r.revenueOrder;
-  const base: RecordTradeInit = { side: 'sell', sku: r.sku, name: r.name, venue: 'backpack.tf' };
+  const base: RecordTradeInit = { side: 'sell', sku: r.sku, name: r.name, venue: HOLDING_EXIT_VENUES.backpack };
   if (!o) return base;
   return { ...base, keys: o.keys, scrap: o.metalScrap, note: `Sold to ${o.userName || o.steamid}` };
+}
+
+/** The row's Record sale… button tooltip: who the prefill sells to. */
+export function recordSaleTitle(r: Pick<HoldingRow, 'revenueOrder'> & Partial<Pick<HoldingRow, 'bestExit'>>): string {
+  if (r.bestExit === 'scraptf') return "Record a sale in your journal, prefilled for scrap.tf's bank at its saved list price (s)";
+  return r.revenueOrder ? `Record a sale in your journal, prefilled for ${buyerName(r.revenueOrder)} (s)` : 'Record a sale in your journal (s)';
 }
 
 /** The buyer's backpack.tf profile, opened only through 'links.open'; null without a SteamID64. */

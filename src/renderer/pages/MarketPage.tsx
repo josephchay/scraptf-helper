@@ -3,21 +3,39 @@
 // service's market index, which only reads the book the websocket already
 // fills, so this page adds no network traffic. The scrap.tf side is only what
 // you typed or saved (R1, R10): the app never visits scrap.tf. The coverage
-// strip (F13) only hands a bank page's address to your own browser.
+// strip (F13) shows when you last saved each scrap.tf page; a chip opens its card
+// on the scrap.tf banks page (F15), which hands the address to your own browser.
+// The scrap.tf price list (F14) is the card on top plus the "scrap.tf pays" and
+// Stock columns, all from the scrap.tf/items page the user saved themselves. A
+// bank card's "See all" lands here (#/market/bank/<bank>), filtered to its
+// categories and Not checked. The Recent checks panel (F16 Live check) lists
+// what the check hotkey, the opt-in clipboard watcher or its own box found;
+// only results reach it, never the copied text. F17: a "New" badge marks items
+// new on scrap.tf since the user's previous save of a bank page, and the Source
+// popover's "New on scrap.tf" keeps only those (both from saved pages, R10).
+// F19: each row's scrap.tf button (or o) arms the Live check, copies the name and
+// hands the item's static bank page to the user's browser through main's allowlist;
+// a header button opens the bank page while the market shows one bank. A price
+// copied there comes back through the check hotkey or watcher. Nothing here loads scrap.tf.
 
-import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent, type MouseEvent } from 'react';
+import { memo, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent, type MouseEvent } from 'react';
+import { CHECK_HINT, CHECK_MAX_CHARS, CHECK_PRIVACY_SENTENCE } from '../../shared/check';
 import { marketUpdatedAt, MARKET_MAX_SEARCH_CHARS, MARKET_SORTS } from '../../shared/market';
-import type { MarketListResult, MarketRow, MarketSort, MarketStats, Scrap, UnixMs } from '../../shared/types';
+import type { CheckResult, MarketListResult, MarketRow, MarketSort, MarketStats, Scrap, UnixMs } from '../../shared/types';
 import { CATEGORIES, CATEGORY_LABELS, MARKET_SOURCES, MARKET_VERDICTS } from '../../shared/types';
 import { rpc, saveCsv } from '../api';
+import { banksPath } from '../banksModel';
+import { checkKey, checkPayUpTo, checkSummaryText, manualCheckProblem, mergeRecentChecks, recentCheckRow, recentChecksHint, sanitizeRecentOpen } from '../checkModel';
 import { CheckList, Popover } from '../components/Controls';
 import { openOrCopy } from '../components/ExternalLink';
 import { Banner, EmptyState, ErrorBanner, LoadingBlock } from '../components/Feedback';
 import { Icon } from '../components/Icon';
-import { isContextMenuKey, menuPointForRect, useItemMenu } from '../components/ItemMenu';
-import { Money } from '../components/ItemName';
+import { isContextMenuKey, menuPointForRect, openOnScraptf, useItemMenu } from '../components/ItemMenu';
+import { ItemName, Money } from '../components/ItemName';
 import { ROW_HEIGHT } from '../components/OppTable';
-import { ConfidenceBadge, ItemTagChip, OnlineDot, StatePill } from '../components/Pills';
+import { ConfidenceBadge, ItemTagChip, OnlineDot, StatePill, TonePill } from '../components/Pills';
+import { ScraptfListCard } from '../components/ScraptfListCard';
+import { CheckVerdictPill } from './CheckPopup';
 import { DASH, categoryLabel, errorMessage, flagInfo, fmtAge, fmtDateTime, fmtInt, fmtMoney, itemTags, qualityClass, qualityName, qualityOf } from '../format';
 import { useApp } from '../hooks/appContext';
 import { usePersistentState } from '../hooks/usePersistentState';
@@ -27,8 +45,15 @@ import {
   BOUNDARY_NOTE,
   DEFAULT_MARKET_SORT,
   FLASH_MS,
+  LISTED_ON_SCRAPTF_HINT,
+  LISTED_ON_SCRAPTF_LABEL,
+  LISTED_ON_SCRAPTF_TITLE,
+  MARKET_SCRAPTF_KEY,
   MAX_MIN_BUYERS,
   MIN_BUYER_STEPS,
+  NEW_ON_SCRAPTF_HINT,
+  NEW_ON_SCRAPTF_LABEL,
+  NEW_ON_SCRAPTF_TITLE,
   SORT_LABELS,
   SOURCE_HINTS,
   SOURCE_LABELS,
@@ -43,10 +68,12 @@ import {
   createMarketWindow,
   defaultMarketDir,
   defaultMarketFilters,
+  emptyFiltersText,
   emptyMarketReason,
   indexStateText,
   lastChangeText,
   liveRateText,
+  marketBankLink,
   marketDisplayRows,
   marketErrorText,
   marketExportQuery,
@@ -54,7 +81,10 @@ import {
   marketLiveState,
   marketPayTitle,
   marketPollMs,
+  marketRouteIntent,
+  marketScraptfButton,
   marketSellsForTitle,
+  marketSourceCount,
   marketWindowQuery,
   nextPageRequest,
   pulseRate,
@@ -62,6 +92,7 @@ import {
   readMinPrice,
   sanitizeMarketFilters,
   sanitizeMarketSort,
+  scraptfNewBadge,
   scraptfSideText,
   toggleMarketSort,
   toggleVerdict,
@@ -81,6 +112,7 @@ import {
   type SortDir,
 } from '../marketModel';
 import { indexOfRow, isMenuKeyEcho, isSearchShortcut, menuAnchorRect, moveCursor } from '../oppModel';
+import { allItemsChip, listPaysCell, listStockCell } from '../scraptfListModel';
 import { MIN_CEILING_PRESETS, readMinCeiling } from '../shoppingModel';
 
 type MenuPoint = { x: number; y: number };
@@ -162,9 +194,27 @@ function useMarketWindow(query: MarketWindowQuery, keyScrap: Scrap | null, onLoa
 }
 
 export function MarketPage() {
-  const { keyScrap: statusKey, settings, status, openItem, navigate, toast, updateSettings, itemSku } = useApp();
+  const { keyScrap: statusKey, settings, status, openItem, navigate, toast, updateSettings, itemSku, segments } = useApp();
   const [filters, setFilters] = usePersistentState<MarketFilters>('market.filters', defaultMarketFilters(), sanitizeMarketFilters);
   const [sort, setSort] = usePersistentState<MarketSortState>('market.sort', { ...DEFAULT_MARKET_SORT }, sanitizeMarketSort);
+  // F15: a bank card's "See all" (#/market/bank/<bank>) sets its filters while rendering, so the first
+  // market.list already asks for them, then the route goes back to #/market (Back returns to the banks).
+  const intent = marketRouteIntent(segments);
+  const intentKey = intent?.key ?? null;
+  const [appliedIntent, setAppliedIntent] = useState<string | null>(null);
+  // The filters object the last "See all" set; kept once the route is gone.
+  const [routeFilters, setRouteFilters] = useState<MarketFilters | null>(null);
+  if (intentKey !== appliedIntent) {
+    setAppliedIntent(intentKey);
+    if (intent) {
+      setFilters(intent.filters);
+      setSort(intent.sort);
+      setRouteFilters(intent.filters);
+    }
+  }
+  useEffect(() => {
+    if (intentKey !== null) replaceRoute('market');
+  }, [intentKey]);
   const [noteDismissed, setNoteDismissed] = usePersistentState<boolean>('market.boundaryNoteDismissed', false, (v) => v === true);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [frozen, setFrozen] = useState(false);
@@ -176,9 +226,14 @@ export function MarketPage() {
   const visible = useDocumentVisible();
   const menu = useItemMenu();
 
-  const search = useDebounced(filters.search, 200);
+  const typedSearch = useDebounced(filters.search, 200);
   // Typing "10 ref" passes through unparseable text; only a settled value reaches the query.
-  const minText = useDebounced(filters.minCeiling, 300);
+  const typedMin = useDebounced(filters.minCeiling, 300);
+  // Until the user changes a filter, a "See all" route's own (empty) search and minimum count at once:
+  // the debounced values still hold the saved ones it replaced, and would reach the first market.list.
+  const routed = routeFilters !== null && filters === routeFilters;
+  const search = routed ? filters.search : typedSearch;
+  const minText = routed ? filters.minCeiling : typedMin;
   // Kept in keys and scrap: "1 key" must not become a new query (top of the list, Freeze
   // bypassed) each time the key price moves. Each request converts it with the current key price.
   const minPrice = useMemo(() => readMinPrice(minText), [minText]);
@@ -212,6 +267,9 @@ export function MarketPage() {
   });
   // Your own prices and rules move verdicts without any book change.
   usePush('prices.changed', () => onLiveChange(1));
+  // F14: the list's columns, its filter and the "All items" chip are read per request; a purge or a
+  // list save that moved no price pushes only this.
+  usePush('scraptf.listChanged', () => onLiveChange(1));
   useEffect(() => {
     if (visible && !frozenRef.current && gate.shown()) refresh();
   }, [visible, gate, refresh]);
@@ -260,7 +318,26 @@ export function MarketPage() {
   // F9 item menu. Through a ref, so the memoised rows keep a stable handler.
   const openMenuRef = useRef(menu.open);
   openMenuRef.current = menu.open;
-  const onRowMenu = useCallback((r: MarketRow, at: MenuPoint) => openMenuRef.current({ sku: r.sku, name: r.name }, at), []);
+  const onRowMenu = useCallback((r: MarketRow, at: MenuPoint) => openMenuRef.current({ sku: r.sku, name: r.name, category: r.category }, at), []);
+  // F19: a row's scrap.tf button or its o key: arm, copy the name, open the static bank page. Through
+  // refs, so the memoised rows keep a stable handler.
+  const settingsRef = useRef(settings);
+  settingsRef.current = settings;
+  const scraptfBusy = useRef(false);
+  const onScraptf = useCallback((r: MarketRow) => {
+    // A second press while the first is still on its way would open the page twice.
+    if (scraptfBusy.current) return;
+    const b = marketScraptfButton(r, Date.now());
+    // Set only once nothing synchronous can throw, and always cleared: a stuck flag would end the button.
+    scraptfBusy.current = true;
+    void openOnScraptf(b.url, b.name, (text, tone) => toastRef.current(text, tone), { sku: r.sku, settings: settingsRef.current })
+      .catch(() => toastRef.current('Could not open scrap.tf. Try again, or use Open on scrap.tf in the item details.', 'bad'))
+      .finally(() => {
+        scraptfBusy.current = false;
+      });
+  }, []);
+  // U2: the one bank the category filter covers (a bank card's "See all" included).
+  const bankLink = marketBankLink(filters.categories);
   const loadMore = win.loadMore;
 
   // "/" focuses the search box from anywhere on the page, but not from inside the item drawer.
@@ -299,6 +376,7 @@ export function MarketPage() {
   const paused = status?.networkPaused ?? settings?.networkPaused ?? false;
   const feedOff = settings ? !settings.liveFeed.enabled : status?.feed === 'off';
   const filterCount = activeMarketFilterCount(filters);
+  const sourceCount = marketSourceCount(filters);
   const minShown = readMinCeiling(filters.minCeiling, statusKey);
   const lastAt = newest(result?.stats.lastChangeAt ?? null, lastPushAt.current);
   // Pushes arrive between the 5 s ticks: the strip's clock is at least the newest one seen, so
@@ -307,6 +385,8 @@ export function MarketPage() {
 
   return (
     <div className="page market-page">
+      {/* The page note below already states the boundary; the card repeats it only once that is dismissed. */}
+      <ScraptfListCard placement="market" boundaryNote={noteDismissed} />
       <MarketStrip
         live={marketLiveState(status?.feed, paused, feedOff)}
         lastAt={lastAt}
@@ -325,6 +405,8 @@ export function MarketPage() {
           </button>
         </div>
       )}
+      {/* F16: what the live check hotkey, the clipboard watcher or the box inside found lately. */}
+      <RecentChecks />
 
       <div className="toolbar" role="toolbar" aria-label="Filters">
         <div className="search-box">
@@ -346,8 +428,28 @@ export function MarketPage() {
         <Popover label={<>Category{filters.categories.length ? <span className="count">{filters.categories.length}</span> : null}</>} active={filters.categories.length > 0}>
           <CheckList values={filters.categories} options={CATEGORIES.map((c) => ({ value: c, label: CATEGORY_LABELS[c] }))} onChange={(v) => set('categories', v)} />
         </Popover>
-        <Popover label={<>Source{filters.sources.length ? <span className="count">{filters.sources.length}</span> : null}</>} active={filters.sources.length > 0}>
+        <Popover label={<>Source{sourceCount ? <span className="count">{sourceCount}</span> : null}</>} active={sourceCount > 0}>
           <CheckList values={filters.sources} options={MARKET_SOURCES.map((s) => ({ value: s, label: SOURCE_LABELS[s], hint: SOURCE_HINTS[s] }))} onChange={(v) => set('sources', v)} />
+          {/* F14: here rather than in the toolbar, which already fills a 1280 px window. */}
+          <div className="market-list-filter">
+            <label className="check-row" title="Only items on your saved scrap.tf/items list: the items scrap.tf trades, with what it pays and its stock">
+              <input type="checkbox" checked={filters.onScraptfList} onChange={() => set('onScraptfList', !filters.onScraptfList)} />
+              <span>On scrap.tf&apos;s list</span>
+              <span className="muted small">your saved scrap.tf/items</span>
+            </label>
+            {/* F17: new in the newest save of a bank page (MarketQuery.newOnScraptf), from pages you saved. */}
+            <label className="check-row" title={NEW_ON_SCRAPTF_TITLE}>
+              <input type="checkbox" checked={filters.newOnScraptf} onChange={() => set('newOnScraptf', !filters.newOnScraptf)} />
+              <span>{NEW_ON_SCRAPTF_LABEL}</span>
+              <span className="muted small">{NEW_ON_SCRAPTF_HINT}</span>
+            </label>
+            {/* F20: listed for at least a day across your saves (MarketQuery.listedOnScraptf). */}
+            <label className="check-row" title={LISTED_ON_SCRAPTF_TITLE}>
+              <input type="checkbox" checked={filters.listedOnScraptf} onChange={() => set('listedOnScraptf', !filters.listedOnScraptf)} />
+              <span>{LISTED_ON_SCRAPTF_LABEL}</span>
+              <span className="muted small">{LISTED_ON_SCRAPTF_HINT}</span>
+            </label>
+          </div>
         </Popover>
         <Popover
           label={<>Pay up to{minShown.scrap !== null ? <span className="count">≥ {fmtMoney(minShown.scrap, keyScrap)}</span> : minShown.error ? <span className="count">?</span> : null}</>}
@@ -482,6 +584,12 @@ export function MarketPage() {
           ) : null}
         </div>
         <div className="summary-actions">
+          {bankLink ? (
+            <button type="button" className="btn small market-bank-link" title={bankLink.title} aria-label={bankLink.ariaLabel} onClick={() => void openOrCopy(bankLink.url, toast)}>
+              {bankLink.text}
+              <span aria-hidden="true"> ↗</span>
+            </button>
+          ) : null}
           {frozen ? (
             <span className={`market-waiting small${waiting > 0 ? ' has-waiting' : ''}`} title="Live changes held back while frozen; unfreeze to apply them">
               {waitingText(waiting)}
@@ -529,6 +637,7 @@ export function MarketPage() {
               reason={emptyMarketReason({ filters, stats: result.stats, paused, feedOff, knownItems: result.scraptf.typed + result.scraptf.pages })}
               stats={result.stats}
               filtered={filterCount > 0}
+              filtersText={emptyFiltersText(filters)}
               onReset={resetFilters}
             />
           ) : (
@@ -546,6 +655,7 @@ export function MarketPage() {
               onSelect={setSelectedId}
               onOpen={onOpen}
               onMenu={onRowMenu}
+              onScraptf={onScraptf}
               onLoadMore={loadMore}
               onSort={onSort}
             />
@@ -553,8 +663,8 @@ export function MarketPage() {
         </div>
       )}
       <p className="hint-line muted small">
-        Keyboard: <kbd>j</kbd>/<kbd>k</kbd> or arrows to move, <kbd>Enter</kbd> to open, <kbd>Shift</kbd>+<kbd>F10</kbd> or right-click for item actions, <kbd>/</kbd> to search.
-        Freeze holds the order while you read.{' '}
+        Keyboard: <kbd>j</kbd>/<kbd>k</kbd> or arrows to move, <kbd>Enter</kbd> to open, <kbd>{MARKET_SCRAPTF_KEY}</kbd> to open it on scrap.tf (copies the name),{' '}
+        <kbd>Shift</kbd>+<kbd>F10</kbd> or right-click for item actions, <kbd>/</kbd> to search. Freeze holds the order while you read.{' '}
         <button type="button" className="link-btn" onClick={() => navigate('settings')}>
           Change thresholds
         </button>
@@ -564,10 +674,242 @@ export function MarketPage() {
   );
 }
 
+/**
+ * Swaps the current route without a history entry, so Back skips a one-shot route like
+ * #/market/bank/<bank>; hashchange tells the route hook (replaceState fires none).
+ */
+function replaceRoute(path: string): void {
+  try {
+    window.history.replaceState(window.history.state, '', `#/${path}`);
+    window.dispatchEvent(new Event('hashchange'));
+  } catch {
+    // The filters are already applied; only the address stays as it was.
+  }
+}
+
 function newest(a: UnixMs | null, b: UnixMs | null): UnixMs | null {
   if (a === null) return b;
   if (b === null) return a;
   return Math.max(a, b);
+}
+
+// ---------------------------------------------------------------------------
+// Recent checks (F16 Live check)
+// ---------------------------------------------------------------------------
+
+/**
+ * The live check's recent results: the service's in-memory ring ('check.recent': results only, never
+ * the copied text), kept live by 'check.done', plus a box to check pasted text without the hotkey
+ * ('check.text', source 'manual'). Collapsed by default; the choice is remembered. Local IPC only:
+ * nothing here reads the clipboard or contacts scrap.tf (R1). Exported for the render tests.
+ */
+export function RecentChecks() {
+  const { openItem, settings } = useApp();
+  const [open, setOpen] = usePersistentState<boolean>('market.recentChecksOpen', false, sanitizeRecentOpen);
+  const [checks, setChecks] = useState<CheckResult[]>([]);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  // The pasted text lives in this field only: never stored, logged or kept once it was an item.
+  const [text, setText] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [manual, setManual] = useState<{ result: CheckResult | null; error: string | null } | null>(null);
+  const busyRef = useRef(false);
+  const now = useNow(open ? 15_000 : 60_000);
+  const ids = useId();
+  const bodyId = `${ids}-body`;
+  const inputId = `${ids}-text`;
+
+  const load = useCallback(() => {
+    rpc('check.recent')
+      .then((r) => {
+        setChecks((cur) => mergeRecentChecks(cur, r));
+        setLoadError(null);
+      })
+      .catch((e: unknown) => setLoadError(errorMessage(e)));
+  }, []);
+  // On mount (the count shows while collapsed) and on each opening, to catch up.
+  useEffect(() => {
+    load();
+  }, [load, open]);
+  // A manual check is both returned and pushed; mergeRecentChecks keeps it once.
+  usePush('check.done', (r) => setChecks((cur) => mergeRecentChecks(cur, [r])));
+
+  const runCheck = async () => {
+    if (busyRef.current) return;
+    const problem = manualCheckProblem(text);
+    if (problem) {
+      setManual({ result: null, error: problem });
+      return;
+    }
+    busyRef.current = true;
+    setBusy(true);
+    const sent = text;
+    try {
+      const r = await rpc('check.text', { text: sent, source: 'manual' });
+      setManual({ result: r, error: null });
+      if (r.status === 'item') {
+        setChecks((cur) => mergeRecentChecks(cur, [r]));
+        // Only what was checked: text typed while the check ran stays.
+        setText((cur) => (cur === sent ? '' : cur));
+      }
+    } catch (e) {
+      setManual({ result: null, error: errorMessage(e) });
+    } finally {
+      busyRef.current = false;
+      setBusy(false);
+    }
+  };
+
+  const watchOn = settings?.check?.watchClipboard ?? false;
+  // Main's watcher does not poll while the network-paused switch (a setting) is on, so the header must not say it is on.
+  const watchPaused = watchOn && (settings?.networkPaused ?? false);
+  const hint = recentChecksHint(settings?.check?.hotkey ?? '', watchOn && !watchPaused);
+  const latest = manual?.result?.status === 'item' ? checkKey(manual.result) : null;
+  // A check lands between ticks: the clock is at least its time, so it never reads "in 11 s".
+  const shownNow = Math.max(now, checks[0]?.checkedAt ?? 0, manual?.result?.checkedAt ?? 0);
+  return (
+    <section className="card recent-checks" aria-labelledby={`${ids}-title`}>
+      <div className="rc-head">
+        <h2 className="rc-title" id={`${ids}-title`}>
+          {/* aria-controls only while the body is rendered: it must name an element that exists. */}
+          <button type="button" className="rc-toggle" aria-expanded={open} aria-controls={open ? bodyId : undefined} onClick={() => setOpen((o) => !o)}>
+            <Icon name={open ? 'chevronDown' : 'chevronRight'} size={14} />
+            Recent checks
+            <span className="count">
+              <span className="sr-only">, </span>
+              {fmtInt(checks.length)}
+            </span>
+          </button>
+        </h2>
+        <span className="rc-hint muted small" title={hint}>
+          {hint}
+        </span>
+        {watchOn ? (
+          <TonePill tone={watchPaused ? 'warn' : 'info'} title={watchPaused ? `Paused while the network is paused. ${CHECK_PRIVACY_SENTENCE}` : CHECK_PRIVACY_SENTENCE}>
+            {watchPaused ? 'Clipboard check paused' : 'Clipboard check on'}
+          </TonePill>
+        ) : null}
+      </div>
+      {open ? (
+        <div id={bodyId} className="rc-body">
+          <form
+            className="rc-form"
+            onSubmit={(e) => {
+              e.preventDefault();
+              void runCheck();
+            }}
+          >
+            <label className="sr-only" htmlFor={inputId}>
+              Item or scrap.tf/items row to check
+            </label>
+            <textarea
+              id={inputId}
+              className="input rc-input"
+              rows={1}
+              maxLength={CHECK_MAX_CHARS}
+              autoComplete="off"
+              spellCheck={false}
+              placeholder="Paste an item name or a scrap.tf/items row"
+              value={text}
+              onChange={(e) => setText(e.target.value)}
+              onKeyDown={(e) => {
+                // Enter checks; Shift+Enter keeps a line break (a name, then its price).
+                if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
+                  e.preventDefault();
+                  void runCheck();
+                } else if (e.key === 'Escape' && text) {
+                  e.preventDefault();
+                  setText('');
+                }
+              }}
+            />
+            <button type="submit" className="btn small primary" disabled={busy}>
+              {busy ? 'Checking…' : 'Check'}
+            </button>
+          </form>
+          {manual ? <ManualCheckLine manual={manual} now={shownNow} onOpen={openItem} /> : null}
+          {loadError ? (
+            <div className="tone-text-bad small" role="alert">
+              Could not load recent checks: {loadError}{' '}
+              <button type="button" className="link-btn" onClick={load}>
+                Retry
+              </button>
+            </div>
+          ) : null}
+          {checks.length ? (
+            <ul className="rc-list" aria-label="Recent checks, newest first">
+              {checks.map((r) => (
+                <RecentCheckItem key={checkKey(r)} result={r} now={shownNow} highlight={checkKey(r) === latest} onOpen={openItem} />
+              ))}
+            </ul>
+          ) : (
+            <p className="muted small">No checks yet. They stay in memory only, until the app closes.</p>
+          )}
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
+function ManualCheckLine({ manual, now, onOpen }: { manual: { result: CheckResult | null; error: string | null }; now: UnixMs; onOpen: (sku: string) => void }) {
+  const r = manual.result;
+  if (!r) {
+    return (
+      <p className="rc-result tone-text-bad small" role="alert">
+        {manual.error}
+      </p>
+    );
+  }
+  if (r.status !== 'item' || !r.sku) {
+    return (
+      <p className="rc-result small" role="status">
+        <Icon name={r.status === 'refused' ? 'warning' : 'info'} size={13} />
+        <span>{r.reason}</span>
+        <span className="muted">{CHECK_HINT}.</span>
+      </p>
+    );
+  }
+  const sku = r.sku;
+  return (
+    <p className="rc-result small" role="status" title={checkSummaryText(r, now)}>
+      <ItemName sku={sku} name={r.name ?? sku} maxTags={1} />
+      <CheckVerdictPill result={r} />
+      <span className="muted">
+        Pay up to <span className="money">{checkPayUpTo(r).text}</span>
+      </span>
+      <button type="button" className="link-btn" onClick={() => onOpen(sku)}>
+        Open
+      </button>
+    </p>
+  );
+}
+
+function RecentCheckItem({ result, now, highlight, onOpen }: { result: CheckResult; now: UnixMs; highlight: boolean; onOpen: (sku: string) => void }) {
+  const row = recentCheckRow(result, now);
+  return (
+    <li>
+      <button type="button" className={`rc-row${highlight ? ' just-checked' : ''}`} title={row.title} onClick={() => onOpen(row.sku)}>
+        <span className="rc-time">{row.ago}</span>
+        <span className="rc-item">
+          <ItemName sku={row.sku} name={row.name} maxTags={1} />
+        </span>
+        <span className="rc-price">
+          {row.price ? (
+            <>
+              <span className="money">{row.price}</span> <span className="muted small">{row.priceSource}</span>
+            </>
+          ) : (
+            <span className="muted">no scrap.tf price</span>
+          )}
+        </span>
+        <span className="rc-verdict">
+          <CheckVerdictPill result={result} />
+        </span>
+        <span className="rc-pay">
+          Pay up to <span className="money">{row.payUpTo}</span>
+        </span>
+      </button>
+    </li>
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -641,20 +983,28 @@ function IndexError({ stats, title }: { stats: MarketStats; title: string }) {
 }
 
 /**
- * F13: one chip per scrap.tf bank page, coloured by how recently you saved it. A click hands the
- * page to your own browser through main's link allowlist (openOrCopy); the app never fetches it.
- * Hidden while import is off.
- * Exported for the render tests only.
+ * F13: one chip per scrap.tf bank page, coloured by how recently you saved it, after F14's "All items"
+ * chip for the whole scrap.tf/items price list. A click opens that page's card on the scrap.tf banks
+ * page (F15), where Open in browser hands it to your own browser; nothing here opens or fetches it.
+ * Hidden while import is off. Exported for the render tests only.
  */
 export function CoverageStrip({ scraptf, now }: { scraptf: MarketListResult['scraptf'] | null; now: number }) {
-  const { toast } = useApp();
-  const chips = coverageChips(scraptf, now);
+  const { navigate } = useApp();
+  const all = allItemsChip(scraptf, now);
+  const chips = [...(all ? [all] : []), ...coverageChips(scraptf, now)];
   if (!chips.length) return null;
   return (
     <div className="market-strip-row market-coverage" role="group" aria-label="scrap.tf pages you saved">
       <span className="muted small">Saved pages</span>
       {chips.map((c) => (
-        <button key={c.label} type="button" className={`chip coverage-chip tone-${c.tone}`} title={c.title} aria-label={c.ariaLabel} onClick={() => void openOrCopy(c.url, toast)}>
+        <button
+          key={`${c.kind}:${c.label}`}
+          type="button"
+          className={`chip coverage-chip tone-${c.tone}${c.kind === 'list' ? ' coverage-all' : ''}`}
+          title={c.title}
+          aria-label={c.ariaLabel}
+          onClick={() => navigate(banksPath(c.bank))}
+        >
           <span className="status-dot" aria-hidden="true" />
           <span className="coverage-label">{c.label}</span>
           <span className="coverage-status">{c.status}</span>
@@ -711,7 +1061,7 @@ function SortPicker({ value, onChange }: { value: MarketSortState; onChange: (v:
 // Empty states
 // ---------------------------------------------------------------------------
 
-function NoRows({ reason, stats, filtered, onReset }: { reason: EmptyMarketReason; stats: MarketStats; filtered: boolean; onReset: () => void }) {
+function NoRows({ reason, stats, filtered, filtersText, onReset }: { reason: EmptyMarketReason; stats: MarketStats; filtered: boolean; filtersText: string; onReset: () => void }) {
   const { navigate, updateSettings, toast } = useApp();
   const openQuick = () => rpc('app.showQuickEntry').catch(() => toast('Could not open quick entry.', 'bad'));
   const settingsBtn = (
@@ -794,7 +1144,7 @@ function NoRows({ reason, stats, filtered, onReset }: { reason: EmptyMarketReaso
             </button>
           }
         >
-          Clear the search or the verdict chips, or lower the minimums. Items without buyers show only when you have a scrap.tf price for them.
+          {filtersText}
         </EmptyState>
       );
     case 'nothing-yet':
@@ -854,6 +1204,13 @@ const HEAD: readonly HeadDef[] = [
   { sort: 'buyers', label: 'Buyers', cls: 'm-buyers num', title: 'Sort by distinct buyers with eligible orders' },
   { sort: 'ceiling', label: 'Pay up to', cls: 'm-pay num', title: 'Sort by ceiling: the highest scrap.tf price that still clears your profit thresholds' },
   { sort: null, label: 'Your scrap.tf price', cls: 'm-yours num', title: 'Your latest typed or saved scrap.tf price, its source and age; a rule estimate in italics' },
+  {
+    sort: null,
+    label: 'scrap.tf pays',
+    cls: 'm-list num',
+    title: "What scrap.tf's bank pays you for it, from your saved scrap.tf/items list (as of that save). Dimmed when scrap.tf is full or the list is over a day old.",
+  },
+  { sort: null, label: 'Stock', cls: 'm-stock num', title: "scrap.tf's stock of its limit, from your saved scrap.tf/items list. Full: it will not buy more right now." },
   { sort: 'profit', label: 'Verdict', cls: 'm-verdict', title: 'Sort by profit at your price' },
   { sort: null, label: 'Confidence', cls: 'm-conf', title: 'Buy-side confidence: buyers and reference prices only' },
   { sort: 'updated', label: 'Updated', cls: 'm-updated num', title: 'Sort by the last order change or your last price' },
@@ -895,6 +1252,8 @@ export interface MarketTableProps {
   onSelect: (id: string | null) => void;
   onOpen: (r: MarketRow) => void;
   onMenu: (r: MarketRow, at: MenuPoint) => void;
+  /** F19: a row's scrap.tf button or the o key. Without it the rows show no button. */
+  onScraptf?: (r: MarketRow) => void;
   onLoadMore: () => void;
   onSort: (k: MarketSort) => void;
 }
@@ -903,7 +1262,24 @@ export interface MarketTableProps {
  * Virtualised market grid with the opportunities table's keyboard model; rows are keyed by SKU.
  * Exported for the render tests only.
  */
-export function MarketTable({ rows, dataKey, keyScrap, now, density, selectedId, flash, sort, loadingMore, frozen, onSelect, onOpen, onMenu, onLoadMore, onSort }: MarketTableProps) {
+export function MarketTable({
+  rows,
+  dataKey,
+  keyScrap,
+  now,
+  density,
+  selectedId,
+  flash,
+  sort,
+  loadingMore,
+  frozen,
+  onSelect,
+  onOpen,
+  onMenu,
+  onScraptf,
+  onLoadMore,
+  onSort,
+}: MarketTableProps) {
   const scroller = useRef<HTMLDivElement>(null);
   const header = useRef<HTMLDivElement>(null);
   // Only the first visible row is state, so scrolling within a row costs no render.
@@ -1053,6 +1429,12 @@ export function MarketTable({ rows, dataKey, keyScrap, now, density, selectedId,
         if (row.type === 'item') onOpen(row.row);
         else if (!row.capped && !loadingMore && !frozen) onLoadMore();
         break;
+      case MARKET_SCRAPTF_KEY:
+        if (row?.type !== 'item' || !onScraptf) return;
+        e.preventDefault();
+        // A held key repeats: one press, one browser tab.
+        if (!e.repeat) onScraptf(row.row);
+        break;
     }
   };
 
@@ -1071,7 +1453,7 @@ export function MarketTable({ rows, dataKey, keyScrap, now, density, selectedId,
       onScroll={onScroll}
       tabIndex={0}
       role="grid"
-      aria-label="Live market. Use j and k or the arrow keys to move, Enter to open, Shift+F10 for item actions."
+      aria-label={`Live market. Use j and k or the arrow keys to move, Enter to open${onScraptf ? `, ${MARKET_SCRAPTF_KEY} to open the item on scrap.tf and copy its name` : ''}, Shift+F10 for item actions.`}
       aria-rowcount={rows.length + 1}
       aria-activedescendant={selectedIndex >= 0 ? `mktrow-${selectedIndex}` : undefined}
       onKeyDown={onKey}
@@ -1107,6 +1489,7 @@ export function MarketTable({ rows, dataKey, keyScrap, now, density, selectedId,
               onSelect={onSelect}
               onOpen={onOpen}
               onMenu={onMenu}
+              onScraptf={onScraptf}
             />
           );
         })}
@@ -1213,6 +1596,7 @@ const ItemRow = memo(function ItemRow({
   onSelect,
   onOpen,
   onMenu,
+  onScraptf,
 }: {
   row: MarketRow;
   index: number;
@@ -1226,11 +1610,18 @@ const ItemRow = memo(function ItemRow({
   onSelect: (id: string) => void;
   onOpen: (r: MarketRow) => void;
   onMenu: (r: MarketRow, at: MenuPoint) => void;
+  onScraptf?: ((r: MarketRow) => void) | undefined;
 }) {
   const order = r.revenueOrder;
   const pill = verdictPill(r, keyScrap);
   const yours = yourPriceCell(r, keyScrap, now);
+  const pays = listPaysCell(r, keyScrap, now);
+  const stock = listStockCell(r, now);
   const updated = marketUpdatedAt(r);
+  // F17: new on scrap.tf since the previous save of a bank page (MarketRow.scraptfNewAt).
+  const fresh = scraptfNewBadge(r, now);
+  // F19: the bank page to look for it on, in the Item cell (the grid's column budget is test-pinned).
+  const stf = onScraptf ? marketScraptfButton(r, now) : null;
   // Flags that should stop a purchase get an icon; the drawer explains every flag.
   const bad = r.flags.map(flagInfo).filter((f) => f.tone === 'bad');
   const flashCls = flash ? ` flash-${flash} flash-${flashOdd ? 'b' : 'a'}` : '';
@@ -1255,10 +1646,37 @@ const ItemRow = memo(function ItemRow({
     >
       <div role="gridcell" className="m-item">
         <MarketItemName sku={r.sku} name={r.name} />
+        {fresh ? (
+          <span className={`pill market-new tone-${fresh.tone}`} title={fresh.title}>
+            {fresh.text}
+            <span className="sr-only"> on scrap.tf</span>
+          </span>
+        ) : null}
         {bad.length ? (
           <span className="tone-text-bad risk-icon" title={bad.map((f) => `${f.label}: ${f.help}`).join('\n')}>
             <Icon name="warning" size={13} />
           </span>
+        ) : null}
+        {stf && onScraptf ? (
+          <button
+            type="button"
+            className={`m-stf${stf.seen ? ' seen' : ''}`}
+            // Out of the Tab order (keyboard users press o), and a click leaves the focus on the grid,
+            // so j/k and o go on working.
+            tabIndex={-1}
+            title={stf.title}
+            aria-label={stf.ariaLabel}
+            onMouseDown={(e) => e.preventDefault()}
+            onClick={(e) => {
+              // Not the row's click: that opens the drawer.
+              e.stopPropagation();
+              onSelect(r.sku);
+              onScraptf(r);
+            }}
+          >
+            <Icon name="external" size={12} />
+            <span className="m-stf-label">{stf.label}</span>
+          </button>
         ) : null}
       </div>
       <div role="gridcell" className="m-cat muted" title={categoryLabel(r.category)}>
@@ -1298,6 +1716,15 @@ const ItemRow = memo(function ItemRow({
             </span>
           </>
         )}
+      </div>
+      <div role="gridcell" className={`m-list num${pays.dim ? ' list-dim' : ''}`} title={pays.title}>
+        {pays.scrap === null ? <span className="muted">{DASH}</span> : <Money scrap={pays.scrap} keyScrap={keyScrap} title={pays.title} />}
+        {/* Shown only where the narrowest layout hides the Stock column (market.css). */}
+        {pays.full ? <span className="pill tone-warn list-full list-full-inline">Full</span> : null}
+      </div>
+      <div role="gridcell" className={`m-stock num${stock.dim ? ' list-dim' : ''}${stock.out ? ' list-out' : ''}`} title={stock.title}>
+        <span className={stock.text === DASH ? 'muted' : 'list-stock'}>{stock.text}</span>
+        {stock.full ? <span className="pill tone-warn list-full">Full</span> : null}
       </div>
       <div role="gridcell" className="m-verdict">
         <span className={`pill verdict-pill tone-${pill.tone}`} title={pill.title}>

@@ -7,7 +7,7 @@ import { buildShoppingList, shoppingCsv } from '../../src/service/domain/shoppin
 import { T0 } from './helpers';
 
 const K = 567;
-const KP: KeyPriceState = { valueScrap: K, source: 'pricedb', observedAt: T0, stale: false, quotes: [] };
+const KP: KeyPriceState = { valueScrap: K, source: 'pricedb', observedAt: T0, stale: false, quotes: [], scraptfFromList: null };
 
 function order(valueScrap: number, isBot: boolean, over: Partial<OrderSummary> = {}): OrderSummary {
   return {

@@ -20,9 +20,11 @@
 // The PriceDB item page (/item/{encodeURIComponent(sku)}) was confirmed on
 // pricedb.io's own search page script.
 
-import { CATEGORIES, KILLSTREAK_NAMES, QUALITY_NAMES, WEAR_NAMES } from './types';
-import type { Category, LinkContext, LinkGroup, LinkSpec, SkuObject } from './types';
+import { CATEGORIES, KILLSTREAK_NAMES, QUALITY_NAMES, SCRAPTF_BANK_IDS, WEAR_NAMES } from './types';
+import type { Category, LinkContext, LinkGroup, LinkSpec, MarketScraptfLink, ScrapPrice, ScraptfBank, ScraptfSeenOn, SkuObject } from './types';
 import { fromObject, fromString, looksLikeSku, normalizeSkuObject } from './sku';
+
+export type { ScraptfBank } from './types';
 
 // ---------------------------------------------------------------------------
 // scrap.tf pages (opened by the user in their own browser, never fetched)
@@ -40,31 +42,160 @@ const SCRAPTF_PAGES: Readonly<Record<Category, string>> = Object.freeze({
   other: 'https://scrap.tf/buy/items',
 });
 
+/**
+ * scrap.tf's public price list of every item it trades (F14). The user opens it in their own browser
+ * and saves it into the watch folder; the app never fetches it (R1). Exact URL only: the allowlist
+ * does not open other scrap.tf paths (/items/2 included; the user pages on in their browser).
+ */
+export const SCRAPTF_ITEMS_URL = 'https://scrap.tf/items';
+
 /** Static scrap.tf bank page for a category. The app only hands it to the user's browser. */
 export function scraptfPageFor(category: Category): string {
   return Object.hasOwn(SCRAPTF_PAGES, category) ? SCRAPTF_PAGES[category] : SCRAPTF_PAGES.other;
+}
+
+/** One scrap.tf page the user can save into the watch folder (F15): a bank page or the /items price list. */
+export interface ScraptfBankInfo {
+  bank: ScraptfBank;
+  label: string;
+  /** A STATIC_EXTERNAL_URLS page: only ever handed to links.open (the user's browser), never fetched (R1). */
+  url: string;
+  /**
+   * Item categories this page sells (what to look for there; bankForCategory is the inverse). [] for
+   * 'list': scrap.tf/items lists everything and counts for no bank page.
+   */
+  categories: readonly Category[];
+}
+
+/**
+ * Every scrap.tf page the app knows, in the banks page's card order: the six /buy pages, /unusuals,
+ * then the /items price list. The single source of truth for bank ids, labels and URLs; the URLs are
+ * SCRAPTF_PAGES and SCRAPTF_ITEMS_URL, so the allowlist (STATIC_EXTERNAL_URLS) is unchanged.
+ */
+export const SCRAPTF_BANKS: readonly ScraptfBankInfo[] = Object.freeze([
+  { bank: 'hats', label: 'Hats', url: SCRAPTF_PAGES.hats, categories: ['hats'] },
+  { bank: 'weapons', label: 'Weapons', url: SCRAPTF_PAGES.weapons, categories: ['weapons'] },
+  { bank: 'stranges', label: 'Stranges', url: SCRAPTF_PAGES.stranges, categories: ['stranges'] },
+  { bank: 'killstreaks', label: 'Killstreaks', url: SCRAPTF_PAGES.killstreaks, categories: ['killstreaks'] },
+  { bank: 'skins', label: 'Skins', url: SCRAPTF_PAGES.skins, categories: ['skins'] },
+  // scrap.tf's "items" bank holds tools, paints, taunts, crates, promos and australiums.
+  { bank: 'items', label: 'Items', url: SCRAPTF_PAGES.other, categories: ['taunts', 'other'] },
+  { bank: 'unusuals', label: 'Unusuals', url: SCRAPTF_PAGES.unusuals, categories: ['unusuals'] },
+  // Same label as the F14 "All items" chip (SCRAPTF_LIST_LABEL).
+  { bank: 'list', label: 'All items', url: SCRAPTF_ITEMS_URL, categories: [] },
+] satisfies ScraptfBankInfo[]);
+
+const BANK_BY_ID: ReadonlyMap<string, ScraptfBankInfo> = new Map(SCRAPTF_BANKS.map((b) => [b.bank, b]));
+
+/** True for a known bank id (validates stored values and push payloads). */
+export function isScraptfBank(v: unknown): v is ScraptfBank {
+  return typeof v === 'string' && (SCRAPTF_BANK_IDS as readonly string[]).includes(v);
+}
+
+/** The SCRAPTF_BANKS entry for a bank id, or null for anything else. */
+export function scraptfBankInfo(bank: unknown): ScraptfBankInfo | null {
+  return typeof bank === 'string' ? (BANK_BY_ID.get(bank) ?? null) : null;
+}
+
+/**
+ * F20: true only for the exact static URL of a SCRAPTF_BANKS entry (a re-save reminder's notify openUrl).
+ * Main checks it, together with isAllowedExternalUrl, when the notification is clicked; nothing else is
+ * ever opened from a notification.
+ */
+export function isScraptfBankUrl(url: unknown): url is string {
+  return typeof url === 'string' && SCRAPTF_BANKS.some((b) => b.url === url);
+}
+
+/**
+ * The bank page that sells a category, for items the user has not seen on a saved page: taunts and
+ * 'other' are on the items bank (as scraptfPageFor), and so is anything unexpected. Never 'list'.
+ */
+export function bankForCategory(category: Category): Exclude<ScraptfBank, 'list'> {
+  switch (category) {
+    case 'hats':
+    case 'weapons':
+    case 'stranges':
+    case 'killstreaks':
+    case 'skins':
+    case 'unusuals':
+      return category;
+    default:
+      return 'items';
+  }
+}
+
+/**
+ * ItemDetail.seenOn: the bank of the newest imported price that names one (observedAt, ties to the
+ * higher id), with that bank's static URL and the price's time; null when none does. Typed prices
+ * never count: the user did not see them on a saved page.
+ */
+export function scraptfSeenOn(prices: readonly Pick<ScrapPrice, 'id' | 'source' | 'observedAt' | 'bank'>[]): ScraptfSeenOn | null {
+  let best: Pick<ScrapPrice, 'id' | 'observedAt'> | null = null;
+  let info: ScraptfBankInfo | null = null;
+  for (const p of prices) {
+    if (p.source !== 'import') continue;
+    const b = scraptfBankInfo(p.bank);
+    if (!b || !Number.isFinite(p.observedAt)) continue;
+    if (best === null || p.observedAt > best.observedAt || (p.observedAt === best.observedAt && p.id > best.id)) {
+      best = p;
+      info = b;
+    }
+  }
+  return best && info ? { bank: info.bank, url: info.url, at: best.observedAt } : null;
+}
+
+/** F19: one saved page that listed an item (a bank-stock save or an imported price): its bank and that save's time. */
+export type ScraptfSeen = Pick<ScraptfSeenOn, 'bank' | 'at'>;
+
+function seenUsable(s: ScraptfSeen | null | undefined): s is ScraptfSeen {
+  return !!s && scraptfBankInfo(s.bank) !== null && Number.isFinite(s.at);
+}
+
+/**
+ * F19: of two sightings, the one MarketRow.scraptfLink names. A bank page beats the scrap.tf/items list,
+ * because the list is only used when nothing else is known; then the newer one wins, and a tie keeps `a`.
+ * An unknown bank or a non-finite time counts as no sighting. Fold it over every sighting of a base SKU.
+ */
+export function preferScraptfSeen(a: ScraptfSeen | null | undefined, b: ScraptfSeen | null | undefined): ScraptfSeen | null {
+  const okA = seenUsable(a);
+  const okB = seenUsable(b);
+  if (!okA) return okB ? b : null;
+  if (!okB) return a;
+  const listA = a.bank === 'list';
+  if (listA !== (b.bank === 'list')) return listA ? b : a;
+  return b.at > a.at ? b : a;
+}
+
+/**
+ * F19, MarketRow.scraptfLink: the page in `seen` (picked with preferScraptfSeen) when there is one,
+ * else the category's bank (bankForCategory, never the list). The URL always comes from SCRAPTF_BANKS,
+ * never from item data, so only static allowlisted pages ever reach links.open.
+ */
+export function scraptfLinkFor(category: Category, seen: ScraptfSeen | null | undefined): MarketScraptfLink {
+  const info = seenUsable(seen) ? scraptfBankInfo(seen.bank) : null;
+  if (info && seen) return { bank: info.bank, url: info.url, seenAt: seen.at, source: 'seen' };
+  const bank = bankForCategory(category);
+  return { bank, url: scraptfBankInfo(bank)?.url ?? scraptfPageFor(category), seenAt: null, source: 'category' };
 }
 
 /** One scrap.tf bank page as the Live market's coverage strip lists it (F13). */
 export interface ScraptfBankPage {
   /** The page's own category (ScraptfCoverage.category); the items page uses 'other'. */
   category: Category;
+  /** F15: the page's bank id (a batch's recorded ImportBatch.bank counts for the page with this bank). */
+  bank: Exclude<ScraptfBank, 'list'>;
   label: string;
   url: string;
   /** Item categories this page sells: a saved page counts for it when most of its items are in them. */
   categories: readonly Category[];
 }
 
-/** The bank pages in strip order: the six /buy pages, then /unusuals. Every URL is a SCRAPTF_PAGES one. */
-export const SCRAPTF_BANK_PAGES: readonly ScraptfBankPage[] = Object.freeze([
-  { category: 'hats', label: 'Hats', url: SCRAPTF_PAGES.hats, categories: ['hats'] },
-  { category: 'weapons', label: 'Weapons', url: SCRAPTF_PAGES.weapons, categories: ['weapons'] },
-  { category: 'stranges', label: 'Stranges', url: SCRAPTF_PAGES.stranges, categories: ['stranges'] },
-  { category: 'killstreaks', label: 'Killstreaks', url: SCRAPTF_PAGES.killstreaks, categories: ['killstreaks'] },
-  { category: 'skins', label: 'Skins', url: SCRAPTF_PAGES.skins, categories: ['skins'] },
-  { category: 'other', label: 'Items', url: SCRAPTF_PAGES.other, categories: ['taunts', 'other'] },
-  { category: 'unusuals', label: 'Unusuals', url: SCRAPTF_PAGES.unusuals, categories: ['unusuals'] },
-] satisfies ScraptfBankPage[]);
+/** The bank pages in strip order: the six /buy pages, then /unusuals (SCRAPTF_BANKS without the list). */
+export const SCRAPTF_BANK_PAGES: readonly ScraptfBankPage[] = Object.freeze(
+  SCRAPTF_BANKS.flatMap((b): ScraptfBankPage[] =>
+    b.bank === 'list' ? [] : [{ category: b.bank === 'items' ? 'other' : b.bank, bank: b.bank, label: b.label, url: b.url, categories: b.categories }],
+  ),
+);
 
 /** Where backpack.tf shows both the access token ("Reveal") and the API key (registered there first). */
 export const BPTF_API_ACCESS_URL = 'https://next.backpack.tf/account/api-access';
@@ -90,13 +221,15 @@ export const ALLOWED_EXTERNAL_HOSTS: readonly string[] = Object.freeze([
 
 /**
  * The only other pages the app opens, matched as exact URLs: platform terms and
- * attribution (§7.5.8) and the static scrap.tf bank pages. Nothing else on
- * these hosts (a GitHub release download, for example) can be opened.
+ * attribution (§7.5.8), the static scrap.tf bank pages and the scrap.tf/items price
+ * list (F14). Nothing else on these hosts (a GitHub release download, for example)
+ * can be opened.
  */
 export const STATIC_EXTERNAL_URLS: readonly string[] = Object.freeze([
   ...new Set([
     'https://scrap.tf/terms',
     ...Object.values(SCRAPTF_PAGES),
+    SCRAPTF_ITEMS_URL,
     'https://store.steampowered.com/subscriber_agreement/english/',
     'https://github.com/NetroScript/scrap.tf-item-information',
     'https://github.com/VeBeshka/tf2-scraptf-profit-helper',

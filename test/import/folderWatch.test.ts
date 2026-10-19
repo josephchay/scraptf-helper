@@ -89,7 +89,14 @@ describe('isImportCandidate', () => {
     ['hats.html~', false],
     ['~$hats.html', false],
     ['.hats.html', false],
-    ['hats.mhtml', false],
+    // F18: "Webpage, Single File" saves, under the same temp-file and _files rules.
+    ['hats.mhtml', true],
+    ['Hats.MHT', true],
+    ['hats.mhtml.crdownload', false],
+    ['hats.mht.tmp', false],
+    ['~hats.mhtml', false],
+    ['hats_files/inner.mhtml', false],
+    ['hats.mhtmlx', false],
     ['hats.txt', false],
     ['hats_files', false],
     ['hats_files/inner.html', false],
@@ -248,6 +255,45 @@ describe('createFolderWatcher', () => {
     fw.emit('big.html');
     await vi.waitFor(() => expect(log.lines.some((l) => l.level === 'warn' && l.msg.includes('big.html'))).toBe(true), { timeout: 3000, interval: 20 });
     expect(delivered).toHaveLength(0);
+  });
+
+  it('reports a file over the size limit to onSkip, once per version and unread, so the import can say why (F18)', async () => {
+    const fw = fakeWatch();
+    const skipped: { path: string; reason: string; detail: string; mtimeMs: number }[] = [];
+    const { delivered } = start({ factory: fw.factory, maxBytes: 3 * 1024 * 1024, onSkip: (path, reason, detail, mtimeMs) => skipped.push({ path, reason, detail, mtimeMs }) });
+    const file = join(dir, 'Item Trading - TF2 - Scrap.TF.mhtml');
+    await writeFile(file, 'x'.repeat(5 * 1024 * 1024));
+    fw.emit('Item Trading - TF2 - Scrap.TF.mhtml');
+    await vi.waitFor(() => expect(skipped).toHaveLength(1), { timeout: 3000, interval: 20 });
+    expect(skipped[0]).toEqual({ path: file, reason: 'too-large', detail: '5 MB is over the 3 MB import limit', mtimeMs: (await stat(file)).mtimeMs });
+    expect(delivered).toHaveLength(0);
+    // The same version again: already reported.
+    fw.emit('Item Trading - TF2 - Scrap.TF.mhtml');
+    await settle(200);
+    expect(skipped).toHaveLength(1);
+    // A page that fits is delivered as before, not skipped.
+    await writeFile(join(dir, 'hats.html'), PAGE);
+    fw.emit('hats.html');
+    await vi.waitFor(() => expect(delivered).toHaveLength(1), { timeout: 3000, interval: 20 });
+    expect(skipped).toHaveLength(1);
+  });
+
+  it('logs and continues when onSkip throws', async () => {
+    const fw = fakeWatch();
+    const { delivered, log } = start({
+      factory: fw.factory,
+      maxBytes: 100,
+      onSkip: () => {
+        throw new Error('boom');
+      },
+    });
+    expect(PAGE.length).toBeLessThan(100);
+    await writeFile(join(dir, 'big.html'), 'x'.repeat(101));
+    fw.emit('big.html');
+    await vi.waitFor(() => expect(log.lines.some((l) => l.level === 'error' && l.msg.includes('boom'))).toBe(true), { timeout: 3000, interval: 20 });
+    await writeFile(join(dir, 'hats.html'), PAGE);
+    fw.emit('hats.html');
+    await vi.waitFor(() => expect(delivered).toHaveLength(1), { timeout: 3000, interval: 20 });
   });
 
   it('skips empty files until they are written', async () => {

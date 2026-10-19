@@ -5,6 +5,11 @@
 // the local 'item.detail') and the link groups from 'links.forSku', fetched
 // lazily on open. URLs open only through 'links.open' (openOrCopy -> openLink
 // in api.ts). Recording writes the user's own journal; nothing is traded (R4).
+// "Open on scrap.tf (copies name)" (F14) copies the name for scrap.tf's own
+// search and hands the static bank page (where the user last saw the item, F15,
+// else its category's) to the user's browser; the app never visits scrap.tf (R1).
+// F19: it also arms the Live check ('check.arm', main only, in memory), so a price
+// the user copies there on its own is checked as this item.
 //
 // MenuPopover is the generic part (placement, roving focus, closing rules); the
 // drawer's buyer actions menu (F3) uses it too.
@@ -12,11 +17,12 @@
 import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode, type SyntheticEvent } from 'react';
 import { createPortal } from 'react-dom';
 import { DEFAULT_SETTINGS } from '../../shared/defaults';
-import type { ItemDetail } from '../../shared/types';
-import { rpc, windowKind } from '../api';
+import type { Category, ItemDetail, ScraptfBank, ScraptfSeenOn, Settings } from '../../shared/types';
+import { openLink, rpc, windowKind } from '../api';
+import { checkArmFor, checkReturnPath, scraptfBackHint } from '../checkModel';
 import { copyText } from '../clipboard';
 import { errorMessage } from '../format';
-import { useApp } from '../hooks/appContext';
+import { useApp, type ToastTone } from '../hooks/appContext';
 import {
   copiedMessage,
   createMenuClosePolicy,
@@ -27,6 +33,7 @@ import {
   placeMenu,
   recordTradeInit,
   resolveMenuPoint,
+  scraptfOpenedToast,
   stepIndex,
   typeaheadIndex,
   type AnchorBox,
@@ -46,9 +53,42 @@ export interface ItemMenuTarget {
   name: string;
   /** backpack.tf full name when the row knows it (ItemDetail.bptfName); defaults to `name`. */
   bptfName?: string;
+  /** The item's category when the row knows it: "Open on scrap.tf" then needs no links.forSku answer (F14). */
+  category?: Category;
+  /**
+   * F15: the scrap.tf page the row comes from (the banks page's cards). "Open on scrap.tf" opens that
+   * bank page; without it the menu reads where the user last saw the item (ItemDetail.seenOn).
+   */
+  bank?: ScraptfBank;
 }
 
 export { isContextMenuKey, menuPointForRect } from '../itemMenuModel';
+
+/** F19: arm the Live check for this item, and word the toast from these settings (Settings → Live check). */
+export interface ScraptfArm {
+  sku: string;
+  settings: Pick<Settings, 'check' | 'networkPaused'> | null | undefined;
+}
+
+/**
+ * "Open on scrap.tf (copies name)" (F14): copies the name for scrap.tf's own search box, then hands
+ * the page to the user's browser through 'links.open' (main's allowlist). The app never visits scrap.tf (R1).
+ * With `arm` (F19) it first tells main which item this is ('check.arm', kept in memory, never logged),
+ * so the check hotkey or watcher checks a price copied there as this item.
+ */
+export async function openOnScraptf(url: string, name: string, toast: (text: string, tone?: ToastTone) => void, arm?: ScraptfArm): Promise<void> {
+  const params = arm ? checkArmFor(arm.sku, name) : null;
+  // Only the toast's wording needs it, so it runs alongside and never delays the copy.
+  const hotkeys = arm ? rpc('app.hotkeys').catch(() => null) : null;
+  // Arm before the copy: main's watcher polls every 700 ms and must already know the name is the app's own (M2).
+  const armed = params ? await rpc('check.arm', params).then((r) => r.armedUntil !== null, () => false) : false;
+  // Copy first: once the browser has focus, the clipboard API refuses an unfocused page.
+  const copied = await copyText(name);
+  const opened = await openLink(url);
+  const back = arm ? scraptfBackHint(checkReturnPath(arm.settings, (await hotkeys)?.check ?? null, armed)) : null;
+  const t = scraptfOpenedToast(copied, opened, url, back);
+  toast(t.text, t.tone);
+}
 
 /** Where to open for a click or contextmenu event, falling back to the focused element for keyboard-triggered ones. */
 export function menuPointFromEvent(at: MenuPoint): MenuPoint {
@@ -122,9 +162,10 @@ export function useItemMenu(): { open(target: ItemMenuTarget, at: { x: number; y
 }
 
 function ItemMenuView({ state, onDone, onRecord }: { state: OpenState; onDone: () => void; onRecord: (side: 'buy' | 'sell', target: ItemMenuTarget) => void }) {
-  const { openItem, toast } = useApp();
+  const { openItem, toast, settings } = useApp();
   const { target } = state;
   const [links, setLinks] = useState<LinksState>({ status: 'loading' });
+  const [seenOn, setSeenOn] = useState<ScraptfSeenOn | null>(null);
 
   // Lazily, once per open: the menu is often used only to copy or open details.
   useEffect(() => {
@@ -141,7 +182,24 @@ function ItemMenuView({ state, onDone, onRecord }: { state: OpenState; onDone: (
     };
   }, [target.sku]);
 
-  const sections = useMemo(() => itemMenuSections(target, links), [target, links]);
+  // F15: "Open on scrap.tf" goes to the bank page the user last saw the item on (a local read, no
+  // history). Until it answers, or when it fails, the category's bank stands in; a row that names its
+  // page (target.bank) needs no read.
+  const namedBank = target.bank;
+  useEffect(() => {
+    if (namedBank) return;
+    let alive = true;
+    rpc('item.detail', { sku: target.sku, history: false })
+      .then((d) => {
+        if (alive) setSeenOn(d?.seenOn ?? null);
+      })
+      .catch(() => undefined);
+    return () => {
+      alive = false;
+    };
+  }, [target.sku, namedBank]);
+
+  const sections = useMemo(() => itemMenuSections(target, links, seenOn), [target, links, seenOn]);
 
   const run = (a: ItemMenuAction) => {
     switch (a.kind) {
@@ -158,6 +216,10 @@ function ItemMenuView({ state, onDone, onRecord }: { state: OpenState; onDone: (
         return;
       case 'record':
         onRecord(a.side, target);
+        return;
+      case 'scraptf':
+        // F19: armed with the menu's item and exactly the name it copies.
+        void openOnScraptf(a.url, a.name, toast, { sku: target.sku, settings });
         return;
       case 'link':
         void openOrCopy(a.url, toast);

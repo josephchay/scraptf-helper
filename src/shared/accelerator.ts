@@ -121,6 +121,27 @@ function canonicalAccelerator(mods: readonly string[], key: string): string {
   return [...[...set].sort(), CANONICAL_KEY[k] ?? k].join('+');
 }
 
+function canonicalOf(accel: string): string | null {
+  if (typeof accel !== 'string' || accel === '') return null;
+  const tokens = accel.split('+');
+  if (tokens.some((t) => t === '')) return null;
+  const key = tokens[tokens.length - 1]!;
+  return canonicalAccelerator(
+    tokens.slice(0, -1).map((m) => m.toLowerCase()),
+    key,
+  );
+}
+
+/**
+ * True when two accelerators press the same chord ("Ctrl+Alt+C" and "CommandOrControl+Alt+C").
+ * '' (off) never matches, so two switched-off hotkeys do not conflict. Used for the check hotkey,
+ * which must not take the quick-entry hotkey's chord (one global registration per chord).
+ */
+export function sameAccelerator(a: string, b: string): boolean {
+  const x = canonicalOf(a);
+  return x !== null && x === canonicalOf(b);
+}
+
 /** True for a well-formed accelerator that is a system or everyday app shortcut (Ctrl+C, Alt+F4, F5…). */
 export function isReservedAccelerator(accel: string): boolean {
   if (typeof accel !== 'string' || accel === '') return false;

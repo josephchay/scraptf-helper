@@ -12,7 +12,8 @@ import { FakeClock, FakeTimers, makeDeps } from '../domain/helpers';
 import { openRepo } from '../../src/service/db';
 import { importSavedPage, type HandlerContext } from '../../src/service/rpcHandlers';
 import { DEFAULT_SETTINGS, mergeSettings } from '../../src/shared/defaults';
-import type { ImportResult, ScrapPrice } from '../../src/shared/types';
+import { scraptfListKeyOf } from '../../src/shared/scraptfList';
+import { KEY_SKU, type ImportResult, type ScrapPrice } from '../../src/shared/types';
 import { createStubSchema } from './schemaStub';
 
 const NOW = 1_800_000_000_000;
@@ -26,9 +27,10 @@ afterEach(() => {
   while (repos.length) repos.pop()!.close();
 });
 
-function setup(schema: SchemaService = createStubSchema()) {
-  const repo = openRepo(':memory:');
-  repos.push(repo);
+function setup(schema: SchemaService = createStubSchema(), wrapRepo: (r: Repo) => Repo = (r) => r) {
+  const real = openRepo(':memory:');
+  repos.push(real);
+  const repo = wrapRepo(real);
   const settings = mergeSettings(DEFAULT_SETTINGS, { import: { enabled: true, acknowledgedAt: NOW - 3_600_000 } });
   const dirty: string[] = [];
   const quiet = () => undefined;
@@ -37,6 +39,8 @@ function setup(schema: SchemaService = createStubSchema()) {
     keyPrice: () => ({ valueScrap: KEY_SCRAP }),
     markDirty: (skus: Iterable<string>) => dirty.push(...skus),
   } as unknown as Engine;
+  /** Calls in order: pricesChanged, scraptfListChanged, push:<event>. */
+  const calls: string[] = [];
   const ctx = {
     clock: { now: () => NOW },
     log,
@@ -44,12 +48,17 @@ function setup(schema: SchemaService = createStubSchema()) {
     schema,
     engine,
     settings: () => settings,
-    push: quiet,
-    pricesChanged: quiet,
+    push: (event: string) => calls.push(`push:${event}`),
+    pricesChanged: () => calls.push('pricesChanged'),
+    scraptfListChanged: () => calls.push('scraptfListChanged'),
+    // F17: not in `calls`, whose order the F14 tests pin (test/import/bankStockImport.test.ts covers it).
+    // F20: the change feed's import hook (writes no event in these tests).
+    scraptfHistory: { onImport: () => 0 },
+    bankStockChanged: quiet,
   } as unknown as HandlerContext;
   const run = (html: string, mtimeMs: number, fileName = 'page.html'): ImportResult => importSavedPage(ctx, { html, fileName, mtimeMs });
   const imported = (sku: string): ScrapPrice[] => repo.scrapPricesForSku(sku).filter((p) => p.source === 'import');
-  return { repo, run, imported, dirty, settings };
+  return { repo, run, imported, dirty, settings, calls };
 }
 
 /** A saved bank page (/buy/hats) with the given cards. */
@@ -65,10 +74,13 @@ function bankPage(cards: Record<string, string>[]): string {
   return `<!DOCTYPE html>\n<!-- saved from url=(0024)https://scrap.tf/buy/hats -->\n<html><head><title>Hats</title></head><body>${html}</body></html>`;
 }
 
-/** A saved /items price list with the given rows ("n/limit" is the stock cell). */
-function itemsPage(rows: { defindex: number; name: string; price: string; stock: string }[]): string {
+/** A saved /items price list with the given rows ("n/limit" is the stock cell; "Price we pay" 1 refined unless given). */
+function itemsPage(rows: { defindex: number; name: string; price: string; stock: string; pays?: string }[]): string {
   const tr = rows
-    .map((r) => `<tr data-quality="6" data-defindex="${r.defindex}"><td></td><td>${r.name}</td><td>${r.price}</td><td>1 refined</td><td><div rel="tooltip" title="${r.stock}"></div></td></tr>`)
+    .map(
+      (r) =>
+        `<tr data-quality="6" data-defindex="${r.defindex}"><td></td><td>${r.name}</td><td>${r.price}</td><td>${r.pays ?? '1 refined'}</td><td><div rel="tooltip" title="${r.stock}"></div></td></tr>`,
+    )
     .join('\n');
   return (
     '<!DOCTYPE html><html><head><title>Item Trading - TF2 - Scrap.TF</title><meta property="og:url" content="https://scrap.tf/items" /></head>' +
@@ -242,5 +254,133 @@ describe('importSavedPage: a saved page keeps the bank page it was (F13 coverage
     // Still the hats page saved 10 minutes ago, not "never saved"; the list counts for no page.
     expect(hatsChip()).toMatchObject({ lastSavedAt: NOW - 10 * 60_000, items: 2 });
     market.stop();
+  });
+});
+
+describe('importSavedPage: the saved scrap.tf price list (F14)', () => {
+  const captain = (price: string, stock: string, pays?: string) => ({ defindex: 378, name: 'Team Captain', price, stock, ...(pays !== undefined ? { pays } : {}) });
+
+  it('stores every /items row with a SKU, out of stock included, at the file time and under the batch', () => {
+    const h = setup();
+    const r = h.run(fixture('items_list.html'), NOW - 60_000, 'items.html');
+    const list = h.repo.scraptfList();
+    expect(list).toHaveLength(13);
+    expect(list.every((l) => l.batchId === r.batchId && l.observedAt === NOW - 60_000)).toBe(true);
+    expect(h.repo.scraptfListRow('126;6')).toEqual({
+      sku: '126;6',
+      name: "Bill's Hat",
+      sellsKeys: 3,
+      sellsScrap: 477,
+      paysKeys: 3,
+      paysScrap: 378,
+      stock: 2,
+      stockLimit: 5,
+      batchId: r.batchId,
+      observedAt: NOW - 60_000,
+    });
+    expect(h.repo.scraptfListRow('5833;6')).toMatchObject({ stock: 49, stockLimit: 50 });
+    // Out of stock: no import price (unchanged), but scrap.tf still buys it, so it is on the list.
+    expect(h.imported('143;6')).toEqual([]);
+    expect(h.repo.scraptfListRow('143;6')).toMatchObject({ sellsKeys: 10, sellsScrap: 450, paysKeys: 8, paysScrap: 90, stock: 0, stockLimit: 5 });
+    expect(h.repo.scraptfListRow('1015;1')).toMatchObject({ stock: 0, stockLimit: 3, paysKeys: 3, paysScrap: 180 });
+    // "Sold out": no price to buy, still what scrap.tf pays.
+    expect(h.repo.scraptfListRow('31193;6')).toMatchObject({ sellsKeys: null, sellsScrap: null, paysKeys: 0, paysScrap: 12, stock: 0, stockLimit: 5 });
+    // The price path is as before: the 10 rows in stock.
+    expect(r.stored).toBe(10);
+    // The result says how many list rows the save wrote, so the Import page can show the whole list.
+    expect(r.listRows).toBe(13);
+    expect(h.repo.listScrapPrices().filter((p) => p.source === 'import')).toHaveLength(10);
+  });
+
+  it('announces the list change after the price change and before import.done', () => {
+    const h = setup();
+    h.run(fixture('items_list.html'), NOW - 60_000, 'items.html');
+    expect(h.calls).toEqual(['pricesChanged', 'scraptfListChanged', 'push:import.done']);
+  });
+
+  it('writes no list rows for a bank page, which has no "Price we pay" column, and announces none', () => {
+    const h = setup();
+    const r = h.run(fixture('buy_hats.html'), NOW - 60_000, 'hats.html');
+    expect(r.stored).toBeGreaterThan(0);
+    expect(r.listRows).toBeUndefined();
+    expect(h.repo.scraptfList()).toEqual([]);
+    expect(h.calls).toEqual(['pricesChanged', 'push:import.done']);
+  });
+
+  it('dates rows at the import time when the file has no usable time, and never in the future', () => {
+    for (const mtime of [0, -5, Number.NaN, NOW + 3_600_000]) {
+      const h = setup();
+      h.run(itemsPage([captain('2 refined', '3/5')]), mtime, 'items.html');
+      expect(h.repo.scraptfListRow('378;6')?.observedAt).toBe(NOW);
+    }
+  });
+
+  it('merges list pages by SKU, newest wins, and an older copy saved earlier changes nothing', () => {
+    const h = setup();
+    const p1 = h.run(itemsPage([captain('2 refined', '3/5', '1.33 refined'), { defindex: 126, name: "Bill's Hat", price: '1 refined', stock: '2/5' }]), NOW - 60_000, 'items.html');
+    const p2 = h.run(itemsPage([captain('3 refined', '4/5', '2 refined')]), NOW - 30_000, 'items (2).html');
+    expect(h.repo.scraptfList().map((r) => [r.sku, r.sellsScrap, r.paysScrap, r.stock, r.batchId])).toEqual([
+      ['126;6', 9, 9, 2, p1.batchId],
+      ['378;6', 27, 18, 4, p2.batchId],
+    ]);
+
+    h.calls.length = 0;
+    const old = h.run(itemsPage([captain('1 refined', '1/5')]), NOW - 120_000, 'old.html');
+    expect(old.listRows).toBe(0);
+    expect(h.repo.scraptfListRow('378;6')).toMatchObject({ sellsScrap: 27, stock: 4, batchId: p2.batchId, observedAt: NOW - 30_000 });
+    // Nothing on the list changed, so nothing is announced.
+    expect(h.calls).toEqual(['pricesChanged', 'push:import.done']);
+
+    // Saving the same file again (same time) rewrites its rows.
+    h.calls.length = 0;
+    h.run(itemsPage([captain('4 refined', '5/5')]), NOW - 30_000, 'items (2).html');
+    expect(h.repo.scraptfListRow('378;6')).toMatchObject({ sellsScrap: 36, stock: 5, stockLimit: 5 });
+    expect(h.calls).toContain('scraptfListChanged');
+  });
+
+  it('keeps the first row with a price to buy when the list repeats a SKU', () => {
+    const h = setup();
+    h.run(itemsPage([captain('Sold out', '0/5', '1 refined'), captain('2 refined', '1/5', '1.33 refined'), captain('3 refined', '2/5', '1.66 refined')]), NOW - 60_000);
+    expect(h.repo.scraptfList()).toHaveLength(1);
+    expect(h.repo.scraptfListRow('378;6')).toMatchObject({ sellsScrap: 18, paysScrap: 12, stock: 1 });
+  });
+
+  it('skips a row that shows neither price; one with either is kept', () => {
+    const h = setup();
+    h.run(
+      itemsPage([
+        captain('Sold out', '0/5', '—'),
+        { defindex: 126, name: "Bill's Hat", price: '1 refined', stock: '2/5', pays: '' },
+        { defindex: 30621, name: 'Burstchester', price: 'Sold out', stock: '0/2', pays: '60 keys' },
+      ]),
+      NOW - 60_000,
+    );
+    expect(h.repo.scraptfList().map((r) => [r.sku, r.sellsScrap, r.paysKeys, r.paysScrap])).toEqual([
+      ['126;6', 9, null, null],
+      ['30621;6', null, 60, 0],
+    ]);
+  });
+
+  it("carries scrap.tf's own key prices (the Mann Co. key row) for the key price, in metal", () => {
+    const h = setup();
+    h.run(itemsPage([{ defindex: 5021, name: 'Mann Co. Supply Crate Key', price: '60.11 refined', stock: '120/400', pays: '59.22 refined' }]), NOW - 60_000);
+    expect(scraptfListKeyOf(h.repo.scraptfListRow(KEY_SKU))).toEqual({ sellsScrap: 541, paysScrap: 533, observedAt: NOW - 60_000 });
+  });
+
+  it('writes the prices and the list in one transaction', () => {
+    const failing = (r: Repo): Repo =>
+      new Proxy(r, {
+        get: (t, k, rcv) =>
+          k === 'upsertScraptfList'
+            ? () => {
+                throw new Error('disk full');
+              }
+            : Reflect.get(t, k, rcv),
+      });
+    const h = setup(createStubSchema(), failing);
+    expect(() => h.run(fixture('items_list.html'), NOW - 60_000, 'items.html')).toThrow(/disk full/);
+    expect(h.repo.listImportBatches(10)).toEqual([]);
+    expect(h.repo.listScrapPrices()).toEqual([]);
+    expect(h.calls).toEqual([]);
   });
 });

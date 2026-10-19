@@ -8,7 +8,7 @@ import { appendFileSync, existsSync, mkdirSync, readdirSync, rmSync, statSync } 
 import path from 'node:path';
 import type { PushContract, PushEvent, RpcMethod } from '../shared/rpc';
 import { baseSku as toBaseSku, looksLikeSku } from '../shared/sku';
-import type { AppStatus, ConnectorHealth, HealthReport, Listing, RequestLogRow, SecretName, Settings, UnixMs } from '../shared/types';
+import type { AppStatus, ConnectorHealth, HealthReport, Listing, RequestLogRow, ScraptfBank, SecretName, Settings, UnixMs } from '../shared/types';
 import { SECRET_NAMES } from '../shared/types';
 import { createBptfApi } from './connectors/bptfApi';
 import { createBptfSocket, type SocketTimers } from './connectors/bptfSocket';
@@ -18,8 +18,31 @@ import { createSteamMarket } from './connectors/steamMarket';
 import type { Clock, FeedBatch, Logger, Repo, ServiceDeps, WebSocketLike } from './contracts';
 import { systemClock } from './contracts';
 import { SchemaVersionError, openRepo } from './db';
-import { RETENTION, createEngine, createHoldings, createMarketIndex, explicitInput, selectKeyPrice } from './domain';
-import { createFolderWatcher, type FolderWatcher, type WatchFactory } from './import';
+import {
+  RETENTION,
+  createBankStock,
+  createBanksSummary,
+  createNewFlipNotifier,
+  createEngine,
+  createHoldings,
+  createLiveCheck,
+  createMarketIndex,
+  createResaveReminders,
+  createScraptfHistory,
+  createScraptfListCache,
+  explicitInput,
+  marketCategoryOf,
+  selectKeyPrice,
+} from './domain';
+import {
+  ImportTooLargeError,
+  createFolderWatcher,
+  decodedTooLargeWarning,
+  tooLargeWarning,
+  type FolderWatcher,
+  type WatchFactory,
+  type WatchSkipReason,
+} from './import';
 import {
   BUDGETS,
   budgetById,
@@ -32,7 +55,7 @@ import {
   unregisterSecret,
   type NetPauseState,
 } from './net';
-import { createRpcHandlers, importSavedPage, type HandlerContext } from './rpcHandlers';
+import { createRpcHandlers, importSavedPage, recordSkippedImport, type HandlerContext } from './rpcHandlers';
 import { buildJobs, createScheduler, SNAPSHOT_STALE_MS, type Scheduler } from './scheduler';
 
 export const DB_FILE_NAME = 'flipdesk.sqlite';
@@ -424,15 +447,40 @@ export function createServiceCore(opts: ServiceCoreOptions): ServiceCore {
   let statusTimer: unknown = null;
   let statusSoon: unknown = null;
 
+  // F14: the user's saved scrap.tf/items list, in memory (filled only by saved pages, R10; no network).
+  // Its key row feeds the key price, which values the other rows; keyRow() never reads the key price,
+  // so the two do not loop. Rows load on first use; scraptfListChanged() re-reads them.
+  const scraptfList = createScraptfListCache({ repo, log, keyPrice: () => engine.keyPrice() });
+
   const engine = createEngine({
     ...deps,
     schema,
     timers,
+    scraptfKey: () => scraptfList.keyRow(),
+    // F17: an imported item a "New on scrap.tf" toast just named gets no second "Profit:" toast. Late-bound
+    // (the notifier is built below); the engine asks only while it runs, after start().
+    toldElsewhere: (opp, at) => opp.inputKind === 'import' && newFlipNotifier.toldRecently(toBaseSku(opp.sku), at),
+    // ...and the other way round: an imported item the engine toasted first (an import held for the
+    // market's first build at start-up) gets no second "New on scrap.tf" toast. Late-bound the same way.
+    notified: (opps, at) => {
+      for (const o of opps) {
+        if (o.inputKind !== 'import') continue;
+        try {
+          newFlipNotifier.toastedElsewhere(toBaseSku(o.sku), at);
+        } catch {
+          // An unreadable SKU only costs a second toast.
+        }
+      }
+    },
     events: {
       onChanged: (summary) => {
         flushOppLog();
         push('opps.changed', summary);
         scheduleStatusCheck();
+        // F15 hook: the stored opportunities moved, so each bank's flips may have (after an import too:
+        // the engine re-evaluates the imported SKUs about 1 s after pricesChanged). Flips only: the
+        // saved pages and the market rows did not change.
+        banks.invalidate('flips');
       },
       onNotify: (n) => push('notify', n),
     },
@@ -445,12 +493,34 @@ export function createServiceCore(opts: ServiceCoreOptions): ServiceCore {
     schema,
     timers,
     keyPrice: () => engine.keyPrice(),
-    onChanged: (p) => push('market.changed', p),
+    onChanged: (p) => {
+      push('market.changed', p);
+      // F15 hook: Live market rows feed each bank's lookFor and unchecked only.
+      banks.invalidate('market');
+      // F17: "New on scrap.tf" notifications held until the first build (bank stock below).
+      newFlipNotifier.flush();
+    },
     // syncFolderWatch drops the watcher when the folder is missing; a failed OS watch is not alive.
     // Read only from market.list, after construction, so the later `let watcher` is initialised.
     folderWatchActive: () => watcher !== null && watcher.handle.alive(),
     // Called from the index's timers only, after construction, so `holdings` below is initialised.
     onBasesChanged: (bases) => holdings.onBasesChanged(bases),
+    // F14: joined per returned row at read time, and the strip's "All items" chip.
+    scraptfList,
+    // F17: "New on scrap.tf" (MarketRow.scraptfNewAt, MarketQuery.newOnScraptf). Late-bound, since the bank
+    // stock reads market.entryFor; called only from list()/all(), after `bankStock` below is initialised.
+    bankStock: {
+      newAtFor: (base) => bankStock.newAtFor(base),
+      version: () => bankStock.version(),
+      // F19: MarketRow.scraptfLink's bank-stock side (the imported prices' is the index's own), late-bound the same way.
+      seenFor: (base) => bankStock.seenFor(base),
+    },
+    // F20: MarketRow.scraptfListedSince and the "Listed > 24 h" filter from the history's runs, late-bound
+    // the same way (the history reads market.entryFor).
+    history: {
+      listedSinceFor: (base, bank) => scraptfHistory.listedSinceFor(base, bank),
+      version: () => scraptfHistory.version(),
+    },
   });
 
   // Holdings (F11): open journal lots priced from the market index; "Sell:" notifications go through main.
@@ -461,6 +531,110 @@ export function createServiceCore(opts: ServiceCoreOptions): ServiceCore {
     timers,
     keyPrice: () => engine.keyPrice(),
     notify: (n) => push('notify', n),
+    // F14: a held base's saved-list row is its scrap.tf exit.
+    scraptfList,
+  });
+
+  // scrap.tf bank stock (F17): each saved page's two newest saves, diffed in memory and joined to the Live
+  // market per read (no network, nothing fetched from scrap.tf: only pages the user saved, R10). Feeds the
+  // banks cards' "What's new", the market's scraptfNewAt, the drawer's ItemDetail.bankStock and the
+  // "New on scrap.tf" notifications. Constructed after the market index it reads, before the banks summary
+  // that reads it; it loads lazily on first use.
+  const bankStock = createBankStock({
+    clock,
+    log,
+    repo,
+    market,
+    keyPrice: () => engine.keyPrice(),
+    settings: () => settings,
+    categoryOf: (sku) => marketCategoryOf(schema, sku),
+    schemaLoaded: () => schema.isLoaded(),
+    // F20: BankStockRow's time listed from the history's runs; late-bound, read only by list()/all().
+    history: { runsFor: (bank) => scraptfHistory.runsFor(bank) },
+  });
+
+  // scrap.tf banks (F15): per-page summaries from the batches, opportunities, market index and saved list,
+  // in memory (no network). Invalidated at the hook points marked "F15 hook"; its throttled change
+  // notification is pushed as 'scraptf.banksChanged'. Its folderWatch is read only from summary(),
+  // after construction, so the later `let watcher` is initialised.
+  const banks = createBanksSummary({
+    clock,
+    log,
+    repo,
+    market,
+    scraptfList,
+    timers,
+    settings: () => settings,
+    folderWatch: () => folderWatchState(),
+    // A pre-0.3 batch without a bank is classified like the coverage strip does it.
+    categoryOf: (sku) => marketCategoryOf(schema, sku),
+    // F17: each card's "What's new", read live on every summary().
+    bankStock,
+  });
+  banks.onChanged(() => push('scraptf.banksChanged', { at: clock.now() }));
+
+  // scrap.tf history (F20): the user's saves read as price history, time listed and a change feed, in
+  // memory plus scraptf_events (no network; only pages the user saved, R10). importSavedPage writes the
+  // events through onImport; bankStockChanged refreshes the runs index.
+  const scraptfHistory = createScraptfHistory({
+    clock,
+    log,
+    repo,
+    market,
+    keyPrice: () => engine.keyPrice(),
+    // An item history's name when no save names it (the drawer of an item never saved).
+    nameOf: (sku) => schema.nameForSku(sku),
+  });
+
+  // F20 S5: opt-in re-save reminders (a notification only; the app never refreshes scrap.tf itself).
+  const resaveReminders = createResaveReminders({
+    clock,
+    log,
+    repo,
+    timers,
+    settings: () => settings,
+    networkPaused: () => settings.networkPaused || http.isPaused(),
+    notify: (n) => push('notify', n),
+  });
+
+  // S3 "New on scrap.tf" notifications. An import made before the Live market's first build (the folder
+  // watch's catch-up at start) is held until it has built: flushed on its change push and the status tick.
+  const newFlipNotifier = createNewFlipNotifier({
+    log,
+    repo,
+    clock,
+    stock: bankStock,
+    settings: () => settings,
+    keyPrice: () => engine.keyPrice(),
+    notify: (n) => push('notify', n),
+    marketBuilt: () => market.stats().lastFullAt !== null,
+  });
+
+  /**
+   * bank_stock rows were written by an import (`imported`: its bank and batch) or pruned (no argument):
+   * ctx.bankStockChanged and maintenance. The cache re-reads the saves first, so the S3 notifications
+   * judge the new save against its predecessor, then the banks page hears of it.
+   */
+  const bankStockChanged = (imported?: { bank: ScraptfBank; batchId: number }): void => {
+    bankStock.refresh();
+    // F20: the runs index reads the same saves (a new one, or thinned ones gone).
+    scraptfHistory.refresh();
+    if (imported) newFlipNotifier.imported(imported);
+    // The banks page's "What's new" lines and the stock page refetch on 'scraptf.banksChanged'.
+    banks.invalidate();
+  };
+
+  // Live check (F16): text the user copied (read by main) or typed, judged against the local book and
+  // the saved list, item.detail {history:false} style; no request of any kind. 'check.text' pushes
+  // 'check.done' for item results; the recent ring lives in memory only.
+  const liveCheck = createLiveCheck({
+    repo,
+    schema,
+    log,
+    settings: () => settings,
+    keyPrice: () => engine.keyPrice(),
+    market,
+    scraptfList,
   });
 
   // ----- backpack.tf feed -----
@@ -560,7 +734,7 @@ export function createServiceCore(opts: ServiceCoreOptions): ServiceCore {
   // ----- key price moves -----
   let lastKeyScrap: number | null = null;
   const keyQuotesChanged = (): void => {
-    const kp = selectKeyPrice(repo.keyQuotes(), settings, clock.now());
+    const kp = selectKeyPrice(repo.keyQuotes(), settings, clock.now(), scraptfList.keyRow());
     if (lastKeyScrap === null || Math.abs(kp.valueScrap - lastKeyScrap) >= 1) {
       if (lastKeyScrap !== null) log.info(`key price moved ${lastKeyScrap} -> ${kp.valueScrap} scrap`);
       lastKeyScrap = kp.valueScrap;
@@ -568,9 +742,29 @@ export function createServiceCore(opts: ServiceCoreOptions): ServiceCore {
       // Ceilings and key-priced orders move with the key value.
       market.markAllDirty();
       holdings.settingsChanged();
+      // List prices in keys are valued at the new key price on their next read.
+      scraptfList.keyPriceChanged();
+      // F17: cheaper/pricier between prices in different keys is decided at the key price.
+      bankStock.refresh();
     }
     scheduleStatusCheck();
   };
+
+  // ----- scrap.tf price list (F14) -----
+  /** Rows were written by an import (importSavedPage) or purged by maintenance: re-read them. */
+  const scraptfListChanged = (): void => {
+    scraptfList.refresh();
+  };
+  scraptfList.onChanged((summary) => {
+    // The key row may have moved scrap.tf's key prices, which cap the key value.
+    keyQuotesChanged();
+    // A held item's scrap.tf exit may have appeared, moved or gone. Market rows read the list per
+    // read, and the pages refetch on the push below (and on 'prices.changed' for an import).
+    holdings.settingsChanged();
+    push('scraptf.listChanged', { at: clock.now(), items: summary.items });
+    // F15 hook: the 'list' card reads the saved list (an import wrote rows, or maintenance purged some).
+    banks.invalidate();
+  });
 
   // ----- PriceDB socket -----
   let pricedbSocketOn = false;
@@ -622,6 +816,15 @@ export function createServiceCore(opts: ServiceCoreOptions): ServiceCore {
   } catch {
     crashedWatchImport = null;
   }
+  /** Records a watched save that imported nothing for its size (F18); a failure to record is only logged. */
+  const recordWatchedSkip = (name: string, mtimeMs: number, warning: string): void => {
+    try {
+      recordSkippedImport(ctx, { fileName: name, mtimeMs, warning });
+    } catch (err) {
+      log.warn(`folder watch could not record the skip of ${name}: ${errorText(err)}`);
+    }
+  };
+
   const importWatchedFile = (file: string, html: string, mtimeMs: number): void => {
     const marker = JSON.stringify({ file, mtimeMs });
     const name = path.basename(file);
@@ -640,6 +843,8 @@ export function createServiceCore(opts: ServiceCoreOptions): ServiceCore {
       log.info(`folder watch imported ${r.fileName}: ${r.stored} of ${r.parsed} items`);
     } catch (err) {
       log.warn(`folder watch could not import ${name}: ${errorText(err)}`);
+      // F18: under the limit on disk but over it once decoded: reported like the on-disk skip, not only logged.
+      if (err instanceof ImportTooLargeError) recordWatchedSkip(name, mtimeMs, decodedTooLargeWarning(err.bytes, err.limit));
     } finally {
       try {
         repo.setMeta(META_WATCH_IMPORTING, '');
@@ -647,6 +852,15 @@ export function createServiceCore(opts: ServiceCoreOptions): ServiceCore {
         // the marker only guards against crash loops
       }
     }
+  };
+
+  /**
+   * F18: a page the watch would not read (over 20 MB: a Single File save holds every image) is
+   * recorded with its reason and pushed as 'import.done', instead of only logged, so the user sees why
+   * the save did nothing.
+   */
+  const skippedWatchedFile = (file: string, reason: WatchSkipReason, detail: string, mtimeMs: number): void => {
+    if (reason === 'too-large') recordWatchedSkip(path.basename(file), mtimeMs, tooLargeWarning(detail));
   };
 
   const syncFolderWatch = (): void => {
@@ -682,11 +896,33 @@ export function createServiceCore(opts: ServiceCoreOptions): ServiceCore {
           since,
           now: () => clock.now(),
           onFile: importWatchedFile,
+          onSkip: skippedWatchedFile,
           ...(opts.watchFactory ? { watchFactory: opts.watchFactory } : {}),
         }),
       };
       log.info('saved-page folder watch started');
     }
+  };
+
+  /** The folder watch as it runs, and its last error ('scraptf.listStatus', 'scraptf.banks'). */
+  const folderWatchState = (): { active: boolean; error: string | null } => {
+    if (watcher !== null) {
+      const alive = watcher.handle.alive();
+      return { active: alive, error: alive ? null : (watcher.handle.lastError() ?? 'Watching the folder stopped after an error; trying again every minute') };
+    }
+    // Same wording as the Data health page's folder-watch row.
+    return { active: false, error: importAllowed() && settings.import.watchFolder ? 'Folder not found' : null };
+  };
+
+  /**
+   * F15: the banks summary reads watchActive live, and the watch dies or comes back (the retry below)
+   * without a settings change; the status tick tells the summary's listeners when it flipped.
+   */
+  let banksWatchActive: boolean | null = null;
+  const checkBanksWatch = (): void => {
+    const active = importAllowed() && folderWatchState().active;
+    if (banksWatchActive !== null && active !== banksWatchActive) banks.invalidate('switches');
+    banksWatchActive = active;
   };
 
   /** Status tick: a watch that failed, or a folder that was missing, is tried again about once a minute. */
@@ -820,6 +1056,14 @@ export function createServiceCore(opts: ServiceCoreOptions): ServiceCore {
     engine,
     market,
     holdings,
+    scraptfList,
+    scraptfListChanged,
+    banks,
+    bankStock,
+    bankStockChanged,
+    scraptfHistory,
+    liveCheck,
+    folderWatch: folderWatchState,
     push,
     status: computeStatus,
     health: computeHealth,
@@ -830,6 +1074,8 @@ export function createServiceCore(opts: ServiceCoreOptions): ServiceCore {
       scheduleStatusCheck();
       // Every window's price sheet and count refresh, including saves from quick entry.
       push('prices.changed', { at: clock.now() });
+      // F15 hook: every import (importSavedPage calls this, folder watch included), price and rule write.
+      banks.invalidate();
     },
     journalChanged: () => {
       // Held SKUs join or leave the watch list; holdings re-read the journal.
@@ -875,6 +1121,9 @@ export function createServiceCore(opts: ServiceCoreOptions): ServiceCore {
     nextQueuedSnapshot: () => snapshotQueue.shift() ?? null,
     snapshot,
     keyQuotesChanged,
+    scraptfListChanged,
+    bankStockChanged: () => bankStockChanged(),
+    scraptfEventsPruned: () => scraptfHistory.refresh(),
   })) {
     scheduler.add(job);
   }
@@ -889,13 +1138,17 @@ export function createServiceCore(opts: ServiceCoreOptions): ServiceCore {
       } catch (err) {
         log.warn(`opportunity log init failed: ${errorText(err)}`);
       }
-      lastKeyScrap = selectKeyPrice(repo.keyQuotes(), settings, clock.now()).valueScrap;
+      lastKeyScrap = selectKeyPrice(repo.keyQuotes(), settings, clock.now(), scraptfList.keyRow()).valueScrap;
       engine.start();
       market.start();
       holdings.start();
+      resaveReminders.start();
       statusTimer = timers.setInterval(() => {
         flushOppLog();
         retryFolderWatch();
+        checkBanksWatch();
+        // F17: the market's last build chunk may push before it counts as built.
+        newFlipNotifier.flush();
         checkStatus();
       }, STATUS_INTERVAL_MS);
       checkStatus();
@@ -906,6 +1159,8 @@ export function createServiceCore(opts: ServiceCoreOptions): ServiceCore {
       syncFeed();
       syncPricedbSocket();
       syncFolderWatch();
+      // The banks summary's watch baseline (a page may have read it while the schema loaded).
+      checkBanksWatch();
       engine.markAllDirty();
       // The Live market's first build, once the schema has loaded (or failed to; a later load rebuilds).
       market.markAllDirty();
@@ -921,6 +1176,8 @@ export function createServiceCore(opts: ServiceCoreOptions): ServiceCore {
       engine.stop();
       market.stop();
       holdings.stop();
+      resaveReminders.stop();
+      banks.stop();
       socket.stop();
       if (pricedbSocketOn) pricedb.stopSocket();
       pricedbSocketOn = false;
@@ -954,7 +1211,12 @@ export function createServiceCore(opts: ServiceCoreOptions): ServiceCore {
       http.setPaused(next.networkPaused);
       if (prev.networkPaused !== next.networkPaused || prev.liveFeed.enabled !== next.liveFeed.enabled) syncFeed();
       syncPricedbSocket();
-      if (JSON.stringify(prev.import) !== JSON.stringify(next.import)) syncFolderWatch();
+      if (JSON.stringify(prev.import) !== JSON.stringify(next.import)) {
+        syncFolderWatch();
+        // F15 hook: importEnabled and watchActive are part of the summary (read live; nothing to rebuild).
+        banks.invalidate('switches');
+        banksWatchActive = importAllowed() && folderWatchState().active;
+      }
       const evalKey = (s: Settings) => JSON.stringify([s.profit, s.keyPrice, s.blocklist, s.notifications]);
       if (evalKey(prev) !== evalKey(next)) {
         engine.markAllDirty();

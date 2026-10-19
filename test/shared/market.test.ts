@@ -1,12 +1,16 @@
 // F10 shared rules: the verdict, filters, order, paging and CSV cells that the
-// service's market index, the browser mock and the dashboard all use.
+// service's market index, the browser mock and the dashboard all use; and F15's
+// page-to-bank rule behind the coverage strip and the banks summary.
 
 import { describe, expect, it } from 'vitest';
+import { SCRAPTF_BANK_PAGES, scraptfLinkFor } from '../../src/shared/links';
 import {
   MARKET_CSV_COLUMNS,
   MARKET_DEFAULT_LIMIT,
   MARKET_MAX_LIMIT,
+  batchBankOf,
   emptyMarketCounts,
+  isEmptyBankSave,
   marketBuySideMatches,
   marketComparator,
   marketCsvCells,
@@ -17,8 +21,10 @@ import {
   marketUpdatedAt,
   marketUserSideMatches,
   marketVerdict,
+  scraptfBankSaves,
+  scraptfCoverage,
 } from '../../src/shared/market';
-import { MARKET_VERDICTS, type MarketRow, type OrderSummary } from '../../src/shared/types';
+import { MARKET_VERDICTS, type Category, type ImportBatch, type MarketRow, type OrderSummary } from '../../src/shared/types';
 
 const T = Date.UTC(2026, 9, 15, 12, 0, 0);
 
@@ -65,6 +71,14 @@ function row(over: Partial<MarketRow> = {}): MarketRow {
     verdict: 'unchecked',
     lastOrderChangeAt: T - 60_000,
     evaluatedAt: T,
+    scraptfPaysScrap: null,
+    scraptfStock: null,
+    scraptfStockLimit: null,
+    scraptfFull: false,
+    scraptfListAt: null,
+    scraptfNewAt: null,
+    scraptfListedSince: null,
+    scraptfLink: scraptfLinkFor(over.category ?? 'hats', null),
   };
   return { ...base, ...over };
 }
@@ -213,10 +227,138 @@ describe('marketCsvCells', () => {
       profit: '1.33 ref',
       confidence: 70,
       updated: new Date(T).toISOString(),
+      // Off the saved scrap.tf list: blank.
+      scraptf_pays: '',
+      scraptf_stock: null,
+      scraptf_limit: null,
+      scraptf_list_saved: '',
+    });
+    const listed = marketCsvCells(row({ scraptfPaysScrap: 600, scraptfStock: 5, scraptfStockLimit: 5, scraptfFull: true, scraptfListAt: T - 60_000 }), 568);
+    expect(Object.fromEntries(MARKET_CSV_COLUMNS.map((c, i) => [c, listed[i]]))).toMatchObject({
+      scraptf_pays: '1 key 3.55 ref',
+      scraptf_stock: 5,
+      scraptf_limit: 5,
+      scraptf_list_saved: new Date(T - 60_000).toISOString(),
     });
     const empty = Object.fromEntries(
       MARKET_CSV_COLUMNS.map((c, i) => [c, marketCsvCells(row({ revenueOrder: null, revenueScrap: null, maxCostScrap: null, lastOrderChangeAt: null }), null)[i]]),
     );
     expect(empty).toMatchObject({ sells_for: '', buyer: '', pay_up_to: '', your_price: '', source: '', stock: null, rule_price: '', profit: '', updated: '' });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// F15: which scrap.tf page a saved page counts for (coverage strip, banks summary, mock)
+// ---------------------------------------------------------------------------
+
+describe('batchBankOf and scraptfBankSaves (F15)', () => {
+  const MIN = 60_000;
+  function batch(id: number, over: Partial<ImportBatch> = {}): ImportBatch {
+    return { id, fileName: `page ${id}.html`, pageKind: 'buy', fileMtime: T - id * MIN, importedAt: T - id * MIN + 1_000, itemCount: id, categories: null, bank: null, ...over };
+  }
+  const never = (): Category[] => {
+    throw new Error('the rows are read only for a page without a bank or categories');
+  };
+
+  it('takes the recorded bank whatever the page held or its kind', () => {
+    expect(batchBankOf(batch(1, { bank: 'stranges', categories: { hats: 9 } }), never)).toBe('stranges');
+    expect(batchBankOf(batch(1, { bank: 'items', categories: { hats: 1, weapons: 1, stranges: 1 } }), never)).toBe('items');
+    expect(batchBankOf(batch(1, { bank: 'list', pageKind: 'buy', categories: { hats: 2 } }), never)).toBe('list');
+    expect(batchBankOf(batch(1, { bank: 'unusuals', pageKind: 'items-list' }), never)).toBe('unusuals');
+    // Even with nothing stored (all sold out).
+    expect(batchBankOf(batch(1, { bank: 'skins', itemCount: 0 }), never)).toBe('skins');
+  });
+
+  it('falls back only without one: the list for an /items page, else the majority of what it stored', () => {
+    expect(batchBankOf(batch(1, { pageKind: 'items-list', categories: { hats: 4 } }), never)).toBe('list');
+    expect(batchBankOf(batch(1, { categories: { weapons: 2, hats: 1 } }), never)).toBe('weapons');
+    expect(batchBankOf(batch(1, { pageKind: 'unusuals', categories: { taunts: 1, other: 1, hats: 1 } }), never)).toBe('items');
+    expect(batchBankOf(batch(1, { categories: { hats: 1, weapons: 1, stranges: 1 } }), never)).toBeNull();
+    // A 0.4 shape without the field, and garbage in it, read as "no bank".
+    const { bank: _drop, ...pre05 } = batch(1, { categories: { killstreaks: 1 } });
+    expect(batchBankOf(pre05, never)).toBe('killstreaks');
+    expect(batchBankOf(batch(1, { bank: 'shop' as never, categories: { skins: 1 } }), never)).toBe('skins');
+    expect(batchBankOf(batch(1, { bank: '__proto__' as never, categories: { skins: 1 } }), never)).toBe('skins');
+    // A batch from before 0.3: the rows carrying its id today.
+    expect(batchBankOf(batch(7), (id) => (id === 7 ? ['unusuals', 'unusuals', 'hats'] : []))).toBe('unusuals');
+    expect(batchBankOf(batch(7), () => [])).toBeNull();
+  });
+
+  it('dates each bank by its newest page (file time, ties to the higher id), with that page\'s item count', () => {
+    const { bankOf, newest } = scraptfBankSaves(
+      [
+        batch(1, { bank: 'hats', itemCount: 48 }),
+        batch(2, { bank: 'hats', itemCount: 50 }),
+        batch(3, { categories: { weapons: 3 }, itemCount: 3 }),
+        batch(4, { pageKind: 'items-list', itemCount: 900 }),
+        batch(5, { categories: { hats: 1, weapons: 1, stranges: 1 } }),
+        batch(6, { bank: 'skins', fileMtime: T, itemCount: 1 }),
+        batch(7, { bank: 'skins', fileMtime: T, itemCount: 2 }),
+        batch(8, { bank: 'unusuals', fileMtime: 0, importedAt: T - 30 * MIN, itemCount: Number.NaN }),
+      ],
+      never,
+    );
+    expect([...bankOf]).toEqual([
+      [1, 'hats'],
+      [2, 'hats'],
+      [3, 'weapons'],
+      [4, 'list'],
+      [6, 'skins'],
+      [7, 'skins'],
+      [8, 'unusuals'],
+    ]);
+    expect(Object.fromEntries(newest)).toEqual({
+      hats: { at: T - MIN, id: 1, items: 48 },
+      weapons: { at: T - 3 * MIN, id: 3, items: 3 },
+      list: { at: T - 4 * MIN, id: 4, items: 900 },
+      skins: { at: T, id: 7, items: 2 },
+      unusuals: { at: T - 30 * MIN, id: 8, items: 0 },
+    });
+  });
+
+  it('feeds the coverage strip: the recorded bank, the list counting for no bank page', () => {
+    const cov = scraptfCoverage(
+      [batch(1, { bank: 'list', pageKind: 'items-list', categories: { hats: 5 } }), batch(2, { bank: 'stranges', categories: { hats: 2 } }), batch(3, { categories: { hats: 1 } })],
+      never,
+    );
+    expect(cov.map((c) => [c.label, c.lastSavedAt, c.items])).toEqual(
+      SCRAPTF_BANK_PAGES.map((p) => [p.label, p.bank === 'stranges' ? T - 2 * MIN : p.bank === 'hats' ? T - 3 * MIN : null, p.bank === 'stranges' ? 2 : p.bank === 'hats' ? 3 : 0]),
+    );
+  });
+
+  it('passes over a bank page that stored nothing (saved without its cards, F18 S3), never over the list', () => {
+    expect(isEmptyBankSave({ itemCount: 0 }, 'hats')).toBe(true);
+    expect(isEmptyBankSave({ itemCount: 0 }, 'unusuals')).toBe(true);
+    expect(isEmptyBankSave({ itemCount: 0 }, 'list')).toBe(false);
+    expect(isEmptyBankSave({ itemCount: 3 }, 'hats')).toBe(false);
+    // An unreadable count is not a known 0.
+    expect(isEmptyBankSave({ itemCount: Number.NaN }, 'hats')).toBe(false);
+
+    const { bankOf, newest } = scraptfBankSaves(
+      [
+        // Hats: saved with cards 3 minutes ago, then without them a minute ago (newer, ignored).
+        batch(1, { bank: 'hats', itemCount: 0 }),
+        batch(3, { bank: 'hats', itemCount: 40 }),
+        // Skins: only ever saved without cards.
+        batch(2, { bank: 'skins', itemCount: 0 }),
+        // The list with every row sold out still dates the list.
+        batch(4, { bank: 'list', pageKind: 'items-list', itemCount: 0 }),
+      ],
+      never,
+    );
+    // The batch keeps its bank (the Import page names it), but no bank is dated by it.
+    expect([...bankOf]).toEqual([
+      [1, 'hats'],
+      [3, 'hats'],
+      [2, 'skins'],
+      [4, 'list'],
+    ]);
+    expect(Object.fromEntries(newest)).toEqual({
+      hats: { at: T - 3 * MIN, id: 3, items: 40 },
+      list: { at: T - 4 * MIN, id: 4, items: 0 },
+    });
+    const cov = scraptfCoverage([batch(1, { bank: 'hats', itemCount: 0 }), batch(3, { bank: 'hats', itemCount: 40 }), batch(2, { bank: 'skins', itemCount: 0 })], never);
+    expect(cov.find((c) => c.label === 'Hats')).toMatchObject({ lastSavedAt: T - 3 * MIN, items: 40 });
+    expect(cov.find((c) => c.label === 'Skins')).toMatchObject({ lastSavedAt: null, items: 0 });
   });
 });

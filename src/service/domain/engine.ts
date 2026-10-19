@@ -25,6 +25,7 @@ import type {
   ReferencePrices,
   Scrap,
   ScrapPrice,
+  ScraptfListKey,
   Settings,
   SkuObject,
   UnixMs,
@@ -404,18 +405,31 @@ export const RETENTION = {
   listingsMs: 14 * 24 * 60 * 60 * 1000,
   eventsMs: 90 * 24 * 60 * 60 * 1000,
   requestLogMs: 7 * 24 * 60 * 60 * 1000,
+  /** Saved scrap.tf/items list rows (F14): a month-old stock or price says nothing about today. */
+  scraptfListMs: 30 * 24 * 60 * 60 * 1000,
 } as const;
 
 /**
- * Daily purge: listings not seen for 14 days, events older than 90 days and
- * request-log rows older than 7 days. Call engine.markAllDirty() afterwards so
- * opportunities built on purged listings are re-evaluated.
+ * Daily purge: listings not seen for 14 days, events older than 90 days,
+ * request-log rows older than 7 days, saved scrap.tf list rows older than 30
+ * days, bank stock past its retention (F20 thinning: every save of the last day,
+ * hourly to 7 days, daily to 90 days, at most 300 per page, a page's newest save and
+ * the one it is compared with always kept; rows whose batch is gone too) and scrap.tf
+ * change events older than 90 days (F20). Call engine.markAllDirty() afterwards so
+ * opportunities built on purged listings are re-evaluated, and refresh the list,
+ * bank stock and history caches when their rows went.
  */
-export function runMaintenance(repo: Repo, now: UnixMs): { listings: number; events: number; requests: number } {
+export function runMaintenance(
+  repo: Repo,
+  now: UnixMs,
+): { listings: number; events: number; requests: number; scraptfList: number; bankStock: number; scraptfEvents: number } {
   return {
     listings: repo.purgeListingsOlderThan(now - RETENTION.listingsMs),
     events: repo.purgeEventsOlderThan(now - RETENTION.eventsMs),
     requests: repo.purgeRequestLogOlderThan(now - RETENTION.requestLogMs),
+    scraptfList: repo.purgeScraptfListOlderThan(now - RETENTION.scraptfListMs),
+    bankStock: repo.pruneBankStock(now, { orphans: true }),
+    scraptfEvents: repo.pruneScraptfEvents(now),
   };
 }
 
@@ -428,6 +442,25 @@ export interface EngineDeps extends ServiceDeps {
   events: EngineEvents;
   /** Injected in tests; defaults to unref'd real timers. */
   timers?: TimerApi;
+  /**
+   * F14: scrap.tf's key prices from the saved scrap.tf/items list (core: scraptfList.keyRow()), passed to
+   * selectKeyPrice. Omitted (tests, or no list): the key price is exactly as before.
+   */
+  scraptfKey?(): ScraptfListKey | null;
+  /**
+   * F17: whether the user was already told about this opportunity's item by another notification (core:
+   * an imported item that a "New on scrap.tf" toast named moments ago, newFlipNotifier.toldRecently). Such
+   * an opportunity is recorded as notified, so it is not toasted later either, but sends no second toast.
+   * Omitted (tests): every qualifying opportunity is toasted, as before.
+   */
+  toldElsewhere?(opp: Pick<Opportunity, 'sku' | 'inputKind'>, now: UnixMs): boolean;
+  /**
+   * F17: every opportunity a run toasted, individually or in its summary (core: the import ones go to
+   * newFlipNotifier.toastedElsewhere). At start-up the engine judges an import held for the Live market's
+   * first build before the "New on scrap.tf" notifier can, so that notifier needs to hear of these to
+   * keep one toast per find. Optional; a failing hook changes nothing here.
+   */
+  notified?(opps: readonly Pick<Opportunity, 'sku' | 'inputKind'>[], now: UnixMs): void;
 }
 
 interface SkuInfo {
@@ -452,6 +485,15 @@ function baseOf(sku: string): string {
 export function createEngine(deps: EngineDeps): Engine {
   const { repo, log, clock, schema, events } = deps;
   const timers = deps.timers ?? realTimers;
+  /** F14: the saved list's key row; a failed read must not stop the key price. */
+  const scraptfKey = (): ScraptfListKey | null => {
+    try {
+      return deps.scraptfKey?.() ?? null;
+    } catch (err) {
+      log.warn('Could not read the scrap.tf list key price', { error: String(err) });
+      return null;
+    }
+  };
 
   let started = false;
   let tickTimer: unknown = null;
@@ -674,7 +716,7 @@ export function createEngine(deps: EngineDeps): Engine {
     const now = clock.now();
     const settings = deps.settings();
     const p = settings.profit;
-    const kp = selectKeyPrice(repo.keyQuotes(), settings, now);
+    const kp = selectKeyPrice(repo.keyQuotes(), settings, now, scraptfKey());
     lastKeyPrice = kp;
     const K = kp.valueScrap;
     const rules = repo.listRules();
@@ -925,6 +967,7 @@ export function createEngine(deps: EngineDeps): Engine {
       const dedupMs = Number.isFinite(n.dedupMs) && n.dedupMs > 0 ? n.dedupMs : 0;
       const kinds = notifyKinds(n.inputKinds);
       const last = loadNotified();
+      let toldElsewhere = 0;
       for (const opp of results.values()) {
         if (opp.status !== 'profitable' || opp.profitScrap === null) continue;
         if (opp.confidence < n.minConfidence || opp.profitScrap < n.minProfitScrap) continue;
@@ -932,6 +975,12 @@ export function createEngine(deps: EngineDeps): Engine {
         if (!kinds.has(opp.inputKind) || opp.flags.includes('suspect-margin')) continue;
         const ts = last.get(opp.key);
         if (ts !== undefined && now - ts < dedupMs && now >= ts) continue;
+        // F17: the "New on scrap.tf" toast already named this item; one toast per find.
+        if (deps.toldElsewhere && safeTold(opp, now)) {
+          last.set(opp.key, now);
+          toldElsewhere++;
+          continue;
+        }
         toNotify.push(opp);
       }
       if (toNotify.length > 0) {
@@ -940,8 +989,8 @@ export function createEngine(deps: EngineDeps): Engine {
           last.set(opp.key, now);
           if (i < MAX_NOTIFIED_EVENTS_PER_RUN) evs.push(eventOf(opp, 'notified', notificationBody(opp, K, p.useOrder), now));
         });
-        notifyMeta = serializeNotified(last, now, Math.max(dedupMs, 1));
       }
+      if (toNotify.length > 0 || toldElsewhere > 0) notifyMeta = serializeNotified(last, now, Math.max(dedupMs, 1));
     }
 
     // ----- write -----
@@ -960,6 +1009,8 @@ export function createEngine(deps: EngineDeps): Engine {
     }
 
     if (toNotify.length > 0) {
+      // Before the toasts: the summary's items count as told too.
+      if (deps.notified) safeCall(() => deps.notified?.(toNotify, now));
       const individual = toNotify.slice(0, MAX_NOTIFICATIONS_PER_RUN);
       for (const opp of individual) {
         safeCall(() => events.onNotify({ title: notificationTitle(opp), body: notificationBody(opp, K, p.useOrder), sku: opp.sku }));
@@ -991,6 +1042,16 @@ export function createEngine(deps: EngineDeps): Engine {
       fn();
     } catch (err) {
       log.warn('Engine event listener failed', { error: String(err) });
+    }
+  }
+
+  /** A failing check toasts as before: a second toast beats a lost one. */
+  function safeTold(opp: Opportunity, now: UnixMs): boolean {
+    try {
+      return deps.toldElsewhere?.(opp, now) === true;
+    } catch (err) {
+      log.warn('Engine notification check failed', { error: String(err) });
+      return false;
     }
   }
 
@@ -1078,10 +1139,10 @@ export function createEngine(deps: EngineDeps): Engine {
 
     keyPrice() {
       try {
-        return selectKeyPrice(repo.keyQuotes(), deps.settings(), clock.now());
+        return selectKeyPrice(repo.keyQuotes(), deps.settings(), clock.now(), scraptfKey());
       } catch (err) {
         log.warn('Key price lookup failed', { error: String(err) });
-        return lastKeyPrice ?? selectKeyPrice([], deps.settings(), clock.now());
+        return lastKeyPrice ?? selectKeyPrice([], deps.settings(), clock.now(), scraptfKey());
       }
     },
 

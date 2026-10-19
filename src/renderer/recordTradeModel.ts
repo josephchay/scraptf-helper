@@ -52,6 +52,19 @@ function amount(v: unknown): number {
   return typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : 0;
 }
 
+/**
+ * A price known only by its value (a HoldingRow's scraptfPaysScrap, F14) as whole keys plus metal at
+ * key price `keyScrap`, the way scrap.tf lists one, for a prefill: valued back at the same key price
+ * it is exactly `valueScrap`. Without a key price it is all metal.
+ */
+export function splitAtKey(valueScrap: Scrap, keyScrap: Scrap | null): { keys: number; scrap: Scrap } {
+  const v = Math.max(0, Math.round(amount(valueScrap)));
+  const k = typeof keyScrap === 'number' && Number.isFinite(keyScrap) ? Math.round(keyScrap) : 0;
+  if (k <= 0) return { keys: 0, scrap: v };
+  const keys = Math.floor(v / k);
+  return { keys, scrap: v - keys * k };
+}
+
 /** The prefilled price as the user would type it ("1 key 5.11 ref"), or '' without one. */
 export function initialPriceText(init: Pick<RecordTradeInit, 'keys' | 'scrap'>): string {
   const keys = amount(init.keys);

@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import type { DeepPartial, ImportResult, PermissionRecord, Settings } from '../../shared/types';
+import type { ImportResult, PermissionRecord } from '../../shared/types';
 import { rpc } from '../api';
 import { ConfirmButton, Field } from '../components/Controls';
 import { Banner, EmptyState, LoadingBlock } from '../components/Feedback';
@@ -10,8 +10,23 @@ import { usePush, useRpcQuery } from '../hooks/useRpc';
 import { useNow } from '../hooks/useTimers';
 import { copyText } from '../clipboard';
 import { ExternalLink } from '../components/ExternalLink';
+import { SaveModeChoice, ScraptfListCard } from '../components/ScraptfListCard';
+import { chooseWatchFolder, importListRowsText, importToastText } from '../scraptfListModel';
+import { importBankText } from '../banksModel';
+import {
+  IMPORT_FILE_HINT,
+  SAVE_MODE_FILES_NOTE,
+  SAVE_MODE_HTML_ONLY_NOTE,
+  SAVE_MODE_LIST_ONLY,
+  importFailedToast,
+  importSavedWithoutCards,
+  importWarningsView,
+} from '../importModel';
 
-const PAGE_KIND_LABELS: Record<string, string> = { buy: 'Buy page', unusuals: 'Unusuals page', 'items-list': 'Item list', unknown: 'Unknown page' };
+// Kept importable from here: the folder dialog helper moved to scraptfListModel.ts with the price-list card (F14).
+export { chooseWatchFolder };
+
+const PAGE_KIND_LABELS: Record<string, string> = { buy: 'Buy page', unusuals: 'Unusuals page', 'items-list': 'Price list (scrap.tf/items)', unknown: 'Unknown page' };
 
 export const PERMISSION_TEMPLATE = `To: admin@scrap.tf
 Subject: Question about a personal price-tracking tool and the ToS
@@ -25,22 +40,6 @@ Would you permit importing pages I save myself (Ctrl+S in my browser), for perso
 I will follow whatever you decide.
 
 Thank you.`;
-
-/**
- * Main's folder dialog only returns the chosen path; the watch starts once the
- * folder is saved in settings (the service watches settings.import.watchFolder).
- * Returns the saved folder, or null when the dialog was cancelled or saving failed
- * (updateSettings reports that failure itself).
- */
-export async function chooseWatchFolder(
-  pick: () => Promise<{ folder: string | null }>,
-  save: (patch: DeepPartial<Settings>) => Promise<Settings | null>,
-): Promise<string | null> {
-  const { folder } = await pick();
-  if (!folder) return null;
-  const next = await save({ import: { watchFolder: folder } });
-  return next?.import.watchFolder ?? null;
-}
 
 export function ImportPage() {
   const { settings } = useApp();
@@ -88,6 +87,8 @@ function ImportGate() {
           </ExternalLink>
         </div>
       </section>
+      {/* F14: what one save of scrap.tf/items would give once import is on (its steps stay disabled until then). */}
+      <ScraptfListCard placement="import" />
       <PermissionTemplate />
     </div>
   );
@@ -112,9 +113,10 @@ function PermissionTemplate() {
 }
 
 function ImportEnabled() {
-  const { settings, updateSettings, toast, bumpData } = useApp();
+  const { settings, updateSettings, toast, bumpData, lastImport } = useApp();
   const batches = useRpcQuery('import.batches', { limit: 20 });
-  const [last, setLast] = useState<ImportResult | null>(null);
+  // F18: opened from the no-cards toast ("How to save"), the page starts on the import it was about.
+  const [last, setLast] = useState<ImportResult | null>(lastImport);
   const [busy, setBusy] = useState(false);
   const now = useNow(30_000);
   usePush('import.done', (r) => {
@@ -129,12 +131,18 @@ function ImportEnabled() {
       const r = await rpc('import.pickFile');
       if (r) {
         setLast(r);
-        toast(`Imported ${r.stored} of ${r.parsed} items from ${r.fileName}`, r.stored ? 'good' : 'warn');
+        // F18: a save without its cards is toasted by the dashboard on 'import.done', once for any import.
+        if (!importSavedWithoutCards(r)) {
+          const t = importToastText(r);
+          toast(t.text, t.tone);
+        }
         void batches.reload();
         bumpData();
       }
     } catch (e) {
-      toast(`Import failed: ${errorMessage(e)}`, 'bad');
+      // F18: a Single File save over 20 MB is refused before the service sees it; say how to save it instead.
+      const t = importFailedToast(errorMessage(e));
+      toast(t.text, 'bad', t.timeoutMs === null ? undefined : { timeoutMs: t.timeoutMs });
     } finally {
       setBusy(false);
     }
@@ -154,19 +162,31 @@ function ImportEnabled() {
 
   return (
     <div className="import-grid">
+      {/* F14: every scrap.tf price in one save of scrap.tf/items, the same card as on the Live market. */}
+      <div className="span-2">
+        <ScraptfListCard placement="import" />
+      </div>
+
       <section className="card" aria-labelledby="import-how">
         <h2 id="import-how">Import a saved page</h2>
         <ol className="steps">
           <li>Open the scrap.tf page you want in your own browser, logged in as usual.</li>
           <li>
-            Press <kbd>Ctrl</kbd>+<kbd>S</kbd> and choose <strong>Webpage, HTML only</strong>.
+            {/* F18: HTML only writes the page as it first loaded, before scrap.tf added its cards. */}
+            Press <kbd>Ctrl</kbd>+<kbd>S</kbd> and <SaveModeChoice />.
+            <div className="muted small">
+              {SAVE_MODE_HTML_ONLY_NOTE} {SAVE_MODE_FILES_NOTE} {SAVE_MODE_LIST_ONLY}
+            </div>
           </li>
           <li>Import the file here, or save it into the watched folder.</li>
         </ol>
         <div className="form-actions">
-          <button type="button" className="btn primary" disabled={busy} onClick={() => void pickFile()}>
+          <button type="button" className="btn primary" disabled={busy} aria-describedby="import-file-hint" onClick={() => void pickFile()}>
             <Icon name="import" size={14} /> {busy ? 'Importing…' : 'Import saved page…'}
           </button>
+          <span id="import-file-hint" className="muted small">
+            {IMPORT_FILE_HINT}
+          </span>
         </div>
         <div className="watch-row">
           <div>
@@ -212,20 +232,29 @@ function ImportEnabled() {
                 </tr>
               </thead>
               <tbody>
-                {batches.data.map((b) => (
-                  <tr key={b.id}>
-                    <td className="num">{b.id}</td>
-                    <td className="mono small">{b.fileName}</td>
-                    <td>{PAGE_KIND_LABELS[b.pageKind] ?? b.pageKind}</td>
-                    <td className="num">{fmtInt(b.itemCount)}</td>
-                    <td className="num" title={fmtDateTime(b.fileMtime)}>
-                      {fmtAgo(b.fileMtime, now)}
-                    </td>
-                    <td className="num" title={fmtDateTime(b.importedAt)}>
-                      {fmtAgo(b.importedAt, now)}
-                    </td>
-                  </tr>
-                ))}
+                {batches.data.map((b) => {
+                  // A batch from before 0.5 has no bank: nothing to say rather than "not recognised".
+                  // F18: a bank page that stored nothing reads "not counted", as the banks page treats it; a batch
+                  // keeps no warnings, so whether its save type was to blame is unknown and the remedy is hedged.
+                  const bank = b.bank ? importBankText(b.bank, b.itemCount) : null;
+                  return (
+                    <tr key={b.id}>
+                      <td className="num">{b.id}</td>
+                      <td className="mono small">{b.fileName}</td>
+                      <td>
+                        {PAGE_KIND_LABELS[b.pageKind] ?? b.pageKind}
+                        {bank ? <span className="muted small" title={bank.title}> · {bank.text}</span> : null}
+                      </td>
+                      <td className="num">{fmtInt(b.itemCount)}</td>
+                      <td className="num" title={fmtDateTime(b.fileMtime)}>
+                        {fmtAgo(b.fileMtime, now)}
+                      </td>
+                      <td className="num" title={fmtDateTime(b.importedAt)}>
+                        {fmtAgo(b.importedAt, now)}
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>
@@ -248,22 +277,46 @@ function ImportEnabled() {
   );
 }
 
-function ImportResultView({ r }: { r: ImportResult }) {
+/** One import's result. Exported for the render tests only. */
+export function ImportResultView({ r }: { r: ImportResult }) {
+  const listText = importListRowsText(r);
+  // F15: which banks card this save counts for (the parser's recognised page); F18: none when it stored nothing,
+  // blaming the save type only when the page came without its cards.
+  const bank = importBankText(r.bank, r.stored, importSavedWithoutCards(r));
+  // F18: a bank page saved without its cards leads, with what to do; the other warnings follow.
+  const warnings = importWarningsView(r);
   return (
     <div className="import-result">
+      {warnings.noCards ? (
+        <Banner tone="warn" icon="warning">
+          <strong>{warnings.noCards.text}</strong> {warnings.noCards.hint}
+        </Banner>
+      ) : null}
       <dl className="kv">
         <dt>File</dt>
         <dd className="mono small">{r.fileName}</dd>
         <dt>Page</dt>
         <dd>{PAGE_KIND_LABELS[r.pageKind] ?? r.pageKind}</dd>
+        {bank ? (
+          <>
+            <dt>scrap.tf page</dt>
+            <dd title={bank.title}>{bank.text}</dd>
+          </>
+        ) : null}
         <dt>Stored</dt>
         <dd>
           <strong>{r.stored}</strong> of {r.parsed} items read (batch #{r.batchId})
         </dd>
+        {listText ? (
+          <>
+            <dt>Price list</dt>
+            <dd>{listText}</dd>
+          </>
+        ) : null}
       </dl>
-      {r.warnings.length ? (
+      {warnings.rest.length ? (
         <ul className="warn-list">
-          {r.warnings.map((w, i) => (
+          {warnings.rest.map((w, i) => (
             <li key={i} className="tone-text-warn">
               <Icon name="warning" size={12} /> {w}
             </li>

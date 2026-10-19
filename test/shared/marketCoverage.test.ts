@@ -13,7 +13,7 @@ const T0 = Date.UTC(2026, 9, 15, 12, 0, 0);
 const MIN = 60_000;
 
 function batch(id: number, over: Partial<ImportBatch> = {}): ImportBatch {
-  return { id, fileName: `page ${id}.html`, pageKind: 'buy', fileMtime: T0 - id * MIN, importedAt: T0 - id * MIN + 1_000, itemCount: 10 * id, ...over };
+  return { id, fileName: `page ${id}.html`, pageKind: 'buy', fileMtime: T0 - id * MIN, importedAt: T0 - id * MIN + 1_000, itemCount: 10 * id, bank: null, ...over };
 }
 
 const index = (c: Category) => SCRAPTF_BANK_PAGES.findIndex((p) => p.category === c);

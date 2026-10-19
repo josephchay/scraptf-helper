@@ -8,7 +8,9 @@ import type { DefaultTreeAdapterTypes } from 'parse5';
 import { z } from 'zod';
 import { parsePrice } from '../../shared/currency';
 import { fromObject, normalizeSkuObject } from '../../shared/sku';
-import type { ImportPageKind, ParsedScrapItem, SkuObject, SpecialAttrs } from '../../shared/types';
+import { SCRAPTF_BANK_IDS } from '../../shared/types';
+import type { ImportPageKind, ParsedScrapItem, ScraptfBank, SkuObject, SpecialAttrs } from '../../shared/types';
+import { SERIESLESS_CRATES } from '../connectors/schemaNames';
 import type { PaintkitRow, SchemaItemRow, SchemaService } from '../contracts';
 
 type Node = DefaultTreeAdapterTypes.Node;
@@ -40,6 +42,16 @@ export class ImportTooLargeError extends Error {
 
 export interface ScrapTfParseResult {
   pageKind: ImportPageKind;
+  /**
+   * F15: the scrap.tf page the file was saved from (/buy/<slug>, /unusuals, /items[/n] -> 'list'), or
+   * null when it cannot be told. importSavedPage stores it as ImportBatch.bank.
+   */
+  bank: ScraptfBank | null;
+  /**
+   * F17: which page of its bank the file is (scraptfPageKey: '/buy/hats', '/items/2', '/unusuals/378',
+   * or the body id of a file with no address), so bank stock compares two saves of the same page only.
+   */
+  page: string;
   items: ParsedScrapItem[];
   warnings: string[];
 }
@@ -51,9 +63,17 @@ export interface ScrapTfParseResult {
  * unknown-paint, paint-mismatch, paintkit-unresolved, paintkit-mismatch,
  * paintkit-inferred, wear-unresolved, wear-mismatch, killstreak-mismatch,
  * sheen-mismatch, needs-target, unparsed-modifier, reserved, not-tradable,
- * price-mismatch, unparsed-price, no-price, parse-error.
+ * series-mismatch, series-unresolved, series-inferred, price-mismatch, unparsed-price, no-price,
+ * no-pays-price, unparsed-pays-price, parse-error.
  * Page codes: not-scraptf, page-not-importable, page-kind-guessed,
- * page-kind-unknown, schema-not-loaded, duplicate-cards, no-items, no-sku.
+ * page-kind-unknown, unknown-bank, schema-not-loaded, duplicate-cards, no-items,
+ * no-cards-saved (F18: a bank page saved without its cards), no-sku, no-pays-column,
+ * and from an .mhtml file (savedPage.ts): mhtml-invalid, mhtml-too-many-parts,
+ * mhtml-no-html, mhtml-truncated (the file ends inside its page: nothing imported),
+ * mhtml-charset; and too-large for a file the folder watch would not read
+ * (recordSkippedImport in rpcHandlers.ts).
+ * The pays codes only concern the /items "Price we pay" column (F14); they never
+ * make an item unimportable (isImportableItem reads the price to buy).
  */
 export function warningCode(warning: string): string {
   const i = warning.indexOf(':');
@@ -63,11 +83,21 @@ export function warningCode(warning: string): string {
 /** True when the item has a SKU and a usable price (the importer stores only these). */
 export function isImportableItem(item: ParsedScrapItem): boolean {
   if (item.sku === null) return false;
-  if (item.costKeys <= 0 && item.costScrap <= 0) return false;
-  return !item.warnings.some((w) => {
+  return sellsPriceOf(item) !== null;
+}
+
+/**
+ * The price to buy an item at (what scrap.tf charges), or null when the page shows none: no cell,
+ * text that is not a price ("Sold out" on the /items list), or zero. A "Sold out" row keeps
+ * costScrap 0 plus a warning for the price path; the saved list stores it with no price to buy.
+ */
+export function sellsPriceOf(item: ParsedScrapItem): { keys: number; scrap: number } | null {
+  if (item.costKeys <= 0 && item.costScrap <= 0) return null;
+  const unpriced = item.warnings.some((w) => {
     const c = warningCode(w);
     return c === 'no-price' || c === 'unparsed-price';
   });
+  return unpriced ? null : { keys: item.costKeys, scrap: item.costScrap };
 }
 
 // ---------------------------------------------------------------------------
@@ -353,9 +383,25 @@ function backgroundColorOf(style: string): string | null {
 
 export interface PageHint {
   kind: ImportPageKind;
+  /**
+   * F15: the scrap.tf page it names (/buy/<slug> by slug, /unusuals and /buy/unusuals, /items[/n] ->
+   * 'list'); null off scrap.tf, on other paths, and for a /buy/<slug> this app does not know.
+   */
+  bank: ScraptfBank | null;
   host: string;
   path: string;
   scrapTf: boolean;
+}
+
+/** The /buy/<slug> banks: every bank but the list, by its own id (unusuals also answers at /unusuals). */
+const BUY_SLUG_BANKS: ReadonlyMap<string, ScraptfBank> = new Map(
+  SCRAPTF_BANK_IDS.filter((b) => b !== 'list').map((b) => [b, b] as const),
+);
+
+/** Lower-cased first segment after /buy/ (the bank slug), or null. */
+function buySlugOf(path: string): string | null {
+  const m = /^\/buy\/([^/]{1,200})/i.exec(path);
+  return m ? m[1]!.toLowerCase() : null;
 }
 
 function isScrapTfHostname(host: string): boolean {
@@ -363,7 +409,7 @@ function isScrapTfHostname(host: string): boolean {
   return h === 'scrap.tf' || h.endsWith('.scrap.tf');
 }
 
-/** Maps a page URL (never fetched) to the import page kind. */
+/** Maps a page URL (never fetched) to the import page kind and the scrap.tf bank it names. */
 export function pageKindFromUrl(raw: string, depth = 0): PageHint | null {
   // Real page addresses are short and archive links nest once; a crafted page could nest thousands.
   if (raw.length > MAX_URL_CHARS || depth > MAX_ARCHIVE_DEPTH) return null;
@@ -384,13 +430,41 @@ export function pageKindFromUrl(raw: string, depth = 0): PageHint | null {
     }
   }
   const path = url.pathname.replace(/\/+$/, '') || '/';
-  if (!isScrapTfHostname(host)) return { kind: 'unknown', host, path, scrapTf: false };
+  if (!isScrapTfHostname(host)) return { kind: 'unknown', bank: null, host, path, scrapTf: false };
   const p = path.toLowerCase();
   let kind: ImportPageKind = 'unknown';
-  if (/^\/buy\/unusuals?(\/|$)/.test(p) || /^\/unusuals?(\/|$)/.test(p)) kind = 'unusuals';
-  else if (/^\/buy\/[^/]+/.test(p)) kind = 'buy';
-  else if (/^\/items(\/\d+)?$/.test(p)) kind = 'items-list';
-  return { kind, host, path, scrapTf: true };
+  let bank: ScraptfBank | null = null;
+  if (/^\/buy\/unusuals?(\/|$)/.test(p) || /^\/unusuals?(\/|$)/.test(p)) {
+    kind = 'unusuals';
+    bank = 'unusuals';
+  } else if (/^\/buy\/[^/]+/.test(p)) {
+    kind = 'buy';
+    // An unknown slug stays null (the caller warns): its items still import, coverage falls back to categories.
+    bank = BUY_SLUG_BANKS.get(buySlugOf(p) ?? '') ?? null;
+  } else if (/^\/items(\/\d+)?$/.test(p)) {
+    kind = 'items-list';
+    bank = 'list';
+  }
+  return { kind, bank, host, path, scrapTf: true };
+}
+
+/** A page key longer than this is clipped: real scrap.tf paths are far shorter, and the file is untrusted. */
+const MAX_PAGE_KEY_CHARS = 200;
+
+/**
+ * F17: which page of its bank a saved file is. Several pages give one bank (/items and /items/2 the
+ * list, /unusuals and /unusuals/378 the unusuals), and bank stock must compare a save only with an
+ * earlier save of the same page: page 2 against page 1 would read as everything new and gone. The
+ * scrap.tf path lower-cased (no trailing slash, query or hash), with /buy/unusuals and /unusual as
+ * /unusuals; a file with no scrap.tf address gets its body id ('pid-buy-hats'), which never equals a
+ * path, so it is never compared with an addressed save it cannot be told apart from; else ''.
+ */
+export function scraptfPageKey(hint: Pick<PageHint, 'path' | 'scrapTf'> | null, bodyId: string | null): string {
+  if (hint && hint.scrapTf) {
+    const p = hint.path.toLowerCase().replace(/\/+$/, '') || '/';
+    return p.replace(/^\/(?:buy\/)?unusuals?(?=\/|$)/, '/unusuals').slice(0, MAX_PAGE_KEY_CHARS);
+  }
+  return (bodyId ?? '').trim().toLowerCase().slice(0, MAX_PAGE_KEY_CHARS);
 }
 
 const SAVED_FROM_RE = /<!--\s*saved from url=\(\s*\d+\s*\)\s*(\S+?)\s*-->/i;
@@ -409,6 +483,10 @@ interface DocScan {
   rows: Element[];
   priceColumn: number | null;
   nameColumn: number | null;
+  /** The /items "Price we pay" column (F14), found in the same header row as the price column. */
+  paysColumn: number | null;
+  /** The /items "Item Limits" column (stock n of limit), found the same way. */
+  limitsColumn: number | null;
 }
 
 function isCard(classes: string[]): boolean {
@@ -426,6 +504,8 @@ function scanDocument(root: Node): DocScan {
     rows: [],
     priceColumn: null,
     nameColumn: null,
+    paysColumn: null,
+    limitsColumn: null,
   };
   const stack: { n: Node; selected: boolean }[] = [{ n: root, selected: false }];
   while (stack.length) {
@@ -470,6 +550,12 @@ function scanDocument(root: Node): DocScan {
           scan.priceColumn = idx;
           const nameIdx = cells.findIndex((c) => c.tagName === 'th' && /^items?$/i.test(textContent(c)));
           if (nameIdx >= 0) scan.nameColumn = nameIdx;
+          // By header text, not position: a layout change must not read stock or the price to buy as it.
+          const paysIdx = cells.findIndex((c) => c.tagName === 'th' && /price we pay/i.test(textContent(c)));
+          if (paysIdx >= 0) scan.paysColumn = paysIdx;
+          // Stock and limit decide "full" (then scrap.tf is no exit), so a moved column must still be read.
+          const limitsIdx = cells.findIndex((c) => c.tagName === 'th' && /item limits?/i.test(textContent(c)));
+          if (limitsIdx >= 0) scan.limitsColumn = limitsIdx;
         }
       }
     }
@@ -613,6 +699,8 @@ interface NameParse {
   customName: string | null;
   wear: number | null;
   crateSeries: number | null;
+  /** A bare "#N" ending the title of an item the schema does not know: a crate series or a craft number. */
+  unresolvedSeries: string | null;
   located: boolean;
   baseText: string;
   uncraftable: boolean;
@@ -640,6 +728,8 @@ const QUALITY_TOKENS: [RegExp, number][] = [
   [/^Self-Made(?:\s+|$)/, 9],
   [/^Genuine(?:\s+|$)/, 1],
   [/^Vintage(?:\s+|$)/, 3],
+  // NetroScript strips both "Unusual " and "★Unusual " from skin names.
+  [/^★\s*Unusual(?:\s+|$)/, 5],
   [/^Unusual(?:\s+|$)/, 5],
   [/^Unique(?:\s+|$)/, 6],
   // NetroScript: "Haunted Ghosts" is a war paint, not the Haunted quality.
@@ -657,6 +747,7 @@ function parseName(title: string, nctx: NameCtx, ctx: Ctx): NameParse {
     customName: null,
     wear: null,
     crateSeries: null,
+    unresolvedSeries: null,
     located: false,
     baseText: '',
     uncraftable: false,
@@ -684,13 +775,19 @@ function parseName(title: string, nctx: NameCtx, ctx: Ctx): NameParse {
     res.wear = WEAR_BY_NAME[wear[1]!.toLowerCase()] ?? null;
     t = t.slice(0, wear.index).trim();
   }
-  if (nctx.isCrate) {
-    const series = /\s*(?:Series\s*)?#(\d{1,6})$/i.exec(t);
-    if (series) {
-      res.crateSeries = Number(series[1]);
-      t = t.slice(0, series.index).trim();
-    }
+  const series = /\s*(Series\s*)?#(\d{1,6})$/i.exec(t);
+  // The series is part of a crate's SKU. Without a schema row, "Series #N" still names a crate, but a
+  // bare "#N" could be a craft number: that one is left for buildSku to refuse instead of dropping it.
+  if (series && (nctx.isCrate || (nctx.item === null && series[1] !== undefined))) {
+    res.crateSeries = Number(series[2]);
+    t = t.slice(0, series.index).trim();
+  } else if (series && nctx.item === null) {
+    res.unresolvedSeries = `#${series[2]}`;
   }
+  // "War Paint: Masked Mender (Field-Tested)" puts the paintkit after the item; read it as
+  // "Masked Mender War Paint" so the schema name and the paintkit are both found.
+  const warPaint = /^(.*?)\bWar Paint:\s*(\S.*)$/i.exec(t);
+  if (warPaint) t = collapse(`${warPaint[1]} ${warPaint[2]} War Paint`);
 
   const allowPaintkit = res.wear !== null || nctx.quality === 15 || /\bWar Paint\b/i.test(t);
   const loc = locateBaseName(t, nctx.item);
@@ -825,6 +922,8 @@ interface ContentInfo {
   strangeStatClock: boolean;
   reserved: boolean;
   wear: number | null;
+  /** Steam's "Crate Series #N" description line (part of a crate's SKU). */
+  crateSeries: number | null;
   spells: string[];
   parts: string[];
   customDesc: boolean;
@@ -844,6 +943,7 @@ function parseContent(lines: string[]): ContentInfo {
     strangeStatClock: false,
     reserved: false,
     wear: null,
+    crateSeries: null,
     spells: [],
     parts: [],
     customDesc: false,
@@ -893,6 +993,10 @@ function parseContent(lines: string[]): ContentInfo {
     }
     if (/has been reserved/i.test(line)) {
       info.reserved = true;
+      continue;
+    }
+    if ((m = /^(?:Crate )?Series\s*#(\d{1,6})$/i.exec(line))) {
+      info.crateSeries = Number(m[1]);
       continue;
     }
     if ((m = /^Halloween:\s*(.+?)(?:\s*\(spell only active during event\))?$/i.exec(line))) {
@@ -1024,7 +1128,9 @@ function collectCard(el: Element, warnings: string[]): CardParts {
   return parts;
 }
 
-function cardPrice(itemValue: number | null, indicator: string | null, warnings: string[]): { keys: number; scrap: number } {
+function cardPrice(rawValue: number | null, indicator: string | null, warnings: string[]): { keys: number; scrap: number } {
+  // A data-item-value of 0 is no price (as the reference helper reads it): the indicator text decides.
+  const itemValue = rawValue !== null && rawValue > 0 ? rawValue : null;
   const ind = indicator ? collapse(indicator) : '';
   const parsed = ind ? parsePrice(ind, 'ref') : null;
   if (ind && !parsed) warnings.push(`unparsed-price: "${clip(ind, 40)}"`);
@@ -1138,16 +1244,24 @@ function parseCard(el: Element, ctx: Ctx): { item: ParsedScrapItem; assetId: str
 
   const q = qualityFromClasses(parts.classes);
   const effectImg = cardEffectId(parts, warnings);
-  const name = parseName(titleText, { item, quality: q.primary, isCrate: item?.itemClass === 'supply_crate', effectHint: effectImg }, ctx);
+  const nameEffect = content.effectName ? safe(() => ctx.schema.effectIdByName(content.effectName!), null) : null;
+  // A crate the schema does not know still shows its series in the tooltip ("Crate Series #N").
+  const isCrate = item?.itemClass === 'supply_crate' || (item === null && content.crateSeries !== null);
+  // The tooltip's effect also names it in a title such as "Isotope Frozen Aurora Flame Thrower" when no image does.
+  const name = parseName(titleText, { item, quality: q.primary, isCrate, effectHint: effectImg ?? nameEffect }, ctx);
+  const warpaint = cardWarpaint(parts);
 
   let quality = q.primary;
+  // Unusual skins are Decorated (15) plus an effect, so "Unusual" in a skin's title agrees with a quality15 class.
+  const skinLike = name.wear !== null || content.wear !== null || name.paintkit !== null || warpaint !== null;
+  const sameQuality = (x: number, y: number): boolean => x === y || (skinLike && ((x === 5 && y === 15) || (x === 15 && y === 5)));
   if (quality === null) {
     quality = name.qualities.find((x) => x !== 11) ?? (name.strange ? 11 : null);
     if (quality === null) {
       quality = 6;
       warnings.push('unknown-quality: no qualityN class; assuming Unique');
     }
-  } else if (name.qualities.length > 0 && !name.qualities.includes(quality) && !q.all.some((x) => name.qualities.includes(x))) {
+  } else if (name.qualities.length > 0 && !q.all.some((x) => name.qualities.some((y) => sameQuality(x, y)))) {
     warnings.push(`quality-mismatch: card class says ${quality} but title says ${name.qualities.join('/')}`);
   }
 
@@ -1156,7 +1270,6 @@ function parseCard(el: Element, ctx: Ctx): { item: ParsedScrapItem; assetId: str
 
   // Effect
   let effect: number | null = null;
-  const nameEffect = content.effectName ? safe(() => ctx.schema.effectIdByName(content.effectName!), null) : null;
   if (effectImg !== null) {
     effect = safe(() => ctx.schema.canonicalEffectId(effectImg), effectImg);
     if (safe(() => ctx.schema.effectName(effectImg), null) === null) {
@@ -1183,7 +1296,6 @@ function parseCard(el: Element, ctx: Ctx): { item: ParsedScrapItem; assetId: str
   else if (otherKs && otherKs !== killstreak) warnings.push(`killstreak-mismatch: class says tier ${killstreak}, text says tier ${otherKs}`);
 
   // Wear and paintkit
-  const warpaint = cardWarpaint(parts);
   let wear = name.wear ?? content.wear;
   if (name.wear !== null && content.wear !== null && name.wear !== content.wear) {
     warnings.push(`wear-mismatch: title says w${name.wear}, tooltip says w${content.wear}`);
@@ -1199,7 +1311,24 @@ function parseCard(el: Element, ctx: Ctx): { item: ParsedScrapItem; assetId: str
     if (paintkit === null) paintkit = warpaint.paintkit;
     if (wear === null && warpaint.wear >= 1 && warpaint.wear <= 5) wear = warpaint.wear;
   }
-  ({ paintkit } = warPaintCheck(defindex, paintkit, name, warnings));
+  const warPaint = warPaintCheck(defindex, paintkit, name, warnings);
+  paintkit = warPaint.paintkit;
+  // Unusual skins are keyed as Decorated (15) plus the effect (DESIGN_BRIEF §4.3); NetroScript drops the
+  // Unusual quality scrap.tf puts on skins. Without an effect the card stays 5 and is refused.
+  if (quality === 5 && effect !== null && paintkit !== null && wear !== null) quality = 15;
+  // A Decorated card the title, class or tooltip calls Unusual has an effect this card does not show:
+  // the plain skin's SKU would be a guess, so it stays Unusual and buildSku refuses it.
+  else if (quality === 15 && effect === null && (name.qualities.includes(5) || q.all.includes(5) || content.effectName !== null)) quality = 5;
+
+  // Crate series: the title's, else the tooltip's.
+  let crateSeries = name.crateSeries;
+  if (content.crateSeries !== null) {
+    if (!isCrate) warnings.push(`unparsed-modifier: "Crate Series #${content.crateSeries}"`);
+    else if (crateSeries === null) crateSeries = content.crateSeries;
+    else if (crateSeries !== content.crateSeries) {
+      warnings.push(`series-mismatch: title says #${crateSeries}, tooltip says #${content.crateSeries} (using the title)`);
+    }
+  }
 
   // Special attributes
   const special = emptySpecial();
@@ -1255,7 +1384,9 @@ function parseCard(el: Element, ctx: Ctx): { item: ParsedScrapItem; assetId: str
     tradable: !content.notTradable,
     wear,
     paintkit,
-    crateSeries: name.crateSeries,
+    paintkitConflict: warPaint.conflict,
+    isCrate,
+    crateSeries,
     item,
     name,
     fallbackTitle: titleText,
@@ -1285,17 +1416,22 @@ function warPaintCheck(
   paintkit: number | null,
   name: NameParse,
   warnings: string[],
-): { paintkit: number | null } {
+): { paintkit: number | null; conflict: boolean } {
   // War Paint items are defindex 16000 + paintkit (DESIGN_BRIEF §4.3).
-  if (defindex === null || defindex < 16000 || defindex > 16999) return { paintkit };
-  if (!/\bWar Paint\b/i.test(name.plain) && name.wear === null) return { paintkit };
+  if (defindex === null || defindex < 16000 || defindex > 16999) return { paintkit, conflict: false };
+  if (!/\bWar Paint\b/i.test(name.plain) && name.wear === null) return { paintkit, conflict: false };
   const implied = defindex - 16000;
   if (paintkit === null) {
     warnings.push(`paintkit-inferred: war paint pk${implied} taken from defindex ${defindex}`);
-    return { paintkit: implied };
+    return { paintkit: implied, conflict: false };
   }
-  if (paintkit !== implied) warnings.push(`paintkit-mismatch: name gives pk${paintkit}, defindex ${defindex} implies pk${implied}`);
-  return { paintkit };
+  if (paintkit !== implied) {
+    // The defindex or the name is wrong, so either paintkit is a guess (and the name's makes a SKU that
+    // cannot exist): buildSku refuses the card.
+    warnings.push(`paintkit-mismatch: name gives pk${paintkit}, defindex ${defindex} implies pk${implied}`);
+    return { paintkit, conflict: true };
+  }
+  return { paintkit, conflict: false };
 }
 
 interface SkuInput {
@@ -1310,11 +1446,27 @@ interface SkuInput {
   tradable: boolean;
   wear: number | null;
   paintkit: number | null;
+  /** A War Paint whose name and defindex name different paintkits (warPaintCheck warned). */
+  paintkitConflict: boolean;
+  /** A supply crate (schema item class, or the page's own sign): priced per series. */
+  isCrate: boolean;
   crateSeries: number | null;
   item: SchemaItemRow | null;
   name: NameParse;
   fallbackTitle: string;
   warnings: string[];
+}
+
+/**
+ * The series of a crate whose page shows none, from the item schema: only an exact name match on the
+ * same defindex that carries one (a single-series case). A multi-series crate resolves without one.
+ */
+function schemaCrateSeries(ctx: Ctx, defindex: number, plain: string): number | null {
+  if (!plain) return null;
+  const r = safe(() => ctx.schema.resolve(plain), null);
+  if (!r || r.match !== 'exact' || r.skuObject?.defindex !== defindex) return null;
+  const series = r.skuObject.crateseries;
+  return typeof series === 'number' && Number.isInteger(series) && series > 0 ? series : null;
 }
 
 function buildSku(ctx: Ctx, s: SkuInput): { sku: string | null; obj: SkuObject | null } {
@@ -1340,12 +1492,31 @@ function buildSku(ctx: Ctx, s: SkuInput): { sku: string | null; obj: SkuObject |
     w.push('no-defindex: card has no usable data-defindex');
     return { sku: null, obj: null };
   }
-  if (!s.item && schemaLoaded) w.push(`unknown-item: defindex ${s.defindex} is not in the item schema`);
+  const defindex = s.defindex;
+  if (!s.item && schemaLoaded) w.push(`unknown-item: defindex ${defindex} is not in the item schema`);
   else if (s.item && !s.name.located && s.name.plain && s.name.customName === null) {
     w.push(`name-unmatched: "${clip(s.name.plain, 60)}" does not contain the schema name "${clip(s.item.itemName, 40)}"`);
   }
+  if (s.name.unresolvedSeries !== null && s.crateSeries === null) {
+    // Dropping it would price a crate series (or a low craft number) as the plain item.
+    w.push(`series-unresolved: "${s.name.unresolvedSeries}" in "${clip(s.name.plain, 60)}" is a crate series or a craft number; the item schema does not say which`);
+    return { sku: null, obj: null };
+  }
+  let crateSeries = s.crateSeries;
+  if (s.isCrate && crateSeries === null && !SERIESLESS_CRATES.has(defindex)) {
+    // Crates are priced per series (backpack.tf orders, PriceDB, the schema's resolver): a bare SKU is
+    // one no order or price uses. A case with one series takes it from the schema; anything else is refused.
+    crateSeries = schemaCrateSeries(ctx, defindex, s.name.plain);
+    if (crateSeries === null) {
+      w.push(`series-unresolved: "${clip(s.name.plain, 60)}" shows no crate series`);
+      return { sku: null, obj: null };
+    }
+    w.push(`series-inferred: crate series #${crateSeries} taken from the item schema`);
+  }
+  if (s.paintkitConflict) return { sku: null, obj: null };
 
-  if (s.quality === 5 && s.effect === null) {
+  // Items that exist only as Unusual have no effect (schema item_quality 5): their SKU is complete without one.
+  if (s.quality === 5 && s.effect === null && safe(() => ctx.schema.itemQuality(defindex), null) !== 5) {
     w.push('unusual-without-effect: unusual quality but no effect found');
     return { sku: null, obj: null };
   }
@@ -1359,7 +1530,7 @@ function buildSku(ctx: Ctx, s: SkuInput): { sku: string | null; obj: SkuObject |
   }
 
   const obj = normalizeSkuObject({
-    defindex: s.defindex,
+    defindex,
     quality: s.quality,
     craftable: !s.uncraftable,
     tradable: s.tradable,
@@ -1370,7 +1541,7 @@ function buildSku(ctx: Ctx, s: SkuInput): { sku: string | null; obj: SkuObject |
     paintkit: s.paintkit,
     wear: s.wear,
     quality2: s.elevated ? 11 : null,
-    crateseries: s.crateSeries,
+    crateseries: crateSeries,
     paint: null,
   });
   return { sku: fromObject(obj), obj };
@@ -1380,7 +1551,59 @@ function buildSku(ctx: Ctx, s: SkuInput): { sku: string | null; obj: SkuObject |
 // /items price list rows
 // ---------------------------------------------------------------------------
 
-function parseRow(row: Element, priceColumn: number, nameColumn: number, ctx: Ctx): ParsedScrapItem {
+/** A "Price we pay" cell longer than this is not a price (real ones read "3 keys, 42 refined"). */
+const MAX_PAYS_CHARS = 200;
+/** Empty, or only dashes ("—"): scrap.tf shows no buy price for the item. */
+const NO_PAYS_RE = /^[\s\-\u2010-\u2015\u2212]*$/;
+
+/**
+ * What scrap.tf pays for a list row (F14), from the header-detected "Price we pay" column. Null with
+ * an item warning when the cell is missing, empty, a dash, zero or not a price. Without the column
+ * (`paysColumn` null) every row is null and the page warns once instead.
+ */
+function rowPays(cells: Element[], paysColumn: number | null, warnings: string[]): { keys: number; scrap: number } | null {
+  if (paysColumn === null) return null;
+  const cell = cells[paysColumn];
+  if (!cell) {
+    warnings.push('no-pays-price: row has no "Price we pay" cell');
+    return null;
+  }
+  const text = textContent(cell);
+  if (NO_PAYS_RE.test(text)) {
+    warnings.push(`no-pays-price: "Price we pay" is ${text ? `"${clip(text, 10)}"` : 'empty'}`);
+    return null;
+  }
+  const p = text.length <= MAX_PAYS_CHARS ? parsePrice(text, 'ref') : null;
+  if (!p) {
+    warnings.push(`unparsed-pays-price: "${clip(text, 40)}"`);
+    return null;
+  }
+  if (p.keys <= 0 && p.scrap <= 0) {
+    warnings.push(`no-pays-price: scrap.tf pays nothing ("${clip(text, 40)}")`);
+    return null;
+  }
+  return { keys: p.keys, scrap: p.scrap };
+}
+
+/** "Item Limits": title="n/limit" on the cell or inside it, stock n of at most `limit` (n >= limit: scrap.tf buys no more). */
+function limitsIn(cell: Element): { stock: number; limit: number } | null {
+  for (const h of [cell, ...descendants(cell)]) {
+    const m = /^\s*(\d{1,7})\s*\/\s*(\d{1,7})\s*$/.exec(getAttr(h, 'title') ?? '');
+    if (m) return { stock: Number(m[1]), limit: Number(m[2]) };
+  }
+  return null;
+}
+
+/** Column indexes of a /items row, from the table header (price and name fall back to the usual layout). */
+interface RowColumns {
+  price: number;
+  name: number;
+  pays: number | null;
+  limits: number | null;
+}
+
+function parseRow(row: Element, cols: RowColumns, ctx: Ctx): ParsedScrapItem {
+  const { price: priceColumn, name: nameColumn, pays: paysColumn } = cols;
   const warnings: string[] = [];
   const a = validateAttrs(RowAttrsSchema, attrsOf(row), warnings);
   const cells = row.childNodes.filter((c): c is Element => isElement(c) && (c.tagName === 'td' || c.tagName === 'th'));
@@ -1400,19 +1623,19 @@ function parseRow(row: Element, priceColumn: number, nameColumn: number, ctx: Ct
   const parsed = priceText ? parsePrice(priceText, 'ref') : null;
   if (!priceText) warnings.push('no-price: row has no "Price to buy" cell');
   else if (!parsed) warnings.push(`unparsed-price: "${clip(priceText, 40)}"`);
+  const pays = rowPays(cells, paysColumn, warnings);
 
-  let stock: number | null = null;
-  for (const c of cells.slice(priceColumn + 1)) {
-    const holders = [c, ...descendants(c)];
-    for (const h of holders) {
-      const m = /^\s*(\d{1,7})\s*\/\s*(\d{1,7})\s*$/.exec(getAttr(h, 'title') ?? '');
-      if (m) {
-        stock = Number(m[1]);
-        break;
-      }
+  // By its header when the page has one, else the first cell after the price that carries it (as before).
+  const limitsCell = cols.limits !== null ? cells[cols.limits] : undefined;
+  let limits = limitsCell ? limitsIn(limitsCell) : null;
+  if (!limits) {
+    for (const c of cells.slice(priceColumn + 1)) {
+      limits = limitsIn(c);
+      if (limits) break;
     }
-    if (stock !== null) break;
   }
+  const stock = limits?.stock ?? null;
+  const stockLimit = limits?.limit ?? null;
 
   const built = buildSku(ctx, {
     defindex,
@@ -1426,6 +1649,8 @@ function parseRow(row: Element, priceColumn: number, nameColumn: number, ctx: Ct
     tradable: true,
     wear: name.wear,
     paintkit: name.paintkit?.id ?? null,
+    paintkitConflict: false,
+    isCrate,
     crateSeries: name.crateSeries,
     item,
     name,
@@ -1443,6 +1668,8 @@ function parseRow(row: Element, priceColumn: number, nameColumn: number, ctx: Ct
     assetId: null,
     stock,
     warnings,
+    pays,
+    stockLimit,
   };
 }
 
@@ -1454,19 +1681,75 @@ function utf8Length(s: string): number {
   return Buffer.byteLength(s, 'utf8');
 }
 
-function guessKindFromTitle(title: string | null, scan: DocScan): ImportPageKind {
-  if (scan.bodyId && /^pid-items$/i.test(scan.bodyId) && scan.rows.length > 0) return 'items-list';
-  if (scan.rows.length > 0 && scan.cards.length === 0) return 'items-list';
+/** The slug comes from the untrusted page, so it is clipped; the items still import. */
+function unknownBankWarning(slug: string): string {
+  return `unknown-bank: ${clip(slug, 40) || '(empty)'} is not a scrap.tf bank page this app knows; coverage uses the item categories`;
+}
+
+interface PageGuess {
+  kind: ImportPageKind;
+  bank: ScraptfBank | null;
+  /** A pid-buy-<slug> body id this app does not know (warned as unknown-bank). */
+  unknownSlug: string | null;
+}
+
+/**
+ * Page kind and bank of a page saved without a scrap.tf address. The body id is the strongest sign
+ * (saved pages carry pid-items, pid-unusuals and pid-buy-<slug>, see the fixtures); the title only
+ * tells the kind, never which bank: the /items list is titled "Item Trading" too.
+ */
+function guessPage(title: string | null, scan: DocScan): PageGuess {
+  const none = { bank: null, unknownSlug: null };
+  const body = (scan.bodyId ?? '').trim();
+  if (/^pid-items$/i.test(body) && scan.rows.length > 0) return { kind: 'items-list', bank: 'list', unknownSlug: null };
+  if (scan.rows.length > 0 && scan.cards.length === 0) return { kind: 'items-list', bank: 'list', unknownSlug: null };
+  if (scan.cards.length > 0) {
+    if (/^pid-unusuals?$/i.test(body)) return { kind: 'unusuals', bank: 'unusuals', unknownSlug: null };
+    const slug = /^pid-buy-([a-z0-9_-]{1,40})$/i.exec(body)?.[1]?.toLowerCase() ?? null;
+    if (slug !== null) {
+      const bank = BUY_SLUG_BANKS.get(slug) ?? null;
+      if (bank === 'unusuals') return { kind: 'unusuals', bank, unknownSlug: null };
+      return { kind: 'buy', bank, unknownSlug: bank === null ? slug : null };
+    }
+  }
   const t = (title ?? '').slice(0, MAX_TITLE_CHARS);
-  if (!/scrap\.?tf/i.test(t)) return 'unknown';
-  if (/unusual/i.test(t)) return 'unusuals';
+  if (!/scrap\.?tf/i.test(t)) return { kind: 'unknown', ...none };
+  if (/unusual/i.test(t)) return { kind: 'unusuals', bank: 'unusuals', unknownSlug: null };
   if (scan.cards.length > 0) {
     // "<kind> ... trading|bank" in two linear steps: an unanchored /kind.*trading/ rescans
     // to the end from every keyword. The first keyword leaves the longest remainder.
     const kind = /(hat|weapon|strange|killstreak|skin|item)s?\b/i.exec(t);
-    if (kind && /\b(trading|bank)/i.test(t.slice(kind.index + kind[0].length))) return 'buy';
+    if (kind && /\b(trading|bank)/i.test(t.slice(kind.index + kind[0].length))) return { kind: 'buy', ...none };
   }
-  return 'unknown';
+  return { kind: 'unknown', ...none };
+}
+
+export interface ParseOptions {
+  /**
+   * F18: the address the file itself names outside the HTML (an .mhtml part's Content-Location),
+   * read first, as the saved-from comment is. Only parsed as text by pageKindFromUrl, never fetched.
+   */
+  address?: string | null;
+}
+
+/** F18 S3: a recognised bank page (any /buy bank or unusuals) whose save holds no card. */
+export const NO_CARDS_SAVED_WARNING =
+  "no-cards-saved: This page was saved without its items. 'HTML only' keeps the page as it first loaded, before scrap.tf added the cards. Save it again as 'Webpage, Complete'.";
+
+/** The bank pages S3 warns about: every recognised bank but the /items list (a sold-out list still lists its rows). */
+function isCardBank(bank: ScraptfBank | null): boolean {
+  return bank !== null && bank !== 'list';
+}
+
+/**
+ * A body id that names a bank page (pid-buy-<known slug>, pid-unusuals). guessPage needs cards before it
+ * trusts one (F15), but a page that says it is a bank and shows no card was saved without its items.
+ */
+function bodyIdNamesCardBank(bodyId: string | null): boolean {
+  const body = (bodyId ?? '').trim();
+  if (/^pid-unusuals?$/i.test(body)) return true;
+  const slug = /^pid-buy-([a-z0-9_-]{1,40})$/i.exec(body)?.[1]?.toLowerCase() ?? null;
+  return slug !== null && isCardBank(BUY_SLUG_BANKS.get(slug) ?? null);
 }
 
 /**
@@ -1474,7 +1757,7 @@ function guessKindFromTitle(title: string | null, scan: DocScan): ImportPageKind
  * ImportTooLargeError above MAX_IMPORT_BYTES; everything else is reported as
  * warnings. Nothing in the page is executed or fetched.
  */
-export function parseScrapTfHtml(html: string, schema: SchemaService): ScrapTfParseResult {
+export function parseScrapTfHtml(html: string, schema: SchemaService, opts: ParseOptions = {}): ScrapTfParseResult {
   if (typeof html !== 'string') throw new TypeError('parseScrapTfHtml expects the page as a string');
   if (html.length > MAX_IMPORT_BYTES || (html.length * 3 > MAX_IMPORT_BYTES && utf8Length(html) > MAX_IMPORT_BYTES)) {
     throw new ImportTooLargeError(utf8Length(html));
@@ -1486,28 +1769,39 @@ export function parseScrapTfHtml(html: string, schema: SchemaService): ScrapTfPa
   const doc = parse(text);
   const scan = scanDocument(doc);
 
-  // Page kind: saved-from comment, canonical link, og:url, then title/structure.
+  // Page kind: the file's own address (an .mhtml part's Content-Location), saved-from comment,
+  // canonical link, og:url, then title/structure.
   const savedFrom = SAVED_FROM_RE.exec(text.slice(0, 64 * 1024))?.[1] ?? null;
-  const hints = [savedFrom, scan.canonical, scan.ogUrl]
+  const address = typeof opts.address === 'string' ? opts.address : null;
+  const hints = [address, savedFrom, scan.canonical, scan.ogUrl]
     .filter((u): u is string => typeof u === 'string' && u.trim() !== '')
     .map((u) => pageKindFromUrl(u))
     .filter((h): h is PageHint => h !== null);
   const hint = hints.find((h) => h.scrapTf) ?? hints[0] ?? null;
 
   let pageKind: ImportPageKind;
+  // F15: the scrap.tf page the file was saved from (ImportBatch.bank). Null when it cannot be told,
+  // and for pages saved from another site; coverage then falls back to the majority category.
+  let bank: ScraptfBank | null = null;
+  const page = scraptfPageKey(hint, scan.bodyId);
   if (hint && hint.scrapTf) {
     pageKind = hint.kind;
+    bank = hint.bank;
     if (pageKind === 'unknown') {
       warnings.push(`page-not-importable: scrap.tf${hint.path} does not list prices you can buy at; nothing imported`);
-      return { pageKind, items: [], warnings };
+      return { pageKind, bank, page, items: [], warnings };
     }
+    if (pageKind === 'buy' && bank === null) warnings.push(unknownBankWarning(buySlugOf(hint.path) ?? ''));
   } else if (hint) {
     pageKind = 'unknown';
     warnings.push(`not-scraptf: the page was saved from ${hint.host}, not scrap.tf`);
   } else {
-    pageKind = guessKindFromTitle(scan.title, scan);
+    const guess = guessPage(scan.title, scan);
+    pageKind = guess.kind;
+    bank = guess.bank;
     if (pageKind === 'unknown') warnings.push('page-kind-unknown: no scrap.tf address found in the saved page; check the prices before using them');
     else warnings.push(`page-kind-guessed: treated as ${pageKind} from the page title/layout`);
+    if (guess.unknownSlug !== null) warnings.push(unknownBankWarning(guess.unknownSlug));
   }
 
   if (!safe(() => schema.isLoaded(), false)) {
@@ -1516,8 +1810,13 @@ export function parseScrapTfHtml(html: string, schema: SchemaService): ScrapTfPa
   if (scan.skippedCards > 0) warnings.push(`duplicate-cards: ignored ${scan.skippedCards} selected-item copies`);
 
   const items: ParsedScrapItem[] = [];
+  // F18 S4: one card can show in two containers (a "new items" strip and the main grid). By asset id;
+  // a card without one by everything it parsed to: scrap.tf stacks identical copies on one card, so an
+  // identical second card is the same card shown again (a reserved copy differs by its warning).
   const seenAssets = new Set<string>();
+  const seenUnidentified = new Set<string>();
   let dupes = 0;
+  let unidentifiedDupes = 0;
   for (const el of scan.cards) {
     let parsed: { item: ParsedScrapItem; assetId: string | null };
     try {
@@ -1533,28 +1832,45 @@ export function parseScrapTfHtml(html: string, schema: SchemaService): ScrapTfPa
         continue;
       }
       seenAssets.add(parsed.assetId);
+    } else {
+      const it = parsed.item;
+      const key = JSON.stringify([it.title, it.sku, it.costKeys, it.costScrap, it.stock, it.special, it.warnings]);
+      if (seenUnidentified.has(key)) {
+        unidentifiedDupes++;
+        continue;
+      }
+      seenUnidentified.add(key);
     }
     items.push(parsed.item);
   }
   if (dupes > 0) warnings.push(`duplicate-cards: ignored ${dupes} cards with an asset id already seen`);
+  if (unidentifiedDupes > 0) warnings.push(`duplicate-cards: ignored ${unidentifiedDupes} cards without an asset id shown twice`);
 
   const priceColumn = scan.priceColumn ?? 2;
   const nameColumn = scan.nameColumn ?? 1;
+  if (scan.rows.length > 0 && scan.paysColumn === null) {
+    // Never guessed by position: a wrong column would read as what scrap.tf pays (Holdings' exit).
+    warnings.push('no-pays-column: no "Price we pay" column found; what scrap.tf pays was not read');
+  }
   for (const row of scan.rows) {
     try {
-      items.push(parseRow(row, priceColumn, nameColumn, ctx));
+      items.push(parseRow(row, { price: priceColumn, name: nameColumn, pays: scan.paysColumn, limits: scan.limitsColumn }, ctx));
     } catch (err) {
       items.push(failedItem(textContent(row).slice(0, 80), `row could not be parsed (${err instanceof Error ? err.message : String(err)})`));
     }
   }
 
   if (items.length === 0) {
-    warnings.push('no-items: no item cards or price rows found (save the page after the items have loaded)');
+    // F18 S3: a bank page (/buy/<slug>, /unusuals) with no card. scrap.tf adds its cards after the page
+    // has loaded, and "HTML only" writes the page as it first loaded. Coverage, the banks cards and bank
+    // stock ignore such a save of a bank page (it stores nothing); a list page keeps 'no-items'.
+    const bankPage = hint !== null ? hint.scrapTf && (pageKind === 'buy' || pageKind === 'unusuals') : isCardBank(bank) || bodyIdNamesCardBank(scan.bodyId);
+    warnings.push(bankPage ? NO_CARDS_SAVED_WARNING : 'no-items: no item cards or price rows found (save the page after the items have loaded)');
   } else {
     const noSku = items.filter((i) => i.sku === null).length;
     if (noSku > 0) warnings.push(`no-sku: ${noSku} of ${items.length} items could not be identified`);
   }
-  return { pageKind, items, warnings };
+  return { pageKind, bank, page, items, warnings };
 }
 
 function failedItem(titleHtml: string, reason: string): ParsedScrapItem {

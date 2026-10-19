@@ -213,7 +213,7 @@ export function OpportunitiesPage() {
   const menu = useItemMenu();
   const openMenuRef = useRef(menu.open);
   openMenuRef.current = menu.open;
-  const onRowMenu = useCallback((o: Opportunity, at: { x: number; y: number }) => openMenuRef.current({ sku: o.sku, name: o.name }, at), []);
+  const onRowMenu = useCallback((o: Opportunity, at: { x: number; y: number }) => openMenuRef.current({ sku: o.sku, name: o.name, category: o.category }, at), []);
 
   // "/" focuses the search box from anywhere on the page, but not from inside the item drawer.
   const drawerOpen = useRef(false);

@@ -2,7 +2,8 @@
 // drawer and the rule preview.
 
 import { categoryOfSkuOnly } from '../../shared/categories';
-import { buildLinks } from '../../shared/links';
+import { buildLinks, scraptfSeenOn } from '../../shared/links';
+import { scraptfListPriceSaved } from '../../shared/scraptfList';
 import { fromObject, fromString, isValidSku, looksLikeSku } from '../../shared/sku';
 import { CATEGORIES, CATEGORY_LABELS, CURRENCY_SKUS, EMPTY_SPECIAL, PROFIT_TIER_LABELS } from '../../shared/types';
 import type {
@@ -20,6 +21,7 @@ import type {
   OrderSummary,
   RuleFilter,
   ScrapPrice,
+  ScraptfListRow,
   Settings,
   UnixMs,
 } from '../../shared/types';
@@ -157,6 +159,10 @@ export interface ItemDetailArgs {
    * paint from the SKU only, which is the row quick entry's prices.upsert creates.
    */
   target?: 'newest' | 'plain';
+  /** F14: the base SKU's saved scrap.tf/items list row (scraptfList.rowFor), passed through as ItemDetail.scraptfList. */
+  scraptfList?: ScraptfListRow | null;
+  /** F17: the item in the newest bank-stock save listing it (BankStock.detailFor), passed through as ItemDetail.bankStock. */
+  bankStock?: ItemDetail['bankStock'];
 }
 
 function attempt<T>(fn: () => T, fallback: T): T {
@@ -199,11 +205,23 @@ export function itemRevenue<T extends ValuedOrderLike>(prices: PriceResult<T>, e
   };
 }
 
-/** A painted SKU's prices, newest first: rows stored under it, and the base SKU's rows of that paint. */
-function pricesOfPaint(repo: Repo, sku: string, base: string, paint: number): ScrapPrice[] {
+/** A painted SKU's prices, newest first: rows stored under it, and the base SKU's rows (`baseRows`) of that paint. */
+function pricesOfPaint(repo: Repo, sku: string, base: string, paint: number, baseRows: readonly ScrapPrice[]): ScrapPrice[] {
   const own = sku === base ? [] : repo.scrapPricesForSku(sku);
-  const ofPaint = repo.scrapPricesForSku(base).filter((p) => p.special?.paint === paint);
+  const ofPaint = baseRows.filter((p) => p.special?.paint === paint);
   return [...own, ...ofPaint].sort((a, b) => b.observedAt - a.observedAt || b.id - a.id);
+}
+
+/**
+ * ItemDetail.seenOn (F15): the bank of the newest imported price shown (`prices`). A painted SKU none
+ * of whose own prices was imported falls back to the base SKU's other copies, from bank pages only:
+ * the bank that sold a plain or other-paint copy sells this item too, while the /items list shows
+ * plain copies only, so it is no place to look for a painted one (the category mapping is, then).
+ */
+export function itemSeenOn(prices: readonly ScrapPrice[], baseRows: readonly ScrapPrice[] | null): ItemDetail['seenOn'] {
+  const own = scraptfSeenOn(prices);
+  if (own !== null || baseRows === null) return own;
+  return scraptfSeenOn(baseRows.filter((p) => p.bank !== 'list'));
 }
 
 /**
@@ -224,7 +242,9 @@ export function buildItemDetail(args: ItemDetailArgs): ItemDetail | null {
   const paint = typeof obj.paint === 'number' && obj.paint > 0 ? obj.paint : null;
   // Prices are stored under the base SKU with the paint in their extras (prices.upsert, saved pages),
   // so a painted SKU's own prices are the base rows of that paint (plus any stored under it as is).
-  const scrapPrices = paint === null ? repo.scrapPricesForSku(sku) : pricesOfPaint(repo, sku, base, paint);
+  // The base rows are read once: the list's "already saved" test and seenOn's fallback read them too.
+  const baseRows = paint === null ? null : repo.scrapPricesForSku(base);
+  const scrapPrices = paint === null || baseRows === null ? repo.scrapPricesForSku(sku) : pricesOfPaint(repo, sku, base, paint, baseRows);
   const opportunities = repo.opportunitiesForSku(sku);
   const listings = repo.listingsByBaseSku(base);
   const anyBase = anyEffectBaseOf(base);
@@ -234,7 +254,16 @@ export function buildItemDetail(args: ItemDetailArgs): ItemDetail | null {
   const sells = listings.filter((l) => l.intent === 'sell');
   const raw = lookupReferences(repo, base);
   const schemaItem = attempt(() => schema.itemByDefindex(obj.defindex), null);
-  if (!schemaItem && listings.length === 0 && scrapPrices.length === 0 && opportunities.length === 0 && !raw.pricedb && !raw.community) {
+  const scraptfList = args.scraptfList ?? null;
+  if (
+    !schemaItem &&
+    !scraptfList &&
+    listings.length === 0 &&
+    scrapPrices.length === 0 &&
+    opportunities.length === 0 &&
+    !raw.pricedb &&
+    !raw.community
+  ) {
     return null;
   }
 
@@ -266,10 +295,12 @@ export function buildItemDetail(args: ItemDetailArgs): ItemDetail | null {
     .sort((a, b) => Number(b.eligible) - Number(a.eligible));
 
   const schemaName = attempt(() => schema.nameForSku(sku), sku);
+  // The saved scrap.tf list names its items too (F14), so an item known only from it is not shown as a raw SKU.
+  const listName = scraptfList && typeof scraptfList.name === 'string' && scraptfList.name.trim() ? scraptfList.name : null;
   const name =
     schemaName && schemaName !== sku
       ? schemaName
-      : (scrapPrices.find((p) => p.name.trim())?.name ?? buys.find((l) => l.itemName)?.itemName ?? sku);
+      : (scrapPrices.find((p) => p.name.trim())?.name ?? buys.find((l) => l.itemName)?.itemName ?? listName ?? sku);
   const rawCategory = attempt<Category | null>(() => schema.categoryForSku(sku), null);
   const category = rawCategory !== null && CATEGORIES.includes(rawCategory) ? rawCategory : categoryOfSkuOnly(obj);
   // backpack.tf names never include paint (the schema appends "(Paint: …)" for painted SKUs), so
@@ -310,6 +341,19 @@ export function buildItemDetail(args: ItemDetailArgs): ItemDetail | null {
     links,
     snapshot: args.snapshot,
     keyPrice: args.keyPrice,
+    scraptfList,
+    // "Use as my price" stores the plain copy under the list's base SKU, which a painted SKU's
+    // scrapPrices (pricesOfPaint) never include; read those rows so its drawer sees the save too.
+    scraptfListSaved:
+      scraptfList !== null &&
+      scraptfListPriceSaved(
+        scraptfList,
+        scraptfList.sku === sku ? scrapPrices : baseRows !== null && scraptfList.sku === base ? baseRows : repo.scrapPricesForSku(scraptfList.sku),
+      ),
+    // F15: the bank of the newest imported price shown here (ScrapPrice.bank is joined by the repo), for
+    // the drawer's "Seen on" and every "Open bank page" (the drawer's and the ItemMenu's item.detail).
+    seenOn: itemSeenOn(scrapPrices, baseRows),
+    bankStock: args.bankStock ?? null,
   };
 }
 

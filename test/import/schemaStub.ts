@@ -53,7 +53,44 @@ export const STUB_ITEMS: SchemaItemRow[] = [
   item(725, 'Tour of Duty Ticket', 'tool', null),
   item(5832, 'Warbird Weapons Case', 'supply_crate', null),
   item(5020, 'Name Tag', 'tool', null),
+  // F15 bank fixtures (buy_weapons/stranges/killstreaks/skins/items.html): TF2 schema defindexes.
+  item(35, 'Kritzkrieg', 'tf_weapon_medigun', 'secondary', 'The Kritzkrieg'),
+  item(41, 'Natascha', 'tf_weapon_minigun', 'primary'),
+  item(127, 'Direct Hit', 'tf_weapon_rocketlauncher_directhit', 'primary', 'The Direct Hit'),
+  item(133, 'Gunboats', 'tf_wearable', 'secondary', 'The Gunboats'),
+  item(197, 'Wrench', 'tf_weapon_wrench', 'melee'),
+  item(199, 'Shotgun', 'tf_weapon_shotgun', 'secondary'),
+  item(200, 'Scattergun', 'tf_weapon_scattergun', 'primary'),
+  item(201, 'Sniper Rifle', 'tf_weapon_sniperrifle', 'primary'),
+  item(206, 'Grenade Launcher', 'tf_weapon_grenadelauncher', 'primary'),
+  item(207, 'Stickybomb Launcher', 'tf_weapon_pipebomblauncher', 'secondary'),
+  item(211, 'Medi Gun', 'tf_weapon_medigun', 'secondary'),
+  item(228, 'Black Box', 'tf_weapon_rocketlauncher', 'primary', 'The Black Box'),
+  item(355, "Fan O'War", 'tf_weapon_bat', 'melee', "The Fan O'War"),
+  item(638, 'Sharp Dresser', 'tf_weapon_knife', 'melee', 'The Sharp Dresser'),
+  item(654, 'Festive Minigun', 'tf_weapon_minigun', 'primary'),
+  item(793, 'Silver Botkiller Minigun Mk.I', 'tf_weapon_minigun', 'primary'),
+  item(1013, 'Ham Shank', 'saxxy', 'melee', 'The Ham Shank'),
+  item(1118, 'Taunt: Conga', 'tf_wearable', 'taunt'),
+  item(1157, 'Taunt: Kazotsky Kick', 'tf_wearable', 'taunt'),
+  item(1162, 'Taunt: Mannrobics', 'tf_wearable', 'taunt'),
+  item(5037, 'Australium Gold', 'tool', null),
+  item(5044, 'Description Tag', 'tool', null),
+  item(5046, 'Team Spirit', 'tool', null),
+  item(5051, 'Pink as Hell', 'tool', null),
+  item(5734, 'Mann Co. Supply Munition', 'supply_crate', null),
+  item(6526, 'Professional Killstreak Kit', 'tool', null),
+  item(16070, 'War Paint', 'tool', null),
+  item(16104, 'War Paint', 'tool', null),
+  // Crates whose card shows no series (a single-series case, a multi-series crate) and an item that
+  // exists only as Unusual, without an effect.
+  item(5078, 'Scorched Crate', 'supply_crate', null),
+  item(5022, 'Mann Co. Supply Crate', 'supply_crate', null),
+  item(267, 'Haunted Metal Scrap', 'craft_item', null),
 ];
+
+/** item_quality where the schema gives one other than Unique (6). */
+export const STUB_ITEM_QUALITY: Record<number, number> = { 267: 5, 16070: 15, 16104: 15, 16105: 15 };
 
 export const STUB_EFFECTS: EffectRow[] = [
   { id: 8, name: 'Haunted Ghosts', canonicalId: 8, type: 'cosmetic' },
@@ -68,6 +105,13 @@ export const STUB_EFFECTS: EffectRow[] = [
   { id: 365, name: 'Crystal Crown', canonicalId: 365, type: 'cosmetic' },
   { id: 366, name: 'Crystal Crown', canonicalId: 365, type: 'cosmetic' },
   { id: 701, name: 'Hot', canonicalId: 701, type: 'weapon' },
+  { id: 702, name: 'Isotope', canonicalId: 702, type: 'weapon' },
+  { id: 703, name: 'Cool', canonicalId: 703, type: 'weapon' },
+  { id: 704, name: 'Energy Orb', canonicalId: 704, type: 'weapon' },
+  // Taunt effects: Showstopper is a RED/BLU pair; '72 carries an apostrophe.
+  { id: 3001, name: 'Showstopper', canonicalId: 3001, type: 'taunt' },
+  { id: 3002, name: 'Showstopper', canonicalId: 3001, type: 'taunt' },
+  { id: 3004, name: "'72", canonicalId: 3004, type: 'taunt' },
   { id: 3010, name: 'Mega Strike', canonicalId: 3010, type: 'taunt' },
   { id: 3190, name: 'Award Winning', canonicalId: 3190, type: 'taunt' },
 ];
@@ -98,6 +142,12 @@ export const STUB_PAINTKITS: PaintkitRow[] = [
 /** Exact-name resolutions (kits and fabricators carry target tokens). */
 export const STUB_RESOLVE: Record<string, string> = {
   'specialized killstreak ham shank kit fabricator': '20002;6;kt-2;td-1013;od-6523;oq-6',
+  'professional killstreak rocket launcher kit': '6526;6;kt-3;td-205',
+  'professional killstreak rocket launcher kit fabricator': '20003;6;kt-3;td-205;od-6526;oq-6',
+  // As the real resolver: a single-series case gets its series, a multi-series crate none.
+  'scorched crate': '5078;6;c46',
+  'mann co. supply crate': '5022;6',
+  'mann co. supply munition': '5734;6',
 };
 
 function normHex(hex: string): string {
@@ -132,14 +182,21 @@ export function createStubSchema(opts: StubOptions = {}): SchemaService & { call
     const o = fromString(sku);
     const it = itemByDefindex(o.defindex);
     if (!it) return sku;
+    // Kits and fabricators are named after their target ("Professional Killstreak Rocket Launcher Kit").
+    const target = o.target !== null ? itemByDefindex(o.target) : null;
+    if (target && / Kit(?: Fabricator)?$/.test(it.itemName)) {
+      const tier = o.killstreak ? `${KILLSTREAK_NAMES[o.killstreak]} ` : '';
+      return `${tier}${target.itemName} Kit${it.itemName.endsWith('Fabricator') ? ' Fabricator' : ''}`;
+    }
     const parts: string[] = [];
     if (!o.craftable) parts.push('Non-Craftable');
     if (o.quality2 === 11) parts.push('Strange');
     if (o.quality === 5 && o.effect) parts.push(effectName(o.effect) ?? `Effect ${o.effect}`);
     else if (o.quality !== 6 && !(o.quality === 15 && o.paintkit !== null)) parts.push(QUALITY_NAMES[o.quality] ?? `Quality ${o.quality}`);
     else if (o.effect) parts.push(effectName(o.effect) ?? `Effect ${o.effect}`);
-    if (o.killstreak) parts.push(KILLSTREAK_NAMES[o.killstreak]!);
+    // bp.tf's order: Festivized before the killstreak tier.
     if (o.festive) parts.push('Festivized');
+    if (o.killstreak) parts.push(KILLSTREAK_NAMES[o.killstreak]!);
     if (o.australium) parts.push('Australium');
     if (o.paintkit !== null) parts.push(paintkitName(o.paintkit) ?? `Paintkit ${o.paintkit}`);
     parts.push(it.itemName);
@@ -166,6 +223,7 @@ export function createStubSchema(opts: StubOptions = {}): SchemaService & { call
     isLoaded: () => guard('isLoaded', () => loaded),
     health: () => health,
     itemByDefindex: (d) => guard('itemByDefindex', () => itemByDefindex(d)),
+    itemQuality: (d) => guard('itemQuality', () => (itemByDefindex(d) ? (STUB_ITEM_QUALITY[d] ?? 6) : null)),
     nameForSku: (sku) => guard('nameForSku', () => nameForSku(sku)),
     baseNameForSku: (sku) => guard('baseNameForSku', () => itemByDefindex(fromString(sku).defindex)?.itemName ?? sku),
     marketHashName: () => null,

@@ -30,6 +30,8 @@ import {
 } from './helpers';
 import type { StubSchemaOptions } from './helpers';
 import { mergeSettings, DEFAULT_SETTINGS } from '../../src/shared/defaults';
+import { BANK_STOCK_MAX_AGE_MS } from '../../src/shared/bankStock';
+import { SCRAPTF_EVENTS_MAX_AGE_MS } from '../../src/shared/scraptfHistory';
 
 const K = 567;
 const openRepos: Repo[] = [];
@@ -866,7 +868,7 @@ describe('explicitInput', () => {
 });
 
 describe('runMaintenance', () => {
-  it('purges old listings, events and request-log rows', () => {
+  it('purges old listings, events, request-log rows and saved scrap.tf list rows', () => {
     const repo = newRepo();
     const now = T0;
     repo.upsertListings([
@@ -879,10 +881,33 @@ describe('runMaintenance', () => {
     ]);
     repo.appendRequestLog({ ts: now - RETENTION.requestLogMs - 1, host: 'h', path: '/', method: 'GET', status: 200, ms: 1, bytes: 1, note: null });
     repo.appendRequestLog({ ts: now, host: 'h', path: '/', method: 'GET', status: 200, ms: 1, bytes: 1, note: null });
-    expect(runMaintenance(repo, now)).toEqual({ listings: 1, events: 1, requests: 1 });
+    const listRow = { name: 'n', sellsKeys: 0, sellsScrap: 12, paysKeys: 0, paysScrap: 10, stock: 1, stockLimit: 5, batchId: 1 };
+    repo.upsertScraptfList([
+      { ...listRow, sku: '378;6', observedAt: now - RETENTION.scraptfListMs - 1 },
+      { ...listRow, sku: '126;6', observedAt: now - RETENTION.scraptfListMs + 1 },
+    ]);
+    // F17/F20: a hats save past the retention goes; the newest and the one it is compared with stay.
+    const batch = (at: number) => repo.createImportBatch({ fileName: 'hats.html', pageKind: 'buy', fileMtime: at, importedAt: at, itemCount: 1, bank: 'hats' });
+    const stock = { sku: '378;6', specialKey: '', name: 'Team Captain', costKeys: 0, costScrap: 30, stock: 1, assetId: null };
+    const oldSave = batch(now - BANK_STOCK_MAX_AGE_MS - 1);
+    const midSave = batch(now - 2 * 3_600_000);
+    const freshSave = batch(now - 1);
+    repo.insertBankStock(oldSave, 'hats', [stock]);
+    repo.insertBankStock(midSave, 'hats', [stock]);
+    repo.insertBankStock(freshSave, 'hats', [stock]);
+    // F20: a change event past its 90 days goes, a fresh one stays.
+    const event = { bank: 'hats' as const, page: '/buy/hats', sku: '378;6', specialKey: '', name: 'Team Captain', kind: 'cheaper' as const, fromKeys: 0, fromScrap: 31, toKeys: 0, toScrap: 30, fromStock: 1, toStock: 1, batchId: freshSave };
+    repo.insertScraptfEvents([
+      { ...event, at: now - SCRAPTF_EVENTS_MAX_AGE_MS - 1 },
+      { ...event, at: now - 1 },
+    ]);
+    expect(runMaintenance(repo, now)).toEqual({ listings: 1, events: 1, requests: 1, scraptfList: 1, bankStock: 1, scraptfEvents: 1 });
+    expect(repo.scraptfEvents().map((e) => e.at)).toEqual([now - 1]);
     expect(repo.getListing('new')).not.toBeNull();
     expect(repo.listEvents({})).toHaveLength(1);
     expect(repo.recentRequests(10)).toHaveLength(1);
+    expect(repo.scraptfList().map((r) => r.sku)).toEqual(['126;6']);
+    expect(repo.bankStockSaves('hats').map((s) => s.batchId)).toEqual([freshSave, midSave]);
   });
 });
 

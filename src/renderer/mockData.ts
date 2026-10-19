@@ -1,9 +1,10 @@
 // Deterministic fake data for running the dashboard in a plain browser.
 // Development only: none of these prices, buyers or listings are real.
 
+import { bankStockSpecialKey, marketNewSideMatches } from '../shared/bankStock';
 import { frictionOf, maxCostFor } from '../shared/ceiling';
 import { parsePrice, refToScrap, formatScrap, type ParsedPrice } from '../shared/currency';
-import { scraptfPageFor } from '../shared/links';
+import { bankForCategory, scraptfLinkFor, scraptfPageFor, type ScraptfSeen } from '../shared/links';
 import {
   emptyMarketCounts,
   marketBuySideMatches,
@@ -16,9 +17,12 @@ import {
 } from '../shared/market';
 import type { HoldingBuySide } from '../shared/holdings';
 import { communityMaxAgeMs } from '../shared/referenceAge';
+import { marketListedSideMatches } from '../shared/scraptfHistory';
+import { marketListFields, marketListSideMatches } from '../shared/scraptfList';
 import { baseSku, fromString } from '../shared/sku';
-import { CATEGORIES, CATEGORY_LABELS, CURRENCY_SKUS } from '../shared/types';
+import { CATEGORIES, CATEGORY_LABELS, CURRENCY_SKUS, KEY_SKU } from '../shared/types';
 import type {
+  BankStockStored,
   BulkPriceRow,
   Category,
   ConfidenceLevel,
@@ -41,6 +45,9 @@ import type {
   RuleFilter,
   Scrap,
   ScrapPrice,
+  ScraptfBank,
+  ScraptfListRow,
+  ScraptfListStored,
   Settings,
   ShoppingListResult,
   ShoppingQuery,
@@ -794,8 +801,9 @@ function costOf(p: { costKeys: number; costScrap: Scrap }, keyScrap: Scrap): Scr
 
 /**
  * One Live market row: the book priced like mockRevenue, buy-side confidence from a neutral input
- * (fresh, free, so only buyers and references count), and the user's side joined in.
- * Null when the item has no eligible buyers and no price of the user's (it is not in the market).
+ * (fresh, free, so only buyers and references count), and the user's side joined in, with the saved
+ * scrap.tf/items list row (F14) when given. Null when the item has no eligible buyers and no price of
+ * the user's (it is not in the market).
  */
 export function mockMarketRow(args: {
   item: Pick<CatalogItem, 'sku' | 'name' | 'category'>;
@@ -805,6 +813,13 @@ export function mockMarketRow(args: {
   settings: Settings;
   keyScrap: Scrap;
   now: UnixMs;
+  list?: ScraptfListRow | null;
+  /** F17: MarketRow.scraptfNewAt (bankStockNewAt over the mock's bank-stock saves). */
+  newAt?: UnixMs | null;
+  /** F19: the saved page that last listed the item (preferScraptfSeen), else the category's bank. */
+  seen?: ScraptfSeen | null;
+  /** F20: MarketRow.scraptfListedSince (scraptfListedSinceOf over the seen bank's runs). */
+  listedSince?: UnixMs | null;
 }): MarketRow | null {
   const { item, book, known, settings, keyScrap, now } = args;
   if (MARKET_CURRENCY.has(item.sku)) return null;
@@ -866,6 +881,10 @@ export function mockMarketRow(args: {
     verdict,
     lastOrderChangeAt,
     evaluatedAt: now,
+    ...marketListFields(args.list ?? null),
+    scraptfNewAt: args.newAt ?? null,
+    scraptfLink: scraptfLinkFor(item.category, args.seen ?? null),
+    scraptfListedSince: args.listedSince ?? null,
   };
 }
 
@@ -873,12 +892,18 @@ export function mockMarketRow(args: {
  * Filters, counts, sorts and pages like the service's market.list. `counts` are taken over the
  * query without its own verdicts filter; `matched` is every match in order (the CSV export).
  */
-export function mockMarketQuery(all: readonly MarketRow[], q: MarketQuery): { rows: MarketRow[]; matched: MarketRow[]; total: number; counts: Record<MarketVerdict, number> } {
+export function mockMarketQuery(
+  all: readonly MarketRow[],
+  q: MarketQuery,
+  now: UnixMs = Date.now(),
+): { rows: MarketRow[]; matched: MarketRow[]; total: number; counts: Record<MarketVerdict, number> } {
   const tokens = marketSearchTokens(q.search);
   const counts = emptyMarketCounts();
   const matched: MarketRow[] = [];
   for (const r of all) {
-    if (!marketBuySideMatches(r, q, tokens) || !marketUserSideMatches(r, q, true)) continue;
+    if (!marketBuySideMatches(r, q, tokens) || !marketListSideMatches(r, q) || !marketNewSideMatches(r, q) || !marketUserSideMatches(r, q, true)) continue;
+    // F20 (U5): "Listed on scrap.tf > 24 h", with the other source filters and before the verdict counts.
+    if (!marketListedSideMatches(r, q, now)) continue;
     counts[r.verdict]++;
     if (!q.verdicts?.length || q.verdicts.includes(r.verdict)) matched.push(r);
   }
@@ -911,6 +936,260 @@ export function mockHoldingBuySide(book: MockBook, settings: Settings, keyScrap:
     flags: row.flags,
     lastOrderChangeAt: row.lastOrderChangeAt,
   };
+}
+
+// ---------------------------------------------------------------------------
+// scrap.tf price list (F14): the user's saved copy of scrap.tf/items
+// ---------------------------------------------------------------------------
+
+/**
+ * The saved list's pages: /items split into three pages the user saved at different times, so the
+ * card and the rows show fresh, hour-old and day-old data (the last is shown, never a held item's exit).
+ */
+export const MOCK_LIST_PAGES: readonly { batchId: number; ageMs: number }[] = [
+  { batchId: 101, ageMs: 3 * 60_000 },
+  { batchId: 102, ageMs: 50 * 60_000 },
+  { batchId: 103, ageMs: 26 * 3_600_000 },
+];
+const LIST_LIMITS: readonly number[] = [1, 3, 5, 6, 10, 20];
+
+/** Hand-set rows that show a case on purpose (the rest are generated from the catalogue). */
+const LIST_OVERRIDES: Readonly<Record<string, { sells: Scrap; pays: Scrap | null; stock: number; limit: number; page: number }>> = {
+  // A held item scrap.tf will not buy right now: Holdings shows "scrap.tf full", the status stays no-buyers.
+  '30359;6': { sells: r(1.55), pays: r(1.33), stock: 6, limit: 6, page: 0 },
+  // A held item scrap.tf pays more for than the backpack.tf buyers: its better exit (still a loss).
+  '143;6': { sells: k(1, 55), pays: k(1, 48), stock: 1, limit: 3, page: 0 },
+  // In stock, cheaper than the buyers pay: a Live market flip the list shows.
+  '378;6': { sells: k(1, 12), pays: k(1, 2), stock: 2, limit: 5, page: 0 },
+  // Out of stock: scrap.tf still buys it, but nothing can be bought there now.
+  '126;6': { sells: k(1, 1), pays: r(55), stock: 0, limit: 4, page: 1 },
+};
+
+function splitPrice(v: Scrap): { keys: number; scrap: Scrap } {
+  const keys = v >= K ? Math.floor(v / K) : 0;
+  return { keys, scrap: v - keys * K };
+}
+
+/**
+ * Deterministic list rows for most catalogue items (painted copies never: the list shows plain ones),
+ * some out of stock, some full, on pages of mixed ages, plus the key row (KEY_SKU). The key row pays
+ * above the mock's backpack.tf key quotes, so it never caps the mock key value (568) unless the user
+ * types a scrap.tf key price later in Settings.
+ */
+export function seedScraptfList(now: UnixMs): ScraptfListStored[] {
+  const out: ScraptfListStored[] = [];
+  const at = (page: number) => now - MOCK_LIST_PAGES[page]!.ageMs;
+  const batch = (page: number) => MOCK_LIST_PAGES[page]!.batchId;
+  for (const item of [...CATALOG, ...EXTRA_NAMES, ...MARKET_ONLY]) {
+    if (/;p\d/.test(item.sku) || MARKET_CURRENCY.has(item.sku)) continue;
+    const h = hashOf(`list:${item.sku}`);
+    const o = LIST_OVERRIDES[item.sku];
+    if (o) {
+      const s = splitPrice(o.sells);
+      const p = o.pays === null ? null : splitPrice(o.pays);
+      out.push({ sku: item.sku, name: item.name, sellsKeys: s.keys, sellsScrap: s.scrap, paysKeys: p?.keys ?? null, paysScrap: p?.scrap ?? null, stock: o.stock, stockLimit: o.limit, batchId: batch(o.page), observedAt: at(o.page) });
+      continue;
+    }
+    // Not every item is on scrap.tf's list.
+    if (h % 9 === 0) continue;
+    const value = item.value > 0 ? item.value : r(1.33);
+    // scrap.tf sells near the buyers' price and pays well under it.
+    const sells = Math.max(1, Math.round(value * (0.82 + ((h >>> 3) % 24) / 100)));
+    const paysRaw = Math.round(sells * (0.7 + ((h >>> 8) % 18) / 100));
+    const pays = paysRaw >= 1 ? Math.min(paysRaw, Math.max(1, sells - 1)) : null;
+    const limit = LIST_LIMITS[(h >>> 12) % LIST_LIMITS.length]!;
+    const roll = (h >>> 16) % 10;
+    const stock = roll === 0 ? 0 : roll === 1 ? limit : (h >>> 20) % (limit + 1);
+    const page = (h >>> 24) % MOCK_LIST_PAGES.length;
+    const s = splitPrice(sells);
+    const p = pays === null ? null : splitPrice(pays);
+    out.push({ sku: item.sku, name: item.name, sellsKeys: s.keys, sellsScrap: s.scrap, paysKeys: p?.keys ?? null, paysScrap: p?.scrap ?? null, stock, stockLimit: limit, batchId: batch(page), observedAt: at(page) });
+  }
+  out.push({ sku: KEY_SKU, name: 'Mann Co. Supply Crate Key', sellsKeys: 0, sellsScrap: K + 15, paysKeys: 0, paysScrap: K + 6, stock: 140, stockLimit: 400, batchId: batch(0), observedAt: at(0) });
+  return out.sort((a, b) => (a.sku < b.sku ? -1 : a.sku > b.sku ? 1 : 0));
+}
+
+// ---------------------------------------------------------------------------
+// scrap.tf bank stock (F17): two saves of most banks, so every change shows
+// ---------------------------------------------------------------------------
+
+/** One saved bank page as the service keeps it in bank_stock (its rows raw, its batch's save time). */
+export interface MockStockSave {
+  bank: ScraptfBank;
+  batchId: number;
+  savedAt: UnixMs;
+  rows: BankStockStored[];
+}
+
+/** Items a bank page shows, at most this many (the generated unusuals and killstreaks run into hundreds). */
+const MOCK_STOCK_POOL = 40;
+
+function stockRowOf(item: Pick<CatalogItem, 'sku' | 'name'>, price: Scrap | null, stock: number | null): BankStockStored {
+  const obj = fromString(item.sku);
+  const paint = obj.paint && obj.paint > 0 ? obj.paint : null;
+  const split = price === null ? null : splitPrice(price);
+  return {
+    sku: baseSku(item.sku),
+    specialKey: bankStockSpecialKey(paint === null ? null : { paint }),
+    name: item.name,
+    costKeys: split?.keys ?? null,
+    costScrap: split?.scrap ?? null,
+    stock,
+    assetId: null,
+  };
+}
+
+/**
+ * Deterministic bank-stock saves (no RNG, so the seeded mock is unchanged): for each `newest` save, its
+ * rows, and an older save `previousAt` (null: the bank's first save) differing from it on purpose. The
+ * first six items of every pool are, in order: new, gone, cheaper, pricier, new again (sold out before)
+ * and gone (sold out now); the rest change by hash. A bank page's rows carry the imported price of the
+ * same batch when there is one (the Live market shows the same cost); the 'list' save is the saved
+ * scrap.tf/items list's rows (`listRows`, sold out included).
+ */
+export function seedBankStock(args: {
+  saves: readonly { bank: ScraptfBank; batchId: number; savedAt: UnixMs; previous: { batchId: number; savedAt: UnixMs } | null }[];
+  prices: readonly ScrapPrice[];
+  listRows: readonly ScraptfListStored[];
+}): MockStockSave[] {
+  const out: MockStockSave[] = [];
+  const all = [...CATALOG, ...EXTRA_NAMES, ...MARKET_ONLY].filter((i) => !MARKET_CURRENCY.has(baseSku(i.sku)));
+  for (const s of args.saves) {
+    const pool: { item: Pick<CatalogItem, 'sku' | 'name'>; price: Scrap | null; stock: number | null }[] = [];
+    if (s.bank === 'list') {
+      for (const r of args.listRows) {
+        if (r.sku === KEY_SKU) continue;
+        const price = r.sellsScrap === null ? null : Math.round((r.sellsKeys ?? 0) * K) + r.sellsScrap;
+        pool.push({ item: { sku: r.sku, name: r.name }, price, stock: r.stock });
+      }
+      // Rows on sale first, so the six forced cases below land on rows that can change.
+      const onSale = (x: (typeof pool)[number]) => x.price !== null && x.stock !== 0;
+      pool.sort((a, b) => Number(onSale(b)) - Number(onSale(a)) || hashOf(`stock:${a.item.sku}`) - hashOf(`stock:${b.item.sku}`));
+    } else {
+      const own = new Map(args.prices.filter((p) => p.source === 'import' && p.importBatch === s.batchId).map((p) => [p.sku, p]));
+      const items = all
+        .filter((i) => bankForCategory(i.category) === s.bank)
+        .sort((a, b) => Number(own.has(b.sku)) - Number(own.has(a.sku)) || hashOf(`stock:${a.sku}`) - hashOf(`stock:${b.sku}`))
+        .slice(0, MOCK_STOCK_POOL);
+      for (const item of items) {
+        const p = own.get(item.sku);
+        const h = hashOf(`stock:${s.bank}:${item.sku}`);
+        const value = item.value > 0 ? item.value : r(1.33);
+        const price = p ? Math.round(p.costKeys * K) + p.costScrap : Math.max(1, Math.round(value * (0.82 + ((h >>> 3) % 24) / 100)));
+        pool.push({ item, price, stock: p?.stock ?? 1 + ((h >>> 8) % 4) });
+      }
+    }
+    const newest: BankStockStored[] = [];
+    const previous: BankStockStored[] = [];
+    pool.forEach(({ item, price, stock }, i) => {
+      const h = hashOf(`stock-case:${s.bank}:${item.sku}`);
+      const kase = i < 6 ? i : 6 + ((h >>> 5) % 6);
+      const now = stockRowOf(item, price, stock);
+      const before = (p: Scrap | null, st: number | null) => stockRowOf(item, p, st);
+      const scaled = (f: number) => (price === null ? null : Math.max(1, Math.round(price * f)));
+      switch (kase) {
+        case 0: // new: not on the previous page (cheap on purpose, so a new flip shows)
+          newest.push(stockRowOf(item, scaled(0.7), stock));
+          break;
+        case 1: // gone: only on the previous page
+          previous.push(now);
+          break;
+        case 2: // cheaper than before
+          newest.push(now);
+          previous.push(before(scaled(1.12), stock));
+          break;
+        case 3: // pricier than before
+          newest.push(now);
+          previous.push(before(scaled(0.9), stock));
+          break;
+        case 4: // new again: sold out on the previous page
+          newest.push(now);
+          previous.push(before(price, 0));
+          break;
+        case 5: // gone: listed sold out now
+          newest.push(before(price, 0));
+          previous.push(now);
+          break;
+        case 6: // stock moved, price kept
+          newest.push(now);
+          previous.push(before(price, (stock ?? 1) + 1));
+          break;
+        default:
+          newest.push(now);
+          previous.push(now);
+      }
+    });
+    out.push({ bank: s.bank, batchId: s.batchId, savedAt: s.savedAt, rows: newest });
+    if (s.previous) out.push({ bank: s.bank, batchId: s.previous.batchId, savedAt: s.previous.savedAt, rows: previous });
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// scrap.tf history (F20): older saves of each bank with two saves, so the history, the time listed and
+// the change feed have something to show
+// ---------------------------------------------------------------------------
+
+const HOUR = 3_600_000;
+/** Older saves added before a bank's previous save: twelve 12 h apart, then four a day apart. */
+const HISTORY_STEPS: readonly number[] = [...Array.from({ length: 12 }, (_, i) => (i + 1) * 12 * HOUR), ...Array.from({ length: 4 }, (_, i) => (6 + i + 1) * 24 * HOUR)];
+
+/**
+ * F20: about 20 saves per bank over 10 days for every bank the seed saved twice (killstreaks keeps its
+ * single first save, skins and items stay never saved). Built backwards from each bank's previous save,
+ * deterministically (hashOf): prices drift, some items appear late (new) or leave for a while and come
+ * back (gone, then restocked), a few others come and go, stock counts move. Batch ids from 1000 up; the
+ * two seeded saves are unchanged, so F17's diff (newest against previous) is too.
+ */
+export function seedBankStockHistory(saves: readonly MockStockSave[]): MockStockSave[] {
+  const out: MockStockSave[] = [];
+  const all = [...CATALOG, ...EXTRA_NAMES, ...MARKET_ONLY].filter((i) => !MARKET_CURRENCY.has(baseSku(i.sku)));
+  const banks = [...new Set(saves.map((s) => s.bank))];
+  banks.forEach((bank, bankIdx) => {
+    const mine = saves.filter((s) => s.bank === bank).sort((a, b) => b.savedAt - a.savedAt || b.batchId - a.batchId);
+    const previous = mine[1];
+    if (!previous) return;
+    // A few items the bank had for a while in the past only (they came and went).
+    const listed = new Set([...mine[0]!.rows, ...previous.rows].map((r) => r.sku));
+    const ghosts = all
+      .filter((i) => !listed.has(baseSku(i.sku)) && (bank === 'list' || bankForCategory(i.category) === bank))
+      .sort((a, b) => hashOf(`ghost:${bank}:${a.sku}`) - hashOf(`ghost:${bank}:${b.sku}`))
+      .slice(0, 3);
+    let newer: BankStockStored[] = previous.rows;
+    HISTORY_STEPS.forEach((ago, i) => {
+      const step = i + 1;
+      const rows: BankStockStored[] = [];
+      for (const row of previous.rows) {
+        const h = hashOf(`hist:${bank}:${row.sku}|${row.specialKey}`);
+        // Born late: absent from every save older than its birth step (new when it first shows).
+        if (h % 5 === 0 && step >= 2 + ((h >>> 4) % 12)) continue;
+        // Away for a while: gone from step a to b (going forward: gone, then restocked).
+        const away = (h >>> 8) % 7 === 0 ? 3 + ((h >>> 12) % 6) : null;
+        if (away !== null && step >= away && step < away + 2) continue;
+        const later = newer.find((r) => r.sku === row.sku && r.specialKey === row.specialKey) ?? row;
+        // Drift: some saves had another price (the newer save's, nudged).
+        const dh = hashOf(`drift:${bank}:${row.sku}:${step}`);
+        let price: Scrap | null = later.costScrap === null ? null : Math.round((later.costKeys ?? 0) * K) + later.costScrap;
+        if (price !== null && dh % 4 === 0) price = Math.max(1, Math.round(price * (1 + (((dh >>> 4) % 17) - 8) / 100)));
+        // Sold out on some saves (restocked after); stock moves on others.
+        const soldOut = (dh >>> 9) % 11 === 0;
+        const stock = soldOut ? 0 : row.stock === null ? null : Math.max(1, row.stock + (((dh >>> 13) % 3) - 1));
+        // The copy's own special key (a painted copy stays one).
+        const split = price === null ? null : splitPrice(price);
+        rows.push({ ...row, costKeys: split?.keys ?? null, costScrap: split?.scrap ?? null, stock });
+      }
+      ghosts.forEach((g, gi) => {
+        // Listed from step 4 + gi to 9 + gi: new at the older end, gone at the newer one.
+        if (step >= 4 + gi && step <= 9 + gi) {
+          const value = g.value > 0 ? g.value : r(1.33);
+          rows.push(stockRowOf(g, Math.max(1, Math.round(value * 0.9)), 1 + (hashOf(`ghost-stock:${g.sku}`) % 3)));
+        }
+      });
+      out.push({ bank, batchId: 1000 + bankIdx * 50 + step, savedAt: previous.savedAt - ago, rows });
+      newer = rows;
+    });
+  });
+  return out;
 }
 
 // ---------------------------------------------------------------------------

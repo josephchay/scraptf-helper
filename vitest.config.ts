@@ -8,6 +8,7 @@ const TIMED = [
   'test/domain/engine.test.ts',
   'test/domain/marketPerf.test.ts',
   'test/db/perf.test.ts',
+  'test/db/bankStockThinPerf.test.ts',
   'test/import/scraptfHtml.slowInput.test.ts',
 ];
 
@@ -18,7 +19,8 @@ export default defineConfig({
     pool: 'forks',
     projects: [
       { extends: true, test: { name: 'unit', include: ALL, exclude: [...configDefaults.exclude, ...TIMED], sequence: { groupOrder: 0 } } },
-      { extends: true, test: { name: 'timed', include: TIMED, sequence: { groupOrder: 1 } } },
+      // One file at a time: run side by side, the timed files would decide each other's results.
+      { extends: true, test: { name: 'timed', include: TIMED, sequence: { groupOrder: 1 }, fileParallelism: false } },
     ],
   },
 });

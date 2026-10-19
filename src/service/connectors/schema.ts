@@ -6,6 +6,7 @@
 
 import { z } from 'zod';
 import { categorize } from '../../shared/categories';
+import { itemUrlParts } from '../../shared/itemUrl';
 import { baseSku, canonical, fromObject, fromString, isValidSku, looksLikeSku } from '../../shared/sku';
 import type { Category, ConnState, ConnectorHealth, ItemSuggestion, ResolvedItem, SkuObject, UnixMs } from '../../shared/types';
 import { KILLSTREAK_NAMES, QUALITY_NAMES } from '../../shared/types';
@@ -311,24 +312,12 @@ export function parseItemUrl(text: string): UrlInput | null {
   } catch {
     return null;
   }
-  const host = u.hostname.toLowerCase().replace(/^www\./, '');
-  const segs = u.pathname.split('/').filter(Boolean);
-
-  if (host === 'marketplace.tf') {
-    const i = segs.findIndex((s) => s.toLowerCase() === 'tf2');
-    if (segs[0]?.toLowerCase() === 'items' && i >= 0) return skuFromPath(segs[i + 1]);
-    return null;
-  }
-  if (host === 'pricedb.io') {
-    const i = segs.findIndex((s) => ['item', 'graph', 'item-history', 'item-stats'].includes(s.toLowerCase()));
-    return i >= 0 ? skuFromPath(segs[i + 1]) : null;
-  }
-  if (host === 'backpack.tf' || host === 'next.backpack.tf') {
-    if (segs[0]?.toLowerCase() !== 'stats') return null;
-    if (segs.length >= 3) return classicStats(segs.map(decodeSegment));
-    return nextStats(u.searchParams);
-  }
-  return null;
+  // Hosts and path shapes live in shared/itemUrl.ts: main's clipboard filter lets exactly these through.
+  const parts = itemUrlParts(u);
+  if (!parts) return null;
+  if (parts.kind === 'sku') return skuFromPath(parts.segment);
+  if (parts.kind === 'stats') return classicStats(parts.segments.map(decodeSegment));
+  return nextStats(parts.params);
 }
 
 function classicStats(segs: string[]): UrlInput | null {
@@ -844,6 +833,7 @@ export function createSchemaService(deps: ServiceDeps): SchemaService {
     isLoaded: () => index !== null && index.items.size > 0,
     health,
     itemByDefindex: (d) => index?.item(d) ?? null,
+    itemQuality: (d) => (index?.item(d) ? index.itemQuality(d) : null),
     nameForSku,
     baseNameForSku,
     marketHashName,

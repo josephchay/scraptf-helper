@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import type { KeyPriceQuote } from '../../src/shared/types';
-import { DEFAULT_KEY_SCRAP, KEY_PRICE_STALE_MS, isQuoteStale, selectKeyPrice } from '../../src/service/domain/keyprice';
+import type { KeyPriceQuote, ScraptfListKey } from '../../src/shared/types';
+import { DEFAULT_KEY_SCRAP, KEY_PRICE_STALE_MS, effectiveScraptfKey, isQuoteStale, selectKeyPrice } from '../../src/service/domain/keyprice';
 import { HOUR, T0, testSettings } from './helpers';
 
 const auto = testSettings();
@@ -62,7 +62,7 @@ describe('selectKeyPrice (brief §5.3)', () => {
 
   it('falls back to a clearly marked 60 ref default', () => {
     const r = selectKeyPrice([], auto, T0);
-    expect(r).toEqual({ valueScrap: DEFAULT_KEY_SCRAP, source: 'default', observedAt: null, stale: true, quotes: [] });
+    expect(r).toEqual({ valueScrap: DEFAULT_KEY_SCRAP, source: 'default', observedAt: null, stale: true, quotes: [], scraptfFromList: null });
     expect(DEFAULT_KEY_SCRAP).toBe(540);
   });
 
@@ -101,5 +101,49 @@ describe('selectKeyPrice (brief §5.3)', () => {
   it('returns every valid quote in display order', () => {
     const quotes = [q('manual', 500, null), q('pricedb', 568, null), q('bptf', 570, null)];
     expect(selectKeyPrice(quotes, auto, T0).quotes.map((x) => x.source)).toEqual(['bptf', 'pricedb', 'manual']);
+  });
+});
+
+describe('selectKeyPrice with the saved scrap.tf list key row (F14)', () => {
+  const listKey = (paysScrap: number | null, sellsScrap: number, ageMs = 0): ScraptfListKey => ({ paysScrap, sellsScrap, observedAt: T0 - ageMs });
+
+  it('changes nothing without a list key row', () => {
+    const s = testSettings({ keyPrice: { mode: 'auto', scraptfSellScrap: 580, scraptfObservedAt: T0 - HOUR } });
+    const a = selectKeyPrice([q('pricedb', 600, null)], s, T0);
+    expect(selectKeyPrice([q('pricedb', 600, null)], s, T0, null)).toEqual(a);
+    expect(a).toMatchObject({ valueScrap: 580, scraptfFromList: null });
+  });
+
+  it('caps the automatic value by what scrap.tf pays per the list when nothing is typed', () => {
+    const r = selectKeyPrice([q('bptf', 600, null)], auto, T0, listKey(575, 590));
+    expect(r).toMatchObject({ valueScrap: 575, source: 'bptf', scraptfFromList: { paysScrap: 575, sellsScrap: 590, observedAt: T0 } });
+  });
+
+  it('takes the newer of the typed values and the list row', () => {
+    const typedOld = testSettings({ keyPrice: { mode: 'auto', scraptfSellScrap: 560, scraptfBuyScrap: 600, scraptfObservedAt: T0 - 2 * HOUR } });
+    expect(selectKeyPrice([q('bptf', 600, null)], typedOld, T0, listKey(575, 590, HOUR)).valueScrap).toBe(575);
+    expect(effectiveScraptfKey(typedOld, listKey(575, 590, HOUR))).toEqual({ paysScrap: 575, sellsScrap: 590, source: 'list' });
+    const typedNew = testSettings({ keyPrice: { mode: 'auto', scraptfSellScrap: 560, scraptfBuyScrap: 600, scraptfObservedAt: T0 } });
+    expect(selectKeyPrice([q('bptf', 600, null)], typedNew, T0, listKey(575, 590, HOUR)).valueScrap).toBe(560);
+    expect(effectiveScraptfKey(typedNew, listKey(575, 590, HOUR))).toEqual({ paysScrap: 560, sellsScrap: 600, source: 'settings' });
+    // Typed values without a date count as older than any saved list.
+    const undated = testSettings({ keyPrice: { mode: 'auto', scraptfSellScrap: 560, scraptfObservedAt: null } });
+    expect(effectiveScraptfKey(undated, listKey(575, 590, HOUR)).source).toBe('list');
+  });
+
+  it('fills a value the newer source lacks from the other one', () => {
+    const typed = testSettings({ keyPrice: { mode: 'auto', scraptfSellScrap: 560, scraptfObservedAt: T0 - 2 * HOUR } });
+    expect(effectiveScraptfKey(typed, listKey(null, 590))).toEqual({ paysScrap: 560, sellsScrap: 590, source: 'list' });
+    expect(selectKeyPrice([q('bptf', 600, null)], typed, T0, listKey(null, 590)).valueScrap).toBe(560);
+  });
+
+  it('ignores an insane list price and never caps a manual value', () => {
+    expect(selectKeyPrice([q('bptf', 600, null)], auto, T0, listKey(5, 7)).valueScrap).toBe(600);
+    const manual = testSettings({ keyPrice: { mode: 'manual', manualScrap: 600 } });
+    expect(selectKeyPrice([], manual, T0, listKey(575, 590))).toMatchObject({ valueScrap: 600, source: 'manual', scraptfFromList: { paysScrap: 575 } });
+  });
+
+  it('reports the list key row on the default too', () => {
+    expect(selectKeyPrice([], auto, T0, listKey(575, 590))).toMatchObject({ source: 'default', scraptfFromList: { paysScrap: 575, sellsScrap: 590 } });
   });
 });

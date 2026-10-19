@@ -7,12 +7,13 @@ import path from 'node:path';
 import type { IpcMain, IpcMainInvokeEvent } from 'electron';
 import { z } from 'zod';
 import type { Logger } from '../service/contracts';
+import { CHECK_ARM_NAME_MAX, CHECK_PRICE_TEXT_MAX } from '../shared/check';
 import { decodeHtmlBuffer } from '../shared/htmlDecode';
-import { MAIN_METHODS, SERVICE_METHODS, type AppInfo, type PushContract, type RpcMethod } from '../shared/rpc';
+import { MAIN_METHODS, SERVICE_METHODS, type AppInfo, type HotkeysStatus, type PushContract, type RpcMethod } from '../shared/rpc';
 import { validateSettingsPatch } from '../shared/settingsSchema';
 import { isValidSku } from '../shared/sku';
-import type { SecretName, SecretsStatus, Settings } from '../shared/types';
-import { isTrustedSenderUrl, MAX_IMPORT_BYTES, safeErrorMessage, sanitizeFileName } from './paths';
+import type { CheckArm, SecretName, SecretsStatus, Settings, UnixMs } from '../shared/types';
+import { isHttpsUrl, isTrustedSenderUrl, MAX_IMPORT_BYTES, safeErrorMessage, sanitizeFileName } from './paths';
 import { MAX_SECRET_LENGTH, secretNameSchema } from './secrets';
 
 export const RPC_CHANNEL = 'rpc';
@@ -29,13 +30,23 @@ export interface MainRpcDeps {
   settings: { get(): Settings; set(patch: unknown): Settings };
   secrets: { status(): SecretsStatus; set(name: SecretName, value: string | null): SecretsStatus };
   service: { callRaw(method: RpcMethod, params: unknown): Promise<unknown> };
-  /** With a SKU, the quick-entry window gets push 'ui.quickPrefill' once its page has loaded. */
-  showQuickEntry(sku?: string): void;
+  /**
+   * With a SKU, the quick-entry window gets push 'ui.quickPrefill' once its page has loaded; `price`
+   * (F16, the check popup) rides along as text for its price field.
+   */
+  showQuickEntry(sku?: string, price?: string): void;
   /** Shows the dashboard and sends it push 'ui.openItem'. */
   openItemInDashboard(sku: string): void;
   appInfo(): AppInfo;
   /** The current 'service.state' push (serviceStatePush of the host's status), for a page that loaded after it was sent. */
   serviceState(): PushContract['service.state'] | null;
+  /** F16: both global hotkeys as registered now (settingsStore's hotkeyStatus and checkHotkeyStatus). */
+  hotkeys(): HotkeysStatus;
+  /**
+   * F19 'check.arm' (validated): remember the item opened on scrap.tf for CHECK_ARM_MS, replacing any
+   * earlier one; null disarms. Memory only; the name is never logged.
+   */
+  armCheck(arm: CheckArm | null): { armedUntil: UnixMs | null };
   isAllowedExternalUrl(url: string): boolean;
   openExternal(url: string): Promise<void>;
   dialogs: {
@@ -62,12 +73,61 @@ const linksOpenParams = z.object({ url: z.string().min(1).max(4096) });
 const openItemParams = z.object({ sku: z.string().trim().min(1).max(200).regex(/^\d+;\d+(;[a-z0-9-]+)*$/i, 'not a SKU') });
 // Same rule as the service's skuText (rpcHandlers.ts): the SKU is pushed to the renderer as is.
 const quickEntrySku = z.string().trim().min(1).max(300).toLowerCase().refine(isValidSku, 'not a SKU');
-const showQuickEntryParams = z.object({ sku: quickEntrySku.optional() }).nullish();
+// Price text for quick entry's field (F16): short, one line, no markup; quick entry parses it like typing.
+const quickEntryPrice = z
+  .string()
+  .trim()
+  .min(1)
+  .max(CHECK_PRICE_TEXT_MAX)
+  .refine((s) => !/[\u0000-\u001f\u007f<>]/.test(s), 'not a price');
+const showQuickEntryParams = z.object({ sku: quickEntrySku.optional(), price: quickEntryPrice.optional() }).nullish();
+// F19. Fixed messages only: the name is item data the user is about to paste, and a failed call's
+// message reaches main's debug log (registerRpcHandler), so no issue may quote it.
+const checkArmParams = z
+  .object(
+    {
+      sku: z
+        .string({ error: 'not a SKU' })
+        .trim()
+        .min(1, { error: 'not a SKU' })
+        .max(300, { error: 'not a SKU' })
+        .toLowerCase()
+        .refine(isValidSku, { error: 'not a SKU' }),
+      name: z
+        .string({ error: 'must be a string' })
+        .trim()
+        .min(1, { error: 'an item name is required' })
+        .max(CHECK_ARM_NAME_MAX, { error: `at most ${CHECK_ARM_NAME_MAX} characters` })
+        .refine((s) => !/[\u0000-\u001f\u007f]/.test(s), { error: 'not an item name' }),
+    },
+    { error: 'expected { sku, name } or null' },
+  )
+  .nullable();
 const saveTextParams = z.object({
   suggestedName: z.string().max(255),
   text: z.string().max(MAX_SAVE_TEXT_CHARS),
 });
 const importHtmlParams = z.looseObject({ html: z.string().max(MAX_IMPORT_BYTES) });
+/** The saved pages "Import file" reads: .html/.htm, and .mhtml/.mht (F18, "Webpage, Single File"). */
+const PICKABLE_PAGE = /\.(?:html?|mht(?:ml)?)$/i;
+export const PICK_PAGE_REFUSAL = 'Choose a saved .html or .mhtml page.';
+
+/**
+ * F16: a page's 'check.text' is text the user typed or pasted ('manual'). 'hotkey' and 'watch' mean
+ * main read the clipboard and filtered it (liveCheck.ts), so a page may not claim them. Fixed text:
+ * the message never echoes the params.
+ */
+export const CHECK_TEXT_SOURCE_REFUSAL = 'Invalid parameters for check.text: source: a page can only send manual checks';
+/** F19: only main adds a 'check.text' hint (from its own 'check.arm'); a page may not. Fixed text, like the above. */
+export const CHECK_TEXT_HINT_REFUSAL = 'Invalid parameters for check.text: hint: only the check hotkey and the clipboard watcher send one';
+
+function isManualCheck(params: unknown): boolean {
+  return typeof params === 'object' && params !== null && (params as { source?: unknown }).source === 'manual';
+}
+
+function hasHint(params: unknown): boolean {
+  return typeof params === 'object' && params !== null && (params as { hint?: unknown }).hint !== undefined;
+}
 
 function parseParams<T>(schema: z.ZodType<T>, params: unknown, method: string): T {
   const r = schema.safeParse(params);
@@ -96,14 +156,6 @@ export function isJsonExportName(name: string): boolean {
   return path.extname(name).toLowerCase() === '.json';
 }
 
-function isHttpsUrl(url: string): boolean {
-  try {
-    return new URL(url).protocol === 'https:';
-  } catch {
-    return false;
-  }
-}
-
 const mainMethods = new Set<string>(MAIN_METHODS);
 const serviceMethods = new Set<string>(SERVICE_METHODS);
 
@@ -120,6 +172,8 @@ export function createRpcRouter(deps: MainRpcDeps): RpcRouter {
     if (serviceMethods.has(method)) {
       // Same 20 MB cap as the file picker; the service re-validates everything else.
       if (method === 'import.html') parseParams(importHtmlParams, params, method);
+      if (method === 'check.text' && !isManualCheck(params)) throw new Error(CHECK_TEXT_SOURCE_REFUSAL);
+      if (method === 'check.text' && hasHint(params)) throw new Error(CHECK_TEXT_HINT_REFUSAL);
       return deps.service.callRaw(method, params);
     }
 
@@ -129,10 +183,17 @@ export function createRpcRouter(deps: MainRpcDeps): RpcRouter {
       case 'app.serviceState':
         // Answered by main itself: the service may be exactly what is down.
         return deps.serviceState();
+      case 'app.hotkeys':
+        // Copies: the status objects are main's own and must not be changed through IPC.
+        return structuredClone(deps.hotkeys());
+      case 'check.arm':
+        return deps.armCheck(parseParams(checkArmParams, params, method));
       case 'app.showQuickEntry': {
-        const sku = parseParams(showQuickEntryParams, params, method)?.sku;
-        if (sku === undefined) deps.showQuickEntry();
-        else deps.showQuickEntry(sku);
+        const p = parseParams(showQuickEntryParams, params, method);
+        if (p?.sku === undefined) deps.showQuickEntry();
+        else if (p.price === undefined) deps.showQuickEntry(p.sku);
+        // A price means nothing without its item, so it is only passed on with a SKU.
+        else deps.showQuickEntry(p.sku, p.price);
         return { ok: true };
       }
       case 'app.hideWindow':
@@ -174,9 +235,10 @@ export function createRpcRouter(deps: MainRpcDeps): RpcRouter {
         }
         const file = await deps.dialogs.openHtmlFile(ctx.window);
         if (!file) return null;
-        if (!/\.html?$/i.test(file)) throw new Error('Choose a saved .html page.');
+        // F18: an .mhtml/.mht save is passed on as text too; the service unpacks its web page.
+        if (!PICKABLE_PAGE.test(file)) throw new Error(PICK_PAGE_REFUSAL);
         const st = await deps.files.stat(file);
-        if (!st.isFile()) throw new Error('Choose a saved .html page.');
+        if (!st.isFile()) throw new Error(PICK_PAGE_REFUSAL);
         if (st.size > MAX_IMPORT_BYTES) throw new Error('That file is larger than 20 MB.');
         // Bounded read: the file may still be growing (download or sync in progress).
         const bytes = await deps.files.readBytes(file, MAX_IMPORT_BYTES + 1);

@@ -7,8 +7,9 @@
 
 import { z } from 'zod';
 import { DEFAULT_SETTINGS, mergeSettings } from './defaults';
-import type { DeepPartial, Settings } from './types';
-import { isValidAccelerator } from './accelerator';
+import { SCRAPTF_BANK_IDS, type DeepPartial, type ScraptfBank, type Settings } from './types';
+import { isValidAccelerator, sameAccelerator } from './accelerator';
+import { CHECK_HOTKEY_CONFLICT } from './check';
 import { CONTACT_MAX, CONTACT_RE } from './contact';
 
 const MAX_SCRAP = 1_000_000_000;
@@ -92,11 +93,19 @@ const permissionSchema = z.object({
   scope: shortText(1000),
 });
 
+// F20: the banks a re-save reminder may name.
+const scraptfBank = z.enum(SCRAPTF_BANK_IDS as unknown as [ScraptfBank, ...ScraptfBank[]]);
+
 const importSchema = z.object({
   enabled: bool,
   acknowledgedAt: timestamp.nullable(),
   watchFolder: localDir.nullable(),
   permission: permissionSchema.nullable(),
+  // F20: minutes between re-save reminders per bank (0 = off; at most a day). Missing from files before
+  // 0.7, so the lenient load falls back to the default (off).
+  resaveReminderMin: z.number().int().min(0).max(1440),
+  // [] = every bank saved at least once.
+  resaveBanks: z.array(scraptfBank).max(8),
 });
 
 const inputKind = z.enum(['user', 'import', 'rule']);
@@ -110,13 +119,28 @@ const notificationsSchema = z.object({
   silent: bool,
   // A settings file from before v0.3 has no key: the lenient load falls back to the default (on).
   holdings: bool,
+  // F17; likewise missing from files before v0.6, so the lenient load turns it on.
+  newOnScraptf: bool,
 });
+
+const hotkey = z
+  .string()
+  .max(64)
+  .refine(isValidAccelerator, 'Not a usable shortcut (needs Ctrl, Alt or Super plus a key, and not a system shortcut such as Ctrl+C or Alt+F4)');
 
 const appSchema = z.object({
   startAtLogin: bool,
   startHidden: bool,
   closeToTray: bool,
-  quickEntryHotkey: z.string().max(64).refine(isValidAccelerator, 'Not a usable shortcut (needs Ctrl, Alt or Super plus a key, and not a system shortcut such as Ctrl+C or Alt+F4)'),
+  quickEntryHotkey: hotkey,
+});
+
+// Live check (F16). The hotkey follows the quick-entry rules ('' = off); crossFieldProblem keeps the two apart.
+const checkSchema = z.object({
+  hotkey,
+  watchClipboard: bool,
+  notifyFlips: bool,
+  popup: bool,
 });
 
 const uiSchema = z.object({
@@ -133,6 +157,7 @@ export const settingsSchema = z.object({
   import: importSchema,
   notifications: notificationsSchema,
   app: appSchema,
+  check: checkSchema,
   networkPaused: bool,
   blocklist: z.array(steamId64).max(10_000),
   ui: uiSchema,
@@ -148,6 +173,7 @@ export const settingsPatchSchema = z.object({
   import: importSchema.partial().optional(),
   notifications: notificationsSchema.partial().optional(),
   app: appSchema.partial().optional(),
+  check: checkSchema.partial().optional(),
   networkPaused: bool.optional(),
   blocklist: z.array(steamId64).max(10_000).optional(),
   ui: uiSchema.partial().optional(),
@@ -186,6 +212,7 @@ function lenientArray<T>(el: z.ZodType<T>, max: number) {
 const LENIENT_LEAVES: Record<string, z.ZodType> = {
   'profit.notesKeywords': lenientArray(keyword, 200),
   'notifications.inputKinds': lenientArray(inputKind, 3),
+  'import.resaveBanks': lenientArray(scraptfBank, 8),
   blocklist: lenientArray(steamId64, 10_000),
 };
 
@@ -214,11 +241,17 @@ function parseGroup(
   return out;
 }
 
+// The settings.set refusal when the check hotkey and the quick-entry hotkey are one chord. It lives in
+// check.ts (zod-free) so the browser mock refuses with the same words.
+export { CHECK_HOTKEY_CONFLICT };
+
 /** Cross-field rules shared by load and update. Returns a message when `s` breaks one. */
 function crossFieldProblem(s: Settings): string | null {
   if (s.import.enabled && s.import.acknowledgedAt === null) {
     return 'import.enabled: saved-page import needs the acknowledgement first';
   }
+  // One chord, one global registration: the second would fail, or take the chord from the first.
+  if (sameAccelerator(s.check.hotkey, s.app.quickEntryHotkey)) return CHECK_HOTKEY_CONFLICT;
   return null;
 }
 
@@ -249,9 +282,14 @@ export function parseSettingsWithReport(raw: unknown): { settings: Settings; inv
   }
 
   const settings = out as unknown as Settings;
-  if (crossFieldProblem(settings)) {
+  if (settings.import.enabled && settings.import.acknowledgedAt === null) {
     settings.import.enabled = false;
     invalid.push('import.enabled');
+  }
+  // The quick-entry hotkey came first and is kept; the check hotkey turns off until the user picks another.
+  if (sameAccelerator(settings.check.hotkey, settings.app.quickEntryHotkey)) {
+    settings.check.hotkey = '';
+    invalid.push('check.hotkey');
   }
   return { settings, invalid };
 }

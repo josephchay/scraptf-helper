@@ -31,14 +31,35 @@ describe('the page', () => {
 
   it('only reads the local index, exports and opens quick entry: no new traffic', () => {
     const methods = new Set([...page.matchAll(/rpc\('([a-zA-Z.]+)'/g)].map((m) => m[1]));
-    expect([...methods].sort()).toEqual(['app.showQuickEntry', 'market.list', 'opps.exportCsv']);
+    // F16: the Recent checks panel reads the service's in-memory ring and checks pasted text, both local.
+    expect([...methods].sort()).toEqual(['app.showQuickEntry', 'check.recent', 'check.text', 'market.list', 'opps.exportCsv']);
     for (const m of methods) expect([...SERVICE_METHODS, ...MAIN_METHODS]).toContain(m);
     expect(page).toContain("kind: 'market'");
     expect(page).not.toMatch(/https?:\/\//);
-    // The one link (F13): a coverage chip hands its bank page, from the service's coverage list, to the
-    // user's own browser through links.open (openOrCopy). Nothing on the page fetches it.
-    expect([...page.matchAll(/openOrCopy\(([^,]+),/g)].map((m) => m[1])).toEqual(['c.url']);
+    // F15: a coverage chip opens its card on the scrap.tf banks page (the card hands the page to the
+    // user's browser). Nothing on this page fetches an address.
+    expect(page).toContain('onClick={() => navigate(banksPath(c.bank))}');
     expect(page).not.toMatch(/links\.open|openLink|fetch\(|XMLHttpRequest|new WebSocket/);
+    // F19: it hands exactly two addresses to the user's browser, both static SCRAPTF_BANKS pages from
+    // the model, never one built from a row: a row's bank page (arm, copy, open) and the one-bank header's.
+    expect(page.match(/openOnScraptf\(/g)).toHaveLength(1);
+    expect(page).toContain('const b = marketScraptfButton(r, Date.now());');
+    expect(page).toContain('void openOnScraptf(b.url, b.name, (text, tone) => toastRef.current(text, tone), { sku: r.sku, settings: settingsRef.current })');
+    expect(page.match(/openOrCopy\(/g)).toHaveLength(1);
+    expect(page).toContain('const bankLink = marketBankLink(filters.categories);');
+    expect(page).toContain('onClick={() => void openOrCopy(bankLink.url, toast)}');
+    expect(page).not.toMatch(/scraptfLink\.url/);
+  });
+
+  it('F15: applies a bank card\'s "See all" route while rendering, then drops it from the history', () => {
+    expect(page).toContain('const intent = marketRouteIntent(segments);');
+    // Set during render, so the first market.list already carries the bank's filters.
+    expect(page).toMatch(/if \(intentKey !== appliedIntent\) \{\s*setAppliedIntent\(intentKey\);\s*if \(intent\) \{\s*setFilters\(intent\.filters\);\s*setSort\(intent\.sort\);/);
+    expect(page).toMatch(/if \(intentKey !== null\) replaceRoute\('market'\);/);
+    const replace = page.slice(page.indexOf('function replaceRoute'), page.indexOf('function newest'));
+    expect(replace).toContain('window.history.replaceState(');
+    expect(replace).toContain("window.dispatchEvent(new Event('hashchange'))");
+    expect(replace).not.toMatch(/location\.hash\s*=/);
   });
 
   it('H2: reads the loaded window in one call; no chunked refresh, no snapshot pinning', () => {
@@ -92,5 +113,113 @@ describe('market.css', () => {
     const reduced = css.slice(css.indexOf('@media (prefers-reduced-motion: reduce)'));
     expect(reduced.length).toBeGreaterThan(40);
     expect(reduced).toMatch(/\.market-row\.flash-up,\s*\.market-row\.flash-down\s*\{\s*animation: none !important;/);
+  });
+});
+
+// The grid's width budget with F14's "scrap.tf pays" and Stock columns, read from market.css itself:
+// every layout has exactly one track per visible cell and fits its whole width range, and the common
+// window sizes keep a readable item name.
+describe('market.css width budget', () => {
+  const css = readFileSync(new URL('../../src/renderer/styles/market.css', import.meta.url), 'utf8');
+  const page = read('pages/MarketPage.tsx');
+  const GAP = 10; // .opp-row column-gap
+  const PAD = 24; // .opp-row padding, both sides
+  // The opp-scroll container at a window width: the nav (208px, 58px up to 1100px), the page padding
+  // (40px, 28px up to 1040px; layout.css), the table border (2px) and the 11px scrollbar.
+  const container = (w: number) => w - (w <= 1100 ? 58 : 208) - (w <= 1040 ? 28 : 40) - 2 - 11;
+  // From the 960px minimum window up: the narrowest container is just above the nav's breakpoint.
+  const NARROWEST = Math.min(...[960, 1000, 1040, 1041, 1100, 1101, 1140].map(container));
+
+  interface Layout {
+    max: number;
+    tracks: { min: number; flex: boolean }[];
+    hidden: string[];
+  }
+  const tracksOf = (v: string) => [...v.matchAll(/minmax\((\d+)px, 1fr\)|(\d+)px/g)].map((m) => ({ min: Number(m[1] ?? m[2]), flex: m[1] !== undefined }));
+  const layouts: Layout[] = [{ max: Infinity, tracks: tracksOf(/\.market-scroll \{\s*--market-cols: ([^;]+);/.exec(css)![1]!), hidden: [] }];
+  for (const m of css.matchAll(/@container \(max-width: (\d+)px\) \{([\s\S]*?)\n\}/g)) {
+    const body = m[2]!;
+    const cols = /--market-cols: ([^;]+);/.exec(body);
+    if (!cols) continue;
+    const prev = layouts[layouts.length - 1]!;
+    const hiddenHere = [...body.matchAll(/\.opp-row > \.(m-[a-z]+)/g)].map((h) => h[1]!);
+    layouts.push({ max: Number(m[1]), tracks: tracksOf(cols[1]!), hidden: [...prev.hidden, ...hiddenHere] });
+  }
+  const need = (l: Layout) => l.tracks.reduce((s, t) => s + t.min, 0) + (l.tracks.length - 1) * GAP + PAD;
+  /** The layout a container width gets: the narrowest query that still applies. */
+  const layoutAt = (w: number) => [...layouts].reverse().find((l) => w <= l.max) ?? layouts[0]!;
+  const nameWidth = (w: number) => {
+    const l = layoutAt(w);
+    return w - need(l) + l.tracks.find((t) => t.flex)!.min;
+  };
+
+  it('has the header cells in the row cells\' order, with the two list columns before Verdict', () => {
+    const head = [...page.slice(page.indexOf('const HEAD'), page.indexOf('function HeadCell')).matchAll(/cls: '(m-[a-z]+)/g)].map((m) => m[1]);
+    const row = page.slice(page.indexOf('const ItemRow = memo'));
+    const cells = [...row.matchAll(/role="gridcell" className=\{?[`'"](m-[a-z]+)/g)].map((m) => m[1]);
+    expect(head).toEqual(['m-item', 'm-cat', 'm-sells', 'm-buyers', 'm-pay', 'm-yours', 'm-list', 'm-stock', 'm-verdict', 'm-conf', 'm-updated']);
+    expect(cells).toEqual(head);
+    expect(layouts[0]!.tracks).toHaveLength(head.length);
+  });
+
+  it('gives every layout one track per visible cell and fits its whole range', () => {
+    const cells = 11;
+    expect(layouts.length).toBeGreaterThanOrEqual(5);
+    layouts.forEach((l, i) => {
+      expect(l.tracks.filter((t) => t.flex), `layout ≤${l.max}`).toHaveLength(1);
+      expect(l.tracks.length, `layout ≤${l.max}`).toBe(cells - new Set(l.hidden).size);
+      // A layout applies from just above the next query's width (or the narrowest window) up to its own.
+      const lowest = i + 1 < layouts.length ? layouts[i + 1]!.max + 1 : NARROWEST;
+      expect(need(l), `layout ≤${l.max} at ${lowest}px`).toBeLessThanOrEqual(lowest);
+    });
+    expect(NARROWEST).toBe(container(1101));
+    expect(NARROWEST).toBe(840);
+    expect(need(layouts[0]!)).toBe(1400);
+    // Category goes first, the new list columns are never both gone, and Pay up to and Verdict always stay.
+    expect(layouts[1]!.hidden).toEqual(['m-cat']);
+    for (const l of layouts) {
+      expect(l.hidden).not.toContain('m-list');
+      expect(l.hidden).not.toContain('m-pay');
+      expect(l.hidden).not.toContain('m-verdict');
+    }
+  });
+
+  it('keeps a readable item name and both list columns at 1440 and 1280 px windows', () => {
+    for (const w of [1280, 1360, 1440, 1920]) {
+      for (const scrollbar of [0, 11]) {
+        const c = container(w) + 11 - scrollbar;
+        expect(nameWidth(c), `${w}px window`).toBeGreaterThanOrEqual(200);
+        expect(layoutAt(c).hidden, `${w}px window`).not.toContain('m-stock');
+      }
+    }
+    // A 1440 px window keeps Confidence and Updated (only Category and Buyers go).
+    expect(layoutAt(container(1440)).hidden).toEqual(['m-cat', 'm-buyers']);
+    for (const w of [960, 1040, 1100, 1101]) expect(nameWidth(container(w)), `${w}px window`).toBeGreaterThanOrEqual(130);
+  });
+
+  it('folds Stock into scrap.tf pays as a Full pill only where the Stock column is hidden', () => {
+    expect(css).toMatch(/\.m-list \.list-full-inline \{\s*display: none;/);
+    const narrow = css.slice(css.indexOf('@container (max-width: 950px)'));
+    expect(narrow).toMatch(/\.opp-row > \.m-stock/);
+    expect(narrow).toMatch(/\.market-scroll \.m-list \.list-full-inline \{\s*display: inline-flex;/);
+  });
+});
+
+describe('the scrap.tf list filter (F14)', () => {
+  const page = read('pages/MarketPage.tsx');
+
+  it('offers onScraptfList under the Source choices (the toolbar already fills a 1280 px window), counted on the Source button', () => {
+    const source = page.slice(page.indexOf('<Popover label={<>Source'), page.indexOf('<Popover label={<>Pay up to'));
+    expect(source).toContain("<input type=\"checkbox\" checked={filters.onScraptfList} onChange={() => set('onScraptfList', !filters.onScraptfList)} />");
+    expect(source).toContain('On scrap.tf&apos;s list');
+    expect(source).toContain('active={sourceCount > 0}');
+    // F17: marketSourceCount also counts "New on scrap.tf" (marketBankStock.test.ts).
+    expect(page).toContain('const sourceCount = marketSourceCount(filters);');
+    expect(page.match(/set\('onScraptfList'/g)).toHaveLength(1);
+  });
+
+  it("refetches the window on 'scraptf.listChanged' like a price change (throttled, hidden-gated, counted while frozen)", () => {
+    // A maintenance purge pushes only this: the list cells, the filter and the "All items" chip must follow.
+    expect(page).toContain("usePush('scraptf.listChanged', () => onLiveChange(1));");
   });
 });

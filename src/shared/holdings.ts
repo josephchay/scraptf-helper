@@ -6,6 +6,7 @@
 import { formatScrap, valueScrap } from './currency';
 import { frictionOf, profitStatus, type CeilingSettings } from './ceiling';
 import { marketSearchTokens } from './market';
+import { bestExitOf, holdingListFields } from './scraptfList';
 import { HOLDING_STATUSES } from './types';
 import type {
   Category,
@@ -20,6 +21,7 @@ import type {
   OpportunityStatus,
   OrderSummary,
   Scrap,
+  ScraptfListRow,
   UnixMs,
 } from './types';
 
@@ -89,8 +91,18 @@ export function lotCostAt(lot: Pick<JournalLot, 'costScrap'> & Partial<Pick<Jour
  * One row from an open journal position (journalSummary().open) and its buy side; `buy` null means
  * no eligible buy order. Lots are valued at `keyScrap`, today's key price (lotCostAt). A painted copy
  * is priced against its clean base, so it is flagged has-extras like a painted price on the Live market.
+ * `scraptf` (F14) is the base SKU's saved scrap.tf/items row (valued at `keyScrap`) and the time it is
+ * judged at: the better exit (bestExitOf) sets exitScrap, and status and profit are judged on it.
+ * Omitted, backpack.tf is the only exit and the row is exactly as before F14.
  */
-export function holdingRow(pos: JournalPosition, category: Category, buy: HoldingBuySide | null, p: CeilingSettings, keyScrap: Scrap | null = null): HoldingRow {
+export function holdingRow(
+  pos: JournalPosition,
+  category: Category,
+  buy: HoldingBuySide | null,
+  p: CeilingSettings,
+  keyScrap: Scrap | null = null,
+  scraptf: { list: ScraptfListRow | null; now: UnixMs } | null = null,
+): HoldingRow {
   const lots = Array.isArray(pos.lots) ? pos.lots : [];
   const qty = pos.qty;
   const next = lots[0];
@@ -101,6 +113,8 @@ export function holdingRow(pos: JournalPosition, category: Category, buy: Holdin
   const revenueScrap = buy?.revenueScrap ?? null;
   const flags = buy ? [...buy.flags] : [];
   if (/;p\d/.test(pos.sku) && !flags.includes('has-extras')) flags.push('has-extras');
+  const list = scraptf?.list ?? null;
+  const exit = bestExitOf(revenueScrap, list, scraptf?.now ?? 0);
   return {
     sku: pos.sku,
     name: pos.name,
@@ -115,7 +129,10 @@ export function holdingRow(pos: JournalPosition, category: Category, buy: Holdin
     revenueOrder: buy?.revenueOrder ?? null,
     bestOrder: buy?.bestOrder ?? null,
     buyerCount: buy?.buyerCount ?? 0,
-    ...holdingFigures({ revenueScrap, qty, costScrap, nextLotCostScrap }, p),
+    ...holdingListFields(list),
+    ...exit,
+    // Judged on the better exit, so a holding can be 'sell' through scrap.tf (F14).
+    ...holdingFigures({ revenueScrap: exit.exitScrap, qty, costScrap, nextLotCostScrap }, p),
     confidence: buy?.confidence ?? 0,
     confidenceLevel: buy?.confidenceLevel ?? 'low',
     flags,
@@ -153,14 +170,16 @@ export function holdingsMatching(rows: readonly HoldingRow[], q: HoldingsQuery):
   return rows.filter((r) => holdingMatches(r, tokens)).sort(holdingComparator);
 }
 
-/** See HoldingsResult.totals: rows without a revenue add to items, units and cost only. */
+/** See HoldingsResult.totals: rows without an exit add to items, units and cost only. */
 export function holdingsTotals(rows: readonly HoldingRow[]): HoldingsResult['totals'] {
   const t = { items: 0, units: 0, costScrap: 0, worthNowScrap: 0, profitNowScrap: 0, sellable: 0 };
   for (const r of rows) {
     t.items++;
     t.units += r.qty;
     t.costScrap += r.costScrap;
-    if (finite(r.revenueScrap)) t.worthNowScrap += r.revenueScrap * r.qty;
+    // Worth at the better exit (F14); exitScrap is the revenue when backpack.tf is the only one.
+    const exit = finite(r.exitScrap) ? r.exitScrap : r.revenueScrap;
+    if (finite(exit)) t.worthNowScrap += exit * r.qty;
     if (finite(r.profitAllScrap)) t.profitNowScrap += r.profitAllScrap;
     if (r.status === 'sell') t.sellable++;
   }
@@ -185,6 +204,11 @@ export const HOLDINGS_CSV_COLUMNS: readonly string[] = [
   'profit_all',
   'status',
   'confidence',
+  // F14: the better exit the profit and status are judged on, and the saved scrap.tf/items price.
+  // Appended so earlier columns keep their place; sells_for stays the backpack.tf revenue.
+  'exit',
+  'exit_venue',
+  'scraptf_pays',
 ];
 
 /** One CSV line's cells, in HOLDINGS_CSV_COLUMNS order; money as keys + ref, missing values blank. */
@@ -205,5 +229,8 @@ export function holdingsCsvCells(r: HoldingRow, keyScrap: Scrap | null): (string
     money(r.profitAllScrap),
     r.status,
     r.confidence,
+    money(r.exitScrap),
+    r.exitVenue ?? '',
+    money(r.scraptfPaysScrap),
   ];
 }

@@ -92,7 +92,7 @@ export function ShoppingPage() {
   // F9 item menu. Through a ref, so the memoised rows keep a stable handler.
   const openMenuRef = useRef(menu.open);
   openMenuRef.current = menu.open;
-  const onRowMenu = useCallback((r: ShoppingRow, at: MenuPoint) => openMenuRef.current({ sku: r.sku, name: r.name }, at), []);
+  const onRowMenu = useCallback((r: ShoppingRow, at: MenuPoint) => openMenuRef.current({ sku: r.sku, name: r.name, category: r.category }, at), []);
 
   // "/" focuses the search box from anywhere on the page, but not from inside the item drawer.
   const drawerOpen = useRef(false);

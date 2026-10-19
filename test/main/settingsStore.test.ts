@@ -2,9 +2,11 @@ import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSy
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { applyGlobalHotkey, hotkeyTakenMessage } from '../../src/main/hotkeys';
 import { createSettingsStore, type HotkeyResult, type SettingsEffects } from '../../src/main/settingsStore';
 import { DEFAULT_SETTINGS } from '../../src/shared/defaults';
-import { SettingsValidationError } from '../../src/shared/settingsSchema';
+import { CHECK_HOTKEY_CONFLICT, SettingsValidationError } from '../../src/shared/settingsSchema';
+import { fakeShortcuts } from './fakeShortcuts';
 
 const quietLog = () => ({ debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() });
 
@@ -308,5 +310,184 @@ describe('settings store: hotkey and login item', () => {
     expect(effects.applyLoginItem).toHaveBeenCalledWith(true);
     expect(s.get().app.startAtLogin).toBe(true);
     expect(log.warn).toHaveBeenCalled();
+  });
+});
+
+describe('settings store: live check hotkey (F16)', () => {
+  const QUICK = DEFAULT_SETTINGS.app.quickEntryHotkey; // CommandOrControl+Alt+F
+  const CHECK = DEFAULT_SETTINGS.check.hotkey; // CommandOrControl+Alt+C
+
+  /** The real registration rules (hotkeys.ts) against an Electron-like globalShortcut. */
+  function realEffects(taken: string[] = []) {
+    const f = fakeShortcuts(taken);
+    const quick = vi.fn();
+    const check = vi.fn();
+    const applyHotkey = vi.fn((next: string, prev: string | null) => applyGlobalHotkey(f.gs, next, prev, quick));
+    const applyCheckHotkey = vi.fn((next: string, prev: string | null) => applyGlobalHotkey(f.gs, next, prev, check));
+    const effects: SettingsEffects = { applyHotkey, applyCheckHotkey, applyLoginItem: vi.fn() };
+    /** Which action each chord runs now. */
+    const actions = (...chords: string[]) =>
+      chords.map((c) => {
+        quick.mockClear();
+        check.mockClear();
+        f.press(c);
+        return quick.mock.calls.length > 0 ? 'quick' : check.mock.calls.length > 0 ? 'check' : null;
+      });
+    return { f, effects, applyHotkey, applyCheckHotkey, actions };
+  }
+
+  it('registers both stored hotkeys at startup, each for its own action', () => {
+    const r = realEffects();
+    const s = createSettingsStore({ file, log: quietLog(), effects: r.effects });
+    expect(s.applyStartupEffects()).toEqual({ accelerator: QUICK, registered: true, error: null });
+    expect(s.checkHotkeyStatus()).toEqual({ accelerator: CHECK, registered: true, error: null });
+    expect(r.actions('Ctrl+Alt+F', 'Ctrl+Alt+C')).toEqual(['quick', 'check']);
+  });
+
+  it('reports a taken check hotkey at startup without touching quick entry', () => {
+    const r = realEffects(['Ctrl+Alt+C']);
+    const log = quietLog();
+    const s = createSettingsStore({ file, log, effects: r.effects });
+    s.applyStartupEffects();
+    expect(s.hotkeyStatus().registered).toBe(true);
+    expect(s.checkHotkeyStatus()).toEqual({ accelerator: CHECK, registered: false, error: hotkeyTakenMessage(CHECK) });
+    expect(log.warn).toHaveBeenCalledWith(expect.stringMatching(/^live check hotkey/));
+  });
+
+  it('rebinds the check hotkey on change, releasing the old chord', () => {
+    const r = realEffects();
+    const s = createSettingsStore({ file, log: quietLog(), effects: r.effects });
+    s.applyStartupEffects();
+    s.set({ check: { hotkey: 'Ctrl+Shift+K' } });
+    expect(r.applyCheckHotkey).toHaveBeenLastCalledWith('Ctrl+Shift+K', CHECK);
+    expect(r.f.held().sort()).toEqual([QUICK, 'Ctrl+Shift+K'].sort());
+    expect(s.checkHotkeyStatus()).toEqual({ accelerator: 'Ctrl+Shift+K', registered: true, error: null });
+    expect(JSON.parse(readFileSync(file, 'utf8')).check.hotkey).toBe('Ctrl+Shift+K');
+    expect(r.actions('Ctrl+Shift+K', 'Ctrl+Alt+C')).toEqual(['check', null]);
+  });
+
+  it('refuses a taken check hotkey: nothing saved, the old one still works, Settings gets the reason', () => {
+    const r = realEffects(['Ctrl+Alt+T']);
+    const writeFile = vi.fn();
+    const s = createSettingsStore({ file, log: quietLog(), effects: r.effects, writeFile });
+    s.applyStartupEffects();
+    let thrown: unknown = null;
+    try {
+      s.set({ check: { hotkey: 'Ctrl+Alt+T' }, networkPaused: true });
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown).toBeInstanceOf(SettingsValidationError);
+    expect((thrown as Error).message).toBe(hotkeyTakenMessage('Ctrl+Alt+T'));
+    expect(writeFile).not.toHaveBeenCalled();
+    expect(s.get().check.hotkey).toBe(CHECK);
+    expect(s.get().networkPaused).toBe(false);
+    expect(r.actions('Ctrl+Alt+C')).toEqual(['check']);
+  });
+
+  it('refuses one chord for both hotkeys, whichever one the patch changes', () => {
+    const r = realEffects();
+    const s = createSettingsStore({ file, log: quietLog(), effects: r.effects });
+    s.applyStartupEffects();
+    r.applyHotkey.mockClear();
+    r.applyCheckHotkey.mockClear();
+    expect(() => s.set({ check: { hotkey: 'Ctrl+Alt+F' } })).toThrow(CHECK_HOTKEY_CONFLICT);
+    expect(() => s.set({ app: { quickEntryHotkey: 'CommandOrControl+Alt+C' } })).toThrow(CHECK_HOTKEY_CONFLICT);
+    expect(r.applyHotkey).not.toHaveBeenCalled();
+    expect(r.applyCheckHotkey).not.toHaveBeenCalled();
+    expect(r.actions('Ctrl+Alt+F', 'Ctrl+Alt+C')).toEqual(['quick', 'check']);
+  });
+
+  it('swaps the two hotkeys in one patch (each would find its new chord held by the other)', () => {
+    const r = realEffects();
+    const s = createSettingsStore({ file, log: quietLog(), effects: r.effects });
+    s.applyStartupEffects();
+    s.set({ app: { quickEntryHotkey: CHECK }, check: { hotkey: QUICK } });
+    expect(r.actions('Ctrl+Alt+C', 'Ctrl+Alt+F')).toEqual(['quick', 'check']);
+    expect(s.hotkeyStatus()).toEqual({ accelerator: CHECK, registered: true, error: null });
+    expect(s.checkHotkeyStatus()).toEqual({ accelerator: QUICK, registered: true, error: null });
+    const onDisk = JSON.parse(readFileSync(file, 'utf8'));
+    expect([onDisk.app.quickEntryHotkey, onDisk.check.hotkey]).toEqual([CHECK, QUICK]);
+  });
+
+  it('lets the check hotkey take the chord quick entry gives up in the same patch', () => {
+    const r = realEffects();
+    const s = createSettingsStore({ file, log: quietLog(), effects: r.effects });
+    s.applyStartupEffects();
+    s.set({ app: { quickEntryHotkey: 'Ctrl+Alt+G' }, check: { hotkey: 'Ctrl+Alt+F' } });
+    expect(r.actions('Ctrl+Alt+G', 'Ctrl+Alt+F', 'Ctrl+Alt+C')).toEqual(['quick', 'check', null]);
+  });
+
+  it('a two-hotkey patch with one chord taken changes nothing and leaves both old hotkeys working', () => {
+    const r = realEffects(['Ctrl+Alt+H']);
+    const writeFile = vi.fn();
+    const s = createSettingsStore({ file, log: quietLog(), effects: r.effects, writeFile });
+    s.applyStartupEffects();
+    expect(() => s.set({ app: { quickEntryHotkey: CHECK }, check: { hotkey: 'Ctrl+Alt+H' } })).toThrow(SettingsValidationError);
+    expect(writeFile).not.toHaveBeenCalled();
+    expect(s.get().app.quickEntryHotkey).toBe(QUICK);
+    expect(s.get().check.hotkey).toBe(CHECK);
+    expect(r.actions('Ctrl+Alt+F', 'Ctrl+Alt+C')).toEqual(['quick', 'check']);
+    expect(r.f.held()).toHaveLength(2);
+  });
+
+  it('restores both hotkeys when saving a swap fails', () => {
+    const r = realEffects();
+    const s = createSettingsStore({
+      file,
+      log: quietLog(),
+      effects: r.effects,
+      writeFile: () => {
+        throw new Error('disk');
+      },
+    });
+    s.applyStartupEffects();
+    expect(() => s.set({ app: { quickEntryHotkey: CHECK }, check: { hotkey: QUICK } })).toThrow('Could not save');
+    expect(r.actions('Ctrl+Alt+F', 'Ctrl+Alt+C')).toEqual(['quick', 'check']);
+    expect(s.checkHotkeyStatus().accelerator).toBe(CHECK);
+  });
+
+  it('restores the check hotkey when saving its change fails', () => {
+    const r = realEffects();
+    const s = createSettingsStore({
+      file,
+      log: quietLog(),
+      effects: r.effects,
+      writeFile: () => {
+        throw new Error('disk');
+      },
+    });
+    s.applyStartupEffects();
+    expect(() => s.set({ check: { hotkey: 'Ctrl+Alt+K' } })).toThrow('Could not save');
+    expect(r.actions('Ctrl+Alt+C', 'Ctrl+Alt+K')).toEqual(['check', null]);
+  });
+
+  it('turns the check hotkey off with an empty string and on again later', () => {
+    const r = realEffects();
+    const s = createSettingsStore({ file, log: quietLog(), effects: r.effects });
+    s.applyStartupEffects();
+    s.set({ check: { hotkey: '' } });
+    expect(s.checkHotkeyStatus()).toEqual({ accelerator: '', registered: false, error: null });
+    expect(r.actions('Ctrl+Alt+C')).toEqual([null]);
+    s.set({ check: { hotkey: 'Ctrl+Alt+K' } });
+    expect(r.applyCheckHotkey).toHaveBeenLastCalledWith('Ctrl+Alt+K', null);
+    expect(r.actions('Ctrl+Alt+K')).toEqual(['check']);
+  });
+
+  it('retries a check hotkey that failed at startup without releasing anything', () => {
+    const r = realEffects(['Ctrl+Alt+C']);
+    const s = createSettingsStore({ file, log: quietLog(), effects: r.effects });
+    s.applyStartupEffects();
+    s.set({ check: { hotkey: 'Ctrl+Alt+K' } });
+    expect(r.applyCheckHotkey).toHaveBeenLastCalledWith('Ctrl+Alt+K', null);
+    expect(s.checkHotkeyStatus()).toEqual({ accelerator: 'Ctrl+Alt+K', registered: true, error: null });
+  });
+
+  it('effects without a check hotkey register nothing for it and refuse nothing', () => {
+    const { effects } = fakeEffects();
+    const s = createSettingsStore({ file, log: quietLog(), effects });
+    s.applyStartupEffects();
+    expect(s.set({ check: { hotkey: 'Ctrl+Alt+K' } }).check.hotkey).toBe('Ctrl+Alt+K');
+    expect(effects.applyHotkey).toHaveBeenCalledTimes(1);
   });
 });

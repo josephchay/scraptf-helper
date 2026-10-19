@@ -1,7 +1,10 @@
 /* Live market page (F10). Reuses the opportunities grid (.opp-scroll, .opp-row) and the shopping
    list's patterns; only the market's own tracks, verdict pills, header strip (with the rebuild
-   error, H1, and the saved-page coverage chips, F13) and the row flash live here. Colours come
-   from tokens.css; the flash respects prefers-reduced-motion. */
+   error, H1, and the saved-page coverage chips, F13), the scrap.tf price list's columns and
+   "All items" chip (F14), the "New on scrap.tf" badge (F17), the rows' scrap.tf button and the
+   one-bank header button (F19) and the row flash live here. The
+   price-list card itself is in scraptf-list.css. Colours come from tokens.css; the flash respects
+   prefers-reduced-motion. */
 
 .market-page {
   height: 100%;
@@ -60,7 +63,7 @@
 
 /* ---------- scrap.tf saved-page coverage (F13) ---------- */
 
-/* One chip per bank page; a click opens it in the user's browser, the app never fetches it. */
+/* One chip per bank page; a click opens its card on the scrap.tf banks page (F15). The app never fetches it. */
 .market-coverage {
   gap: 4px 6px;
 }
@@ -90,6 +93,11 @@
 .coverage-chip.tone-muted .coverage-label {
   color: var(--text-muted);
   font-weight: 500;
+}
+
+/* F14: the whole scrap.tf/items list leads, set a little apart from the bank pages. */
+.coverage-chip.coverage-all {
+  margin-right: 6px;
 }
 
 .market-progress {
@@ -143,6 +151,13 @@
 }
 
 /* ---------- filters ---------- */
+
+/* F14: "On scrap.tf's list" and F17's "New on scrap.tf", under the Source choices they narrow further. */
+.market-list-filter {
+  margin-top: 4px;
+  padding-top: 4px;
+  border-top: 1px solid var(--border);
+}
 
 .market-sort {
   display: inline-flex;
@@ -198,42 +213,73 @@
 
 /* ---------- table ---------- */
 
-/* Item / Category / Sells for / Buyers / Pay up to / Your scrap.tf price / Verdict / Confidence / Updated.
-   Full needs ~1212px; the queries below drop Category, then Buyers, then Confidence, down to ~840px
-   (the 960px minimum window). */
+/* Item / Category / Sells for / Buyers / Pay up to / Your scrap.tf price / scrap.tf pays / Stock /
+   Verdict / Confidence / Updated. The grid's container is the window minus the nav (208px, 58px up to
+   1100px), the page padding and an 11px scrollbar: about 1179px at 1440, 1087px at 1360, 1019px at
+   1280, and 840px at 1101 (the narrowest: the nav is wide again there). Full needs 1400px. Each query
+   fits its whole range with the item name at least ~150px: Category goes at 1400, Buyers at 1230
+   (a 1440px window keeps 9 columns), Confidence at 1140 (1360px), Updated at 1060 (1280px), and at
+   950 Stock folds into scrap.tf pays as a Full pill. */
 .market-scroll {
-  --market-cols: minmax(200px, 1fr) 104px 210px 56px 108px 172px 132px 70px 56px;
+  --market-cols: minmax(200px, 1fr) 104px 210px 56px 108px 172px 92px 76px 132px 70px 56px;
 }
 
 .market-scroll .opp-row {
   grid-template-columns: var(--market-cols);
 }
 
-@container (max-width: 1230px) {
+@container (max-width: 1400px) {
   .market-scroll .opp-row {
-    --market-cols: minmax(180px, 1fr) 200px 52px 104px 168px 128px 66px 52px;
+    --market-cols: minmax(180px, 1fr) 196px 52px 104px 164px 88px 72px 128px 66px 52px;
   }
   .market-scroll .opp-row > .m-cat {
     display: none;
   }
+  /* F19: the Item cell is about 220px from here down (1280 and 1440 px windows): the scrap.tf button is
+     its icon, so the name keeps its room; the selected row names the page o opens. */
+  .market-scroll .market-row:not(.selected) .m-stf-label {
+    display: none;
+  }
 }
 
-@container (max-width: 1060px) {
+@container (max-width: 1230px) {
   .market-scroll .opp-row {
-    --market-cols: minmax(160px, 1fr) 190px 100px 164px 124px 64px 52px;
+    --market-cols: minmax(170px, 1fr) 190px 102px 160px 86px 72px 126px 66px 52px;
   }
   .market-scroll .opp-row > .m-buyers {
     display: none;
   }
 }
 
+@container (max-width: 1140px) {
+  .market-scroll .opp-row {
+    --market-cols: minmax(170px, 1fr) 186px 100px 160px 86px 72px 124px 52px;
+  }
+  .market-scroll .opp-row > .m-conf {
+    display: none;
+  }
+}
+
+@container (max-width: 1060px) {
+  .market-scroll .opp-row {
+    --market-cols: minmax(150px, 1fr) 176px 100px 160px 84px 70px 120px;
+  }
+  .market-scroll .opp-row > .m-updated {
+    display: none;
+  }
+}
+
 @container (max-width: 950px) {
   .market-scroll .opp-row {
-    --market-cols: minmax(150px, 1fr) 176px 100px 160px 120px 50px;
+    --market-cols: minmax(130px, 1fr) 168px 96px 148px 90px 116px;
   }
-  .market-scroll .opp-row > .m-conf,
-  .market-scroll .src-age {
+  .market-scroll .opp-row > .m-stock,
+  .market-scroll .src-age,
+  .market-scroll .m-stf-label {
     display: none;
+  }
+  .market-scroll .m-list .list-full-inline {
+    display: inline-flex;
   }
 }
 
@@ -245,6 +291,68 @@
 
 .market-row.verdict-no-buyers .m-item .item-name {
   opacity: 0.85;
+}
+
+/* F17: "New" on scrap.tf since the user's previous save of a bank page. In the Item cell, not a column
+   of its own (the width budget above is test-pinned); the name ellipses first, the badge never shrinks. */
+.market-new {
+  flex-shrink: 0;
+  height: 17px;
+  padding: 0 6px;
+  font-size: 10.5px;
+  cursor: help;
+}
+
+/* F19: the row's scrap.tf bank page button, also in the Item cell (no column of its own). A quiet tag
+   at the cell's right edge, so the links line up down the table; the name ellipses first. The bank
+   label shows where the cell is wide; from the 1400px layout down it is an icon button (the selected
+   row keeps its label), and in the 950px layout always one. The tooltip and aria-label name the page. */
+.m-stf {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 3px;
+  max-width: 96px;
+  height: 18px;
+  margin-left: auto;
+  padding: 0 5px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-faint);
+  font: inherit;
+  font-size: 10.5px;
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+/* Seen on a page you saved: that is where to look first. */
+.m-stf.seen {
+  color: var(--text-muted);
+}
+
+.market-row:hover .m-stf,
+.market-row.selected .m-stf {
+  border-color: var(--border-strong);
+  color: var(--text-muted);
+}
+
+.market-row .m-stf:hover {
+  border-color: var(--accent);
+  background: var(--accent-weak);
+  color: var(--accent);
+}
+
+.m-stf-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* U2: "Open scrap.tf/buy/<bank> ↗" while the market shows one bank's items. */
+.market-bank-link {
+  white-space: nowrap;
 }
 
 .m-cat {
@@ -295,6 +403,16 @@
 
 /* The badge gives way first, so the price itself stays readable. */
 .m-yours > .src-badge {
+  flex-shrink: 1000;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* A price wider than its right-aligned cell (an unusual's "98 keys 61.88 ref") ellipses at its end
+   instead of losing its leading digits at the left edge, where "98 keys" would read as "8 keys". */
+.m-pay > .money,
+.m-yours > span:last-child {
   flex-shrink: 1;
   min-width: 0;
   overflow: hidden;
@@ -334,6 +452,58 @@
 .rule-est {
   color: var(--text-muted);
   font-style: italic;
+}
+
+/* ---------- scrap.tf price list columns (F14) ---------- */
+
+.m-list,
+.m-stock {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 4px;
+}
+
+.m-list > *,
+.m-stock > * {
+  flex-shrink: 0;
+}
+
+/* A long price ("2 keys 10.33 ref") ellipses instead of being clipped at the left edge. */
+.m-list > .money {
+  flex-shrink: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.list-stock {
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Full, or from a list over a day old: shown, but not what scrap.tf would pay you right now. */
+.list-dim .money,
+.list-dim .list-stock {
+  color: var(--text-muted);
+}
+
+/* Out of stock: nothing to buy on scrap.tf until it restocks. */
+.list-out .list-stock {
+  color: var(--text-muted);
+  text-decoration: line-through;
+  text-decoration-color: var(--text-faint);
+}
+
+.list-full {
+  height: 17px;
+  padding: 0 5px;
+  font-size: 10.5px;
+}
+
+/* The pays cell's own Full pill only shows where the Stock column is hidden (the 950px query). */
+.m-list .list-full-inline {
+  display: none;
 }
 
 .m-verdict {

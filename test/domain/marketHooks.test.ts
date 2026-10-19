@@ -6,7 +6,7 @@
 // Real in-memory repo, fake clock and timers; nothing here touches the network.
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import type { Repo } from '../../src/service/contracts';
+import type { NewImportBatch, Repo } from '../../src/service/contracts';
 import { openRepo } from '../../src/service/db';
 import { selectKeyPrice } from '../../src/service/domain/keyprice';
 import {
@@ -22,7 +22,7 @@ import {
 import { matchContext } from '../../src/service/domain/matcher';
 import { DEFAULT_SETTINGS, mergeSettings } from '../../src/shared/defaults';
 import { SCRAPTF_BANK_PAGES } from '../../src/shared/links';
-import type { Category, DeepPartial, ImportBatch, Listing, Settings, UnixMs } from '../../src/shared/types';
+import type { Category, DeepPartial, Listing, Settings, UnixMs } from '../../src/shared/types';
 import { FakeClock, FakeTimers, MIN, T0, createStubSchema, makeDeps, makeListing, recordingLogger } from './helpers';
 import type { StubSchemaOptions } from './helpers';
 
@@ -279,7 +279,7 @@ describe('F13: scrap.tf saved-page coverage', () => {
   const CATS: Record<number, Category> = { 1: 'hats', 2: 'weapons', 3: 'stranges', 4: 'unusuals', 5: 'taunts', 6: 'other' };
   const schema: StubSchemaOptions = { items: [], categoryOf: (d) => CATS[Math.floor(d / 1000)] ?? 'other', nameOf: (s) => `Item ${s}` };
 
-  function page(repo: Repo, b: Omit<ImportBatch, 'id' | 'itemCount'>, defindexes: number[]): number {
+  function page(repo: Repo, b: Omit<NewImportBatch, 'itemCount'>, defindexes: number[]): number {
     const id = repo.createImportBatch({ ...b, itemCount: defindexes.length });
     for (const d of defindexes) {
       repo.upsertScrapPrice({ sku: `${d};6`, name: `Item ${d}`, costScrap: 20, source: 'import', observedAt: b.fileMtime || b.importedAt, importBatch: id, stock: 1 });
@@ -345,14 +345,16 @@ describe('F13: scrap.tf saved-page coverage', () => {
     expect(byLabel(h).Hats).toEqual([T0 - 10 * MIN, 2]);
   });
 
-  it('reads no batches while no saved-page price is stored, and survives a failed read', () => {
+  it('reads the batches once per price change even with no saved-page price stored, and survives a failed read', () => {
     const repo = newRepo();
     repo.upsertScrapPrice({ sku: '1001;6', name: 'Typed', costScrap: 20, source: 'user', observedAt: T0 });
     const h = setup({ repo, schema });
     build(h);
     const batches = vi.spyOn(repo, 'listImportBatches');
     expect(Object.values(byLabel(h))).toEqual(SCRAPTF_BANK_PAGES.map(() => [null, 0]));
-    expect(batches).not.toHaveBeenCalled();
+    byLabel(h);
+    // F15: a recognised page counts even when nothing on it was stored, so the batches are read (cached).
+    expect(batches).toHaveBeenCalledTimes(1);
 
     page(repo, { fileName: 'hats.html', pageKind: 'buy', fileMtime: T0 - MIN, importedAt: T0 }, [1001]);
     batches.mockImplementation(() => {
@@ -395,5 +397,65 @@ describe('F13: scrap.tf saved-page coverage', () => {
     // Cached again once read.
     byLabel(h);
     expect(batches).toHaveBeenCalledTimes(6);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// F15: coverage by the recorded bank
+// ---------------------------------------------------------------------------
+
+describe('F15: coverage by the bank each saved page recorded', () => {
+  const CATS: Record<number, Category> = { 1: 'hats', 2: 'weapons', 3: 'stranges', 4: 'unusuals', 5: 'taunts', 6: 'other', 7: 'skins', 8: 'killstreaks' };
+  const schema: StubSchemaOptions = { items: [], categoryOf: (d) => CATS[Math.floor(d / 1000)] ?? 'other', nameOf: (s) => `Item ${s}` };
+
+  function page(repo: Repo, b: Omit<NewImportBatch, 'itemCount'>, defindexes: number[]): number {
+    const id = repo.createImportBatch({ ...b, itemCount: defindexes.length });
+    for (const d of defindexes) {
+      repo.upsertScrapPrice({ sku: `${d};6`, name: `Item ${d}`, costScrap: 20, source: 'import', observedAt: b.fileMtime || b.importedAt, importBatch: id, stock: 1 });
+    }
+    return id;
+  }
+
+  const byLabel = (h: H) => Object.fromEntries(h.market.list({}, h.clock.now()).scraptf.coverage.map((c) => [c.label, [c.lastSavedAt, c.items]]));
+
+  it('files a page under its recorded bank whatever it held, and the majority rule only for pages without one', () => {
+    const repo = newRepo();
+    // Recorded 'stranges' although most of what it stored files as hats (strange cosmetics).
+    page(repo, { fileName: 'stranges.html', pageKind: 'buy', fileMtime: T0 - 3 * MIN, importedAt: T0 - 3 * MIN, categories: { hats: 2, stranges: 1 }, bank: 'stranges' }, [1001, 1002, 3001]);
+    // A 0.4 page (no bank): the majority of its stored categories, as before.
+    page(repo, { fileName: 'hats-04.html', pageKind: 'buy', fileMtime: T0 - 9 * MIN, importedAt: T0 - 9 * MIN, categories: { hats: 2 } }, [1003, 1004]);
+    // Recorded 'items' with no majority of its own (a mixed tools page).
+    page(repo, { fileName: 'items.html', pageKind: 'buy', fileMtime: T0 - 5 * MIN, importedAt: T0 - 5 * MIN, categories: { taunts: 1, hats: 1, weapons: 1 }, bank: 'items' }, [5001, 1005, 2001]);
+    // Recorded 'skins' but stored nothing: saved without its cards, so not a save of the page (F18 S3).
+    page(repo, { fileName: 'skins.html', pageKind: 'buy', fileMtime: T0 - 7 * MIN, importedAt: T0 - 7 * MIN, bank: 'skins' }, []);
+    // The /items list (recorded) counts for no bank page, even when it is all hats and the newest.
+    page(repo, { fileName: 'list.html', pageKind: 'items-list', fileMtime: T0 - MIN, importedAt: T0 - MIN, categories: { hats: 3 }, bank: 'list' }, [1006, 1007, 1008]);
+    // A page the parser recognised as the list, whatever its kind, counts for no bank page either.
+    page(repo, { fileName: 'list2.html', pageKind: 'buy', fileMtime: T0 - 2 * MIN, importedAt: T0 - 2 * MIN, categories: { weapons: 2 }, bank: 'list' }, [2002, 2003]);
+    const h = setup({ repo, schema });
+    build(h);
+    expect(byLabel(h)).toEqual({
+      Hats: [T0 - 9 * MIN, 2],
+      Weapons: [null, 0],
+      Stranges: [T0 - 3 * MIN, 3],
+      Killstreaks: [null, 0],
+      Skins: [null, 0],
+      Items: [T0 - 5 * MIN, 3],
+      Unusuals: [null, 0],
+    });
+  });
+
+  it('keeps a page under its recorded bank after a later /items list re-tags the rows it shared', () => {
+    const repo = newRepo();
+    const killstreaks = page(repo, { fileName: 'ks.html', pageKind: 'buy', fileMtime: T0 - 10 * MIN, importedAt: T0 - 10 * MIN, categories: { killstreaks: 2 }, bank: 'killstreaks' }, [8001, 8002]);
+    const h = setup({ repo, schema });
+    build(h);
+    expect(byLabel(h).Killstreaks).toEqual([T0 - 10 * MIN, 2]);
+    // The list rewrites both rows in place under its own batch id.
+    const list = repo.createImportBatch({ fileName: 'items.html', pageKind: 'items-list', fileMtime: T0 - MIN, importedAt: T0 - MIN, itemCount: 2, bank: 'list' });
+    for (const p of repo.listScrapPrices()) if (p.importBatch === killstreaks) repo.upsertScrapPrice({ ...p, importBatch: list, observedAt: T0 - MIN });
+    h.market.pricesChanged();
+    expect(byLabel(h).Killstreaks).toEqual([T0 - 10 * MIN, 2]);
+    expect(repo.listScrapPrices().every((p) => p.bank === 'list')).toBe(true);
   });
 });

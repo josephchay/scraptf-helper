@@ -211,8 +211,8 @@ export interface ServiceHost {
   shutdown(graceMs?: number): Promise<void>;
 }
 
-/** Pushes only main sends (ARCHITECTURE: settings, the dashboard drawer, the service banner). */
-export const MAIN_ONLY_PUSH_EVENTS: readonly PushEvent[] = ['settings.changed', 'ui.openItem', 'ui.quickPrefill', 'service.state'];
+/** Pushes only main sends (ARCHITECTURE: settings, the dashboard drawer, quick entry, the check popup, the service banner). */
+export const MAIN_ONLY_PUSH_EVENTS: readonly PushEvent[] = ['settings.changed', 'ui.openItem', 'ui.quickPrefill', 'ui.checkShow', 'service.state'];
 /** Pushes the service may send; anything else from the service is dropped as unrecognised. */
 export const SERVICE_PUSH_EVENTS: readonly PushEvent[] = PUSH_EVENTS.filter((e) => !MAIN_ONLY_PUSH_EVENTS.includes(e));
 const pushEvents = new Set<string>(SERVICE_PUSH_EVENTS);

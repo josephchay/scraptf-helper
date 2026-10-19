@@ -1,6 +1,9 @@
 import { useEffect, useState, useSyncExternalStore } from 'react';
 import type { PushContract } from '../shared/rpc';
-import { rpc, windowKind } from './api';
+import type { ScraptfBank } from '../shared/types';
+import { rpc, windowKind, type WindowKind } from './api';
+import { bankStockRouteBank } from './banksModel';
+import { logTabOf } from './changesModel';
 import { ErrorBanner, LoadingBlock, ToastStack } from './components/Feedback';
 import { Icon, type IconName } from './components/Icon';
 import { StatePill } from './components/Pills';
@@ -10,7 +13,11 @@ import { AppProvider, useApp } from './hooks/appContext';
 import { usePush, useThrottled } from './hooks/useRpc';
 import { useNow } from './hooks/useTimers';
 import { serviceNotReady } from './serviceStateModel';
+import { scraptfKeyTipText } from './settingsFields';
 import { AboutPage } from './pages/AboutPage';
+import { BankStockPage } from './pages/BankStockPage';
+import { BanksPage } from './pages/BanksPage';
+import { CheckPopup } from './pages/CheckPopup';
 import { HealthPage } from './pages/HealthPage';
 import { HoldingsPage } from './pages/HoldingsPage';
 import { ImportPage } from './pages/ImportPage';
@@ -24,11 +31,12 @@ import { QuickEntry } from './pages/QuickEntry';
 import { ShoppingPage } from './pages/ShoppingPage';
 import { SettingsPage } from './pages/SettingsPage';
 
-type RouteId = 'opportunities' | 'market' | 'shopping' | 'holdings' | 'log' | 'prices' | 'import' | 'journal' | 'health' | 'settings' | 'about';
+type RouteId = 'opportunities' | 'market' | 'banks' | 'shopping' | 'holdings' | 'log' | 'prices' | 'import' | 'journal' | 'health' | 'settings' | 'about';
 
 const NAV: { id: RouteId; label: string; icon: IconName }[] = [
   { id: 'opportunities', label: 'Opportunities', icon: 'opps' },
   { id: 'market', label: 'Live market', icon: 'market' },
+  { id: 'banks', label: 'scrap.tf banks', icon: 'banks' },
   { id: 'shopping', label: 'Shopping list', icon: 'cart' },
   { id: 'holdings', label: 'Holdings', icon: 'holdings' },
   { id: 'log', label: 'Live log', icon: 'log' },
@@ -43,6 +51,7 @@ const NAV: { id: RouteId; label: string; icon: IconName }[] = [
 const TITLES: Record<RouteId, string> = {
   opportunities: 'Opportunities',
   market: 'Live market',
+  banks: 'scrap.tf banks',
   shopping: 'Shopping list',
   holdings: 'Holdings',
   log: 'Live log',
@@ -59,16 +68,22 @@ function subscribeHash(cb: () => void): () => void {
   return () => window.removeEventListener('hashchange', cb);
 }
 
-/** Picks the dashboard or the quick-entry window. */
+const WINDOW_TITLES: Record<WindowKind, string> = {
+  dashboard: 'TF2 Flip Desk',
+  'quick-entry': 'Quick entry · TF2 Flip Desk',
+  check: 'Live check · TF2 Flip Desk',
+};
+
+/** Picks the dashboard, the quick-entry window or the live check popup (F16). */
 export function Root() {
-  // Re-evaluated on hash changes so "#/quick" works in a plain browser too.
+  // Re-evaluated on hash changes so "#/quick" and "#/check" work in a plain browser too.
   useSyncExternalStore(subscribeHash, () => window.location.hash, () => '');
   const kind = windowKind();
   useEffect(() => {
     document.documentElement.dataset['window'] = kind;
-    document.title = kind === 'quick-entry' ? 'Quick entry · TF2 Flip Desk' : 'TF2 Flip Desk';
+    document.title = WINDOW_TITLES[kind];
   }, [kind]);
-  return <AppProvider>{kind === 'quick-entry' ? <QuickEntry /> : <Dashboard />}</AppProvider>;
+  return <AppProvider>{kind === 'quick-entry' ? <QuickEntry /> : kind === 'check' ? <CheckPopup /> : <Dashboard />}</AppProvider>;
 }
 
 const SERVICE_STATE_TEXT: Record<string, string> = {
@@ -103,16 +118,22 @@ function ServiceDetail({ state }: { state: PushContract['service.state'] }) {
 function Dashboard() {
   const { segments, status, settings, bridgeError, refreshStatus, dataVersion } = useApp();
   const route: RouteId = (NAV.some((n) => n.id === segments[0]) ? segments[0] : 'opportunities') as RouteId;
+  // F17: #/banks/<bank>/stock is a bank's stock page, under the scrap.tf banks nav entry.
+  const stockBank = route === 'banks' ? bankStockRouteBank(segments) : null;
   const [unseen, setUnseen] = useState(0);
   const [priceCount, setPriceCount] = useState<number | null>(null);
+  // F20: the badge counts opportunity events, so only their tab clears it (not #/log/changes).
+  const oppEventsShown = route === 'log' && logTabOf(segments) === 'events';
 
   usePush('opps.changed', (p) => {
-    if (route !== 'log') setUnseen((n) => Math.min(999, n + p.appeared + p.changed + p.gone));
+    if (!oppEventsShown) setUnseen((n) => Math.min(999, n + p.appeared + p.changed + p.gone));
   });
   useEffect(() => {
-    if (route === 'log') setUnseen(0);
+    if (oppEventsShown) setUnseen(0);
+  }, [oppEventsShown]);
+  useEffect(() => {
     document.getElementById('content')?.scrollTo({ top: 0 });
-  }, [route]);
+  }, [route, stockBank]);
 
   useEffect(() => {
     let alive = true;
@@ -185,7 +206,7 @@ function Dashboard() {
         <TopBar title={TITLES[route]} />
         <ServiceBanner />
         <main className="content" id="content">
-          {!status && !bridgeError ? <LoadingBlock label="Starting…" /> : <RouteView route={route} />}
+          {!status && !bridgeError ? <LoadingBlock label="Starting…" /> : <RouteView route={route} stockBank={stockBank} />}
         </main>
       </div>
       <ItemDrawer />
@@ -194,12 +215,16 @@ function Dashboard() {
   );
 }
 
-function RouteView({ route }: { route: RouteId }) {
+function RouteView({ route, stockBank }: { route: RouteId; stockBank: ScraptfBank | null }) {
+  // Keyed by bank: each bank's page starts fresh with its own remembered filter, search and order.
+  if (stockBank) return <BankStockPage key={stockBank} bank={stockBank} />;
   switch (route) {
     case 'opportunities':
       return <OpportunitiesPage />;
     case 'market':
       return <MarketPage />;
+    case 'banks':
+      return <BanksPage />;
     case 'shopping':
       return <ShoppingPage />;
     case 'holdings':
@@ -228,6 +253,8 @@ function TopBar({ title }: { title: string }) {
   const key = status ? keyPriceSummary(kp, now) : { value: '…', source: 'loading', age: '', stale: false };
   const paused = status?.networkPaused ?? settings?.networkPaused ?? false;
   const feed = status?.feed ?? 'connecting';
+  // What scrap.tf pays for a key, from the source that caps the automatic value (a newer saved list replaces the typed price).
+  const stfTip = kp && settings ? scraptfKeyTipText(kp.scraptfFromList, settings.keyPrice, now) : null;
 
   const openQuick = () => {
     rpc('app.showQuickEntry').catch(() => toast('Could not open quick entry.', 'bad'));
@@ -259,7 +286,7 @@ function TopBar({ title }: { title: string }) {
                     ))}
                   </tbody>
                 </table>
-                {settings?.keyPrice.scraptfSellScrap ? <div className="muted small">scrap.tf sell (yours): {fmtRefOnly(settings.keyPrice.scraptfSellScrap)}</div> : null}
+                {stfTip ? <div className="muted small">{stfTip}</div> : null}
               </div>
             ) : (
               'No key price yet.'

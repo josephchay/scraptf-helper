@@ -69,6 +69,16 @@ export const CATEGORY_LABELS: Record<Category, string> = {
   other: 'Other',
 };
 
+/**
+ * F15: a scrap.tf page the user saves into the watch folder: the seven bank pages (/buy/<slug> and
+ * /unusuals) plus 'list', the scrap.tf/items price list. Labels and URLs: SCRAPTF_BANKS in
+ * src/shared/links.ts. Not a Category: 'items' sells taunts and 'other', and 'list' sells everything.
+ */
+export type ScraptfBank = 'hats' | 'weapons' | 'stranges' | 'killstreaks' | 'skins' | 'items' | 'unusuals' | 'list';
+
+/** Every ScraptfBank in SCRAPTF_BANKS order (the banks page's card order); the repo validates stored values against it. */
+export const SCRAPTF_BANK_IDS: readonly ScraptfBank[] = ['hats', 'weapons', 'stranges', 'killstreaks', 'skins', 'items', 'unusuals', 'list'];
+
 export const QUALITY_NAMES: Record<number, string> = {
   0: 'Normal',
   1: 'Genuine',
@@ -191,6 +201,12 @@ export interface ScrapPrice {
   special: SpecialAttrs | null;
   assetId: string | null;
   stock: number | null;
+  /**
+   * F15: the scrap.tf page this price was imported from (its import batch's ImportBatch.bank), joined
+   * in by the repo on every read. null for typed prices and for batches whose page was not recognised
+   * (or saved before 0.5); absent on objects not read from the repo. Never written: it follows the batch.
+   */
+  bank?: ScraptfBank | null;
 }
 
 export interface ScrapPriceInput {
@@ -254,6 +270,20 @@ export interface KeyPriceQuote {
   observedAt: UnixMs;
 }
 
+/**
+ * scrap.tf's own key prices read from the Mann Co. Supply Crate Key row (5021;6) of the user's
+ * saved scrap.tf/items list (F14). Raw scrap: scrap.tf prices a key in metal, so no key price
+ * is needed to read it (selectKeyPrice reads it without a cycle).
+ */
+export interface ScraptfListKey {
+  /** What scrap.tf charges for a key ("Price to buy"); settings.keyPrice.scraptfBuyScrap's role. null when sold out. */
+  sellsScrap: Scrap | null;
+  /** What scrap.tf pays for a key ("Price we pay"); settings.keyPrice.scraptfSellScrap's role (caps the key value). */
+  paysScrap: Scrap | null;
+  /** The list row's observedAt (the saved file's mtime, else its import time). */
+  observedAt: UnixMs;
+}
+
 /** The key price currently used to value keys in scrap. */
 export interface KeyPriceState {
   valueScrap: Scrap;
@@ -261,6 +291,12 @@ export interface KeyPriceState {
   observedAt: UnixMs | null;
   stale: boolean;
   quotes: KeyPriceQuote[];
+  /**
+   * scrap.tf's key prices from the saved /items list (F14), for display ("From your saved scrap.tf
+   * list"); null when the list has no key row. Whether they are in use: compare `observedAt` with
+   * settings.keyPrice.scraptfObservedAt (the newer of the two supplies the scrap.tf key prices).
+   */
+  scraptfFromList: ScraptfListKey | null;
 }
 
 export interface PricedbRow {
@@ -507,11 +543,39 @@ export interface MarketQuery {
   /** Only rows whose revenue order is a bot's. */
   onlyBotBuyers?: boolean;
   minBuyers?: number;
+  /** F14: only rows on the user's saved scrap.tf/items list (scraptfListAt not null); marketListSideMatches. */
+  onScraptfList?: boolean;
+  /**
+   * F17: only rows "New on scrap.tf" (scraptfNewAt not null: new in the newest save of a bank);
+   * marketNewSideMatches. The Source popover's "New on scrap.tf" (spec S4's source filter 'new').
+   */
+  newOnScraptf?: boolean;
+  /**
+   * F20 (optional U5): only rows listed on scrap.tf for at least SCRAPTF_LONG_LISTED_MS (24 h):
+   * scraptfListedSince at or before now - 24 h (marketListedSideMatches in src/shared/scraptfHistory.ts).
+   */
+  listedOnScraptf?: boolean;
   sort?: MarketSort;
   dir?: 'asc' | 'desc';
   /** 1..2000, default 200. The dashboard reads its whole loaded window (≤ 2000 rows) in one call (H2). */
   limit?: number;
   offset?: number;
+}
+
+/**
+ * F19, MarketRow.scraptfLink: where to look for this item on scrap.tf. That is the bank page the user
+ * last saw it on, else its category's bank. The URL is a static allowlisted page, handed to the user's
+ * browser through links.open on a click or key press only. It is never fetched (R1) and never built
+ * from item data.
+ */
+export interface MarketScraptfLink {
+  /** Never 'list' unless the item is only known from scrap.tf/items. */
+  bank: ScraptfBank;
+  /** SCRAPTF_BANKS[bank].url (STATIC_EXTERNAL_URLS). */
+  url: string;
+  /** The newest saved page (bank stock / imported price) that listed this item, else null (category fallback). */
+  seenAt: UnixMs | null;
+  source: 'seen' | 'category';
 }
 
 export interface MarketRow {
@@ -544,6 +608,33 @@ export interface MarketRow {
   /** Newest lastEventAt among the eligible orders. */
   lastOrderChangeAt: UnixMs | null;
   evaluatedAt: UnixMs;
+  /**
+   * F14, from the user's saved scrap.tf/items list (ScraptfListRow of this base SKU), all null/false
+   * when the list has no row: what scrap.tf pays (valued at the current key price), its stock and
+   * limit, whether it is full (stock >= limit), and when that list row was saved.
+   */
+  scraptfPaysScrap: Scrap | null;
+  scraptfStock: number | null;
+  scraptfStockLimit: number | null;
+  scraptfFull: boolean;
+  scraptfListAt: UnixMs | null;
+  /**
+   * F17: the save time (BankStockResult.savedAt) of the newest save of a bank in which this base SKU is
+   * 'new' (BankStock.newAtFor; the newest such save when several banks list it), else null. Joined at read
+   * time from the bank stock cache, like the list fields; never stored in the index's entries.
+   */
+  scraptfNewAt: UnixMs | null;
+  /**
+   * F19: the scrap.tf page the row's "scrap.tf" button opens (scraptfLinkFor in src/shared/links.ts).
+   * Joined at read time like the other scraptf* fields; never stored in the index's entries.
+   */
+  scraptfLink: MarketScraptfLink;
+  /**
+   * F20: since when the user's saves of the bank it was seen on (scraptfLink's bank, when 'seen') list
+   * it on sale without a break (ScraptfHistory.listedSinceFor, any copy of the base SKU); null otherwise.
+   * Joined at read time like the other scraptf* fields.
+   */
+  scraptfListedSince: UnixMs | null;
 }
 
 export interface MarketStats {
@@ -576,12 +667,36 @@ export interface ScraptfCoverage {
   items: number;
 }
 
+/**
+ * The coverage strip's "All items (scrap.tf/items)" chip (F14). Kept apart from the per-bank-page
+ * `coverage` entries (it is not a Category and counts for no bank page; ScraptfCoverage is unchanged).
+ */
+export interface ScraptfListCoverage {
+  /** 'All items' */
+  label: string;
+  /** SCRAPTF_ITEMS_URL; opened in the user's own browser through links.open, never fetched. */
+  url: string;
+  /** Newest list row's observedAt (ScraptfListStatus.newestAt), or null when no list was saved. */
+  lastSavedAt: UnixMs | null;
+  /** List rows stored (ScraptfListStatus.items). */
+  items: number;
+}
+
 export interface MarketListResult {
   rows: MarketRow[];
   total: number;
   /** Over the query ignoring its own verdicts filter, so the chips show what each would add. */
   counts: Record<MarketVerdict, number>;
-  scraptf: { typed: number; pages: number; newestPageAt: UnixMs | null; importEnabled: boolean; watchFolder: boolean; coverage: ScraptfCoverage[] };
+  scraptf: {
+    typed: number;
+    pages: number;
+    newestPageAt: UnixMs | null;
+    importEnabled: boolean;
+    watchFolder: boolean;
+    coverage: ScraptfCoverage[];
+    /** F14: the saved scrap.tf/items list, shown as the strip's "All items" chip. */
+    allItems: ScraptfListCoverage;
+  };
   stats: MarketStats;
   keyPrice: KeyPriceState | null;
   generatedAt: UnixMs;
@@ -594,11 +709,17 @@ export interface MarketListResult {
 /**
  * profitStatus (src/shared/ceiling.ts) of the next lot's profit:
  * sell = 'profitable' (clears the profit thresholds), hold = 'below-threshold' (positive, under them),
- * loss = 'unprofitable' (profit ≤ 0), no-buyers = no revenue (no eligible buy order to price against).
+ * loss = 'unprofitable' (profit ≤ 0), no-buyers = no exit (no eligible buy order, and no usable scrap.tf
+ * list price, F14). Judged on HoldingRow.exitScrap, so a holding can be 'sell' through scrap.tf.
  */
 export type HoldingStatus = 'sell' | 'hold' | 'loss' | 'no-buyers';
 /** Display and sort order: sellable first. */
 export const HOLDING_STATUSES: readonly HoldingStatus[] = ['sell', 'hold', 'loss', 'no-buyers'];
+
+/** Where a held item sells best right now (F14): a backpack.tf buy order, or scrap.tf's bank per the saved /items list. */
+export type HoldingExit = 'backpack' | 'scraptf';
+/** The journal venue a sale at that exit is recorded under (Record sale prefill). */
+export const HOLDING_EXIT_VENUES: Readonly<Record<HoldingExit, string>> = { backpack: 'backpack.tf', scraptf: 'scrap.tf' };
 
 export interface HoldingsQuery {
   /** Words matched against name and SKU, like the Live market search. */
@@ -628,11 +749,34 @@ export interface HoldingRow {
   revenueOrder: OrderSummary | null;
   bestOrder: OrderSummary | null;
   buyerCount: number;
-  /** revenueScrap - nextLotCostScrap - friction */
+  /**
+   * F14, from the saved scrap.tf/items list row of the base SKU (null/false without one): what
+   * scrap.tf pays per unit (valued at the current key price), whether it is full, when the row was saved.
+   */
+  scraptfPaysScrap: Scrap | null;
+  /**
+   * The same pays price as the list shows it, keys and metal apart (null without one), so Record sale
+   * books what scrap.tf hands over, as the drawer does, instead of re-splitting the value at the key price.
+   */
+  scraptfPaysKeys: number | null;
+  scraptfPaysScrapRaw: Scrap | null;
+  scraptfFull: boolean;
+  scraptfListAt: UnixMs | null;
+  /**
+   * The better exit: 'scraptf' when scrap.tf pays more than revenueScrap (or there are no backpack.tf
+   * buyers), it is not full and the list row is at most SCRAPTF_LIST_FRESH_MS (24 h) old; else
+   * 'backpack' when revenueScrap exists; null when neither. backpack.tf wins a tie.
+   */
+  bestExit: HoldingExit | null;
+  /** Per-unit price at bestExit (revenueScrap or scraptfPaysScrap); what status and profit are judged on. */
+  exitScrap: Scrap | null;
+  /** HOLDING_EXIT_VENUES[bestExit] ('backpack.tf' / 'scrap.tf'), for the Record sale prefill; null without an exit. */
+  exitVenue: string | null;
+  /** exitScrap - nextLotCostScrap - friction */
   profitNowScrap: Scrap | null;
-  /** revenueScrap * qty - costScrap - friction * qty */
+  /** exitScrap * qty - costScrap - friction * qty */
   profitAllScrap: Scrap | null;
-  /** profitNowScrap / nextLotCostScrap; null without revenue or for a free lot. */
+  /** profitNowScrap / nextLotCostScrap; null without an exit or for a free lot. */
   margin: number | null;
   status: HoldingStatus;
   /** Buy-side confidence, as on the Live market row. */
@@ -648,8 +792,8 @@ export interface HoldingsResult {
   rows: HoldingRow[];
   /**
    * Over everything held, whatever the search: items (SKUs), units, cost of all open lots;
-   * worthNowScrap and profitNowScrap (unrealised P/L, the sum of profitAllScrap) count only rows
-   * with a revenue; sellable counts rows in status 'sell'.
+   * worthNowScrap (at exitScrap, F14) and profitNowScrap (unrealised P/L, the sum of profitAllScrap)
+   * count only rows with an exit; sellable counts rows in status 'sell'.
    */
   totals: { items: number; units: number; costScrap: Scrap; worthNowScrap: Scrap; profitNowScrap: Scrap; sellable: number };
   keyPrice: KeyPriceState | null;
@@ -752,6 +896,52 @@ export interface ItemDetail {
   links: LinkSpec[];
   snapshot: { lastAt: UnixMs | null; available: boolean; nextAllowedAt: UnixMs | null };
   keyPrice: KeyPriceState | null;
+  /** F14: the base SKU's row of the user's saved scrap.tf/items list (valued at the current key price), or null. */
+  scraptfList: ScraptfListRow | null;
+  /**
+   * F14: "Use as my price" already saved this list row's price (scraptfListPriceSaved over the base SKU's
+   * plain rows). A painted SKU's scrapPrices leave that plain copy out, so its drawer reads this instead.
+   */
+  scraptfListSaved: boolean;
+  /**
+   * F15: the scrap.tf page the newest imported price of this item came from (ScrapPrice.bank of the
+   * newest import-source row of scrapPrices that names a bank; scraptfSeenOn in src/shared/links.ts),
+   * its static URL and that price's observedAt. A painted SKU none of whose own prices was imported
+   * (scrapPrices holds no imported row) falls back to the base SKU's other copies from bank pages, never
+   * the list (itemSeenOn): then it names where another copy was seen, not a price of this item. null when
+   * neither names a page. Every "Open bank page" uses it, else bankForCategory(category).
+   */
+  seenOn: ScraptfSeenOn | null;
+  /**
+   * F17: the item in the newest bank-stock save that lists it (BankStock.detailFor): which bank, that
+   * save's time, its change since the bank's previous save and its stock. null when no kept save lists it.
+   */
+  bankStock: ItemBankStock | null;
+}
+
+/**
+ * ItemDetail.bankStock (F17): "On scrap.tf/buy/hats in your save 12 min ago: 3 in stock, new since your
+ * previous save", or "↓ cheaper than before (was X)". From pages the user saved; nothing is fetched.
+ */
+export interface ItemBankStock {
+  bank: ScraptfBank;
+  /** That save's time (fileMtime, else importedAt). */
+  savedAt: UnixMs;
+  /** As BankStockRow.change: null when unchanged or when the bank has only one save. */
+  change: BankStockChange;
+  /** The previous save's price at the current key price, for "was X"; null when it had none. */
+  previousCostScrap: Scrap | null;
+  /** Stock on that save (null: the page showed none; 0: listed but sold out, e.g. a 'gone' row). */
+  stock: number | null;
+}
+
+/** ItemDetail.seenOn: where the user last saw an item on scrap.tf (from a page they saved; never fetched). */
+export interface ScraptfSeenOn {
+  bank: ScraptfBank;
+  /** SCRAPTF_BANKS[bank].url: opened in the user's browser through links.open only. */
+  url: string;
+  /** The price's observedAt (the saved file's time). */
+  at: UnixMs;
 }
 
 /** backpack.tf ban lookup for one buyer ('buyer.check'; on click only, cached 1 h). */
@@ -803,6 +993,77 @@ export interface ParsedScrapItem {
   assetId: string | null;
   stock: number | null;
   warnings: string[];
+  /**
+   * /items list rows only (F14): the "Price we pay" column, what scrap.tf pays the user. null when the
+   * cell is empty, "—" or unparsed (with a warning); absent on bank-page cards, which have no such column.
+   */
+  pays?: { keys: number; scrap: Scrap } | null;
+  /** /items list rows only (F14): the limit from the "Item Limits" cell's `title="n/limit"`; absent on cards. */
+  stockLimit?: number | null;
+}
+
+// ---------------------------------------------------------------------------
+// scrap.tf price list (F14): the user's saved copy of scrap.tf/items
+// ---------------------------------------------------------------------------
+
+/**
+ * One stored row of the scraptf_list table, as the repo reads it (raw keys + metal, nothing valued).
+ * Keyed by the canonical base SKU (paint removed): the /items list shows plain copies only.
+ */
+export interface ScraptfListStored {
+  sku: string;
+  name: string;
+  /** null for a "Sold out" row that shows no price to buy (it still counts: scrap.tf buys it). */
+  sellsKeys: number | null;
+  sellsScrap: Scrap | null;
+  paysKeys: number | null;
+  paysScrap: Scrap | null;
+  stock: number | null;
+  stockLimit: number | null;
+  batchId: number;
+  /** The saved file's mtime, else its import time. */
+  observedAt: UnixMs;
+}
+
+/** scrap.tf's price list row for one base SKU, valued with the current key price (spec S3). */
+export interface ScraptfListRow {
+  sku: string;
+  name: string;
+  /**
+   * What scrap.tf charges ("Price to buy"): keys and metal as listed, then valued. null for a "Sold out"
+   * row that shows no price (spec S3 has these non-null; the saved list really omits them, so they may be null).
+   */
+  sellsKeys: number | null;
+  sellsScrapRaw: Scrap | null;
+  sellsScrap: Scrap | null;
+  /** What scrap.tf pays ("Price we pay"); null when the list showed none. */
+  paysKeys: number | null;
+  paysScrapRaw: Scrap | null;
+  paysScrap: Scrap | null;
+  stock: number | null;
+  stockLimit: number | null;
+  /** scrap.tf is at its limit, so it will not buy more right now (as of the saved list). */
+  full: boolean;
+  observedAt: UnixMs;
+}
+
+/** 'scraptf.listStatus': the saved list as a whole plus the import switches the card needs (U1). */
+export interface ScraptfListStatus {
+  /** List rows stored. */
+  items: number;
+  /** Newest / oldest row observedAt; null when empty. */
+  newestAt: UnixMs | null;
+  oldestAt: UnixMs | null;
+  /** Saved list pages behind the rows (distinct import batches; /items may be split into /items/<n>). */
+  pages: number;
+  /** settings.import.enabled and acknowledged (R10). */
+  importEnabled: boolean;
+  /** settings.import.watchFolder as configured (the path the card shows and copies). */
+  watchFolder: string | null;
+  /** The folder watch as it runs: a missing folder or a failed OS watch reads false. */
+  watchActive: boolean;
+  /** The watcher's last error (shown by the card's "Watch error" state); null when fine or not watching. */
+  watchError: string | null;
 }
 
 export interface ImportResult {
@@ -813,6 +1074,13 @@ export interface ImportResult {
   stored: number;
   skipped: { reason: string; title: string }[];
   warnings: string[];
+  /**
+   * F14, saved scrap.tf/items pages only: price list rows this page wrote, out-of-stock rows included
+   * (they are skipped as prices but kept on the list). 0 when a newer saved list already had them all.
+   */
+  listRows?: number;
+  /** F15: the scrap.tf page recognised (ImportBatch.bank of `batchId`); null when not recognised. Absent from 0.4 results. */
+  bank?: ScraptfBank | null;
 }
 
 /** Items per category (absent = none). */
@@ -831,6 +1099,507 @@ export interface ImportBatch {
    * id, so the price rows cannot say this afterwards. null for batches imported before 0.3.
    */
   categories?: CategoryCounts | null;
+  /**
+   * F15: the scrap.tf page this batch was saved from, as the parser recognised it (ScrapTfParseResult.bank),
+   * fixed at import time (schema V5). null when the page was not recognised and for batches imported
+   * before 0.5: coverage then falls back to the majority-category rule (bankPageIndexOf).
+   */
+  bank: ScraptfBank | null;
+}
+
+// ---------------------------------------------------------------------------
+// scrap.tf banks (F15): one summary per saved scrap.tf page, built from local data only
+// ---------------------------------------------------------------------------
+
+/** One of a bank's best flips: an opportunity whose input is an imported price from that bank. */
+export interface ScraptfBankFlip {
+  sku: string;
+  name: string;
+  profitScrap: Scrap;
+  costScrap: Scrap;
+  revenueScrap: Scrap;
+  confidenceLevel: ConfidenceLevel;
+}
+
+/** An item worth looking for on a bank page: buyers pay well and the user has no scrap.tf price for it yet. */
+export interface ScraptfBankLookFor {
+  sku: string;
+  name: string;
+  /** The Live market row's "Pay up to" (> 0). */
+  maxCostScrap: Scrap;
+  revenueScrap: Scrap;
+}
+
+/** 'scraptf.banks': one bank page (or the /items list) and what the user's saved copies of it hold. */
+export interface ScraptfBankSummary {
+  bank: ScraptfBank;
+  /** SCRAPTF_BANKS label and static URL (the user's browser opens it through links.open; never fetched). */
+  label: string;
+  url: string;
+  /** Newest saved page of this bank (fileMtime, else importedAt), null when never saved. */
+  lastSavedAt: UnixMs | null;
+  /** Saved pages (import batches) of this bank behind its current data. */
+  pages: number;
+  /** Items on the newest save(s) of this bank, and how many were in stock. */
+  items: number;
+  inStock: number;
+  /** Profitable opportunities whose input is an imported price from this bank, and their summed profit. */
+  flips: number;
+  flipProfitScrap: Scrap;
+  /** Up to 3 of those, most profit first. */
+  top: ScraptfBankFlip[];
+  /** Live market rows of the categories this bank sells that you have no scrap.tf price for yet: what to look for there. */
+  unchecked: number;
+  /** Up to 5 of those, highest Pay up to first. */
+  lookFor: ScraptfBankLookFor[];
+  /**
+   * F17: what changed between this bank's two newest kept bank-stock saves (BankStock.whatsNew), for the
+   * card's "Since your save 3 h ago: 5 new (2 flips) · 3 gone · 2 cheaper · 1 pricier". null when the bank
+   * has fewer than 2 saves (one save: "First save…"; never saved: lastSavedAt is null too).
+   */
+  whatsNew: ScraptfBankWhatsNew | null;
+}
+
+/** ScraptfBankSummary.whatsNew (F17): BankStockResult.counts' change counts, and the previous save's time. */
+export interface ScraptfBankWhatsNew {
+  new: number;
+  /** 'new' rows whose verdict is 'flip' (BankStockResult.counts.newFlips). */
+  newFlips: number;
+  gone: number;
+  cheaper: number;
+  pricier: number;
+  /** The previous save's time (BankStockResult.previousSavedAt): "Since your save 3 h ago". */
+  since: UnixMs | null;
+}
+
+// ---------------------------------------------------------------------------
+// scrap.tf bank stock (F17): every item on each saved bank page, and what changed between the
+// user's two newest saves of it. Snapshots of pages the user saved (R10); nothing is fetched (R1).
+// ---------------------------------------------------------------------------
+
+/**
+ * A row's change between a bank's newest save and its previous save (matched by SKU + extras key):
+ * new: on sale now, absent or not on sale before; gone: on sale before, absent or not on sale now;
+ * cheaper / pricier: on sale in both, raw keys + metal differ (direction at the current key price);
+ * null: unchanged, or the bank has only one save ("first save": nothing is new).
+ * "On sale" = a price to buy and stock null or above 0 (bankStockOnSale in src/shared/bankStock.ts).
+ */
+export type BankStockChange = 'new' | 'cheaper' | 'pricier' | 'gone' | null;
+export const BANK_STOCK_CHANGES: readonly Exclude<BankStockChange, null>[] = ['new', 'cheaper', 'pricier', 'gone'];
+
+/** profitStatus of the row's profit: profitable is 'flip', no revenue 'no-buyers', anything else 'over'. */
+export type BankStockVerdict = 'flip' | 'over' | 'no-buyers';
+
+/**
+ * F20 adds 'long-listed' (on sale, listed for at least BankStockQuery.minListedMs, default 24 h) and
+ * 'dropped' (on sale and cheaper than when its current run of saves began: changeSinceListed below 0).
+ */
+export type BankStockFilter = 'all' | 'new' | 'flips' | 'changed' | 'gone' | 'long-listed' | 'dropped';
+export const BANK_STOCK_FILTERS: readonly BankStockFilter[] = ['all', 'new', 'flips', 'changed', 'gone', 'long-listed', 'dropped'];
+
+/**
+ * F20 adds 'listed' (how long it has been listed: listedSince, longest first by default) and 'sinceListed'
+ * (changeSinceListed.pct, the biggest drop first by default).
+ */
+export type BankStockSort = 'profit' | 'margin' | 'cost' | 'name' | 'payUpTo' | 'listed' | 'sinceListed';
+export const BANK_STOCK_SORTS: readonly BankStockSort[] = ['profit', 'margin', 'cost', 'name', 'payUpTo', 'listed', 'sinceListed'];
+
+/**
+ * One stored bank_stock row (schema V6) as the repo reads it: raw keys + metal, nothing valued.
+ * `sku` is the canonical base SKU (paint moved into the extras); `specialKey` is the import's extras
+ * key ('' for a clean copy), so painted and spelled copies stay separate rows. A row with no price to
+ * buy (a "Sold out" /items row) has costKeys and costScrap null.
+ */
+export interface BankStockStored {
+  sku: string;
+  specialKey: string;
+  name: string;
+  costKeys: number | null;
+  costScrap: Scrap | null;
+  stock: number | null;
+  assetId: string | null;
+}
+
+/** One save (import batch) of a bank in bank_stock (Repo.bankStockSaves), newest first. */
+export interface BankStockSave {
+  batchId: number;
+  /** The batch's fileMtime when known, else its importedAt (batchSavedAt). */
+  savedAt: UnixMs;
+  /** bank_stock rows of this save (every card or row with a SKU, sold out included). */
+  items: number;
+  /**
+   * Which page of the bank it is (bank_stock.page: '/items/2', '/unusuals/378'; '' when not known): a
+   * save is only ever compared with an earlier save of the same page.
+   */
+  page: string;
+}
+
+/** One item of a bank's newest save (or, for 'gone', of its previous save), joined to live backpack.tf data. */
+export interface BankStockRow {
+  /** Canonical base SKU (paint dropped; it is in the extras). The buy side is read for it. */
+  sku: string;
+  /** `${sku}|${specialKey}` (bankStockKey): unique within a result; React keys, selection. */
+  key: string;
+  name: string;
+  category: Category;
+  /** Paint, spells, parts, sheen, killstreaker or a name/description tag: the ceiling is for a clean copy. */
+  hasExtras: boolean;
+  /** The price as saved (a gone row: its last price, from the previous save), then valued at the current key price. */
+  costKeys: number;
+  costScrapRaw: Scrap;
+  costScrap: Scrap;
+  /** Stock on the newest save (null: not shown; a gone row: 0 when still listed sold out, else null). */
+  stock: number | null;
+  change: BankStockChange;
+  /** The previous save's price at the current key price; null without a previous save or price. */
+  previousCostScrap: Scrap | null;
+  /** The previous save's stock; null without a previous save, or when it showed none. Stock n to m. */
+  previousStock: number | null;
+  /** From the Live market entry of the base SKU (MarketIndex.entryFor); null / 0 without buyers. */
+  revenueScrap: Scrap | null;
+  revenueOrder: OrderSummary | null;
+  buyerCount: number;
+  /** Pay up to (maxCostFor of the revenue). */
+  maxCostScrap: Scrap | null;
+  /** revenue - cost - friction; null without revenue. */
+  profitScrap: Scrap | null;
+  /** profit / cost; null without profit or for a free item. */
+  margin: number | null;
+  verdict: BankStockVerdict;
+  /** The market entry's buy-side confidence; null without an entry. */
+  confidence: number | null;
+  confidenceLevel: ConfidenceLevel | null;
+  /**
+   * F20: the start of the current unbroken run of this bank's saves that list it on sale (ScraptfKeyRun,
+   * from the history of the user's saves); null when the newest save does not list it on sale (a gone row)
+   * or no history is known. "Listed 2 d 4 h".
+   */
+  listedSince: UnixMs | null;
+  /** F20: the oldest retained save of this bank listing it on sale; null when unknown. */
+  firstSeenAt: UnixMs | null;
+  /** F20: the price now against the price when the current run began (raw keys + metal, valued at the current key price); null without a run. */
+  changeSinceListed: ScraptfPriceChange | null;
+}
+
+/** 'scraptf.bankStock' (and opps.exportCsv kind 'bankStock'). */
+export interface BankStockQuery {
+  bank: ScraptfBank;
+  /** Default 'all': in stock on the newest save. Gone rows come back only with 'gone'. */
+  filter?: BankStockFilter;
+  /** F20, filter 'long-listed' (and counts.longListed): listed at least this long; default SCRAPTF_LONG_LISTED_MS (24 h). */
+  minListedMs?: number;
+  /** Words matched against name and SKU, like the Live market search. */
+  search?: string;
+  /** Default 'profit'. */
+  sort?: BankStockSort;
+  /** Default desc ('name': asc). Missing values sort last either way. */
+  dir?: 'asc' | 'desc';
+  /** 1..BANK_STOCK_MAX_LIMIT, default BANK_STOCK_DEFAULT_LIMIT. */
+  limit?: number;
+  offset?: number;
+}
+
+export interface BankStockCounts {
+  /** Rows on the newest save (sold out included). */
+  items: number;
+  /** Of those, on sale (bankStockOnSale): the 'all' chip. */
+  inStock: number;
+  new: number;
+  gone: number;
+  cheaper: number;
+  pricier: number;
+  /** On sale with verdict 'flip'. */
+  flips: number;
+  /** 'new' with verdict 'flip'. */
+  newFlips: number;
+  /** F20: the 'long-listed' chip (on sale, listed at least the query's minListedMs). */
+  longListed: number;
+  /** F20: the 'dropped' chip (on sale, cheaper than when its current run began). */
+  dropped: number;
+}
+
+export interface BankStockResult {
+  bank: ScraptfBank;
+  /** SCRAPTF_BANKS label and static URL (opened only through links.open; never fetched). */
+  label: string;
+  url: string;
+  /** The newest save's time; null when the bank has no kept save. */
+  savedAt: UnixMs | null;
+  /**
+   * The previous save's time; null with fewer than 2 saves of a page (no change columns, "first save").
+   * With several pages of the bank saved, the earliest such save among them: every change shown is since then.
+   */
+  previousSavedAt: UnixMs | null;
+  /** Kept saves of this bank (at most BANK_STOCK_KEEP_SAVES per page). */
+  saves: number;
+  /**
+   * Pages of the bank the rows come from (/items and /items/2, say: each page's newest save, each compared
+   * with its own previous save), and the oldest of those newest saves. Absent with one page.
+   */
+  pages?: number;
+  oldestSavedAt?: UnixMs | null;
+  /** Over the whole bank, whatever the filter and search: each chip's count. */
+  counts: BankStockCounts;
+  /** The page of matching rows, in the query's order. */
+  rows: BankStockRow[];
+  /** Matching rows before paging. */
+  total: number;
+  keyPrice: KeyPriceState | null;
+  generatedAt: UnixMs;
+}
+
+export interface ScraptfBanksResult {
+  /** One per SCRAPTF_BANKS entry, in that order (never-saved banks included, with empty data). */
+  banks: ScraptfBankSummary[];
+  /** settings.import.enabled and acknowledged (R10). */
+  importEnabled: boolean;
+  /** The folder watch as it runs (ScraptfListStatus.watchActive). */
+  watchActive: boolean;
+  generatedAt: UnixMs;
+}
+
+// ---------------------------------------------------------------------------
+// scrap.tf history (F20): the sequence of the user's saves of each bank page, read as price history,
+// time listed and a change feed. Only pages the user saved (R10); nothing is fetched (R1). History has
+// gaps between saves and only covers pages the user saved.
+// ---------------------------------------------------------------------------
+
+/**
+ * One change between a page's save and the previous save of that page (scraptfEventsOf, F17's matching
+ * and rules): new / gone / cheaper / pricier as diffBankStock decides them, except that a 'new' row the
+ * bank listed in an earlier save (sold out, or gone and back) is 'restocked'; 'stock' is a stock count
+ * change alone (both counts known, price unchanged).
+ */
+export type ScraptfChangeKind = 'new' | 'gone' | 'cheaper' | 'pricier' | 'restocked' | 'stock';
+export const SCRAPTF_CHANGE_KINDS: readonly ScraptfChangeKind[] = ['new', 'gone', 'cheaper', 'pricier', 'restocked', 'stock'];
+
+/** One scraptf_events row (schema V7) as written at import: raw keys + metal, nothing valued. */
+export interface NewScraptfEvent {
+  /** The save time of the save that showed the change (its batch's fileMtime, else importedAt). */
+  at: UnixMs;
+  bank: ScraptfBank;
+  /** bank_stock.page of that save ('/buy/hats', '/items/2'; '' when unknown). */
+  page: string;
+  /** The base SKU (paint in specialKey), as bank_stock.sku. */
+  sku: string;
+  /** bank_stock.special_key ('' = a clean copy). */
+  specialKey: string;
+  name: string;
+  kind: ScraptfChangeKind;
+  /** The previous save's price (null: absent or no price, e.g. 'new'). */
+  fromKeys: number | null;
+  fromScrap: Scrap | null;
+  /** The new save's price (null: absent or no price, e.g. 'gone'). */
+  toKeys: number | null;
+  toScrap: Scrap | null;
+  fromStock: number | null;
+  toStock: number | null;
+  /** The import batch of the new save. */
+  batchId: number;
+}
+
+export interface ScraptfEventStored extends NewScraptfEvent {
+  /** scraptf_events.id: grows with every write, so 'beforeId' pages the feed. */
+  id: number;
+}
+
+/**
+ * 'scraptf.changes' / ScraptfItemHistory.events: a stored event valued at the current key price and
+ * joined to the live backpack.tf side of its base SKU (MarketIndex.entryFor), so a 'cheaper' event that
+ * makes a flip shows as one.
+ */
+export interface ScraptfChangeEvent extends ScraptfEventStored {
+  /** bankStockKey(sku, specialKey). */
+  key: string;
+  /** specialKey is not '' (paint, spells...): Sells for and Pay up to are for a clean copy. */
+  hasExtras: boolean;
+  /** from/to valued at the current key price; null when that side had no price. */
+  fromValueScrap: Scrap | null;
+  toValueScrap: Scrap | null;
+  /** to - from (both valued now); null unless both sides have a price. */
+  deltaScrap: Scrap | null;
+  /** delta / from; null unless both sides have a price and from > 0. */
+  pct: number | null;
+  /** Live backpack.tf revenue (Sells for) and Pay up to of the base SKU now; null without an eligible buyer. */
+  revenueScrap: Scrap | null;
+  maxCostScrap: Scrap | null;
+  /** toValueScrap is at or under maxCostScrap now: the "Flip" pill. */
+  flip: boolean;
+}
+
+/** 'scraptf.changes' params (zod in rpcHandlers): newest first, paged by id. */
+export interface ScraptfChangesQuery {
+  bank?: ScraptfBank;
+  kinds?: ScraptfChangeKind[];
+  /** A SKU; its base SKU's events (every copy) are returned. */
+  sku?: string;
+  /** Only events with a smaller id ("Load older"). */
+  beforeId?: number;
+  /** 1..SCRAPTF_CHANGES_MAX_LIMIT (500), default SCRAPTF_CHANGES_DEFAULT_LIMIT (100). */
+  limit?: number;
+}
+
+/** One retained save of the item's bank that covered it (ScraptfItemHistory.points). */
+export interface ScraptfHistoryPoint {
+  at: UnixMs;
+  bank: ScraptfBank;
+  /** The price as saved; 0 when `listed` is false (the chart draws a gap there). */
+  costKeys: number;
+  costScrapRaw: Scrap;
+  /** Valued at the current key price; 0 when `listed` is false. */
+  costScrap: Scrap;
+  stock: number | null;
+  /** On sale on that save (bankStockOnSale). False: absent, sold out or no price. */
+  listed: boolean;
+}
+
+/** A price then against the price now, both from raw keys + metal valued at the current key price. */
+export interface ScraptfPriceChange {
+  fromScrap: Scrap;
+  toScrap: Scrap;
+  /** to - from: below 0 is cheaper now. */
+  deltaScrap: Scrap;
+  /** delta / from; null when from is 0. */
+  pct: number | null;
+  /** When the earlier price was saved. */
+  since: UnixMs;
+}
+
+/** 'scraptf.itemHistory': one copy of an item across the user's retained saves of its bank. */
+export interface ScraptfItemHistory {
+  /** The base SKU asked for (paint moved into the special key). */
+  sku: string;
+  /** The special key read ('' = a clean copy). */
+  specialKey: string;
+  name: string;
+  /**
+   * The bank the history is read from: the bank whose newest observation lists it (a bank page before the
+   * /items list, then the newest), else the one that listed it last; null when no retained save lists it.
+   */
+  bank: ScraptfBank | null;
+  /** Oldest first: one per retained save of that bank that covered the item (listed=false when it did not list it). */
+  points: ScraptfHistoryPoint[];
+  /** Oldest retained save listing it on sale. */
+  firstSeenAt: UnixMs | null;
+  /** Start of the current unbroken run of saves listing it (null when the newest save does not list it). */
+  listedSince: UnixMs | null;
+  lastSeenAt: UnixMs | null;
+  /** The newest save, when it lists it on sale. */
+  current: { costScrap: Scrap; stock: number | null; bank: ScraptfBank } | null;
+  /** Now against the newest save at or before now - 1 h / 24 h / 7 d (null when that save did not list it), and against the run's start. */
+  change: { h1: ScraptfPriceChange | null; h24: ScraptfPriceChange | null; d7: ScraptfPriceChange | null; listed: ScraptfPriceChange | null };
+  /** This copy's change feed, newest first, at most SCRAPTF_ITEM_EVENTS (50). */
+  events: ScraptfChangeEvent[];
+  keyPrice: KeyPriceState | null;
+  generatedAt: UnixMs;
+}
+
+/**
+ * The runs index (BankStockRow's listedSince fields, MarketRow.scraptfListedSince): one copy (bankStockKey)
+ * of one bank across its retained saves, the bank's pages read together (scraptfRunsOf).
+ */
+export interface ScraptfKeyRun {
+  key: string;
+  sku: string;
+  specialKey: string;
+  /** The first retained save listing it at all (on sale or sold out): S2's "seen before". */
+  seenAt: UnixMs;
+  /** Oldest / newest retained save listing it on sale; null when never on sale. */
+  firstSeenAt: UnixMs | null;
+  lastSeenAt: UnixMs | null;
+  /** Start of the current run; null when its newest observation is not on sale. */
+  listedSince: UnixMs | null;
+  /** The raw price on the save that started the current run (changeSinceListed's "from"). */
+  runStart: { keys: number; scrap: Scrap } | null;
+  /** The raw price on its newest observation, when on sale. */
+  current: { keys: number; scrap: Scrap; stock: number | null } | null;
+}
+
+// ---------------------------------------------------------------------------
+// Live check (F16): copy an item while browsing scrap.tf, see its flip at once.
+// The only input is text the user copied (read locally by main) or typed; the
+// app never contacts scrap.tf or reads the browser (R1, R3).
+// ---------------------------------------------------------------------------
+
+/** item: one TF2 item was resolved; not-item: nothing matched confidently; refused: never parsed (markup, a list, a secret, too long). */
+export type CheckStatus = 'item' | 'not-item' | 'refused';
+export const CHECK_STATUSES: readonly CheckStatus[] = ['item', 'not-item', 'refused'];
+
+/** Who asked: the check hotkey (clipboard read once), the opt-in clipboard watcher, or text typed or pasted in the dashboard. */
+export type CheckSource = 'hotkey' | 'watch' | 'manual';
+export const CHECK_SOURCES: readonly CheckSource[] = ['hotkey', 'watch', 'manual'];
+
+/**
+ * F19 'check.arm': the item the user opened on scrap.tf from the Live market (or the drawer, or the item
+ * menu). Main keeps it in memory for CHECK_ARM_MS, and the hotkey and the watcher then pass `hint` with
+ * 'check.text', so a copied price on its own is checked as this item. The name is never logged or stored.
+ */
+export interface CheckArm {
+  /** A SKU (the service's SKU rule; lower-cased). */
+  sku: string;
+  /** The item name the page copied for scrap.tf's search, at most CHECK_ARM_NAME_MAX characters. */
+  name: string;
+}
+
+/** F19 'check.text' hint, passed by main only while an arm is unexpired: price-only text is checked as this SKU. */
+export interface CheckHint {
+  sku: string;
+}
+
+/**
+ * flip: profitable per profitStatus against the checked price; over: a price and buyers, not profitable;
+ * no-buyers: a price but no eligible buy order; no-price: the item is known but has no scrap.tf price
+ * (the popup then leads with Pay up to).
+ */
+export type CheckVerdict = 'flip' | 'over' | 'no-buyers' | 'no-price';
+
+/** Where the compared scrap.tf price came from: the copied text, the saved scrap.tf list, a typed price, an imported page. */
+export type CheckPriceSource = 'clipboard' | 'list' | 'typed' | 'import';
+
+export interface CheckPrice {
+  keys: number;
+  /** The metal part in scrap, as copied or listed (keys not included). */
+  scrapRaw: Scrap;
+  /** keys valued at CheckResult.keyScrap, plus scrapRaw. */
+  valueScrap: Scrap;
+  source: CheckPriceSource;
+  /** checkedAt for 'clipboard', else the list row's or the stored price's observedAt. */
+  observedAt: UnixMs;
+}
+
+/** One live check ('check.text'). Holds the resolved item only: the checked text itself is never kept. */
+export interface CheckResult {
+  /** Increasing per service process: a React key, and how a 'check.done' push matches a 'check.recent' row. */
+  id: number;
+  status: CheckStatus;
+  source: CheckSource;
+  /** User-facing, for not-item and refused (and an item note such as "Closest match only"); null otherwise. */
+  reason: string | null;
+  sku: string | null;
+  name: string | null;
+  category: Category | null;
+  /** The scrap.tf price compared: the copied text first, else the saved scrap.tf list, else the user's newest typed/imported price. */
+  price: CheckPrice | null;
+  /** From a copied /items row's "we pay" column, else the saved list row (valued at keyScrap). */
+  scraptfPaysScrap: Scrap | null;
+  stock: number | null;
+  stockLimit: number | null;
+  /** The saved list row's observedAt when the list supplied price, pays or stock; null otherwise. */
+  listAt: UnixMs | null;
+  /** As ItemDetail.revenue (best/cons/instant, order, maxCostScrap = Pay up to, eligibleCount); null for non-items. */
+  revenue: ItemRevenue | null;
+  /** revenue - price - friction; null without both. */
+  profitScrap: Scrap | null;
+  margin: number | null;
+  /** null unless status is 'item'. */
+  verdict: CheckVerdict | null;
+  /** The Live market entry's buy-side confidence when it has one, else from the revenue order; null for non-items. */
+  confidence: number | null;
+  confidenceLevel: ConfidenceLevel | null;
+  links: LinkSpec[];
+  /** The key value the money above was valued at (the engine's), so a popup formats without another call. */
+  keyScrap: Scrap | null;
+  checkedAt: UnixMs;
 }
 
 // ---------------------------------------------------------------------------
@@ -1000,6 +1769,18 @@ export interface ProfitSettings {
   suspectMargin: number;
 }
 
+/** Settings.check (F16 Live check). */
+export interface CheckSettings {
+  /** Global accelerator that checks the clipboard once; '' turns it off. Never the quick-entry hotkey. */
+  hotkey: string;
+  /** Opt-in clipboard watcher (off by default): main polls readText() locally about every 700 ms. */
+  watchClipboard: boolean;
+  /** The watcher shows a desktop notification for flips (notifications.enabled and silent still apply). */
+  notifyFlips: boolean;
+  /** Show the check popup window. */
+  popup: boolean;
+}
+
 export interface PermissionRecord {
   grantor: string;
   contact: string;
@@ -1028,6 +1809,14 @@ export interface Settings {
     acknowledgedAt: UnixMs | null;
     watchFolder: string | null;
     permission: PermissionRecord | null;
+    /**
+     * F20 re-save reminders: a desktop notification per bank not saved for this many minutes (0-1440;
+     * 0 = off, the default). Only while import is enabled and the network is not paused; never for a
+     * bank never saved. The app cannot refresh scrap.tf itself; this only reminds the user to save it.
+     */
+    resaveReminderMin: number;
+    /** F20: the banks reminded of; [] (the default) = every bank saved at least once. */
+    resaveBanks: ScraptfBank[];
   };
   notifications: {
     enabled: boolean;
@@ -1040,8 +1829,12 @@ export interface Settings {
     silent: boolean;
     /** "Sell: <name>" when a held item becomes sellable at a profit (F11). */
     holdings: boolean;
+    /** F17: "New on scrap.tf (<Bank>): <name>" when a page the user saved shows new items that are flips. */
+    newOnScraptf: boolean;
   };
   app: { startAtLogin: boolean; startHidden: boolean; closeToTray: boolean; quickEntryHotkey: string };
+  /** Live check (F16): the check hotkey, the opt-in clipboard watcher and the popup. */
+  check: CheckSettings;
   networkPaused: boolean;
   /** Steam IDs whose buy orders are never used. */
   blocklist: string[];

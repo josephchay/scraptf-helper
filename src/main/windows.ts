@@ -1,11 +1,13 @@
-// Dashboard and quick-entry windows, plus the hardening applied to every
-// webContents and to the default session.
+// Dashboard, quick-entry and live check popup windows, plus the hardening
+// applied to every webContents and to the default session.
 
 import { BrowserWindow, screen, type Session, type WebContents, type WebPreferences } from 'electron';
 import type { Logger } from '../service/contracts';
 import type { PushContract, PushEvent } from '../shared/rpc';
+import type { CheckResult } from '../shared/types';
 import {
   APP_ORIGIN,
+  CHECK_URL,
   DASHBOARD_URL,
   isAllowedRendererRequest,
   isAppNavigationUrl,
@@ -36,6 +38,27 @@ export interface WindowManagerOptions {
 export const MAX_CRASH_RELOADS = 3;
 export const CRASH_RELOAD_WINDOW_MS = 60_000;
 
+/** The live check popup (F16): small, in the bottom-right corner of the cursor's display. */
+export const CHECK_POPUP_WIDTH = 380;
+export const CHECK_POPUP_HEIGHT = 220;
+/** Gap between the popup and the work area's edges (clear of the taskbar, which the work area excludes). */
+export const CHECK_POPUP_MARGIN = 16;
+
+interface Area {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+/** Top-left corner that puts a `w` x `h` window in the bottom-right of `area`, `margin` in from its edges. */
+export function checkPopupPosition(area: Area, w: number, h: number, margin = CHECK_POPUP_MARGIN): { x: number; y: number } {
+  return {
+    x: Math.round(Math.max(area.x, area.x + area.width - w - margin)),
+    y: Math.round(Math.max(area.y, area.y + area.height - h - margin)),
+  };
+}
+
 export interface WindowManager {
   /** Shows (creating if needed) and focuses the dashboard. */
   showDashboard(): BrowserWindow;
@@ -43,9 +66,23 @@ export interface WindowManager {
   ensureDashboard(show: boolean): BrowserWindow;
   dashboard(): BrowserWindow | null;
   toggleQuickEntry(): void;
-  /** With a SKU, pushes 'ui.quickPrefill' to the quick-entry page once it has loaded (the latest SKU wins). */
-  showQuickEntry(prefillSku?: string): void;
+  /**
+   * With a SKU, pushes 'ui.quickPrefill' to the quick-entry page once it has loaded (the latest SKU wins).
+   * `prefillPrice` (F16, the check popup's Quick entry…) rides along as text for the price field.
+   */
+  showQuickEntry(prefillSku?: string, prefillPrice?: string): void;
   hideQuickEntry(): void;
+  /**
+   * F16: shows the live check popup (created on first use) in the bottom-right of the cursor's display
+   * and pushes 'ui.checkShow' with `result` once its page has loaded (the latest result wins). `focus`
+   * true (the hotkey: the user asked) shows and focuses it; false (the clipboard watcher) uses
+   * showInactive so it never takes focus from the user's browser. The page hides itself (its 10 s
+   * timer, Esc) through 'app.hideWindow'; nothing here hides it on blur.
+   */
+  showCheck(result: CheckResult, opts: { focus: boolean }): void;
+  hideCheck(): void;
+  /** The popup window when it exists (main's hotkey and watcher code; tests). */
+  checkWindow(): BrowserWindow | null;
   broadcast<E extends PushEvent>(event: E, payload: PushContract[E]): void;
   /** Delivers to the dashboard after its page has finished loading. */
   sendToDashboard<E extends PushEvent>(event: E, payload: PushContract[E]): void;
@@ -133,7 +170,14 @@ export function createWindowManager(opts: WindowManagerOptions): WindowManager {
   let quickWin: BrowserWindow | null = null;
   // A prefill asked for before the quick-entry page finished loading is sent on 'did-finish-load'.
   let quickLoaded = false;
-  let quickPrefill: string | null = null;
+  let quickPrefill: PushContract['ui.quickPrefill'] | null = null;
+  // F16 check popup: a result shown before its page loaded is sent on 'did-finish-load'; a show
+  // asked for before the first paint waits for ready-to-show ('focus' wins over 'inactive').
+  let checkWin: BrowserWindow | null = null;
+  let checkLoaded = false;
+  let checkPainted = false;
+  let checkPending: CheckResult | null = null;
+  let checkWant: 'focus' | 'inactive' | null = null;
   const now = opts.now ?? Date.now;
 
   function live(win: BrowserWindow | null): win is BrowserWindow {
@@ -298,9 +342,9 @@ export function createWindowManager(opts: WindowManagerOptions): WindowManager {
     win.webContents.on('did-finish-load', () => {
       if (quickWin !== win) return;
       quickLoaded = true;
-      const sku = quickPrefill;
+      const prefill = quickPrefill;
       quickPrefill = null;
-      if (sku !== null) send(win, 'ui.quickPrefill', { sku });
+      if (prefill !== null) send(win, 'ui.quickPrefill', prefill);
     });
     win.webContents.on('render-process-gone', (_e, details) => {
       log.error(`quick-entry renderer gone: ${details.reason}`, { exitCode: details.exitCode });
@@ -332,7 +376,7 @@ export function createWindowManager(opts: WindowManagerOptions): WindowManager {
     }
   }
 
-  function showQuickEntry(prefillSku?: string): void {
+  function showQuickEntry(prefillSku?: string, prefillPrice?: string): void {
     const { win, fresh } = ensureQuick();
     centreOnCursorDisplay(win);
     const reveal = () => {
@@ -343,13 +387,125 @@ export function createWindowManager(opts: WindowManagerOptions): WindowManager {
     if (fresh) win.once('ready-to-show', reveal);
     else reveal();
     const sku = typeof prefillSku === 'string' && prefillSku !== '' ? prefillSku : null;
+    const price = typeof prefillPrice === 'string' && prefillPrice !== '' ? prefillPrice : null;
+    // Only set keys: a prefill without a price stays exactly { sku }.
+    const prefill: PushContract['ui.quickPrefill'] | null = sku === null ? null : price === null ? { sku } : { sku, price };
     // The latest show wins: a plain show (hotkey) drops a prefill still waiting for the page.
-    if (!quickLoaded) quickPrefill = sku;
-    else if (sku !== null) send(win, 'ui.quickPrefill', { sku });
+    if (!quickLoaded) quickPrefill = prefill;
+    else if (prefill !== null) send(win, 'ui.quickPrefill', prefill);
   }
 
   function hideQuickEntry(): void {
     if (live(quickWin) && quickWin.isVisible()) quickWin.hide();
+  }
+
+  // ----- live check popup (F16) -----
+
+  function forgetCheck(win: BrowserWindow): void {
+    if (checkWin !== win) return;
+    checkWin = null;
+    checkLoaded = false;
+    checkPainted = false;
+    checkPending = null;
+    checkWant = null;
+  }
+
+  function revealCheck(win: BrowserWindow, how: 'focus' | 'inactive'): void {
+    if (win.isDestroyed()) return;
+    if (how === 'focus') {
+      win.show();
+      win.focus();
+    } else {
+      // Never takes focus: the user keeps typing in their browser.
+      win.showInactive();
+    }
+  }
+
+  function ensureCheck(): BrowserWindow {
+    if (live(checkWin)) return checkWin;
+    const win = new BrowserWindow({
+      width: CHECK_POPUP_WIDTH,
+      height: CHECK_POPUP_HEIGHT,
+      show: false,
+      frame: false,
+      resizable: false,
+      minimizable: false,
+      maximizable: false,
+      fullscreenable: false,
+      alwaysOnTop: true,
+      skipTaskbar: true,
+      title: 'Live check',
+      backgroundColor: DARK_BACKGROUND,
+      icon: opts.iconPath,
+      // Same sandbox, isolation, preload and CSP as every window; only the kind differs.
+      webPreferences: windowWebPreferences('check', opts.preloadPath, opts.devTools),
+    });
+    win.setAlwaysOnTop(true, 'floating');
+    checkWin = win;
+    checkLoaded = false;
+    checkPainted = false;
+    win.once('ready-to-show', () => {
+      if (checkWin !== win) return;
+      checkPainted = true;
+      const want = checkWant;
+      checkWant = null;
+      if (want) revealCheck(win, want);
+    });
+    win.on('close', (event) => {
+      if (!opts.isQuitting()) {
+        event.preventDefault();
+        win.hide();
+      }
+    });
+    win.on('closed', () => forgetCheck(win));
+    win.webContents.on('did-start-navigation', (event) => {
+      if (checkWin === win && event.isMainFrame && !event.isSameDocument) checkLoaded = false;
+    });
+    win.webContents.on('did-finish-load', () => {
+      if (checkWin !== win) return;
+      checkLoaded = true;
+      const result = checkPending;
+      checkPending = null;
+      if (result !== null) send(win, 'ui.checkShow', result);
+    });
+    win.webContents.on('render-process-gone', (_e, details) => {
+      log.error(`check popup renderer gone: ${details.reason}`, { exitCode: details.exitCode });
+      if (details.reason === 'clean-exit' || opts.isQuitting()) return;
+      // As quick entry: the next check builds a fresh window (a check is the user's copy or hotkey, so no loop).
+      forgetCheck(win);
+      setImmediate(() => {
+        if (!win.isDestroyed()) win.destroy();
+      });
+    });
+    win.loadURL(CHECK_URL).catch((err: unknown) => log.error('check popup failed to load', err));
+    return win;
+  }
+
+  function placeCheck(win: BrowserWindow): void {
+    try {
+      const area = screen.getDisplayNearestPoint(screen.getCursorScreenPoint()).workArea;
+      const [w = CHECK_POPUP_WIDTH, h = CHECK_POPUP_HEIGHT] = win.getSize();
+      const { x, y } = checkPopupPosition(area, w, h);
+      win.setPosition(x, y);
+    } catch {
+      // Keep the last position; a popup somewhere beats none.
+    }
+  }
+
+  function showCheck(result: CheckResult, showOpts: { focus: boolean }): void {
+    const win = ensureCheck();
+    placeCheck(win);
+    const how = showOpts.focus ? 'focus' : 'inactive';
+    if (checkPainted) revealCheck(win, how);
+    else checkWant = checkWant === 'focus' ? 'focus' : how;
+    // The latest result wins, before and after the page has loaded.
+    if (!checkLoaded) checkPending = result;
+    else send(win, 'ui.checkShow', result);
+  }
+
+  function hideCheck(): void {
+    if (live(checkWin) && checkWin.isVisible()) checkWin.hide();
+    checkWant = null;
   }
 
   return {
@@ -362,9 +518,14 @@ export function createWindowManager(opts: WindowManagerOptions): WindowManager {
     },
     showQuickEntry,
     hideQuickEntry,
+    showCheck,
+    hideCheck,
+    checkWindow: () => (live(checkWin) ? checkWin : null),
     broadcast(event, payload) {
       send(dashboardWin, event, payload);
       send(quickWin, event, payload);
+      // The popup follows settings (theme) and the price sheet like any page.
+      send(checkWin, event, payload);
     },
     sendToDashboard(event, payload) {
       if (live(dashboardWin) && dashboardLoaded) send(dashboardWin, event, payload);
@@ -378,7 +539,8 @@ export function createWindowManager(opts: WindowManagerOptions): WindowManager {
       if (win && !win.isDestroyed()) win.hide();
     },
     destroyAll() {
-      for (const win of [quickWin, dashboardWin]) if (live(win)) win.destroy();
+      for (const win of [checkWin, quickWin, dashboardWin]) if (live(win)) win.destroy();
+      checkWin = null;
       quickWin = null;
       dashboardWin = null;
     },

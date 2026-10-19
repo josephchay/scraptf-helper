@@ -47,7 +47,8 @@ export const DEFAULT_SETTINGS: Settings = {
   // deviations list in docs/ARCHITECTURE.md; users on capped links lower it.
   liveFeed: { enabled: true, dailyCapBytes: 25_000_000_000, keepSellListings: 'watched' },
   connectors: { bptfApi: true, pricedb: true, pricedbSocket: true, scm: false },
-  import: { enabled: false, acknowledgedAt: null, watchFolder: null, permission: null },
+  // F20: re-save reminders are off (0 min); [] reminds of every bank saved at least once.
+  import: { enabled: false, acknowledgedAt: null, watchFolder: null, permission: null, resaveReminderMin: 0, resaveBanks: [] },
   notifications: {
     enabled: true,
     minConfidence: 45,
@@ -56,8 +57,11 @@ export const DEFAULT_SETTINGS: Settings = {
     inputKinds: ['user', 'import', 'rule'],
     silent: false,
     holdings: true,
+    newOnScraptf: true,
   },
   app: { startAtLogin: false, startHidden: false, closeToTray: true, quickEntryHotkey: 'CommandOrControl+Alt+F' },
+  // Live check (F16): the watcher reads the clipboard, so it stays off until the user turns it on.
+  check: { hotkey: 'CommandOrControl+Alt+C', watchClipboard: false, notifyFlips: true, popup: true },
   networkPaused: false,
   blocklist: [],
   ui: { theme: 'system', density: 'comfortable' },

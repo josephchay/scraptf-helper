@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import type { HealthReport, KeyPriceState } from '../../shared/types';
+import type { HealthReport, KeyPriceState, Settings } from '../../shared/types';
 import { rpc } from '../api';
 import { ErrorBanner, LoadingBlock } from '../components/Feedback';
 import { Icon } from '../components/Icon';
@@ -19,6 +19,7 @@ import {
   visibleBudgets,
 } from '../format';
 import { useApp } from '../hooks/appContext';
+import { scraptfKeyHealthRows } from '../settingsFields';
 import { useRpcQuery } from '../hooks/useRpc';
 import { useDocumentVisible, useInterval, useNow } from '../hooks/useTimers';
 
@@ -283,46 +284,54 @@ function KeyPriceCard({ kp, now }: { kp: KeyPriceState | null; now: number }) {
   return (
     <section className="card" aria-labelledby="h-key">
       <h2 id="h-key">Key price</h2>
-      {kp ? (
-        <>
-          <p>
-            Using <strong className="money">{fmtRefOnly(kp.valueScrap)}</strong> from {KEY_SOURCE_LABELS[kp.source] ?? kp.source}
-            {kp.observedAt ? `, ${fmtAge(now - kp.observedAt)} old` : ''}.
-            {kp.stale ? <span className="tone-text-warn"> Stale: no fresh quote in 6 h.</span> : null}
-          </p>
-          <table className="table">
-            <thead>
-              <tr>
-                <th>Source</th>
-                <th className="num">Buy</th>
-                <th className="num">Sell</th>
-                <th className="num">Age</th>
-              </tr>
-            </thead>
-            <tbody>
-              {kp.quotes.map((q) => (
-                <tr key={q.source}>
-                  <td>{KEY_SOURCE_LABELS[q.source] ?? q.source}</td>
-                  <td className="num money">{fmtRefOnly(q.buyScrap)}</td>
-                  <td className="num money">{fmtRefOnly(q.sellScrap)}</td>
-                  <td className={`num${now - q.observedAt > 6 * 3_600_000 ? ' tone-text-warn' : ''}`}>{fmtAge(now - q.observedAt)}</td>
-                </tr>
-              ))}
-              {settings?.keyPrice.scraptfBuyScrap || settings?.keyPrice.scraptfSellScrap ? (
-                <tr className="muted">
-                  <td>scrap.tf (yours; sell caps the automatic value)</td>
-                  <td className="num money">{fmtRefOnly(settings.keyPrice.scraptfBuyScrap)}</td>
-                  <td className="num money">{fmtRefOnly(settings.keyPrice.scraptfSellScrap)}</td>
-                  <td className="num">{settings.keyPrice.scraptfObservedAt ? fmtAge(now - settings.keyPrice.scraptfObservedAt) : '—'}</td>
-                </tr>
-              ) : null}
-            </tbody>
-          </table>
-        </>
-      ) : (
-        <p className="muted">No key price yet.</p>
-      )}
+      {kp ? <KeyPriceTable kp={kp} typed={settings?.keyPrice ?? null} now={now} /> : <p className="muted">No key price yet.</p>}
     </section>
+  );
+}
+
+/**
+ * The key price in use and every quote, then scrap.tf's own key prices: the typed ones and the saved
+ * scrap.tf/items list's (F14), each saying whether it caps the automatic value (scraptfKeyHealthRows).
+ * `typed` null (settings still loading) leaves the scrap.tf rows out rather than guess which one caps.
+ */
+export function KeyPriceTable({ kp, typed, now }: { kp: KeyPriceState; typed: Settings['keyPrice'] | null; now: number }) {
+  const stf = typed ? scraptfKeyHealthRows(kp.scraptfFromList, typed) : [];
+  return (
+    <>
+      <p>
+        Using <strong className="money">{fmtRefOnly(kp.valueScrap)}</strong> from {KEY_SOURCE_LABELS[kp.source] ?? kp.source}
+        {kp.observedAt ? `, ${fmtAge(now - kp.observedAt)} old` : ''}.
+        {kp.stale ? <span className="tone-text-warn"> Stale: no fresh quote in 6 h.</span> : null}
+      </p>
+      <table className="table">
+        <thead>
+          <tr>
+            <th>Source</th>
+            <th className="num">Buy</th>
+            <th className="num">Sell</th>
+            <th className="num">Age</th>
+          </tr>
+        </thead>
+        <tbody>
+          {kp.quotes.map((q) => (
+            <tr key={q.source}>
+              <td>{KEY_SOURCE_LABELS[q.source] ?? q.source}</td>
+              <td className="num money">{fmtRefOnly(q.buyScrap)}</td>
+              <td className="num money">{fmtRefOnly(q.sellScrap)}</td>
+              <td className={`num${now - q.observedAt > 6 * 3_600_000 ? ' tone-text-warn' : ''}`}>{fmtAge(now - q.observedAt)}</td>
+            </tr>
+          ))}
+          {stf.map((r) => (
+            <tr key={`scraptf-${r.source}`} className="muted">
+              <td>{r.label}</td>
+              <td className="num money">{fmtRefOnly(r.buyScrap)}</td>
+              <td className="num money">{fmtRefOnly(r.sellScrap)}</td>
+              <td className="num">{r.observedAt ? fmtAge(now - r.observedAt) : '—'}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </>
   );
 }
 

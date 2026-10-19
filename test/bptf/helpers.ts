@@ -134,6 +134,7 @@ export function createStubSchema(opts: { throwing?: boolean } = {}): SchemaServi
     isLoaded: () => true,
     health: () => health,
     itemByDefindex: (d) => guard(() => byDef(d)),
+    itemQuality: (d) => guard(() => (byDef(d) ? 6 : null)),
     nameForSku: (sku) => guard(() => nameForSku(sku)),
     baseNameForSku: (sku) => guard(() => byDef(fromString(sku).defindex)?.itemName ?? sku),
     marketHashName: () => null,

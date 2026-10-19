@@ -1,0 +1,262 @@
+/* scrap.tf history (F20): the item drawer's "scrap.tf history" block (components/ScraptfHistory.tsx,
+   classes stf-hist-*: the step chart with gaps where the item was not listed, "Listed since", the
+   1 h / 24 h / 7 d / since-listed change chips, stock now and the last change events), the Live log's
+   "scrap.tf changes" tab (stf-feed-*, on top of the log table in layout.css) and the Settings re-save
+   reminder banks (stf-resave-*). The bank stock page's Listed and Since listed columns live in
+   bank-stock.css with the grid they change. Everything shown comes from pages the user saved; nothing
+   here loads anything: no url() and no @import (the compliance scan reads style sheets too). Colours
+   come from tokens.css only, so both themes work; nothing animates, so reduced motion needs nothing of
+   its own. index.css imports it last, after bank-stock.css (F17). */
+
+/* ---------- drawer block ---------- */
+
+.stf-hist .section-head .bank-path {
+  margin-right: auto;
+  color: var(--text-muted);
+}
+
+.stf-hist-listed {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  font-variant-numeric: tabular-nums;
+}
+
+.stf-hist-listed > .icon {
+  flex-shrink: 0;
+  color: var(--tone, var(--text-muted));
+}
+
+.stf-hist-listed.tone-muted {
+  color: var(--text-muted);
+}
+
+.stf-hist-now {
+  margin: 0;
+  font-variant-numeric: tabular-nums;
+}
+
+/* "1 h ↓ 0.11 ref (−8 %)": a label and the change, toned by its direction. */
+.stf-hist-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.stf-hist-chip {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 2px 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface-2);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  cursor: help;
+}
+
+.stf-hist-chip-label {
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.stf-hist-chip.tone-good,
+.stf-hist-chip.tone-bad {
+  border-color: var(--tone);
+  background: var(--tone-weak);
+}
+
+.stf-hist-chip.tone-good .stf-hist-chip-value,
+.stf-hist-chip.tone-bad .stf-hist-chip-value {
+  color: var(--tone);
+  font-weight: 650;
+}
+
+.stf-hist-chip.tone-muted .stf-hist-chip-value {
+  color: var(--text-muted);
+}
+
+/* The step chart: shorter than PriceDB's sparkline, one dot per save on sale, a tick per gap. */
+.stf-hist-svg {
+  height: 80px;
+}
+
+.stf-hist-step {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 2;
+  stroke-linejoin: round;
+}
+
+.stf-hist-dot {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 5;
+  stroke-linecap: round;
+}
+
+.stf-hist-dot.active {
+  stroke: var(--text);
+  stroke-width: 8;
+}
+
+.stf-hist-gap {
+  fill: none;
+  stroke: var(--text-faint);
+  stroke-width: 1.5;
+}
+
+.stf-hist-sub {
+  margin: 4px 0 0;
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.stf-hist-events {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0;
+}
+
+/* Oct 14 09:12 | Cheaper | 1.33 → 1.22 ref (−8 %), stock 5 → 3 */
+.stf-hist-event {
+  display: grid;
+  grid-template-columns: 92px 84px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  font-size: 12.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+.stf-hist-kind {
+  justify-self: start;
+  cursor: help;
+}
+
+.stf-hist-what {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.stf-hist-empty {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.stf-hist-empty > p {
+  margin: 0;
+}
+
+.stf-hist-empty-title {
+  font-weight: 600;
+}
+
+.stf-hist-note {
+  margin: 0;
+}
+
+/* ---------- Live log: scrap.tf changes ---------- */
+
+/* Fixed columns, so a long name or "176 keys → 211 keys 54.11 ref (+20 %)" never scrolls the table
+   sideways at the 960px minimum window (about 860px of table): the item takes what is left and
+   ellipses, the price change and Pay up to wrap. */
+.stf-feed-table {
+  width: 100%;
+  table-layout: fixed;
+}
+
+.stf-feed-table td {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.stf-feed-table .stf-feed-time {
+  width: 92px;
+  white-space: nowrap;
+}
+
+.stf-feed-table .stf-feed-bank {
+  width: 76px;
+  white-space: nowrap;
+}
+
+.stf-feed-table .stf-feed-kind {
+  width: 88px;
+}
+
+.stf-feed-table .stf-feed-price {
+  width: 190px;
+}
+
+.stf-feed-table .stf-feed-sells {
+  width: 112px;
+}
+
+.stf-feed-table .stf-feed-pay {
+  width: 140px;
+}
+
+.stf-feed-row {
+  cursor: pointer;
+}
+
+/* A change that is a flip now: the row's edge says so before the pill is read. */
+.stf-feed-row.flip td:first-child {
+  box-shadow: inset 3px 0 0 var(--good);
+}
+
+.stf-feed-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.stf-feed-item > .row-link {
+  min-width: 0;
+}
+
+.stf-feed-price .money {
+  white-space: normal;
+  cursor: help;
+}
+
+.stf-feed-sells .money,
+.stf-feed-pay .money {
+  white-space: nowrap;
+}
+
+/* Beside Pay up to when it fits, under it when not. */
+.stf-feed-flip {
+  margin-left: 6px;
+  white-space: nowrap;
+  cursor: help;
+}
+
+/* ---------- Settings: re-save reminders ---------- */
+
+.stf-resave-help {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  color: var(--text-muted);
+}
+
+.stf-resave-help > .icon {
+  flex-shrink: 0;
+}
+
+.stf-resave-banks {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 1px 8px;
+}

@@ -11,6 +11,7 @@ import { BOUNDARY_NOTE, COVERAGE_TIP, DEFAULT_MARKET_SORT, marketDisplayRows, ty
 import { createMockBridge, type MockBridge } from '../../src/renderer/mock';
 import { CoverageStrip, MarketPage, MarketStrip, MarketTable, type MarketTableProps } from '../../src/renderer/pages/MarketPage';
 import { SCRAPTF_BANK_PAGES } from '../../src/shared/links';
+import { SCRAPTF_LIST_FRESH_MS, scraptfListCoverage } from '../../src/shared/scraptfList';
 import type { MarketListResult, MarketRow, MarketStats, ScraptfCoverage } from '../../src/shared/types';
 
 const T0 = Date.UTC(2026, 9, 14, 12, 0, 0);
@@ -26,6 +27,9 @@ describe('MarketPage first render', () => {
     expect(html).toContain('Loading the live market');
     expect(html).toContain('Export CSV');
     expect(html).toContain('Freeze');
+    // F14: the scrap.tf price list card on top.
+    expect(html).toContain('scrap.tf price list');
+    expect(html.indexOf('scraptf-list-card')).toBeLessThan(html.indexOf('aria-label="Live market status"'));
   });
 });
 
@@ -51,6 +55,7 @@ describe('MarketStrip (H1, F13)', () => {
     importEnabled: true,
     watchFolder: true,
     coverage: coverage([4 * 60_000, 30 * 60_000, 5 * 3_600_000, null, null, null, null]),
+    allItems: scraptfListCoverage(null),
     ...over,
   });
   const strip = (props: { stats: MarketStats | null; scraptf: MarketListResult['scraptf'] | null }) =>
@@ -82,18 +87,32 @@ describe('MarketStrip (H1, F13)', () => {
   it('lists one chip per bank page with its freshness, and hides them while import is off', () => {
     const html = strip({ stats: stats(), scraptf: side() });
     expect(html).toContain('aria-label="scrap.tf pages you saved"');
-    expect(html.match(/class="chip coverage-chip /g)).toHaveLength(7);
+    // The seven bank pages, after F14's "All items" chip.
+    expect(html.match(/class="chip coverage-chip /g)).toHaveLength(8);
+    expect(html.match(/coverage-all/g)).toHaveLength(1);
+    expect(html).toMatch(/coverage-all[^>]*>.*?>All items<\/span>.*?never saved/);
+    expect(html.indexOf('coverage-all')).toBeLessThan(html.indexOf('>Hats</span>'));
     expect(html).toContain('chip coverage-chip tone-good');
     expect(html).toContain('chip coverage-chip tone-warn');
     expect(html).toContain('chip coverage-chip tone-muted');
     expect(html).toMatch(/saved 4 min ago · 40 items/);
     expect(html).toContain('never saved');
-    expect(html).toContain(`title="${COVERAGE_TIP}"`);
+    // F18: the tip names the save type in quotes, which React escapes in the attribute.
+    expect(html).toContain(`title="${COVERAGE_TIP.replace(/'/g, '&#x27;')}"`);
     // Import off: no strip, and the way in is still there.
     const off = strip({ stats: stats(), scraptf: side({ importEnabled: false }) });
     expect(off).not.toContain('coverage-chip');
     expect(off).toContain('Set up Import');
     expect(strip({ stats: null, scraptf: null })).not.toContain('coverage-chip');
+  });
+
+  it('leads with the saved scrap.tf/items list, opening its card on the scrap.tf banks page', () => {
+    const html = strip({ stats: stats(), scraptf: side({ allItems: scraptfListCoverage({ items: 2341, newestAt: NOW - 4 * 60_000 }) }) });
+    expect(html).toMatch(
+      /class="chip coverage-chip tone-good coverage-all" title="See your saved price list on the scrap\.tf banks page: save scrap\.tf\/items \(Ctrl\+S\)[^"]*" aria-label="All items: saved 4 min ago · 2,341 items\. Opens the scrap\.tf\/items card on the scrap\.tf banks page\."/,
+    );
+    expect(html).toContain('aria-label="Hats: saved 4 min ago · 40 items. Opens its card on the scrap.tf banks page."');
+    expect(html.replace(/<!-- -->/g, '')).toContain('saved 4 min ago · 2,341 items');
   });
 
   it('renders the coverage the mock reports', async () => {
@@ -102,6 +121,8 @@ describe('MarketStrip (H1, F13)', () => {
       const res = await b.rpc('market.list', {});
       const html = renderToString(createElement(AppProvider, null, createElement(CoverageStrip, { scraptf: { ...res.scraptf, importEnabled: true }, now: NOW })));
       for (const p of SCRAPTF_BANK_PAGES) expect(html).toContain(`>${p.label}</span>`);
+      expect(res.scraptf.allItems.items).toBeGreaterThan(0);
+      expect(html).toContain('>All items</span>');
     } finally {
       b.dispose();
     }
@@ -129,9 +150,14 @@ describe('MarketTable', () => {
       pick((r) => r.knownSource === 'typed'),
       pick((r) => r.knownSource === 'none' && r.ruleCostScrap !== null),
       pick((r) => r.revenueOrder?.isBot === false),
+      // F14: the saved scrap.tf/items list's cells.
+      pick((r) => r.scraptfFull),
+      pick((r) => r.scraptfStock === 0),
+      pick((r) => r.scraptfListAt === null),
+      pick((r) => r.scraptfListAt !== null && T0 - r.scraptfListAt > SCRAPTF_LIST_FRESH_MS),
     ].filter((r): r is MarketRow => r !== undefined);
     const rows = [...new Map(picked.map((r) => [r.sku, r])).values()];
-    expect(rows.length).toBeGreaterThanOrEqual(5);
+    expect(rows.length).toBeGreaterThanOrEqual(9);
     const dirs = new Map<string, FlashDir>([
       [rows[0]!.sku, 'up'],
       [rows[1]!.sku, 'down'],
@@ -167,6 +193,18 @@ describe('MarketTable', () => {
     expect(html).toContain('Not checked');
     if (rows.some((r) => r.verdict === 'flip')) expect(html).toMatch(/verdict-pill tone-good[^>]*>Flip \+/);
     if (rows.some((r) => r.knownSource === 'none' && r.ruleCostScrap !== null)) expect(html).toContain('rule-est');
+    // F14 columns: one "scrap.tf pays" and one Stock cell per row, under their headers.
+    expect(html).toContain('>scrap.tf pays</div>');
+    expect(html).toContain('>Stock</div>');
+    expect(html.match(/role="gridcell" class="m-list num/g)).toHaveLength(rows.length);
+    expect(html.match(/role="gridcell" class="m-stock num/g)).toHaveLength(rows.length);
+    expect(html).toContain('class="pill tone-warn list-full">Full</span>');
+    expect(html).toContain('list-full-inline');
+    expect(html).toMatch(/class="m-stock num[^"]*list-out/);
+    expect(html).toMatch(/class="m-list num list-dim"/);
+    expect(html).toContain('Not on your saved scrap.tf/items list.');
+    const full = rows.find((r) => r.scraptfFull)!;
+    expect(html).toContain(`>${full.scraptfStock}/${full.scraptfStockLimit}</span>`);
 
     // Frozen, the More row offers no load: more rows would come from the live order, not the held one.
     const frozen = renderToString(createElement(MarketTable, { ...props, frozen: true }));

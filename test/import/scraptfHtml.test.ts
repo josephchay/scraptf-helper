@@ -9,6 +9,7 @@ import {
   isImportableItem,
   pageKindFromUrl,
   parseScrapTfHtml,
+  sellsPriceOf,
   warningCode,
 } from '../../src/service/import';
 import { fromString } from '../../src/shared/sku';
@@ -56,6 +57,7 @@ describe('parseScrapTfHtml: saved /buy/hats page', () => {
 
   it('detects the page kind from the saved-from comment and drops duplicate cards', () => {
     expect(result.pageKind).toBe('buy');
+    expect(result.bank).toBe('hats');
     expect(items).toHaveLength(38);
     expect(result.warnings.map(warningCode)).toEqual(['duplicate-cards', 'duplicate-cards', 'no-sku']);
     expect(result.warnings).toContain('no-sku: 3 of 38 items could not be identified');
@@ -217,6 +219,7 @@ describe('parseScrapTfHtml: saved /unusuals page', () => {
 
   it('detects the page kind from the canonical link', () => {
     expect(result.pageKind).toBe('unusuals');
+    expect(result.bank).toBe('unusuals');
     expect(result.warnings).toEqual([]);
     expect(result.items).toHaveLength(7);
   });
@@ -261,6 +264,7 @@ describe('parseScrapTfHtml: saved /items price list', () => {
 
   it('detects the page kind from og:url and reads every row', () => {
     expect(result.pageKind).toBe('items-list');
+    expect(result.bank).toBe('list');
     expect(result.items).toHaveLength(13);
     expect(result.warnings).toEqual([]);
     expect(result.items.every((i) => i.assetId === null)).toBe(true);
@@ -304,6 +308,158 @@ describe('parseScrapTfHtml: saved /items price list', () => {
   });
 });
 
+describe('parseScrapTfHtml: what scrap.tf pays and its stock limit (F14)', () => {
+  const result = parseScrapTfHtml(fixture('items_list.html'), createStubSchema());
+  const row = (title: string): ParsedScrapItem => {
+    const hit = result.items.find((i) => i.title === title);
+    if (!hit) throw new Error(`no row ${title}`);
+    return hit;
+  };
+
+  it.each([
+    ['Tough Break Key', 1, 9, 49, 50],
+    ['Warbird Weapons Case #100', 6, 0, 3, 5],
+    ['Earbuds', 8, 90, 0, 5],
+    ['Bills Hat', 3, 378, 2, 5],
+    ['Non-Craftable Tour of Duty Ticket', 0, 238, 44, 400],
+    ['Name Tag', 0, 144, 483, 500],
+    ['Strange Taunt: Burstchester', 60, 0, 1, 2],
+    ['Genuine Taunt: The Shred Alert', 3, 180, 0, 3],
+    ['Strange Part: Airborne Enemies Killed', 3, 360, 5, 10],
+    ['Strange Count Transfer Tool', 0, 1, 12, 20],
+    ['Strange Australium Rocket Launcher', 40, 0, 1, 3],
+    ['Vintage Bills Hat', 40, 0, 1, 2],
+    ['Crocodile Dandy', 0, 12, 0, 5],
+  ])('%s: pays %d keys + %d scrap, stock %d of %d', (title, keys, scrap, stock, limit) => {
+    const it = row(title);
+    expect(it.pays).toEqual({ keys, scrap });
+    expect(it.stock).toBe(stock);
+    expect(it.stockLimit).toBe(limit);
+    expect(codes(it).filter((c) => c.includes('pays'))).toEqual([]);
+  });
+
+  it('reads every row of the fixture without a page warning', () => {
+    expect(result.items).toHaveLength(13);
+    expect(result.warnings).toEqual([]);
+    expect(result.items.every((i) => i.pays !== null && i.stockLimit !== null)).toBe(true);
+  });
+
+  it('keeps out-of-stock rows with what scrap.tf pays for them', () => {
+    const out = result.items.filter((i) => i.stock === 0).map((i) => [i.title, i.pays]);
+    expect(out).toEqual([
+      ['Earbuds', { keys: 8, scrap: 90 }],
+      ['Genuine Taunt: The Shred Alert', { keys: 3, scrap: 180 }],
+      ['Crocodile Dandy', { keys: 0, scrap: 12 }],
+    ]);
+  });
+
+  it('gives a "Sold out" row no price to buy, but still what scrap.tf pays', () => {
+    const dandy = row('Crocodile Dandy');
+    expect(sellsPriceOf(dandy)).toBeNull();
+    expect(dandy.pays).toEqual({ keys: 0, scrap: 12 });
+    expect(sellsPriceOf(row('Bills Hat'))).toEqual({ keys: 3, scrap: 477 });
+    expect(sellsPriceOf(row('Earbuds'))).toEqual({ keys: 10, scrap: 450 });
+  });
+
+  it('leaves the fields off bank-page cards, which have no such column', () => {
+    const cards = parseScrapTfHtml(fixture('buy_hats.html'), createStubSchema()).items;
+    expect(cards.length).toBeGreaterThan(0);
+    for (const c of cards) {
+      expect('pays' in c).toBe(false);
+      expect('stockLimit' in c).toBe(false);
+    }
+  });
+});
+
+describe('parseScrapTfHtml: the "Price we pay" column on edited lists', () => {
+  const HEAD = '<title>Item Trading - TF2 - Scrap.TF</title><meta property="og:url" content="https://scrap.tf/items" />';
+  /** A saved /items table with these header cells and rows (each row: its <td> contents). */
+  function listPage(headers: string[], rows: string[][]): string {
+    const thead = `<thead><tr>${headers.map((h) => `<th>${h}</th>`).join('')}</tr></thead>`;
+    const body = rows.map((cells) => `<tr data-quality="6" data-defindex="126">${cells.map((c) => `<td>${c}</td>`).join('')}</tr>`).join('');
+    return `<!DOCTYPE html><html><head>${HEAD}</head><body id="pid-items"><table>${thead}<tbody>${body}</tbody></table></body></html>`;
+  }
+  const STD = ['Icon', 'Item', 'Price to buy', 'Price we pay', 'Item Limits'];
+  const limits = (t: string) => `<div rel="tooltip" title="${t}"><div>${t.split('/')[0]}</div></div>`;
+  const one = (pays: string): ParsedScrapItem => parseScrapTfHtml(listPage(STD, [['', "Bill's Hat", '3 keys, 53 refined', pays, limits('2/5')]]), createStubSchema()).items[0]!;
+
+  it.each([
+    ['', 'no-pays-price'],
+    ['   ', 'no-pays-price'],
+    ['—', 'no-pays-price'],
+    ['–', 'no-pays-price'],
+    ['-', 'no-pays-price'],
+    ['- —', 'no-pays-price'],
+    ['0 refined', 'no-pays-price'],
+    ['Not buying', 'unparsed-pays-price'],
+    ['twenty', 'unparsed-pays-price'],
+    ['n/a', 'unparsed-pays-price'],
+    ['49 50', 'unparsed-pays-price'],
+  ])('an empty or unreadable "we pay" (%j) gives null and a %s warning', (cell, code) => {
+    const it = one(cell);
+    expect(it.pays).toBeNull();
+    expect(codes(it)).toEqual([code]);
+    // The price to buy is still imported as before.
+    expect(isImportableItem(it)).toBe(true);
+    expect([it.costKeys, it.costScrap, it.stock, it.stockLimit]).toEqual([3, 477, 2, 5]);
+  });
+
+  it('does not run a price parse over an absurdly long cell', () => {
+    const it = one(`1${'0'.repeat(100_000)} refined`);
+    expect(it.pays).toBeNull();
+    expect(codes(it)).toEqual(['unparsed-pays-price']);
+  });
+
+  it('finds the column by its header, wherever it is', () => {
+    const html = listPage(['Item', 'Price we pay', 'Item Limits', 'Icon', 'Price to buy'], [["Bill's Hat", '3 keys, 42 refined', limits('4/5'), '', '3 keys, 53 refined']]);
+    const it = parseScrapTfHtml(html, createStubSchema()).items[0]!;
+    expect(it.pays).toEqual({ keys: 3, scrap: 378 });
+    expect([it.costKeys, it.costScrap]).toEqual([3, 477]);
+    // "Item Limits" before the price column is still read (its header says where): full, out of stock and
+    // the price path's sold-out rule depend on it.
+    expect([it.stock, it.stockLimit]).toEqual([4, 5]);
+    expect(it.warnings).toEqual([]);
+  });
+
+  it('reads stock from the "Item Limits" column by header, not from another cell that happens to carry n/m', () => {
+    const html = listPage(['Icon', 'Item', 'Price to buy', 'Price we pay', 'Notes', 'Item Limits'], [['', "Bill's Hat", '3 keys, 53 refined', '3 keys, 42 refined', limits('9/9'), limits('1/5')]]);
+    const it = parseScrapTfHtml(html, createStubSchema()).items[0]!;
+    expect([it.stock, it.stockLimit]).toEqual([1, 5]);
+  });
+
+  it('falls back to the first n/m cell after the price when the page has no "Item Limits" header', () => {
+    const html = listPage(['Icon', 'Item', 'Price to buy', 'Price we pay', 'Stock'], [['', "Bill's Hat", '3 keys, 53 refined', '3 keys, 42 refined', limits('5/5')]]);
+    const it = parseScrapTfHtml(html, createStubSchema()).items[0]!;
+    expect([it.stock, it.stockLimit]).toEqual([5, 5]);
+  });
+
+  it('never guesses the column by position: without the header no row has a pays price, and the page says so once', () => {
+    const r = parseScrapTfHtml(
+      listPage(['Icon', 'Item', 'Price to buy', 'Paid', 'Item Limits'], [['', "Bill's Hat", '3 keys, 53 refined', '3 keys, 42 refined', limits('2/5')]]),
+      createStubSchema(),
+    );
+    expect(r.items[0]!.pays).toBeNull();
+    expect(r.items[0]!.warnings).toEqual([]);
+    expect(r.items[0]!.stockLimit).toBe(5);
+    expect(r.warnings.map(warningCode)).toEqual(['no-pays-column']);
+  });
+
+  it('warns about a row that is missing the cell', () => {
+    const it = parseScrapTfHtml(listPage(STD, [['', "Bill's Hat", '3 keys, 53 refined']]), createStubSchema()).items[0]!;
+    expect(it.pays).toBeNull();
+    expect(it.stock).toBeNull();
+    expect(it.stockLimit).toBeNull();
+    expect(codes(it)).toEqual(['no-pays-price']);
+  });
+
+  it('reads a full item (stock at its limit)', () => {
+    const it = one('3 keys');
+    expect([it.stock, it.stockLimit]).toEqual([2, 5]);
+    const full = parseScrapTfHtml(listPage(STD, [['', "Bill's Hat", '3 keys, 53 refined', '3 keys', limits('5/5')]]), createStubSchema()).items[0]!;
+    expect([full.stock, full.stockLimit]).toEqual([5, 5]);
+  });
+});
+
 describe('page kind detection', () => {
   it.each([
     ['https://scrap.tf/buy/hats', 'buy', true],
@@ -336,6 +492,7 @@ describe('page kind detection', () => {
   it('imports nothing from scrap.tf pages that are not buy pages', () => {
     const r = parseScrapTfHtml(page(card({ 'data-defindex': '378', 'data-title': 'Team Captain', 'data-item-value': '10' }), { url: 'https://scrap.tf/sell/hats' }), createStubSchema());
     expect(r.pageKind).toBe('unknown');
+    expect(r.bank).toBeNull();
     expect(r.items).toEqual([]);
     expect(r.warnings.map(warningCode)).toEqual(['page-not-importable']);
   });
@@ -343,6 +500,7 @@ describe('page kind detection', () => {
   it('warns but still parses pages saved from another site', () => {
     const r = parseScrapTfHtml(page(card({ 'data-defindex': '378', 'data-title': 'Team Captain', 'data-item-value': '10' }), { url: 'https://example.com/page' }), createStubSchema());
     expect(r.pageKind).toBe('unknown');
+    expect(r.bank).toBeNull();
     expect(r.warnings.map(warningCode)).toEqual(['not-scraptf']);
     expect(r.items[0]?.sku).toBe('378;6');
   });
@@ -359,15 +517,19 @@ describe('page kind detection', () => {
     const body = card({ 'data-defindex': '31540', class: 'item hoverable quality5 app440', 'data-title': 'Le Sapeur', style: "background-image:url('/img/particles_440/13_380x380.png')", 'data-item-value': '490' });
     const r = parseScrapTfHtml(page(body, { url: null, title: 'Unusual Trading - TF2 - Scrap.TF' }), createStubSchema());
     expect(r.pageKind).toBe('unusuals');
+    expect(r.bank).toBe('unusuals');
     expect(r.warnings.map(warningCode)).toEqual(['page-kind-guessed']);
     const r2 = parseScrapTfHtml(page(card({ 'data-defindex': '378', 'data-title': 'Team Captain', 'data-item-value': '9' }), { url: null, title: 'Hat Trading - TF2 - Scrap.TF' }), createStubSchema());
     expect(r2.pageKind).toBe('buy');
+    // The title tells a buy page, never which bank (F15): coverage falls back to the categories.
+    expect(r2.bank).toBeNull();
   });
 
   it('guesses items-list from the table layout alone', () => {
     const html = fixture('items_list.html').replace(/<meta property="og:url"[^>]*>/, '').replace(/<title>[^<]*<\/title>/, '<title>x</title>');
     const r = parseScrapTfHtml(html, createStubSchema());
     expect(r.pageKind).toBe('items-list');
+    expect(r.bank).toBe('list');
     expect(r.warnings.map(warningCode)).toEqual(['page-kind-guessed']);
   });
 
@@ -376,10 +538,11 @@ describe('page kind detection', () => {
     expect(r.pageKind).toBe('unknown');
     expect(r.warnings.map(warningCode)).toEqual(['page-kind-unknown']);
     expect(r.items).toHaveLength(1);
+    // A bank page with no card was saved before scrap.tf added them (F18 S3): 'no-cards-saved', not 'no-items'.
     const empty = parseScrapTfHtml(page('<p>Sign in through Steam</p>'), createStubSchema());
     expect(empty.pageKind).toBe('buy');
     expect(empty.items).toEqual([]);
-    expect(empty.warnings.map(warningCode)).toEqual(['no-items']);
+    expect(empty.warnings.map(warningCode)).toEqual(['no-cards-saved']);
     expect(parseScrapTfHtml('', createStubSchema()).warnings.map(warningCode)).toEqual(['page-kind-unknown', 'no-items']);
   });
 });
@@ -447,12 +610,14 @@ describe('limits and untrusted input', () => {
     expect(codes(it)).toEqual(['invalid-attribute', 'invalid-attribute', 'invalid-attribute', 'no-price', 'no-defindex']);
   });
 
+  // No time bound is asserted. 20,000 nested elements take about 2 s alone, but over 30 s while every
+  // other test file runs in parallel, so the default 20 s timeout would fail it for the load alone.
   it('handles very deep nesting without recursion limits', () => {
     const depth = 20000;
     const html = page('<div>'.repeat(depth) + card({ 'data-defindex': '378', 'data-title': 'Team Captain', 'data-item-value': '9' }) + '</div>'.repeat(depth));
     const r = parseScrapTfHtml(html, createStubSchema());
     expect(r.items.map((i) => i.sku)).toEqual(['378;6']);
-  });
+  }, 90_000);
 });
 
 describe('card details', () => {

@@ -56,7 +56,8 @@ export function pushToast(list: readonly ToastItem[], item: ToastItem, max = TOA
   return out;
 }
 
-export type ToastHold = 'hover' | 'focus';
+/** Why a countdown is held: the pointer, focus, or (F18, set by AppProvider) the dashboard window being hidden. */
+export type ToastHold = 'hover' | 'focus' | 'hidden';
 
 export interface ToastTimerApi {
   setTimeout(fn: () => void, ms: number): unknown;
@@ -65,9 +66,9 @@ export interface ToastTimerApi {
 }
 
 export interface ToastTimers {
-  /** Starts the countdown; only a pausable toast (one with an action) is held by hover or focus. */
+  /** Starts the countdown; only a pausable toast (one with an action) is ever held. */
   start(id: number, ms: number, opts?: { pausable?: boolean }): void;
-  /** Hover or focus holds the countdown; once neither does, it resumes with the time that was left. */
+  /** Hover, focus or a hidden window holds the countdown; once none does, it resumes with the time that was left. */
   hold(id: number, why: ToastHold, on: boolean): void;
   /** Whether the toast's countdown is held right now (tests, and nothing else). */
   held(id: number): boolean;

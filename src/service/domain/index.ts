@@ -31,7 +31,53 @@ export {
   type PricedBook,
 } from './engine';
 
-export { DEFAULT_KEY_SCRAP, KEY_PRICE_STALE_MS, defaultKeyPrice, isQuoteStale, selectKeyPrice } from './keyprice';
+export {
+  DEFAULT_KEY_SCRAP,
+  KEY_PRICE_STALE_MS,
+  defaultKeyPrice,
+  effectiveScraptfKey,
+  isQuoteStale,
+  selectKeyPrice,
+  type ScraptfKeyPrices,
+} from './keyprice';
+
+export { createScraptfListCache, type ScraptfListCache, type ScraptfListCacheDeps } from './scraptfList';
+
+export {
+  BANK_STOCK_NOTIFY_META_KEY,
+  BANK_STOCK_RETRY_MS,
+  bankStockCsv,
+  createBankStock,
+  createNewFlipNotifier,
+  notifyNewBankFlips,
+  previousOf,
+  type BankStock,
+  type BankStockDeps,
+  type BankStockNotifyDeps,
+  type NewFlipNotifier,
+  type NewFlipNotifierDeps,
+} from './bankStock';
+
+export {
+  SCRAPTF_HISTORY_RETRY_MS,
+  createScraptfHistory,
+  scraptfChangedPush,
+  scraptfChangesCsv,
+  type ScraptfHistory,
+  type ScraptfHistoryDeps,
+} from './scraptfHistory';
+
+export { RESAVE_TICK_MS, createResaveReminders, type ResaveReminders, type ResaveRemindersDeps } from './resaveReminders';
+
+export {
+  BANKS_PUSH_MS,
+  createBanksSummary,
+  emptyBankSummary,
+  opportunityBank,
+  type BanksInvalidation,
+  type BanksSummary,
+  type BanksSummaryDeps,
+} from './banks';
 
 export {
   EXCLUDING_FLAGS,
@@ -85,6 +131,7 @@ export {
   CONFIRMED_MS,
   FRESH_INPUT_MS,
   SUSPECT_MIN_ORDERS,
+  isSuspectMargin,
   scoreConfidence,
   type ConfidenceInput,
   type ConfidenceResult,
@@ -118,6 +165,7 @@ export {
   groupLabel,
   groupOrder,
   itemRevenue,
+  itemSeenOn,
   listOpportunities,
   previewRule,
   summarizeGroups,
@@ -137,13 +185,16 @@ export {
   MARKET_RETRY_MAX_MS,
   MARKET_RETRY_MIN_MS,
   MARKET_SLICE_MS,
+  COVERAGE_BATCHES,
   createMarketIndex,
   evaluateMarketBase,
+  marketCategoryOf,
   marketCsv,
   type MarketEval,
   type MarketEvalArgs,
   type MarketIndex,
   type MarketIndexDeps,
+  type UncheckedGroup,
 } from './market';
 
 export {
@@ -155,3 +206,28 @@ export {
   type Holdings,
   type HoldingsDeps,
 } from './holdings';
+
+export {
+  CHECK_EXTRAS_NOTE,
+  CHECK_FUZZY_NOTE,
+  CHECK_INCOMPLETE_NOTE,
+  CHECK_MAX_RESOLVES,
+  CHECK_SCHEMA_LOADING_REASON,
+  CHECK_SCRAPTF_LINK_REASON,
+  CHECK_SOLD_OUT_NOTE,
+  checkVerdict,
+  chooseCheckPrice,
+  copiedSoldOut,
+  createLiveCheck,
+  looselySameName,
+  newestStoredPrice,
+  parseCheckText,
+  storedPriceHasExtras,
+  type CheckForm,
+  type CheckMoney,
+  type LiveCheck,
+  type LiveCheckDeps,
+  type ParseCheckOptions,
+  type ParseCheckResult,
+  type ParsedCheck,
+} from './liveCheck';

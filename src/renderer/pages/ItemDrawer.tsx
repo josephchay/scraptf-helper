@@ -1,18 +1,21 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react';
 import { DEFAULT_SETTINGS } from '../../shared/defaults';
-import type { BuyerCheck, ItemDetail, LinkSpec, Opportunity, OrderSummary, PriceRule, Scrap, ScrapPrice } from '../../shared/types';
+import { SCRAPTF_ITEMS_URL } from '../../shared/links';
+import type { BuyerCheck, ItemDetail, LinkSpec, Opportunity, OrderSummary, PriceRule, Scrap, ScrapPrice, ScraptfListRow } from '../../shared/types';
 import { rpc } from '../api';
+import { seenOnText } from '../banksModel';
 import { copyText } from '../clipboard';
 import { ConfirmButton, Field } from '../components/Controls';
 import { Drawer } from '../components/Drawer';
 import { openOrCopy } from '../components/ExternalLink';
 import { ErrorBanner, LoadingBlock, Spinner } from '../components/Feedback';
 import { Icon } from '../components/Icon';
-import { MenuPopover, menuPointFromEvent } from '../components/ItemMenu';
+import { MenuPopover, menuPointFromEvent, openOnScraptf } from '../components/ItemMenu';
 import { ItemName, Money } from '../components/ItemName';
 import { ConfidenceBadge, FlagList, OnlineDot, TonePill } from '../components/Pills';
 import { PriceInput, parsedValueScrap, readPrice, type BareUnit } from '../components/PriceInput';
 import { useRecordTrade, type RecordTradeInit } from '../components/RecordTradeDialog';
+import { ScraptfHistory } from '../components/ScraptfHistory';
 import { Sparkline } from '../components/Sparkline';
 import {
   INPUT_KIND_LABELS,
@@ -31,11 +34,13 @@ import {
   truncate,
 } from '../format';
 import { useApp } from '../hooks/appContext';
+import { SAVE_MODE } from '../importModel';
 import { usePersistentState } from '../hooks/usePersistentState';
 import { useRpcQuery, useThrottled, useVisiblePush } from '../hooks/useRpc';
 import { useNow } from '../hooks/useTimers';
 import {
   backgroundCheckListings,
+  bankPageUrl,
   blockBuyer,
   buyerLabel,
   buyerMenuSections,
@@ -50,19 +55,28 @@ import {
   fmtDays,
   groupLinks,
   isSteamId64,
+  listPriceAlreadySaved,
+  listPriceInput,
+  listPriceSavedText,
   modalHostOf,
+  OPEN_ON_SCRAPTF_LABEL,
   priceFormHeading,
   recordBuyInit,
   recordInitTitle,
   recordSaleInit,
   reconfirmInput,
   referenceAgeGates,
+  scraptfListView,
+  scraptfOpenTitle,
+  scraptfOpenUrl,
+  scraptfSearchName,
   unblockBuyer,
   type BlocklistDeps,
   type BuyerMenuAction,
   type MenuPoint,
 } from '../itemMenuModel';
-import { previewRevenue } from '../quickModel';
+import { drawerBankStockLine } from '../marketModel';
+import { listRowIsOtherCopy, previewRevenue } from '../quickModel';
 
 export function ItemDrawer() {
   const { itemSku, closeItem } = useApp();
@@ -92,6 +106,8 @@ function ItemDetailView({ sku }: { sku: string }) {
   useVisiblePush('opps.changed', reload);
   // A price saved in quick entry (another window) or an import shows here at once.
   useVisiblePush('prices.changed', reload);
+  // A newly saved scrap.tf/items list (F14) updates the price-list block and the sale prefill.
+  useVisiblePush('scraptf.listChanged', reload);
   const now = useNow(1000);
   const [refresh, setRefresh] = useState<{ queued: boolean; reason: string | null; until: number | null } | null>(null);
   const [busy, setBusy] = useState(false);
@@ -119,9 +135,13 @@ function ItemDetailView({ sku }: { sku: string }) {
   const profit = settings?.profit ?? DEFAULT_SETTINGS.profit;
   const useOrder = profit.useOrder;
   const checkListings = useMemo(() => backgroundCheckListings(d?.opportunities ?? [], useOrder), [d, useOrder]);
-  // The buy prefills with your newest scrap.tf price, the sale with the order your profit uses.
+  // The buy prefills with your newest scrap.tf price, the sale with the order your profit uses, or with
+  // scrap.tf's saved list price when Holdings' rule makes it the better exit (F14).
   const buyInit = useMemo<RecordTradeInit | null>(() => (d ? recordBuyInit(d, d.scrapPrices) : null), [d]);
-  const saleInit = useMemo<RecordTradeInit | null>(() => (d ? recordSaleInit(d, previewRevenue(d, profit).order) : null), [d, profit]);
+  const saleInit = useMemo<RecordTradeInit | null>(
+    () => (d ? recordSaleInit(d, previewRevenue(d, profit).order, d.scraptfList ? { list: d.scraptfList, now } : null) : null),
+    [d, profit, now],
+  );
   const recordSaleTo = useCallback((o: OrderSummary) => (d ? recordTrade.open(recordSaleInit(d, o)) : undefined), [d, recordTrade]);
 
   const doRefresh = async () => {
@@ -172,6 +192,16 @@ function ItemDetailView({ sku }: { sku: string }) {
   // The specific, fixable reason (missing token, API off) rather than a vague "unavailable".
   const unavailable = d.snapshot.available ? null : snapshotUnavailableReason(secrets, settings);
   const ceiling = drawerCeiling(d);
+  // Never null without a links state: the bank page the item was last seen on (F15), else its
+  // category's, else the full scrap.tf/items list.
+  const stfUrl = scraptfOpenUrl(d.category, null, d.seenOn) ?? SCRAPTF_ITEMS_URL;
+  const seen = seenOnText(d.seenOn, now);
+  // F17: the newest bank page save that lists this copy, and its change since the previous save.
+  const stockLine = drawerBankStockLine(d.bankStock, keyScrap, now);
+  const openStock = (route: string) => {
+    closeItem();
+    navigate(route);
+  };
 
   return (
     <div className="drawer-body">
@@ -183,14 +213,43 @@ function ItemDetailView({ sku }: { sku: string }) {
           <div className="drawer-sub">
             <code className="sku">{d.sku}</code>
             <span className="muted">· {categoryLabel(d.category)}</span>
+            {/* F15: from the newest imported price's saved page; nothing here loads it. */}
+            {seen ? (
+              <span className="drawer-seen muted" title={seen.title}>
+                · {seen.text}
+              </span>
+            ) : null}
           </div>
+          {/* F17: text from the user's saved pages only; View stock opens the bank stock page in the app. */}
+          {stockLine ? (
+            <p className="drawer-bank-stock small" title={stockLine.title}>
+              <Icon name="banks" size={13} />
+              <span className="drawer-bank-stock-text">
+                {stockLine.prefix}
+                {stockLine.change !== null ? <span className={`drawer-bank-stock-change${stockLine.tone ? ` tone-${stockLine.tone}` : ''}`}>{stockLine.change}</span> : null}
+              </span>
+              <button type="button" className="link-btn small" title="Every item on this page in your newest save, and what changed since the previous one" onClick={() => openStock(stockLine.route)}>
+                View stock
+              </button>
+            </p>
+          ) : null}
           {/* Copying the name is how the user searches scrap.tf's own search box in their browser. */}
-          <div className="drawer-copy" role="group" aria-label="Copy to the clipboard">
+          <div className="drawer-copy" role="group" aria-label="Copy to the clipboard or search scrap.tf">
             {copyTargets(d).map((c) => (
               <button key={c.kind} type="button" className="btn small ghost" title={c.text} onClick={() => void copy(c.text)}>
                 <Icon name="copy" size={13} /> {c.label}
               </button>
             ))}
+            {/* F14: copies the name, then the user's browser opens the bank page (links.open). F19: armed
+                first with exactly that name, so a price copied there is checked as this item. */}
+            <button
+              type="button"
+              className="btn small ghost"
+              title={scraptfOpenTitle(stfUrl, scraptfSearchName(d))}
+              onClick={() => void openOnScraptf(stfUrl, scraptfSearchName(d), toast, { sku: d.sku, settings })}
+            >
+              <Icon name="external" size={13} /> {OPEN_ON_SCRAPTF_LABEL}
+            </button>
           </div>
         </div>
         <button type="button" className="icon-btn" onClick={closeItem} aria-label="Close item">
@@ -264,6 +323,11 @@ function ItemDetailView({ sku }: { sku: string }) {
           </p>
         )}
       </section>
+
+      <ScraptfListSection d={d} row={d.scraptfList} keyScrap={keyScrap} now={now} onChanged={afterChange} />
+
+      {/* F20 (U1): the price on each of the user's saves of its bank, time listed and its change events. */}
+      <ScraptfHistory sku={d.sku} keyScrap={keyScrap} now={now} />
 
       <PriceSection d={d} keyScrap={keyScrap} now={now} ceiling={ceiling} onChanged={afterChange} onOpenQuick={openQuick} />
 
@@ -381,6 +445,141 @@ function InputCard({ o, keyScrap, now, ruleName }: { o: Opportunity; keyScrap: S
         </details>
       ) : null}
     </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// scrap.tf price list (F14)
+// ---------------------------------------------------------------------------
+
+/**
+ * The item's row of the user's saved scrap.tf/items list: what scrap.tf charges and pays, its stock
+ * and the save's age, with "Use as my price" and the pages to open in the user's browser. The list
+ * only ever comes from a page the user saved (R10); the app never visits scrap.tf (R1).
+ */
+function ScraptfListSection({ d, row, keyScrap, now, onChanged }: { d: ItemDetail; row: ScraptfListRow | null | undefined; keyScrap: Scrap | null; now: number; onChanged: () => void }) {
+  const { toast } = useApp();
+  const [saving, setSaving] = useState(false);
+  // A second click before the first save answers would add the price twice.
+  const savingRef = useRef(false);
+  const view = row ? scraptfListView(row, keyScrap, now) : null;
+  // The list prices the plain copy; a painted drawer shows that copy's row, and says so.
+  const otherCopy = row ? listRowIsOtherCopy(row, d.sku) : false;
+  // Each prices.upsert adds a row: once this list price is on the sheet, a second click would only duplicate it.
+  // A painted drawer's own prices never hold the plain copy's row, so the service answers for it.
+  const used = row ? d.scraptfListSaved || listPriceAlreadySaved(row, d.scrapPrices) : false;
+  const bankPage = bankPageUrl(d.seenOn, d.category);
+
+  const saveAsMine = async () => {
+    const input = row ? listPriceInput(row, d) : null;
+    if (!row || !input || used || savingRef.current) return;
+    savingRef.current = true;
+    setSaving(true);
+    try {
+      const saved = await rpc('prices.upsert', input);
+      toast(listPriceSavedText(saved, row.observedAt, Date.now()), 'good');
+      onChanged();
+    } catch (e) {
+      toast(`Could not save the price: ${errorMessage(e)}`, 'bad');
+    } finally {
+      savingRef.current = false;
+      setSaving(false);
+    }
+  };
+
+  return (
+    <section className="drawer-section stf-list" aria-labelledby="sec-stf-list">
+      <div className="section-head">
+        <h3 id="sec-stf-list">scrap.tf price list</h3>
+        {/* The age reads next to the prices; only a save Holdings no longer trusts gets a pill. */}
+        {view && !view.fresh ? (
+          <TonePill tone="warn" title={view.title}>
+            Over a day old
+          </TonePill>
+        ) : null}
+      </div>
+      {view ? (
+        <p className="stf-list-line" title={view.title}>
+          <span title={view.sellsTitle}>
+            {view.hasSells ? (
+              <>
+                sells <strong className="money">{view.sells}</strong>
+              </>
+            ) : (
+              <strong>{view.sells}</strong>
+            )}
+            {otherCopy ? (
+              <span className="muted" title="scrap.tf's list prices the plain copy of this item, not this painted one.">
+                {' '}
+                (plain copy)
+              </span>
+            ) : null}
+          </span>
+          <span className="stf-sep" aria-hidden="true">
+            ·
+          </span>
+          <span title={view.paysTitle}>
+            pays <strong className="money">{view.pays}</strong>
+          </span>
+          {view.stock !== null ? (
+            <>
+              <span className="stf-sep" aria-hidden="true">
+                ·
+              </span>
+              <span>
+                stock <span className="num">{view.stock}</span>
+                {view.full ? (
+                  <>
+                    {' '}
+                    <TonePill tone="warn" title="scrap.tf is at its limit for this item, so it buys no more right now (as of your saved list).">
+                      Full
+                    </TonePill>
+                  </>
+                ) : null}
+              </span>
+            </>
+          ) : null}
+          <span className="stf-sep" aria-hidden="true">
+            ·
+          </span>
+          <span className={view.fresh ? 'muted' : 'tone-text-warn'}>{view.saved}</span>
+        </p>
+      ) : (
+        <p className="muted small">
+          Not on your saved scrap.tf price list. Open scrap.tf/items, save it with Ctrl+S as <strong>{SAVE_MODE}</strong> into your watch folder (Import), and scrap.tf&apos;s prices for every item it
+          trades show here.
+        </p>
+      )}
+      <div className="stf-list-actions" role="group" aria-label="scrap.tf price list actions">
+        {row && view ? (
+          <button
+            type="button"
+            className="btn small"
+            disabled={!view.canUse || used || saving}
+            title={
+              !view.canUse
+                ? (view.unusable ?? undefined)
+                : used
+                  ? otherCopy
+                    ? `${view.sells} from this saved list is already one of your prices, for a plain copy (Price sheet).`
+                    : `${view.sells} from this saved list is already one of your prices (Your scrap.tf prices, below).`
+                  : `Save ${view.sells} (scrap.tf's price to buy, as listed) as your typed price for a plain copy, dated when you saved the list.`
+            }
+            onClick={() => void saveAsMine()}
+          >
+            <Icon name="check" size={13} /> {saving ? 'Saving…' : used ? 'Saved as my price' : 'Use as my price'}
+          </button>
+        ) : null}
+        <button type="button" className="btn small ghost" title={`${SCRAPTF_ITEMS_URL}: open it in your browser to save the whole list again`} onClick={() => void openOrCopy(SCRAPTF_ITEMS_URL, toast)}>
+          <Icon name="external" size={12} /> Open scrap.tf/items
+        </button>
+        {/* F15: the bank page the item was last seen on, else its category's (bankPageUrl). */}
+        <button type="button" className="btn small ghost" title={bankPage} onClick={() => void openOrCopy(bankPage, toast)}>
+          <Icon name="external" size={12} /> Open bank page
+        </button>
+      </div>
+      <p className="muted small stf-list-note">The app never visits scrap.tf; your browser does, and you choose when.</p>
+    </section>
   );
 }
 

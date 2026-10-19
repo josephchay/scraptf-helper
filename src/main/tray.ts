@@ -1,5 +1,5 @@
-// Tray icon: context menu (show, quick entry, pause toggles, quit) and a
-// tooltip summarising the latest status push.
+// Tray icon: context menu (show, quick entry, pause toggles, the live check's
+// clipboard watcher, quit) and a tooltip summarising the latest status push.
 
 import { Menu, nativeImage, Tray, type MenuItemConstructorOptions } from 'electron';
 import type { Logger } from '../service/contracts';
@@ -13,6 +13,10 @@ export interface TrayState {
   status: AppStatus | null;
   service: Pick<ServiceHostStatus, 'state' | 'nextRestartAt'>;
   hotkey: HotkeyStatus;
+  /** F16: settings.check.watchClipboard (the opt-in clipboard watcher). */
+  checkWatch: boolean;
+  /** F16: the live check hotkey. */
+  checkHotkey: HotkeyStatus;
   now: number;
 }
 
@@ -21,6 +25,8 @@ export interface TrayActions {
   quickEntry(): void;
   setLiveFeedPaused(paused: boolean): void;
   setNetworkPaused(paused: boolean): void;
+  /** F16: turns the clipboard watcher on or off (settings.check.watchClipboard). */
+  setClipboardWatch(on: boolean): void;
   quit(): void;
 }
 
@@ -72,7 +78,10 @@ export function trayTooltip(state: TrayState): string {
     else if (state.status) lines.push(`Live feed ${FEED_LABELS[state.status.feed] ?? state.status.feed}`);
     if (state.status && state.status.setupNeeded.length > 0) lines.push('Setup needed: open Settings');
   }
+  // The watcher reads the clipboard, so the tray always says when it is on (paused with the network).
+  if (state.checkWatch) lines.push(state.networkPaused ? 'Clipboard check paused' : 'Clipboard check on');
   if (state.hotkey.error) lines.push('Quick-entry hotkey unavailable');
+  if (state.checkHotkey.error) lines.push('Live check hotkey unavailable');
 
   let text = lines.join('\n');
   if (text.length > MAX_TOOLTIP) text = `${text.slice(0, MAX_TOOLTIP - 3)}...`;
@@ -101,13 +110,20 @@ export function trayMenuTemplate(state: TrayState, actions: TrayActions): MenuIt
       checked: state.networkPaused,
       click: (item) => actions.setNetworkPaused(item.checked),
     },
+    {
+      label: 'Clipboard check',
+      type: 'checkbox',
+      checked: state.checkWatch,
+      click: (item) => actions.setClipboardWatch(item.checked),
+    },
     { type: 'separator' },
     { label: 'Quit TF2 Flip Desk', click: () => actions.quit() },
   ];
 }
 
-function menuKey(state: TrayState): string {
-  return JSON.stringify([state.liveFeedEnabled, state.networkPaused, state.hotkey.registered, state.hotkey.accelerator]);
+/** Everything the menu shows: a field missing here leaves its item stale (the watch checkbox included). */
+export function menuKey(state: TrayState): string {
+  return JSON.stringify([state.liveFeedEnabled, state.networkPaused, state.checkWatch, state.hotkey.registered, state.hotkey.accelerator]);
 }
 
 export function createTray(iconPath: string, actions: TrayActions, initial: TrayState, log: Logger): TrayController {

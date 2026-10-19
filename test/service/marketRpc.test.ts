@@ -11,10 +11,12 @@ import { createRpcHandlers, type HandlerContext, type RpcHandler } from '../../s
 import { DEFAULT_SETTINGS } from '../../src/shared/defaults';
 import { CSV_BOM } from '../../src/service/domain/csv';
 import { MARKET_CSV_COLUMNS, emptyMarketCounts } from '../../src/shared/market';
+import { scraptfLinkFor } from '../../src/shared/links';
+import { scraptfListCoverage } from '../../src/shared/scraptfList';
 import type { KeyPriceState, MarketListResult, MarketRow } from '../../src/shared/types';
 
 const NOW = Date.UTC(2026, 9, 15, 12, 0, 0);
-const KEY: KeyPriceState = { valueScrap: 568, source: 'bptf', observedAt: NOW, stale: false, quotes: [] };
+const KEY: KeyPriceState = { valueScrap: 568, source: 'bptf', observedAt: NOW, stale: false, quotes: [], scraptfFromList: null };
 
 const ROW: MarketRow = {
   sku: '378;6',
@@ -39,6 +41,14 @@ const ROW: MarketRow = {
   verdict: 'flip',
   lastOrderChangeAt: NOW - 30_000,
   evaluatedAt: NOW,
+  scraptfPaysScrap: 560,
+  scraptfStock: 2,
+  scraptfStockLimit: 6,
+  scraptfFull: false,
+  scraptfListAt: NOW - 120_000,
+  scraptfNewAt: null,
+  scraptfListedSince: null,
+  scraptfLink: scraptfLinkFor('hats', null),
 };
 
 let repo: Repo;
@@ -52,7 +62,7 @@ beforeEach(() => {
     rows: [ROW],
     total: 1,
     counts: { ...emptyMarketCounts(), flip: 1 },
-    scraptf: { typed: 1, pages: 0, newestPageAt: null, importEnabled: false, watchFolder: false, coverage: [] },
+    scraptf: { typed: 1, pages: 0, newestPageAt: null, importEnabled: false, watchFolder: false, coverage: [], allItems: scraptfListCoverage(null) },
     stats: { entries: 1, building: false, progress: 1, lastFullAt: NOW, lastChangeAt: null, pendingDirty: 0, lastError: null, retryAt: null },
     keyPrice: KEY,
     generatedAt: now,
@@ -171,6 +181,9 @@ describe('marketCsv', () => {
     const lines = csv.slice(CSV_BOM.length).trimEnd().split('\r\n');
     expect(lines[0]).toBe(MARKET_CSV_COLUMNS.join(','));
     expect(lines).toHaveLength(2);
-    expect(lines[1]).toBe(`378;6,Team Captain,hats,flip,1 key 3.55 ref,,4,1 key 1.33 ref,61.11 ref,typed,,,5.55 ref,71,${new Date(NOW - 30_000).toISOString()}`);
+    // F14 appended the saved scrap.tf/items list's columns (pays, stock, limit, saved) at the end.
+    expect(lines[1]).toBe(
+      `378;6,Team Captain,hats,flip,1 key 3.55 ref,,4,1 key 1.33 ref,61.11 ref,typed,,,5.55 ref,71,${new Date(NOW - 30_000).toISOString()},62.22 ref,2,6,${new Date(NOW - 120_000).toISOString()}`,
+    );
   });
 });

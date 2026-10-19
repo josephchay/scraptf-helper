@@ -1,6 +1,7 @@
 // Watches one folder for scrap.tf pages the user saves and hands each new or
-// changed .html/.htm file to `onFile`. Only reads local files; never throws after
-// creation (errors are logged).
+// changed .html/.htm/.mhtml/.mht file to `onFile`, as text (an .mhtml file is
+// unpacked by the import, savedPage.ts), and one over the size limit, unread, to
+// `onSkip`. Only reads local files; never throws after creation (errors are logged).
 
 import { watch as fsWatch, promises as fsp } from 'node:fs';
 import { join, resolve } from 'node:path';
@@ -21,10 +22,19 @@ export interface WatchHandle {
 
 export type WatchFactory = (folder: string, listener: (event: string, fileName: string | null) => void) => WatchHandle;
 
+/** Why a saved page was not read: only the size limit so far. */
+export type WatchSkipReason = 'too-large';
+
 export interface FolderWatcherOptions {
   folder: string;
   log: Logger;
   onFile(path: string, html: string, mtimeMs: number): void;
+  /**
+   * A page the watch will not read (over maxBytes), once per version: the import records it, so the
+   * user sees why the save did nothing (a Single File save holds every image and can go over, F18).
+   * `detail` is plain text; nothing of the file is read.
+   */
+  onSkip?(path: string, reason: WatchSkipReason, detail: string, mtimeMs: number): void;
   now?: () => UnixMs;
   /** The initial scan picks up files modified at or after this time (default: start time). */
   since?: UnixMs | null;
@@ -48,7 +58,10 @@ const defaultWatchFactory: WatchFactory = (folder, listener) =>
 
 const TEMP_SUFFIXES = ['.crdownload', '.tmp', '.temp', '.part', '.partial', '.download', '.opdownload', '~'];
 
-/** True for a saved page we should import: *.html / *.htm, not a temp file, not inside a "*_files" folder. */
+/**
+ * True for a saved page we should import: *.html / *.htm, or *.mhtml / *.mht (F18, "Webpage, Single
+ * File"), not a temp file, not inside a "*_files" folder.
+ */
 export function isImportCandidate(fileName: string): boolean {
   const segments = fileName.split(/[\\/]+/).filter(Boolean);
   const base = segments.pop();
@@ -57,7 +70,7 @@ export function isImportCandidate(fileName: string): boolean {
   const lower = base.toLowerCase();
   if (lower.startsWith('.') || lower.startsWith('~')) return false;
   if (TEMP_SUFFIXES.some((s) => lower.endsWith(s))) return false;
-  return lower.endsWith('.html') || lower.endsWith('.htm');
+  return /\.(?:html?|mht(?:ml)?)$/.test(lower);
 }
 
 // Shared with main's "Import file" so both paths decode a page the same way.
@@ -120,6 +133,14 @@ export function createFolderWatcher(opts: FolderWatcherOptions): FolderWatcher {
     }
   };
 
+  const skip = (full: string, reason: WatchSkipReason, detail: string, mtimeMs: number): void => {
+    try {
+      opts.onSkip?.(full, reason, detail, mtimeMs);
+    } catch (err) {
+      log.error(`Reporting the skip of ${full} failed: ${errText(err)}`);
+    }
+  };
+
   /** Runs only through `queue`, so never twice at once. */
   const processFile = async (full: string, fileName: string): Promise<void> => {
     if (stopped) return;
@@ -130,7 +151,9 @@ export function createFolderWatcher(opts: FolderWatcherOptions): FolderWatcher {
       if (st.size === 0) return; // still being written; the write raises another event
       if (st.size > maxBytes) {
         handled.set(full, st.mtimeMs);
-        log.warn(`Skipped ${full}: ${Math.ceil(st.size / 1024 / 1024)} MB is over the ${Math.round(maxBytes / 1024 / 1024)} MB import limit`);
+        const detail = `${Math.ceil(st.size / 1024 / 1024)} MB is over the ${Math.round(maxBytes / 1024 / 1024)} MB import limit`;
+        log.warn(`Skipped ${full}: ${detail}`);
+        skip(full, 'too-large', detail, st.mtimeMs);
         return;
       }
       const buf = await fsp.readFile(full);

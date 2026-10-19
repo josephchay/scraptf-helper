@@ -1,0 +1,432 @@
+/* Live check (F16): the check popup window (pages/CheckPopup.tsx, window kind 'check', about 380 x 220,
+   frameless, always on top; classes cp-*) and the Live market's "Recent checks" panel (classes rc-*).
+   Colours come from tokens.css only, so both themes work. Nothing here loads anything: no url() and
+   no @import (the compliance scan reads style sheets too). Nothing animates. */
+
+/* ---------- the popup window ---------- */
+
+html[data-window='check'] body {
+  overflow: hidden;
+  background: var(--surface);
+}
+
+.check-popup {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  height: 100vh;
+  box-sizing: border-box;
+  padding: 8px 12px 8px;
+  overflow: hidden;
+  border: 1px solid var(--border-strong);
+  /* The verdict colours the left edge, so the result reads before the words. */
+  box-shadow: inset 3px 0 0 var(--border-strong);
+  background: var(--surface);
+}
+
+.check-popup.verdict-flip {
+  box-shadow: inset 3px 0 0 var(--good);
+}
+
+.check-popup.verdict-over {
+  box-shadow: inset 3px 0 0 var(--bad);
+}
+
+.check-popup.verdict-no-price {
+  box-shadow: inset 3px 0 0 var(--info);
+}
+
+.check-popup.status-refused {
+  box-shadow: inset 3px 0 0 var(--warn);
+}
+
+.cp-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  min-height: 24px;
+}
+
+.cp-title {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  font-size: 14px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cp-title .item-name-wrap {
+  max-width: 100%;
+}
+
+.cp-mark {
+  display: inline-grid;
+  flex-shrink: 0;
+  place-items: center;
+  color: var(--tone, var(--accent));
+}
+
+.cp-cat {
+  flex-shrink: 0;
+}
+
+.cp-close {
+  flex-shrink: 0;
+  min-width: 22px;
+  height: 22px;
+  margin-right: -4px;
+}
+
+.cp-text {
+  margin: 0;
+  line-height: 1.35;
+}
+
+/* An item's notes (closest match, part of the name not recognised, sold out) can run to four lines
+   together; two show and the rest is in the tooltip, so the buttons always fit the 220 px window. */
+.cp-note {
+  display: -webkit-box;
+  flex-shrink: 0;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+/* F19: a price copied on its own, checked as the item opened from the Live market. Not muted: it is
+   why the popup names an item the copied text did not. */
+.cp-note.cp-matched {
+  color: var(--info);
+}
+
+.cp-note.cp-matched > .icon {
+  margin-right: 4px;
+  vertical-align: -2px;
+}
+
+.cp-line {
+  display: flex;
+  align-items: center;
+  gap: 2px 6px;
+  min-width: 0;
+  min-height: 20px;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.cp-label {
+  flex-shrink: 0;
+  min-width: 56px;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.cp-line .money {
+  flex-shrink: 0;
+}
+
+/* The buyer's name gives way first; the count stays at the right. */
+.cp-buyer {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-muted);
+  text-overflow: ellipsis;
+}
+
+.cp-count,
+.cp-stock {
+  flex-shrink: 0;
+}
+
+.cp-count {
+  margin-left: auto;
+}
+
+.cp-verdict {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 10px;
+  min-height: 24px;
+}
+
+.cp-pay {
+  color: var(--text-muted);
+  font-size: 12.5px;
+  white-space: nowrap;
+}
+
+.cp-pay .money {
+  color: var(--text);
+}
+
+/* No scrap.tf price to compare: Pay up to is the answer, so it leads. */
+.cp-verdict.lead-pay .cp-pay {
+  order: -1;
+}
+
+.cp-pay.prominent {
+  color: var(--text);
+  font-size: 14px;
+}
+
+.cp-pay.prominent .money {
+  color: var(--good);
+  font-size: 15px;
+}
+
+.cp-conf {
+  margin-left: auto;
+}
+
+/* One row whatever the labels say ("Recording…"): the ghost buttons give way, with an ellipsis. */
+.cp-actions {
+  display: flex;
+  flex-shrink: 0;
+  gap: 6px;
+  min-width: 0;
+  margin-top: auto;
+}
+
+.cp-actions .btn {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+.cp-actions .btn.ghost {
+  flex-shrink: 1;
+  min-width: 0;
+  padding-right: 6px;
+  padding-left: 6px;
+}
+
+.cp-btn-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.cp-keys {
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cp-keys kbd {
+  font-size: 10px;
+}
+
+.check-popup .btn:focus-visible,
+.check-popup .icon-btn:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 1px;
+}
+
+/* The Undo toast fits the small window instead of floating off its edge. */
+html[data-window='check'] .toasts {
+  right: 8px;
+  bottom: 8px;
+  left: 8px;
+  max-width: none;
+}
+
+/* ---------- Settings → Live check (classes lc-*) ---------- */
+
+.lc-hotkey-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.lc-hotkey-row .commit-input {
+  flex: 1;
+  min-width: 0;
+}
+
+.lc-hotkey-row .pill {
+  flex-shrink: 0;
+  margin-top: 6px;
+}
+
+.lc-test {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+  margin-top: 6px;
+}
+
+/* ---------- Recent checks (Live market) ---------- */
+
+.recent-checks {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px 14px;
+}
+
+.rc-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 12px;
+  min-width: 0;
+}
+
+.recent-checks .rc-title {
+  margin: 0;
+  font-size: inherit;
+}
+
+.rc-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 4px;
+  margin-left: -4px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: var(--text);
+  cursor: pointer;
+  font-size: 13.5px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.rc-toggle:hover {
+  background: var(--surface-2);
+}
+
+.rc-toggle .count {
+  min-width: 18px;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: var(--surface-3);
+  color: var(--text-muted);
+  font-size: 11px;
+  text-align: center;
+}
+
+.rc-hint {
+  flex: 1 1 240px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rc-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.rc-form {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.rc-form .input {
+  flex: 1 1 260px;
+  min-width: 0;
+}
+
+/* One line by default; a name-then-price paste (Shift+Enter) can grow it. */
+.rc-input {
+  min-height: 30px;
+  max-height: 90px;
+  resize: vertical;
+  line-height: 1.4;
+}
+
+.rc-result {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+  margin: 0;
+}
+
+.rc-list {
+  display: flex;
+  flex-direction: column;
+  max-height: 264px;
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  list-style: none;
+  border-top: 1px solid var(--border-soft);
+}
+
+/* time · item · price (source) · verdict · Pay up to. Every column can shrink (each cell ends in an
+   ellipsis), so a narrow window never scrolls sideways; Pay up to, then the price, fold away below. */
+.rc-row {
+  display: grid;
+  grid-template-columns: 72px minmax(0, 1.4fr) minmax(0, 1fr) minmax(0, 200px) minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-height: 30px;
+  padding: 3px 6px;
+  border: 0;
+  border-bottom: 1px solid var(--border-soft);
+  background: none;
+  color: var(--text);
+  cursor: pointer;
+  font-size: 12.5px;
+  text-align: left;
+}
+
+.rc-row:hover {
+  background: var(--row-hover);
+}
+
+.rc-row.just-checked {
+  background: var(--accent-weak);
+}
+
+.rc-row > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rc-time {
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.rc-pay {
+  color: var(--text-muted);
+}
+
+.rc-pay .money {
+  color: var(--text);
+}
+
+@media (max-width: 1060px) {
+  .rc-row {
+    grid-template-columns: 64px minmax(0, 1.4fr) minmax(0, 1fr) minmax(0, 190px);
+  }
+
+  .rc-pay {
+    display: none;
+  }
+}
+
+@media (max-width: 760px) {
+  .rc-row {
+    grid-template-columns: 56px minmax(0, 1fr) minmax(0, 180px);
+  }
+
+  .rc-price {
+    display: none;
+  }
+}

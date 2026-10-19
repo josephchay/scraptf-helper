@@ -13,9 +13,13 @@ import type {
   Repo,
   SchemaItemRow,
 } from '../contracts';
+import { bankStockThinning, type BankStockThinSave } from '../../shared/bankStock';
 import { cleanCategoryCounts } from '../../shared/market';
-import { CATEGORIES } from '../../shared/types';
+import { SCRAPTF_CHANGES_DEFAULT_LIMIT, SCRAPTF_EVENTS_MAX_AGE_MS, SCRAPTF_ITEM_EVENTS } from '../../shared/scraptfHistory';
+import { CATEGORIES, SCRAPTF_BANK_IDS, SCRAPTF_CHANGE_KINDS } from '../../shared/types';
 import type {
+  BankStockSave,
+  BankStockStored,
   CommunityRow,
   ConfidenceLevel,
   GroupBy,
@@ -42,6 +46,10 @@ import type {
   RequestLogRow,
   RuleFilter,
   ScrapPrice,
+  ScraptfBank,
+  ScraptfChangeKind,
+  ScraptfEventStored,
+  ScraptfListStored,
   SpecialAttrs,
   UnixMs,
 } from '../../shared/types';
@@ -110,6 +118,11 @@ function boolOrNull(v: Out): boolean | null {
 
 function oneOf<T extends string>(v: Out, allowed: readonly T[], fallback: T): T {
   return typeof v === 'string' && (allowed as readonly string[]).includes(v) ? (v as T) : fallback;
+}
+
+/** A stored or incoming bank id (F15); anything else (a newer build's id, damage) reads as unknown. */
+function bankOrNull(v: unknown): ScraptfBank | null {
+  return typeof v === 'string' && (SCRAPTF_BANK_IDS as readonly string[]).includes(v) ? (v as ScraptfBank) : null;
 }
 
 function bindNum(v: unknown, fallback = 0): number {
@@ -508,8 +521,19 @@ function rowToScrapPrice(r: SqlRow): ScrapPrice {
     special: r['special'] === null || r['special'] === undefined ? null : parseSpecial(r['special']),
     assetId: strOrNull(r['asset_id']),
     stock: numOrNull(r['stock']),
+    // Joined from the row's import batch (PRICE_SELECT); typed rows read null.
+    bank: bankOrNull(r['bank']),
   };
 }
+
+/**
+ * Every scrap_prices read: the row plus its import batch's bank (F15). Columns must be qualified (both
+ * tables have id). Imported rows only: an imported price edited by hand turns 'user' but keeps its
+ * import_batch (prices.upsert keeps omitted fields), and a typed price was seen on no page.
+ */
+const PRICE_SELECT =
+  "SELECT sp.*, ib.bank AS bank FROM scrap_prices sp LEFT JOIN import_batches ib ON ib.id = sp.import_batch AND sp.source = 'import'";
+const PRICE_ORDER = 'ORDER BY sp.observed_at DESC, sp.id DESC';
 
 function rowToRule(r: SqlRow): PriceRule {
   const filter = parseRuleFilter(r['filter_json']);
@@ -621,7 +645,71 @@ function rowToImportBatch(r: SqlRow): ImportBatch {
     importedAt: num(r['imported_at']),
     itemCount: num(r['item_count']),
     categories: cleanCategoryCounts(parseJson(r['categories'])),
+    bank: bankOrNull(r['bank']),
   };
+}
+
+function rowToScraptfList(r: SqlRow): ScraptfListStored {
+  return {
+    sku: str(r['sku']),
+    name: str(r['name']),
+    sellsKeys: numOrNull(r['sells_keys']),
+    sellsScrap: numOrNull(r['sells_scrap']),
+    paysKeys: numOrNull(r['pays_keys']),
+    paysScrap: numOrNull(r['pays_scrap']),
+    stock: numOrNull(r['stock']),
+    stockLimit: numOrNull(r['stock_limit']),
+    batchId: num(r['batch_id']),
+    observedAt: num(r['observed_at']),
+  };
+}
+
+/** A whole count of 0 or more, else null (stock and limit from a saved page). */
+function bindCountOrNull(v: unknown): number | null {
+  return typeof v === 'number' && Number.isFinite(v) && v >= 0 ? Math.floor(v) : null;
+}
+
+function rowToBankStock(r: SqlRow): BankStockStored {
+  const costScrap = numOrNull(r['cost_scrap']);
+  return {
+    sku: str(r['sku']),
+    specialKey: str(r['special_key']),
+    name: str(r['name']),
+    // Both or neither: a row with no price to buy reads null for both.
+    costKeys: costScrap === null ? null : num(r['cost_keys']),
+    costScrap,
+    stock: numOrNull(r['stock']),
+    assetId: strOrNull(r['asset_id']),
+  };
+}
+
+/** A stored change event; a row with an unknown bank or kind (a newer build's, damage) is left out. */
+function rowToScraptfEvent(r: SqlRow): ScraptfEventStored[] {
+  const bank = bankOrNull(r['bank']);
+  const kind = r['kind'];
+  if (bank === null || typeof kind !== 'string' || !(SCRAPTF_CHANGE_KINDS as readonly string[]).includes(kind)) return [];
+  const fromScrap = numOrNull(r['from_scrap']);
+  const toScrap = numOrNull(r['to_scrap']);
+  return [
+    {
+      id: num(r['id']),
+      at: num(r['at']),
+      bank,
+      page: str(r['page']),
+      sku: str(r['sku']),
+      specialKey: str(r['special_key']),
+      name: str(r['name']),
+      kind: kind as ScraptfChangeKind,
+      // Both or neither, as bank_stock: a side with no price reads null for both.
+      fromKeys: fromScrap === null ? null : num(r['from_keys']),
+      fromScrap,
+      toKeys: toScrap === null ? null : num(r['to_keys']),
+      toScrap,
+      fromStock: numOrNull(r['from_stock']),
+      toStock: numOrNull(r['to_stock']),
+      batchId: num(r['batch_id']),
+    },
+  ];
 }
 
 function rowToRequestLog(r: SqlRow): RequestLogRow {
@@ -643,6 +731,56 @@ function rowToRequestLog(r: SqlRow): RequestLogRow {
 
 const LISTING_UPSERT = upsertSql('listings', LISTING_COLS, ['id']);
 const OPP_UPSERT = upsertSql('opportunities', OPP_COLS, ['key']);
+// Newest saved list wins per SKU: an older file imported later (catch-up scan, a copy) never replaces a row.
+const SCRAPTF_LIST_UPSERT =
+  upsertSql(
+    'scraptf_list',
+    ['sku', 'name', 'sells_keys', 'sells_scrap', 'pays_keys', 'pays_scrap', 'stock', 'stock_limit', 'batch_id', 'observed_at'],
+    ['sku'],
+  ) + ' WHERE excluded.observed_at >= scraptf_list.observed_at';
+const BANK_STOCK_INSERT =
+  'INSERT INTO bank_stock (batch_id, bank, sku, special_key, name, cost_keys, cost_scrap, stock, asset_id, page) ' +
+  'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(batch_id, sku, special_key) DO NOTHING';
+/** bank_stock.page longer than this is clipped (the parser clips it already: a page key is a short path). */
+const BANK_STOCK_PAGE_MAX_CHARS = 200;
+/** A save's time, as batchSavedAt (src/shared/market.ts): the file's mtime when known, else the import time. `ib` is import_batches. */
+const BANK_STOCK_SAVED_AT = '(CASE WHEN ib.file_mtime > 0 THEN ib.file_mtime ELSE ib.imported_at END)';
+/**
+ * F20: every save with rows, oldest first, from bank_stock_saves (V8): one row per kept save and one seek
+ * into import_batches for its time, so this costs per kept save, not per import batch ever written
+ * (import_batches is never purged) or per stored row. A save whose batch row is gone is left out.
+ */
+const BANK_STOCK_SAVE_INDEX =
+  `SELECT s.batch_id AS batch_id, ${BANK_STOCK_SAVED_AT} AS saved_at, s.bank AS bank, s.page AS page ` +
+  'FROM bank_stock_saves s JOIN import_batches ib ON ib.id = s.batch_id ' +
+  'ORDER BY saved_at ASC, s.batch_id ASC';
+/** bank_stock_saves kept with bank_stock: a second write to the same batch only adds its rows (first bank and page stay). */
+const BANK_STOCK_SAVE_UPSERT =
+  'INSERT INTO bank_stock_saves (batch_id, bank, page, items) VALUES (?, ?, ?, ?) ' +
+  'ON CONFLICT(batch_id) DO UPDATE SET items = bank_stock_saves.items + excluded.items';
+/** One bank's saves with rows, newest first (Repo.bankStockSaves). */
+const BANK_STOCK_SAVES =
+  `SELECT s.batch_id AS batch_id, ${BANK_STOCK_SAVED_AT} AS saved_at, s.items AS items, s.page AS page ` +
+  'FROM bank_stock_saves s JOIN import_batches ib ON ib.id = s.batch_id WHERE s.bank = ? ' +
+  'ORDER BY saved_at DESC, s.batch_id DESC LIMIT ?';
+/**
+ * F20: one bank's newest `?` saves of each page, page by page (the page saved last first), each page's
+ * newest first: the order bankStockPagePairs reads, so a LIMIT keeps whole pages. Retention keeps up to
+ * 300 saves a page, so a cap on the bank's newest saves overall would cut a quiet page, or the save it is
+ * compared with, out of the F17 diff while the history and the feed still read it.
+ */
+const BANK_STOCK_PAGE_HEADS =
+  'SELECT batch_id, saved_at, items, page FROM (' +
+  `SELECT s.batch_id AS batch_id, ${BANK_STOCK_SAVED_AT} AS saved_at, s.items AS items, s.page AS page, ` +
+  'ROW_NUMBER() OVER w AS rn, FIRST_VALUE(' +
+  BANK_STOCK_SAVED_AT +
+  ') OVER w AS top_at, FIRST_VALUE(s.batch_id) OVER w AS top_id ' +
+  'FROM bank_stock_saves s JOIN import_batches ib ON ib.id = s.batch_id WHERE s.bank = ? ' +
+  `WINDOW w AS (PARTITION BY s.page ORDER BY ${BANK_STOCK_SAVED_AT} DESC, s.batch_id DESC)` +
+  ') WHERE rn <= ? ORDER BY top_at DESC, top_id DESC, saved_at DESC, batch_id DESC LIMIT ?';
+const SCRAPTF_EVENT_INSERT =
+  'INSERT INTO scraptf_events (at, bank, page, sku, special_key, name, kind, from_keys, from_scrap, to_keys, to_scrap, from_stock, to_stock, batch_id) ' +
+  'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)';
 
 // Buy orders best first (keys, then metal), sell listings cheapest first.
 const LISTING_ORDER =
@@ -752,7 +890,7 @@ export function createRepo(db: SqliteDb): Repo {
   };
 
   const getScrapPrice = (id: number): ScrapPrice | null => {
-    const r = get('SELECT * FROM scrap_prices WHERE id = ?', id);
+    const r = get(`${PRICE_SELECT} WHERE sp.id = ?`, id);
     return r ? rowToScrapPrice(r) : null;
   };
 
@@ -1014,19 +1152,15 @@ export function createRepo(db: SqliteDb): Repo {
 
     listScrapPrices(q) {
       const text = typeof q === 'string' ? q.trim() : '';
-      if (!text) return all('SELECT * FROM scrap_prices ORDER BY observed_at DESC, id DESC').map(rowToScrapPrice);
+      if (!text) return all(`${PRICE_SELECT} ${PRICE_ORDER}`).map(rowToScrapPrice);
       const pattern = `%${escapeLike(text)}%`;
-      return all(
-        "SELECT * FROM scrap_prices WHERE name LIKE ? ESCAPE '\\' OR sku LIKE ? ESCAPE '\\' ORDER BY observed_at DESC, id DESC",
-        pattern,
-        pattern,
-      ).map(rowToScrapPrice);
+      return all(`${PRICE_SELECT} WHERE sp.name LIKE ? ESCAPE '\\' OR sp.sku LIKE ? ESCAPE '\\' ${PRICE_ORDER}`, pattern, pattern).map(rowToScrapPrice);
     },
 
     getScrapPrice,
 
     scrapPricesForSku(sku) {
-      return all('SELECT * FROM scrap_prices WHERE sku = ? ORDER BY observed_at DESC, id DESC', sku).map(rowToScrapPrice);
+      return all(`${PRICE_SELECT} WHERE sp.sku = ? ${PRICE_ORDER}`, sku).map(rowToScrapPrice);
     },
 
     upsertScrapPrice(input) {
@@ -1393,19 +1527,265 @@ export function createRepo(db: SqliteDb): Repo {
     createImportBatch(b) {
       const categories = cleanCategoryCounts(b.categories);
       return insertId(
-        'INSERT INTO import_batches (file_name, page_kind, file_mtime, imported_at, item_count, categories) VALUES (?, ?, ?, ?, ?, ?)',
+        'INSERT INTO import_batches (file_name, page_kind, file_mtime, imported_at, item_count, categories, bank) VALUES (?, ?, ?, ?, ?, ?, ?)',
         String(b.fileName ?? ''),
         String(b.pageKind),
         bindNum(b.fileMtime),
         bindNum(b.importedAt),
         bindNum(b.itemCount),
         categories ? JSON.stringify(categories) : null,
+        bankOrNull(b.bank),
       );
     },
 
     listImportBatches(limit) {
       const lim = clampLimit(limit, 50, GENERIC_MAX_LIMIT);
       return all('SELECT * FROM import_batches ORDER BY imported_at DESC, id DESC LIMIT ?', lim).map(rowToImportBatch);
+    },
+
+    // ----- scrap.tf price list (F14) -----
+
+    upsertScraptfList(rows) {
+      if (!Array.isArray(rows) || rows.length === 0) return 0;
+      return db.transaction(() => {
+        const stmt = db.prepare(SCRAPTF_LIST_UPSERT);
+        let written = 0;
+        for (const r of rows) {
+          if (!r || typeof r.sku !== 'string' || r.sku.trim() === '') continue;
+          // A row with neither price, or no time, is a parser slip, not a reason to fail the import.
+          // A "Sold out" row has no price to buy but still a price scrap.tf pays, so it is kept.
+          const sellsScrap = bindNumOrNull(r.sellsScrap);
+          const paysScrap = bindNumOrNull(r.paysScrap);
+          if (sellsScrap === null && paysScrap === null) continue;
+          if (typeof r.observedAt !== 'number' || !Number.isFinite(r.observedAt)) continue;
+          written += Number(
+            stmt.run(
+              r.sku,
+              String(r.name ?? ''),
+              sellsScrap === null ? null : bindNum(r.sellsKeys),
+              sellsScrap === null ? null : Math.round(sellsScrap),
+              paysScrap === null ? null : bindNum(r.paysKeys),
+              paysScrap === null ? null : Math.round(paysScrap),
+              bindCountOrNull(r.stock),
+              bindCountOrNull(r.stockLimit),
+              bindNum(r.batchId),
+              r.observedAt,
+            ).changes,
+          );
+        }
+        return written;
+      });
+    },
+
+    scraptfList() {
+      return all('SELECT * FROM scraptf_list ORDER BY sku ASC').map(rowToScraptfList);
+    },
+
+    scraptfListRow(sku) {
+      if (typeof sku !== 'string' || sku === '') return null;
+      const r = get('SELECT * FROM scraptf_list WHERE sku = ?', sku);
+      return r ? rowToScraptfList(r) : null;
+    },
+
+    scraptfListSummary() {
+      const r = get(
+        'SELECT COUNT(*) AS n, MAX(observed_at) AS newest, MIN(observed_at) AS oldest, COUNT(DISTINCT batch_id) AS batches FROM scraptf_list',
+      );
+      return {
+        items: num(r?.['n']),
+        newestAt: numOrNull(r?.['newest']),
+        oldestAt: numOrNull(r?.['oldest']),
+        batches: num(r?.['batches']),
+      };
+    },
+
+    purgeScraptfListOlderThan(ts) {
+      return run('DELETE FROM scraptf_list WHERE observed_at < ?', bindNum(ts));
+    },
+
+    // ----- scrap.tf bank stock (F17) -----
+
+    insertBankStock(batchId, bank, rows, page) {
+      const id = requireId('batchId', batchId);
+      const b = bankOrNull(bank);
+      if (b === null) throw new TypeError('bank must be a scrap.tf bank id');
+      if (!Array.isArray(rows) || rows.length === 0) return 0;
+      const pageKey = typeof page === 'string' ? page.slice(0, BANK_STOCK_PAGE_MAX_CHARS) : '';
+      return db.transaction(() => {
+        // First row wins: the import already picked one row per (SKU, extras).
+        const stmt = db.prepare(BANK_STOCK_INSERT);
+        let written = 0;
+        for (const r of rows) {
+          if (!r || typeof r.sku !== 'string' || r.sku.trim() === '') continue;
+          const costScrap = bindNumOrNull(r.costScrap);
+          const priced = costScrap !== null;
+          written += Number(
+            stmt.run(
+              id,
+              b,
+              r.sku,
+              typeof r.specialKey === 'string' ? r.specialKey : '',
+              String(r.name ?? ''),
+              priced ? bindNum(r.costKeys) : null,
+              priced ? Math.round(costScrap) : null,
+              bindCountOrNull(r.stock),
+              bindStrOrNull(r.assetId),
+              pageKey,
+            ).changes,
+          );
+        }
+        // F20: the save's entry, in the same transaction (a save with no row is no save).
+        if (written > 0) db.prepare(BANK_STOCK_SAVE_UPSERT).run(id, b, pageKey, written);
+        return written;
+      });
+    },
+
+    bankStockSaves(bank, limit, opts) {
+      const b = bankOrNull(bank);
+      if (b === null) return [];
+      const lim = clampLimit(limit, 50, GENERIC_MAX_LIMIT);
+      const perPage = typeof opts?.perPage === 'number' && Number.isFinite(opts.perPage) ? Math.max(1, Math.floor(opts.perPage)) : null;
+      const rows = perPage === null ? all(BANK_STOCK_SAVES, b, lim) : all(BANK_STOCK_PAGE_HEADS, b, perPage, lim);
+      return rows.map((r): BankStockSave => ({ batchId: num(r['batch_id']), savedAt: num(r['saved_at']), items: num(r['items']), page: str(r['page']) }));
+    },
+
+    bankStockRows(batchId) {
+      return all('SELECT * FROM bank_stock WHERE batch_id = ? ORDER BY sku ASC, special_key ASC', bindNum(batchId, -1)).map(rowToBankStock);
+    },
+
+    bankStockLatestPair(bank) {
+      const [newest = null, previous = null] = repo.bankStockSaves(bank, 2);
+      return { newest, previous };
+    },
+
+    bankStockSaveIndex() {
+      // From bank_stock_saves (one row per kept save): never a scan of bank_stock or of every batch.
+      return all(BANK_STOCK_SAVE_INDEX).flatMap((r): BankStockThinSave[] => {
+        const bank = bankOrNull(r['bank']);
+        return bank === null ? [] : [{ batchId: num(r['batch_id']), savedAt: num(r['saved_at']), bank, page: str(r['page']) }];
+      });
+    },
+
+    bankStockRowsOf(batchIds) {
+      const out = new Map<number, BankStockStored[]>();
+      const ids = [...new Set((Array.isArray(batchIds) ? batchIds : []).filter((v) => typeof v === 'number' && Number.isSafeInteger(v) && v > 0))];
+      for (const part of chunk(ids)) {
+        for (const r of all(`SELECT * FROM bank_stock WHERE batch_id IN (${placeholders(part.length)}) ORDER BY batch_id ASC, sku ASC, special_key ASC`, ...part)) {
+          const id = num(r['batch_id']);
+          let rows = out.get(id);
+          if (!rows) out.set(id, (rows = []));
+          rows.push(rowToBankStock(r));
+        }
+      }
+      return out;
+    },
+
+    pruneBankStock(now, opts) {
+      return db.transaction(() => {
+        let n = 0;
+        // A batch row that is gone (a damaged database) leaves rows no save can be dated by. Scans the
+        // table, so only maintenance asks (importSavedPage passes orphans: false).
+        if (opts?.orphans !== false) {
+          n += run('DELETE FROM bank_stock WHERE batch_id NOT IN (SELECT id FROM import_batches)');
+          run('DELETE FROM bank_stock_saves WHERE batch_id NOT IN (SELECT id FROM import_batches)');
+        }
+        const drop = bankStockThinning(repo.bankStockSaveIndex(), bindNum(now), {
+          ...(typeof opts?.maxSaves === 'number' ? { maxSaves: opts.maxSaves } : {}),
+          ...(typeof opts?.maxAgeMs === 'number' ? { maxAgeMs: opts.maxAgeMs } : {}),
+        });
+        // The count is of bank_stock rows; the saves' entries go with them.
+        for (const part of chunk([...drop])) {
+          n += run(`DELETE FROM bank_stock WHERE batch_id IN (${placeholders(part.length)})`, ...part);
+          run(`DELETE FROM bank_stock_saves WHERE batch_id IN (${placeholders(part.length)})`, ...part);
+        }
+        return n;
+      });
+    },
+
+    // ----- scrap.tf change feed (F20) -----
+
+    insertScraptfEvents(events) {
+      if (!Array.isArray(events) || events.length === 0) return 0;
+      return db.transaction(() => {
+        const stmt = db.prepare(SCRAPTF_EVENT_INSERT);
+        let written = 0;
+        for (const e of events) {
+          if (!e || typeof e.sku !== 'string' || e.sku.trim() === '') continue;
+          const bank = bankOrNull(e.bank);
+          if (bank === null || !(SCRAPTF_CHANGE_KINDS as readonly string[]).includes(e.kind)) continue;
+          if (typeof e.at !== 'number' || !Number.isFinite(e.at)) continue;
+          if (typeof e.batchId !== 'number' || !Number.isSafeInteger(e.batchId) || e.batchId <= 0) continue;
+          const fromScrap = bindNumOrNull(e.fromScrap);
+          const toScrap = bindNumOrNull(e.toScrap);
+          written += Number(
+            stmt.run(
+              Math.round(e.at),
+              bank,
+              typeof e.page === 'string' ? e.page.slice(0, BANK_STOCK_PAGE_MAX_CHARS) : '',
+              e.sku,
+              typeof e.specialKey === 'string' ? e.specialKey : '',
+              String(e.name ?? '').slice(0, 300),
+              e.kind,
+              fromScrap === null ? null : bindNum(e.fromKeys),
+              fromScrap === null ? null : Math.round(fromScrap),
+              toScrap === null ? null : bindNum(e.toKeys),
+              toScrap === null ? null : Math.round(toScrap),
+              bindCountOrNull(e.fromStock),
+              bindCountOrNull(e.toStock),
+              e.batchId,
+            ).changes,
+          );
+        }
+        return written;
+      });
+    },
+
+    scraptfEvents(q) {
+      const where: string[] = [];
+      const params: SqlValue[] = [];
+      if (q?.bank !== undefined) {
+        const bank = bankOrNull(q.bank);
+        if (bank === null) return [];
+        where.push('bank = ?');
+        params.push(bank);
+      }
+      // An empty list is no filter (as scraptfEventMatches); a list of only unknown kinds matches nothing.
+      if (q?.kinds !== undefined && q.kinds.length > 0) {
+        const kinds = uniqueStrings(q.kinds).filter((k) => (SCRAPTF_CHANGE_KINDS as readonly string[]).includes(k));
+        if (kinds.length === 0) return [];
+        where.push(`kind IN (${placeholders(kinds.length)})`);
+        params.push(...kinds);
+      }
+      if (typeof q?.sku === 'string') {
+        where.push('sku = ?');
+        params.push(q.sku);
+        if (typeof q.specialKey === 'string') {
+          where.push('special_key = ?');
+          params.push(q.specialKey);
+        }
+      }
+      if (typeof q?.beforeId === 'number' && Number.isFinite(q.beforeId)) {
+        where.push('id < ?');
+        params.push(q.beforeId);
+      }
+      if (typeof q?.sinceAt === 'number' && Number.isFinite(q.sinceAt)) {
+        where.push('at >= ?');
+        params.push(q.sinceAt);
+      }
+      const lim = Math.max(1, clampLimit(q?.limit, SCRAPTF_CHANGES_DEFAULT_LIMIT, EVENTS_MAX_LIMIT));
+      const sql = `SELECT * FROM scraptf_events${where.length ? ` WHERE ${where.join(' AND ')}` : ''} ORDER BY id DESC LIMIT ?`;
+      return all(sql, ...params, lim).flatMap(rowToScraptfEvent);
+    },
+
+    scraptfEventsForSku(sku, limit) {
+      if (typeof sku !== 'string' || sku === '') return [];
+      const lim = Math.max(1, clampLimit(limit, SCRAPTF_ITEM_EVENTS, EVENTS_MAX_LIMIT));
+      return all('SELECT * FROM scraptf_events WHERE sku = ? ORDER BY id DESC LIMIT ?', sku, lim).flatMap(rowToScraptfEvent);
+    },
+
+    pruneScraptfEvents(now, maxAgeMs) {
+      const maxAge = typeof maxAgeMs === 'number' && Number.isFinite(maxAgeMs) ? Math.max(0, maxAgeMs) : SCRAPTF_EVENTS_MAX_AGE_MS;
+      return run('DELETE FROM scraptf_events WHERE at < ?', bindNum(now) - maxAge);
     },
 
     // ----- request log -----

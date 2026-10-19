@@ -1,11 +1,27 @@
 // Pure helpers for the quick-entry window's live preview (feature F2), its
-// prefill (F8) and "Bought it" (F12). Kept out of QuickEntry.tsx so the rules
-// are unit-tested.
+// prefill (F8, with price text from the live check popup, F16) and "Bought it"
+// (F12). Kept out of QuickEntry.tsx so the rules are unit-tested.
 
 import { frictionOf, maxCostFor, type CeilingSettings } from '../shared/ceiling';
-import { fromObject, fromString } from '../shared/sku';
-import type { ItemDetail, ItemRevenue, JournalEntry, JournalInput, LinkSpec, OpportunityStatus, OrderSummary, ProfitSettings, Scrap, ScrapPrice } from '../shared/types';
-import { fmtKeysMetal, fmtMoney } from './format';
+import { CHECK_PRICE_TEXT_MAX } from '../shared/check';
+import { parsePrice } from '../shared/currency';
+import { SCRAPTF_LIST_PRICE_NOTE, scraptfListFresh, scraptfListUsePrice } from '../shared/scraptfList';
+import { baseSku, fromObject, fromString } from '../shared/sku';
+import type {
+  ItemDetail,
+  ItemRevenue,
+  JournalEntry,
+  JournalInput,
+  LinkSpec,
+  OpportunityStatus,
+  OrderSummary,
+  ProfitSettings,
+  Scrap,
+  ScrapPrice,
+  ScraptfListRow,
+  UnixMs,
+} from '../shared/types';
+import { fmtAgo, fmtDateTime, fmtInt, fmtKeysMetal, fmtMoney } from './format';
 import { statusFor } from './oppModel';
 
 /** Quiet time after a pick before 'item.detail' runs, so arrowing through picks does not fire a request each. */
@@ -233,4 +249,123 @@ export function boughtButton(state: BoughtState | null, priceId: number): { labe
 /** After Undo removed the row: back to idle, unless the button has moved on (another save, another record). */
 export function afterBoughtUndo(state: BoughtState | null, entryId: number): BoughtState | null {
   return state?.status === 'done' && state.entryId === entryId ? null : state;
+}
+
+// ---------------------------------------------------------------------------
+// scrap.tf price list (F14): the hint under the preview and its Use button
+// ---------------------------------------------------------------------------
+
+/** The note on a price taken from the saved list (quick entry's Use, the drawer's "Use as my price"). */
+export const LIST_PRICE_NOTE = SCRAPTF_LIST_PRICE_NOTE;
+/** The note when Use put the list's (unpainted) price on another copy, such as a painted one. */
+export const LIST_PRICE_NOTE_PLAIN = 'from scrap.tf list (plain copy)';
+
+function finiteNum(v: unknown): v is number {
+  return typeof v === 'number' && Number.isFinite(v);
+}
+
+/**
+ * scrap.tf's "Price to buy" as the list shows it ("1 key 5.11 ref"), written with units so the price
+ * field reads it whatever its bare-number unit is. null for a sold-out row (no price shown) or a zero price.
+ */
+export function listSellsText(row: Pick<ScraptfListRow, 'sellsKeys' | 'sellsScrapRaw'> | null | undefined): string | null {
+  if (!row || !finiteNum(row.sellsScrapRaw)) return null;
+  const keys = finiteNum(row.sellsKeys) && row.sellsKeys > 0 ? row.sellsKeys : 0;
+  const scrap = Math.max(0, Math.round(row.sellsScrapRaw));
+  if (keys === 0 && scrap === 0) return null;
+  return fmtKeysMetal(keys, scrap);
+}
+
+/**
+ * The list prices a plain copy (rows are keyed by the base SKU, paint dropped): true when `sku` names
+ * another copy of that item (a painted one), so its price is not the list's.
+ */
+export function listRowIsOtherCopy(row: Pick<ScraptfListRow, 'sku'>, sku: string): boolean {
+  const s = sku.trim().toLowerCase();
+  try {
+    return baseSku(s) !== fromObject(fromString(s)) || baseSku(s) !== row.sku.trim().toLowerCase();
+  } catch {
+    return s !== row.sku.trim().toLowerCase();
+  }
+}
+
+export interface QuickListHint {
+  /** "sells 1.33 ref · stock 2, saved 3 min ago" (the "scrap.tf list" label is the line's own). */
+  text: string;
+  title: string;
+  /** What Use writes into the price field; null when there is nothing to buy (sold out, or stock 0). */
+  price: string | null;
+  /** 'warn' once the saved row is older than a day: check scrap.tf before trusting it. */
+  tone: 'muted' | 'warn';
+  observedAt: UnixMs;
+  /** The picked SKU is another copy (painted) than the plain one the list prices. */
+  otherCopy: boolean;
+}
+
+/** Quick entry's line for the picked item's row of the saved scrap.tf/items list; null without one. */
+export function quickListHint(row: ScraptfListRow | null | undefined, pickedSku: string, now: UnixMs): QuickListHint | null {
+  if (!row || !finiteNum(row.observedAt)) return null;
+  const sells = listSellsText(row);
+  // A priced row with stock 0 cannot be bought either; the import refuses it as a price (scraptfListUsePrice).
+  const outOfStock = sells !== null && scraptfListUsePrice(row) === null;
+  const price = outOfStock ? null : sells;
+  const stock = finiteNum(row.stock) ? ` · stock ${fmtInt(row.stock)}` : '';
+  const otherCopy = listRowIsOtherCopy(row, pickedSku);
+  const copy = otherCopy ? ' (plain copy)' : '';
+  const fresh = scraptfListFresh(row, now);
+  const saved = `saved ${fmtAgo(row.observedAt, now)}`;
+  const text = `${sells ? `sells ${sells}` : 'sold out'}${copy}${stock}, ${saved}`;
+  const title = [
+    `scrap.tf's price list as you saved it ${fmtDateTime(row.observedAt)}.`,
+    otherCopy ? 'It prices the plain copy of this item, not this one.' : '',
+    price
+      ? `Use puts ${price} in the price field; Enter saves it with the list's date.`
+      : outOfStock
+        ? 'Out of stock on scrap.tf (stock 0 when you saved the list), so there is nothing to buy at this price.'
+        : 'It shows no price to buy (sold out), so there is nothing to use.',
+    fresh ? 'Stock may have changed since.' : 'Older than a day: check scrap.tf, or save scrap.tf/items again.',
+    'The app never visits scrap.tf.',
+  ]
+    .filter(Boolean)
+    .join(' ');
+  return { text, title, price, tone: fresh ? 'muted' : 'warn', observedAt: row.observedAt, otherCopy };
+}
+
+// ---------------------------------------------------------------------------
+// Live check (F16): 'ui.quickPrefill' may carry price text (the check popup's Quick entry…)
+// ---------------------------------------------------------------------------
+
+/**
+ * The price text a prefill puts in the price field, or '' to leave it empty. Main already checks it
+ * (ipc.ts: at most CHECK_PRICE_TEXT_MAX characters, no control characters, no markup); checked again
+ * here, and only a price the field can read is used, so nothing odd ever lands in it.
+ */
+export function prefillPriceText(price: unknown): string {
+  if (typeof price !== 'string') return '';
+  const t = price.trim();
+  if (!t || t.length > CHECK_PRICE_TEXT_MAX || /[\u0000-\u001f\u007f<>]/.test(t)) return '';
+  return parsePrice(t, 'ref') ? t : '';
+}
+
+/** A list price put into the price field by Use: for this item, this exact text, seen when the list was saved. */
+export interface ListPriceUse {
+  sku: string;
+  text: string;
+  observedAt: UnixMs;
+  /** Put on another copy than the plain one the list prices (QuickListHint.otherCopy). */
+  otherCopy?: boolean;
+}
+
+/**
+ * The date and note a quick-entry save carries. A price still exactly as Use put it keeps the list's
+ * date (it was seen then, not now; an old list then reads stale, as it should) and, without a note of
+ * the user's own, LIST_PRICE_NOTE (LIST_PRICE_NOTE_PLAIN when it was the plain copy's price put on a
+ * painted one, so the sheet does not pass it off as that copy's own). Anything typed over it is a price seen now.
+ */
+export function listPriceStamp(use: ListPriceUse | null, entry: { sku: string; text: string }, note: string, now: UnixMs): { observedAt: UnixMs; note: string | null } {
+  const typed = note.trim();
+  if (use && use.sku === entry.sku && use.text.trim() === entry.text.trim() && finiteNum(use.observedAt)) {
+    return { observedAt: Math.min(use.observedAt, now), note: typed || (use.otherCopy ? LIST_PRICE_NOTE_PLAIN : LIST_PRICE_NOTE) };
+  }
+  return { observedAt: now, note: typed || null };
 }

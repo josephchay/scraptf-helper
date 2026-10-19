@@ -20,7 +20,7 @@ import {
   type HoldingBuySide,
 } from '../../src/shared/holdings';
 import { valueScrap } from '../../src/shared/currency';
-import { HOLDING_STATUSES, type HoldingRow, type JournalPosition, type OrderSummary } from '../../src/shared/types';
+import { HOLDING_STATUSES, type HoldingRow, type JournalPosition, type OrderSummary, type ScraptfListRow } from '../../src/shared/types';
 
 const NOW = Date.UTC(2026, 9, 15, 12, 0, 0);
 const KEY = 568;
@@ -150,6 +150,55 @@ describe('holdingRow', () => {
   });
 });
 
+describe('holdingRow with the saved scrap.tf list (F14)', () => {
+  const list = (paysScrap: number | null, over: Partial<ScraptfListRow> = {}): ScraptfListRow => ({
+    sku: '378;6',
+    name: 'Team Captain',
+    sellsKeys: 0,
+    sellsScrapRaw: 90,
+    sellsScrap: 90,
+    paysKeys: paysScrap === null ? null : 0,
+    paysScrapRaw: paysScrap,
+    paysScrap,
+    stock: 1,
+    stockLimit: 5,
+    full: false,
+    observedAt: NOW - 10 * 60_000,
+    ...over,
+  });
+  const at = (l: ScraptfListRow | null) => ({ list: l, now: NOW });
+
+  it('changes nothing without a list row: backpack.tf is the exit', () => {
+    const r = holdingRow(position('378;6', [40]), 'hats', buy(60), P, KEY, at(null));
+    expect(r).toMatchObject({ scraptfPaysScrap: null, scraptfFull: false, scraptfListAt: null, bestExit: 'backpack', exitScrap: 60, exitVenue: 'backpack.tf' });
+    expect(r).toMatchObject(holdingFigures({ revenueScrap: 60, qty: 1, costScrap: 40, nextLotCostScrap: 40 }, P));
+    expect(holdingRow(position('378;6', [40]), 'hats', buy(60), P)).toEqual(r);
+  });
+
+  it('sells through scrap.tf when it pays more, judging status and profit on it', () => {
+    const p = { ...P, frictionScrap: 2 };
+    const r = holdingRow(position('378;6', [40, 50]), 'hats', buy(60), p, KEY, at(list(75)));
+    expect(r).toMatchObject({ revenueScrap: 60, scraptfPaysScrap: 75, scraptfListAt: NOW - 10 * 60_000, bestExit: 'scraptf', exitScrap: 75, exitVenue: 'scrap.tf' });
+    expect(r.profitNowScrap).toBe(75 - 40 - 2);
+    expect(r.profitAllScrap).toBe(75 * 2 - 90 - 2 * 2);
+    expect(r.status).toBe(holdingStatusOf(profitStatus(33, 40, p)));
+    expect(holdingsTotals([r]).worthNowScrap).toBe(150);
+  });
+
+  it('gives an item without buyers an exit through scrap.tf', () => {
+    const r = holdingRow(position('30359;6', [12]), 'hats', null, P, KEY, at(list(30, { sku: '30359;6' })));
+    expect(r).toMatchObject({ buyerCount: 0, revenueScrap: null, bestExit: 'scraptf', exitScrap: 30, status: 'sell' });
+  });
+
+  it('keeps backpack.tf on a tie, and never sells into a full or day-old list', () => {
+    expect(holdingRow(position('378;6', [40]), 'hats', buy(60), P, KEY, at(list(60))).bestExit).toBe('backpack');
+    const full = holdingRow(position('378;6', [40]), 'hats', buy(60), P, KEY, at(list(90, { stock: 5, full: true })));
+    expect(full).toMatchObject({ scraptfFull: true, bestExit: 'backpack', exitScrap: 60 });
+    const old = holdingRow(position('30359;6', [12]), 'hats', null, P, KEY, at(list(30, { observedAt: NOW - 25 * 3_600_000 })));
+    expect(old).toMatchObject({ scraptfPaysScrap: 30, bestExit: null, exitScrap: null, status: 'no-buyers' });
+  });
+});
+
 describe('order, search and totals', () => {
   const sell = rowOf('1', [10], buy(60), 'Sell small');
   const sellBig = rowOf('2', [10], buy(200), 'Sell big');
@@ -192,7 +241,23 @@ describe('order, search and totals', () => {
 
 describe('CSV cells', () => {
   it('follow the column list, money as keys + ref, blanks for missing values', () => {
-    expect(HOLDINGS_CSV_COLUMNS).toEqual(['sku', 'name', 'qty', 'cost', 'next_lot_cost', 'held_since', 'sells_for', 'buyer', 'profit_now', 'profit_all', 'status', 'confidence']);
+    expect(HOLDINGS_CSV_COLUMNS).toEqual([
+      'sku',
+      'name',
+      'qty',
+      'cost',
+      'next_lot_cost',
+      'held_since',
+      'sells_for',
+      'buyer',
+      'profit_now',
+      'profit_all',
+      'status',
+      'confidence',
+      'exit',
+      'exit_venue',
+      'scraptf_pays',
+    ]);
     const r = holdingRow(position('378;6', [KEY + 18, 600]), 'hats', buy(KEY + 90), P);
     const cells = holdingsCsvCells(r, KEY);
     expect(cells).toHaveLength(HOLDINGS_CSV_COLUMNS.length);
@@ -201,7 +266,30 @@ describe('CSV cells', () => {
     expect(cells[5]).toBe(new Date(r.heldSince).toISOString());
     expect(cells[7]).toBe('Metal Bank Bot (bot)');
     expect(cells[10]).toBe(r.status);
+    // Without a list the exit is the backpack.tf revenue.
+    expect(cells.slice(12)).toEqual(['1 key 10.00 ref', 'backpack.tf', '']);
     const empty = holdingsCsvCells(rowOf('5', [12], null), KEY);
     expect([empty[6], empty[7], empty[8], empty[9], empty[10]]).toEqual(['', '', '', '', 'no-buyers']);
+    expect(empty.slice(12)).toEqual(['', '', '']);
+  });
+
+  it('write the scrap.tf exit (F14): sells_for stays the backpack.tf revenue, profit follows the exit', () => {
+    const list: ScraptfListRow = {
+      sku: '378;6',
+      name: 'Team Captain',
+      sellsKeys: 0,
+      sellsScrapRaw: 90,
+      sellsScrap: 90,
+      paysKeys: 0,
+      paysScrapRaw: 81,
+      paysScrap: 81,
+      stock: 1,
+      stockLimit: 5,
+      full: false,
+      observedAt: NOW - 60_000,
+    };
+    const r = holdingRow(position('378;6', [40]), 'hats', buy(60), P, KEY, { list, now: NOW });
+    const byCol = Object.fromEntries(HOLDINGS_CSV_COLUMNS.map((c, i) => [c, holdingsCsvCells(r, KEY)[i]]));
+    expect(byCol).toMatchObject({ sells_for: '6.66 ref', profit_now: '4.55 ref', exit: '9.00 ref', exit_venue: 'scrap.tf', scraptf_pays: '9.00 ref' });
   });
 });

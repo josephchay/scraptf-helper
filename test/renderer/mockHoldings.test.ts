@@ -45,7 +45,8 @@ describe('holdings.list', () => {
     for (const r of res.rows) {
       const pos = summary.open.find((p) => p.sku === r.sku)!;
       expect(r).toMatchObject({ qty: pos.qty, costScrap: pos.costScrap, nextLotCostScrap: pos.lots[0]!.costScrap, heldSince: pos.lots[0]!.ts, name: pos.name });
-      expect(r).toMatchObject(holdingFigures(r, settings.profit));
+      // Judged on the better exit (F14): the revenue, or scrap.tf's list price when that is better.
+      expect(r).toMatchObject(holdingFigures({ ...r, revenueScrap: r.exitScrap }, settings.profit));
       expect(r.revenueOrder?.valueScrap ?? null).toBe(r.revenueScrap);
       expect(r.buyerCount > 0).toBe(r.revenueScrap !== null);
     }

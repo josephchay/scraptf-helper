@@ -167,6 +167,13 @@ const PATHS = {
   ),
   // The market's Freeze toggle.
   freeze: <path d="M12 2v20M3.3 7l17.4 10M3.3 17L20.7 7M9 4l3 2.5L15 4M9 20l3-2.5 3 2.5" />,
+  // scrap.tf banks (F15): a bank building, one card per scrap.tf page you save.
+  banks: (
+    <>
+      <path d="M3 9.5L12 4l9 5.5M3 9.5h18" />
+      <path d="M5.5 9.5v8M10 9.5v8M14 9.5v8M18.5 9.5v8M4 17.5h16M3 20.5h18" />
+    </>
+  ),
   // Holdings (F11): a parcel, the items you still hold.
   holdings: (
     <>

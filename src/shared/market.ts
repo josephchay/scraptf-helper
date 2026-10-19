@@ -6,8 +6,20 @@
 
 import { formatScrap } from './currency';
 import { frictionOf, type CeilingSettings } from './ceiling';
-import { SCRAPTF_BANK_PAGES } from './links';
-import type { Category, CategoryCounts, ImportBatch, MarketQuery, MarketRow, MarketSort, MarketVerdict, Scrap, ScraptfCoverage, UnixMs } from './types';
+import { SCRAPTF_BANK_PAGES, isScraptfBank } from './links';
+import type {
+  Category,
+  CategoryCounts,
+  ImportBatch,
+  MarketQuery,
+  MarketRow,
+  MarketSort,
+  MarketVerdict,
+  Scrap,
+  ScraptfBank,
+  ScraptfCoverage,
+  UnixMs,
+} from './types';
 import { CATEGORIES, MARKET_VERDICTS } from './types';
 
 export const MARKET_DEFAULT_LIMIT = 200;
@@ -155,6 +167,11 @@ export const MARKET_CSV_COLUMNS: readonly string[] = [
   'profit',
   'confidence',
   'updated',
+  // F14, appended so existing spreadsheets keep their columns: the saved scrap.tf/items list as of its save.
+  'scraptf_pays',
+  'scraptf_stock',
+  'scraptf_limit',
+  'scraptf_list_saved',
 ];
 
 /**
@@ -182,6 +199,10 @@ export function marketCsvCells(r: MarketRow, keyScrap: Scrap | null): (string | 
     money(r.profitScrap),
     r.confidence,
     updated === null ? '' : new Date(updated).toISOString(),
+    money(r.scraptfPaysScrap),
+    finite(r.scraptfStock) ? r.scraptfStock : null,
+    finite(r.scraptfStockLimit) ? r.scraptfStockLimit : null,
+    finite(r.scraptfListAt) ? new Date(r.scraptfListAt).toISOString() : '',
   ];
 }
 
@@ -246,32 +267,80 @@ export function bankPageIndexOf(pageKind: ImportBatch['pageKind'], categories: r
   return best >= 0 && bestCount * 2 >= total ? best : -1;
 }
 
+/** A saved page as the coverage rules read it; `bank` is optional so a pre-0.5 shape still classifies. */
+export type CoverageBatch = Pick<ImportBatch, 'id' | 'pageKind' | 'fileMtime' | 'importedAt' | 'itemCount' | 'categories'> & Partial<Pick<ImportBatch, 'bank'>>;
+
+/**
+ * The scrap.tf page a saved page (import batch) counts for (F15). The bank the parser recognised and
+ * recorded at import (ImportBatch.bank) decides, whatever the page held: it is fixed then, while a
+ * later import re-tags the rows the page shares. Only a batch without one (imported before 0.5, or a
+ * page the parser did not recognise) falls back: an /items list page is the list, any other page the
+ * F13 majority rule over the categories it stored (bankPageIndexOf), or, for a batch from before 0.3,
+ * over the rows carrying its id today (`categoriesOf`, asked only then). null: no page.
+ */
+export function batchBankOf(b: Pick<CoverageBatch, 'id' | 'pageKind' | 'categories' | 'bank'>, categoriesOf: (batchId: number) => readonly Category[]): ScraptfBank | null {
+  if (isScraptfBank(b.bank)) return b.bank;
+  if (b.pageKind === 'items-list') return 'list';
+  const i = bankPageIndexOf(b.pageKind, cleanCategoryCounts(b.categories) ?? categoriesOf(b.id));
+  return i < 0 ? null : (SCRAPTF_BANK_PAGES[i]?.bank ?? null);
+}
+
+/** A bank's newest saved page (scraptfBankSaves). */
+export interface BankSave {
+  /** batchSavedAt of that page. */
+  at: UnixMs;
+  /** Its import batch id. */
+  id: number;
+  /** Its ImportBatch.itemCount (items stored from it). */
+  items: number;
+}
+
+/**
+ * F18 S3: a save of a bank page (not the /items list) that stored no item. It was saved before
+ * scrap.tf added its cards ("HTML only" keeps the page as it first loaded: the import warns
+ * 'no-cards-saved'), so it must not date its bank "fresh, 0 items" over the save whose prices are
+ * still in use. The list counts with nothing stored: a list of sold-out rows was saved. A missing or
+ * unreadable count is not a known 0.
+ */
+export function isEmptyBankSave(b: Pick<CoverageBatch, 'itemCount'>, bank: ScraptfBank): boolean {
+  return bank !== 'list' && finite(b.itemCount) && b.itemCount <= 0;
+}
+
+/**
+ * Every batch's bank (batchBankOf; a batch counting for none is absent) and each bank's newest saved
+ * page (batchSavedAt, ties to the higher id). Shared by the coverage strip, the service's banks summary
+ * and the mock, so all three date a bank alike. The list counts even when it stored nothing (every row
+ * sold out); a bank page that stored nothing keeps its bank in `bankOf` but is never `newest`
+ * (isEmptyBankSave, F18 S3).
+ */
+export function scraptfBankSaves(
+  batches: readonly CoverageBatch[],
+  categoriesOf: (batchId: number) => readonly Category[],
+): { bankOf: Map<number, ScraptfBank>; newest: Map<ScraptfBank, BankSave> } {
+  const bankOf = new Map<number, ScraptfBank>();
+  const newest = new Map<ScraptfBank, BankSave>();
+  for (const b of batches) {
+    const bank = batchBankOf(b, categoriesOf);
+    if (bank === null) continue;
+    bankOf.set(b.id, bank);
+    if (isEmptyBankSave(b, bank)) continue;
+    const at = batchSavedAt(b);
+    const cur = newest.get(bank);
+    if (!cur || at > cur.at || (at === cur.at && b.id > cur.id)) newest.set(bank, { at, id: b.id, items: finite(b.itemCount) ? b.itemCount : 0 });
+  }
+  return { bankOf, newest };
+}
+
 /**
  * One ScraptfCoverage per SCRAPTF_BANK_PAGES entry, in that order: the newest saved page counting
- * for it (batchSavedAt, ties to the higher id) and that page's itemCount. A batch is classified from
- * the categories it stored when imported (ImportBatch.categories); only a batch from before 0.3,
- * without them, asks `categoriesOf(batchId)` for one category per item stored from it today. Shared
- * by the service (cached, refreshed on pricesChanged) and the mock, so both pick the same page.
+ * for it (scraptfBankSaves: the recorded bank, the majority rule only for a batch without one) and
+ * that page's itemCount. The /items list counts for no bank page (it has its own "All items" chip).
+ * Shared by the service (cached, refreshed on pricesChanged) and the mock, so both pick the same page.
  */
-export function scraptfCoverage(
-  batches: readonly Pick<ImportBatch, 'id' | 'pageKind' | 'fileMtime' | 'importedAt' | 'itemCount' | 'categories'>[],
-  categoriesOf: (batchId: number) => readonly Category[],
-): ScraptfCoverage[] {
-  const newest: ({ at: UnixMs; id: number; items: number } | null)[] = SCRAPTF_BANK_PAGES.map(() => null);
-  for (const b of batches) {
-    if (b.pageKind === 'items-list') continue;
-    // A later import re-tags the rows it shares with this page, so its own record decides.
-    const i = bankPageIndexOf(b.pageKind, cleanCategoryCounts(b.categories) ?? categoriesOf(b.id));
-    if (i < 0) continue;
-    const at = batchSavedAt(b);
-    const cur = newest[i];
-    if (!cur || at > cur.at || (at === cur.at && b.id > cur.id)) newest[i] = { at, id: b.id, items: finite(b.itemCount) ? b.itemCount : 0 };
-  }
-  return SCRAPTF_BANK_PAGES.map((page, i) => ({
-    category: page.category,
-    label: page.label,
-    url: page.url,
-    lastSavedAt: newest[i]?.at ?? null,
-    items: newest[i]?.items ?? 0,
-  }));
+export function scraptfCoverage(batches: readonly CoverageBatch[], categoriesOf: (batchId: number) => readonly Category[]): ScraptfCoverage[] {
+  const { newest } = scraptfBankSaves(batches, categoriesOf);
+  return SCRAPTF_BANK_PAGES.map((page) => {
+    const save = newest.get(page.bank);
+    return { category: page.category, label: page.label, url: page.url, lastSavedAt: save?.at ?? null, items: save?.items ?? 0 };
+  });
 }

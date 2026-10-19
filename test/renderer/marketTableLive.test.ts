@@ -8,6 +8,7 @@ import { act, createElement, useMemo, useState, type ReactElement } from 'react'
 import { afterEach, beforeAll, describe, expect, it } from 'vitest';
 import type { MarketTableProps } from '../../src/renderer/pages/MarketPage';
 import { DEFAULT_MARKET_SORT, marketDisplayRows } from '../../src/renderer/marketModel';
+import { scraptfLinkFor } from '../../src/shared/links';
 import type { MarketRow } from '../../src/shared/types';
 import { installDomShim, ShimEvent, type ShimDocument, type ShimElement } from './domShim';
 
@@ -50,6 +51,14 @@ function row(sku: string): MarketRow {
     verdict: 'unchecked',
     lastOrderChangeAt: T0 - 60_000,
     evaluatedAt: T0,
+    scraptfPaysScrap: null,
+    scraptfStock: null,
+    scraptfStockLimit: null,
+    scraptfFull: false,
+    scraptfListAt: null,
+    scraptfNewAt: null,
+    scraptfListedSince: null,
+    scraptfLink: scraptfLinkFor('hats', null),
   };
 }
 

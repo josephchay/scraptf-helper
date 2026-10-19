@@ -249,10 +249,112 @@ const V3_BATCH_CATEGORIES = `
 ALTER TABLE import_batches ADD COLUMN categories TEXT;
 `;
 
+// F14: the user's saved copy of scrap.tf/items, one row per base SKU (newest saved list wins). Only
+// pages the user saved with their own browser fill it (R10); nothing here was fetched (R1).
+// sells_* are NULL for a "Sold out" row (no price to buy shown; scrap.tf still buys it), pays_* when
+// the list showed no "Price we pay", stock/stock_limit when it showed no limit.
+const V4_SCRAPTF_LIST = `
+CREATE TABLE IF NOT EXISTS scraptf_list (
+  sku         TEXT PRIMARY KEY NOT NULL,
+  name        TEXT NOT NULL DEFAULT '',
+  sells_keys  REAL,
+  sells_scrap INTEGER,
+  pays_keys   REAL,
+  pays_scrap  INTEGER,
+  stock       INTEGER,
+  stock_limit INTEGER,
+  batch_id    INTEGER NOT NULL,
+  observed_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS scraptf_list_observed_at ON scraptf_list(observed_at);
+`;
+
+// F15: the scrap.tf page a saved batch came from (ScraptfBank), as the parser recognised it at import
+// time. Older batches read NULL and are classified by their categories, as before.
+const V5_BATCH_BANK = `
+ALTER TABLE import_batches ADD COLUMN bank TEXT;
+`;
+
+// F17: what each saved bank page had in stock at that moment, one row per card or /items row with a
+// SKU (sold out included), so two saves of a bank can be compared. Only pages the user saved fill it
+// (R10); nothing here was fetched (R1). special_key is the import's extras key ('' = a clean copy), so
+// painted and spelled copies stay separate rows. cost_* are NULL for a row with no price to buy. page
+// is which page of the bank the save is ('/items/2'; ScrapTfParseResult.page), the same on every row of
+// a batch: a save is only compared with an earlier save of the same page.
+// Retention (from F20: bankStockThinning, every save of the last day, then hourly to 7 days and daily to
+// 90 days, at most 300 per page) is Repo.pruneBankStock.
+const V6_BANK_STOCK = `
+CREATE TABLE IF NOT EXISTS bank_stock (
+  batch_id    INTEGER NOT NULL,
+  bank        TEXT NOT NULL,
+  sku         TEXT NOT NULL,
+  special_key TEXT NOT NULL DEFAULT '',
+  name        TEXT NOT NULL,
+  cost_keys   REAL,
+  cost_scrap  INTEGER,
+  stock       INTEGER NULL,
+  asset_id    TEXT NULL,
+  page        TEXT NOT NULL DEFAULT '',
+  PRIMARY KEY (batch_id, sku, special_key)
+);
+CREATE INDEX IF NOT EXISTS bank_stock_bank_batch ON bank_stock(bank, batch_id);
+`;
+
+// F20: the change feed of the user's saves: one row per change between a page's save and the previous
+// save of that page (scraptfEventsOf), written in the import's transaction. Prices are raw keys + metal
+// (valued per read at the current key price); NULL where that side had none. Only pages the user saved
+// fill it (R10); nothing was fetched (R1). Retention (90 days) is Repo.pruneScraptfEvents.
+const V7_SCRAPTF_EVENTS = `
+CREATE TABLE IF NOT EXISTS scraptf_events (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  at          INTEGER NOT NULL,
+  bank        TEXT NOT NULL,
+  page        TEXT NOT NULL DEFAULT '',
+  sku         TEXT NOT NULL,
+  special_key TEXT NOT NULL DEFAULT '',
+  name        TEXT NOT NULL,
+  kind        TEXT NOT NULL,
+  from_keys   REAL,
+  from_scrap  INTEGER,
+  to_keys     REAL,
+  to_scrap    INTEGER,
+  from_stock  INTEGER,
+  to_stock    INTEGER,
+  batch_id    INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS scraptf_events_at ON scraptf_events(at);
+CREATE INDEX IF NOT EXISTS scraptf_events_sku ON scraptf_events(sku);
+CREATE INDEX IF NOT EXISTS scraptf_events_bank_at ON scraptf_events(bank, at);
+`;
+
+// F20 sizing. (1) The feed filtered by bank reads `bank = ? ORDER BY id DESC LIMIT ?`: on (bank, at)
+// SQLite sorted that bank's every event to return a page; on (bank, id) it walks back and stops at the
+// limit. (2) bank_stock_saves lists each save that has rows (bank, page, row count), kept with bank_stock
+// in the same transactions (insertBankStock, pruneBankStock): the save index and the per-page reads cost
+// per kept save, not per import batch ever written (import_batches is never purged) or per stored row.
+// Backfilled from bank_stock; a batch's rows share one bank and page.
+const V8_SCRAPTF_SAVES = `
+CREATE INDEX IF NOT EXISTS scraptf_events_bank_id ON scraptf_events(bank, id);
+CREATE TABLE IF NOT EXISTS bank_stock_saves (
+  batch_id INTEGER PRIMARY KEY NOT NULL,
+  bank     TEXT NOT NULL,
+  page     TEXT NOT NULL DEFAULT '',
+  items    INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS bank_stock_saves_bank ON bank_stock_saves(bank);
+INSERT OR IGNORE INTO bank_stock_saves (batch_id, bank, page, items)
+  SELECT batch_id, MIN(bank), MIN(page), COUNT(*) FROM bank_stock GROUP BY batch_id;
+`;
+
 export const MIGRATIONS: readonly Migration[] = Object.freeze([
   { version: 1, name: 'initial schema', sql: V1_INITIAL },
   { version: 2, name: 'opportunity pay-up-to ceiling', sql: V2_MAX_COST },
   { version: 3, name: 'saved-page batch categories', sql: V3_BATCH_CATEGORIES },
+  { version: 4, name: 'scrap.tf price list', sql: V4_SCRAPTF_LIST },
+  { version: 5, name: 'saved-page batch bank', sql: V5_BATCH_BANK },
+  { version: 6, name: 'scrap.tf bank stock', sql: V6_BANK_STOCK },
+  { version: 7, name: 'scrap.tf change events', sql: V7_SCRAPTF_EVENTS },
+  { version: 8, name: 'scrap.tf feed by bank and kept saves', sql: V8_SCRAPTF_SAVES },
 ]);
 
 export const SCHEMA_VERSION: number = MIGRATIONS.reduce((max, m) => Math.max(max, m.version), 0);

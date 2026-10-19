@@ -1,6 +1,6 @@
 // Key price used to value keys received from backpack.tf buyers (design brief §5.3).
 
-import type { KeyPriceQuote, KeyPriceSource, KeyPriceState, Settings, UnixMs } from '../../shared/types';
+import type { KeyPriceQuote, KeyPriceSource, KeyPriceState, Scrap, ScraptfListKey, Settings, UnixMs } from '../../shared/types';
 
 /** A source is stale after 6 h. */
 export const KEY_PRICE_STALE_MS = 6 * 60 * 60 * 1000;
@@ -18,15 +18,55 @@ function sane(v: unknown): number | null {
   return typeof v === 'number' && Number.isFinite(v) && v >= MIN_SANE_SCRAP && v <= MAX_SANE_SCRAP ? Math.round(v) : null;
 }
 
+/** scrap.tf's key prices in effect, and where they come from. */
+export interface ScraptfKeyPrices {
+  /** What scrap.tf pays for a key; caps the automatic key value. */
+  paysScrap: Scrap | null;
+  /** What scrap.tf charges for a key (display only). */
+  sellsScrap: Scrap | null;
+  /** 'list' when the saved scrap.tf/items key row is newer than the typed values (F14). */
+  source: 'settings' | 'list' | null;
+}
+
 /**
- * Brief §5.3 "conservative default": an automatic value is capped by the
- * user's scrap.tf key sell price (what scrap.tf pays for a key) when one is
- * entered, so keys received from buyers are never valued above what the user
- * can actually get for them. Manual values are taken as given.
+ * The newer of the typed scrap.tf key prices (settings.keyPrice.scraptfSellScrap = what scrap.tf pays,
+ * scraptfBuyScrap = what it charges, dated scraptfObservedAt) and the saved list's key row (dated by
+ * its observedAt). Typed values without a date count as older than any saved list. A value the newer
+ * source lacks comes from the other one.
  */
-function capByScraptfSell(v: number, settings: Settings): number {
-  const cap = sane(settings.keyPrice?.scraptfSellScrap);
+export function effectiveScraptfKey(settings: Settings, listKey?: ScraptfListKey | null): ScraptfKeyPrices {
+  const typedPays = sane(settings.keyPrice?.scraptfSellScrap);
+  const typedSells = sane(settings.keyPrice?.scraptfBuyScrap);
+  const typedAt = settings.keyPrice?.scraptfObservedAt;
+  const listPays = sane(listKey?.paysScrap);
+  const listSells = sane(listKey?.sellsScrap);
+  const hasList = listKey !== null && listKey !== undefined && (listPays !== null || listSells !== null) && Number.isFinite(listKey.observedAt);
+  const hasTyped = typedPays !== null || typedSells !== null;
+  if (hasList && (!hasTyped || typeof typedAt !== 'number' || !Number.isFinite(typedAt) || listKey.observedAt > typedAt)) {
+    return { paysScrap: listPays ?? typedPays, sellsScrap: listSells ?? typedSells, source: 'list' };
+  }
+  if (hasTyped) return { paysScrap: typedPays ?? listPays, sellsScrap: typedSells ?? listSells, source: 'settings' };
+  return { paysScrap: null, sellsScrap: null, source: null };
+}
+
+/**
+ * Brief §5.3 "conservative default": an automatic value is capped by what scrap.tf pays for a key
+ * (typed, or from the saved list when that is newer), so keys received from buyers are never valued
+ * above what the user can actually get for them. Manual values are taken as given.
+ */
+function capByScraptfPays(v: number, cap: Scrap | null): number {
   return cap !== null && cap < v ? cap : v;
+}
+
+/**
+ * KeyPriceState.scraptfFromList: the list key row with only the values effectiveScraptfKey would use,
+ * so Settings never shows (or calls "in use") a price the cap ignores. Null when none is left.
+ */
+function shownListKey(listKey: ScraptfListKey | null | undefined): ScraptfListKey | null {
+  if (!listKey || typeof listKey.observedAt !== 'number' || !Number.isFinite(listKey.observedAt)) return null;
+  const paysScrap = sane(listKey.paysScrap);
+  const sellsScrap = sane(listKey.sellsScrap);
+  return paysScrap === null && sellsScrap === null ? null : { paysScrap, sellsScrap, observedAt: listKey.observedAt };
 }
 
 /** Buy side first: keys we receive from buyers are worth what buyers pay for keys. */
@@ -46,8 +86,8 @@ export function isQuoteStale(q: Pick<KeyPriceQuote, 'observedAt'>, now: UnixMs):
   return !Number.isFinite(q.observedAt) || now - q.observedAt > KEY_PRICE_STALE_MS;
 }
 
-export function defaultKeyPrice(quotes: KeyPriceQuote[] = []): KeyPriceState {
-  return { valueScrap: DEFAULT_KEY_SCRAP, source: 'default', observedAt: null, stale: true, quotes };
+export function defaultKeyPrice(quotes: KeyPriceQuote[] = [], scraptfFromList: ScraptfListKey | null = null): KeyPriceState {
+  return { valueScrap: DEFAULT_KEY_SCRAP, source: 'default', observedAt: null, stale: true, quotes, scraptfFromList };
 }
 
 /**
@@ -55,16 +95,19 @@ export function defaultKeyPrice(quotes: KeyPriceQuote[] = []): KeyPriceState {
  * order (backpack.tf, then PriceDB); if every source is stale, the most recent
  * one, marked stale; then a remembered manual value (stale); and if there is
  * nothing at all, 60 ref marked as the default. Automatic (backpack.tf /
- * PriceDB) values are capped by the user's scrap.tf key sell price if entered.
+ * PriceDB) values are capped by what scrap.tf pays for a key (effectiveScraptfKey).
+ * `listKey` is the saved scrap.tf/items key row (F14); without it nothing changes.
  */
-export function selectKeyPrice(quotes: KeyPriceQuote[], settings: Settings, now: UnixMs): KeyPriceState {
+export function selectKeyPrice(quotes: KeyPriceQuote[], settings: Settings, now: UnixMs, listKey: ScraptfListKey | null = null): KeyPriceState {
   const valid = validQuotes(quotes);
   const shown = [...valid].sort((a, b) => DISPLAY_ORDER.indexOf(a.source) - DISPLAY_ORDER.indexOf(b.source) || b.observedAt - a.observedAt);
+  const scraptfFromList = shownListKey(listKey);
+  const cap = effectiveScraptfKey(settings, listKey).paysScrap;
 
   const manualQuote = valid.filter((x) => x.source === 'manual').sort((a, b) => b.observedAt - a.observedAt)[0] ?? null;
   const manual = sane(settings.keyPrice?.manualScrap) ?? (manualQuote ? quoteValue(manualQuote) : null);
   if (settings.keyPrice?.mode === 'manual' && manual !== null) {
-    return { valueScrap: manual, source: 'manual', observedAt: manualQuote?.observedAt ?? null, stale: false, quotes: shown };
+    return { valueScrap: manual, source: 'manual', observedAt: manualQuote?.observedAt ?? null, stale: false, quotes: shown, scraptfFromList };
   }
 
   const candidates = AUTO_ORDER.flatMap((source) =>
@@ -79,13 +122,17 @@ export function selectKeyPrice(quotes: KeyPriceQuote[], settings: Settings, now:
   );
 
   const fresh = candidates.find((c) => !isQuoteStale(c.q, now));
-  if (fresh) return { valueScrap: capByScraptfSell(fresh.v, settings), source: fresh.q.source, observedAt: fresh.q.observedAt, stale: false, quotes: shown };
+  if (fresh) {
+    return { valueScrap: capByScraptfPays(fresh.v, cap), source: fresh.q.source, observedAt: fresh.q.observedAt, stale: false, quotes: shown, scraptfFromList };
+  }
 
   const latest = [...candidates].sort((a, b) => b.q.observedAt - a.q.observedAt)[0];
-  if (latest) return { valueScrap: capByScraptfSell(latest.v, settings), source: latest.q.source, observedAt: latest.q.observedAt, stale: true, quotes: shown };
+  if (latest) {
+    return { valueScrap: capByScraptfPays(latest.v, cap), source: latest.q.source, observedAt: latest.q.observedAt, stale: true, quotes: shown, scraptfFromList };
+  }
 
   // Brief §5.3 lists the user override last; it still beats a made-up default.
-  if (manual !== null) return { valueScrap: manual, source: 'manual', observedAt: manualQuote?.observedAt ?? null, stale: true, quotes: shown };
+  if (manual !== null) return { valueScrap: manual, source: 'manual', observedAt: manualQuote?.observedAt ?? null, stale: true, quotes: shown, scraptfFromList };
 
-  return defaultKeyPrice(shown);
+  return defaultKeyPrice(shown, scraptfFromList);
 }

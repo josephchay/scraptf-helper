@@ -3,6 +3,10 @@
 // pills and cell text, the header strip (with the rebuild error, H1, and the
 // saved-page coverage chips, F13), flash diffing and scroll anchoring. All pure
 // except createMarketWindow, whose only side effect is the list call it is handed.
+// The scrap.tf price list's cells and "All items" chip (F14) are in scraptfListModel.ts.
+// F17 (bank stock, spec S4) joins the Live market and the item detail: the "New" badge, the
+// "New on scrap.tf" source filter and the drawer's bank stock line are at the end. F19's link out
+// to scrap.tf (each row's bank page button, the one-bank header button) is after them.
 // The service filters, sorts and pages; the verdict, filter and order rules
 // themselves live in src/shared/market.ts so the page, the mock and the
 // service agree.
@@ -10,11 +14,30 @@
 // The scrap.tf side of every row is only what the user typed or saved (R1,
 // R10). Nothing here, or anywhere in the app, fetches scrap.tf.
 
+import { bankStockPagePath } from '../shared/bankStock';
 import { parsePrice } from '../shared/currency';
+import { SCRAPTF_BANKS, bankForCategory, scraptfBankInfo, type ScraptfBankInfo } from '../shared/links';
 import { MARKET_DEFAULT_LIMIT, MARKET_MAX_LIMIT, MARKET_MAX_SEARCH_CHARS, MARKET_SORTS } from '../shared/market';
-import type { Category, ConnState, MarketListResult, MarketQuery, MarketRow, MarketSort, MarketSource, MarketStats, MarketVerdict, Scrap, ScraptfCoverage, UnixMs } from '../shared/types';
+import type {
+  Category,
+  ConnState,
+  ItemBankStock,
+  MarketListResult,
+  MarketQuery,
+  MarketRow,
+  MarketSort,
+  MarketSource,
+  MarketStats,
+  MarketVerdict,
+  Scrap,
+  ScraptfBank,
+  ScraptfCoverage,
+  UnixMs,
+} from '../shared/types';
 import { CATEGORIES, MARKET_SOURCES, MARKET_VERDICTS } from '../shared/types';
-import { CONN_STATE_LABELS, errorMessage, fmtAge, fmtAgo, fmtCountdown, fmtInt, fmtMoney, fmtSignedMoney, type Tone } from './format';
+import { CONN_STATE_LABELS, errorMessage, fmtAge, fmtAgo, fmtCountdown, fmtDateTime, fmtInt, fmtMoney, fmtSignedMoney, type Tone } from './format';
+import { SAVE_MODE } from './importModel';
+import { scraptfSearchName } from './itemMenuModel';
 
 // ---------------------------------------------------------------------------
 // Filters and sort
@@ -31,6 +54,12 @@ export interface MarketFilters {
   onlyBotBuyers: boolean;
   /** 0 = any. */
   minBuyers: number;
+  /** F14: only items on the user's saved scrap.tf/items list (MarketQuery.onScraptfList). */
+  onScraptfList: boolean;
+  /** F17: only items new on scrap.tf since the previous save of a bank page (MarketQuery.newOnScraptf). */
+  newOnScraptf: boolean;
+  /** F20: only items the user's saves have listed on sale for at least 24 h (MarketQuery.listedOnScraptf). */
+  listedOnScraptf: boolean;
 }
 
 export type SortDir = 'asc' | 'desc';
@@ -55,6 +84,9 @@ export const DEFAULT_MARKET_FILTERS: Readonly<MarketFilters> = Object.freeze<Mar
   minCeiling: '',
   onlyBotBuyers: false,
   minBuyers: 0,
+  onScraptfList: false,
+  newOnScraptf: false,
+  listedOnScraptf: false,
 });
 
 export const DEFAULT_MARKET_SORT: Readonly<MarketSortState> = Object.freeze<MarketSortState>({ sort: 'ceiling', dir: 'desc' });
@@ -86,6 +118,11 @@ export function sanitizeMarketFilters(v: unknown): MarketFilters {
     minCeiling: typeof o['minCeiling'] === 'string' ? o['minCeiling'].slice(0, MAX_MIN_CEILING_CHARS) : '',
     onlyBotBuyers: o['onlyBotBuyers'] === true,
     minBuyers: clampBuyers(o['minBuyers']),
+    onScraptfList: o['onScraptfList'] === true,
+    // Filters saved before 0.6 have no such key: off.
+    newOnScraptf: o['newOnScraptf'] === true,
+    // F20: off for filters saved before it.
+    listedOnScraptf: o['listedOnScraptf'] === true,
   };
 }
 
@@ -121,7 +158,15 @@ export function activeMarketFilterCount(f: MarketFilters): number {
   if (f.minCeiling.trim()) n++;
   if (f.onlyBotBuyers) n++;
   if (f.minBuyers > 0) n++;
+  if (f.onScraptfList) n++;
+  if (f.newOnScraptf) n++;
+  if (f.listedOnScraptf) n++;
   return n;
+}
+
+/** The Source button's count: its source choices plus the scrap.tf switches under them (F14, F17, F20). */
+export function marketSourceCount(f: Pick<MarketFilters, 'sources' | 'onScraptfList' | 'newOnScraptf'> & Partial<Pick<MarketFilters, 'listedOnScraptf'>>): number {
+  return f.sources.length + (f.onScraptfList ? 1 : 0) + (f.newOnScraptf ? 1 : 0) + (f.listedOnScraptf ? 1 : 0);
 }
 
 /** Flips one verdict chip, keeping MARKET_VERDICTS order. */
@@ -148,7 +193,46 @@ export function marketQuery(f: MarketFilters, minCeilingScrap: Scrap | null, s: 
   if (f.onlyBotBuyers) q.onlyBotBuyers = true;
   const buyers = clampBuyers(f.minBuyers);
   if (buyers > 0) q.minBuyers = buyers;
+  if (f.onScraptfList) q.onScraptfList = true;
+  if (f.newOnScraptf) q.newOnScraptf = true;
+  if (f.listedOnScraptf) q.listedOnScraptf = true;
   return q;
+}
+
+// ---------------------------------------------------------------------------
+// F15: "See all" on a scrap.tf bank card
+// ---------------------------------------------------------------------------
+
+/** The route segment after 'market' that a bank card's "See all" opens: #/market/bank/<bank>. */
+export const MARKET_BANK_ROUTE = 'bank';
+
+/** "market/bank/hats" for a bank page's "See all"; null for the /items list, which sells no category of its own. */
+export function marketBankPath(bank: ScraptfBank): string | null {
+  const info = scraptfBankInfo(bank);
+  return info && info.categories.length ? `market/${MARKET_BANK_ROUTE}/${info.bank}` : null;
+}
+
+export interface MarketRouteIntent {
+  /** Tells one "See all" from the next. */
+  key: string;
+  filters: MarketFilters;
+  sort: MarketSortState;
+}
+
+/**
+ * What #/market/bank/<bank> asks for: that bank's categories and Not checked, nothing else, highest
+ * Pay up to first, so the table starts with the card's "What to look for" rows and counts what the
+ * card's "See all" said. null for any other route.
+ */
+export function marketRouteIntent(segments: readonly string[]): MarketRouteIntent | null {
+  if (segments[0] !== 'market' || segments[1] !== MARKET_BANK_ROUTE) return null;
+  const info = scraptfBankInfo(segments[2]);
+  if (!info || !info.categories.length) return null;
+  return {
+    key: `${MARKET_BANK_ROUTE}/${info.bank}`,
+    filters: { ...defaultMarketFilters(), categories: pickOrdered(info.categories, CATEGORIES), verdicts: ['unchecked'] },
+    sort: { ...DEFAULT_MARKET_SORT },
+  };
 }
 
 /** The export query: the same filters and sort with no paging, so the file has every match. */
@@ -817,7 +901,8 @@ export const COVERAGE_FRESH_MS = 15 * 60_000;
 /** ... this recently amber; older (or never) muted. */
 export const COVERAGE_AGING_MS = 2 * 3_600_000;
 
-export const COVERAGE_TIP = 'Save this page (Ctrl+S) into your watch folder to update its prices';
+/** F15: a chip opens its card on the scrap.tf banks page, which has Open in browser for the next save. */
+export const COVERAGE_TIP = `See this page on the scrap.tf banks page: its flips, what to look for there, and Open in browser to save it again (Ctrl+S, as '${SAVE_MODE}')`;
 
 export type CoverageTone = 'good' | 'warn' | 'muted';
 
@@ -832,27 +917,41 @@ export function coverageTone(lastSavedAt: UnixMs | null, now: UnixMs): CoverageT
 }
 
 export interface CoverageChip {
+  /** 'page': one scrap.tf bank page (F13); 'list': the whole scrap.tf/items price list (F14, allItemsChip). */
+  kind: 'page' | 'list';
   label: string;
   /** "saved 4 min ago · 48 items" or "never saved". */
   status: string;
   tone: CoverageTone;
+  /** F15: the bank whose card a click opens on the scrap.tf banks page; null for a page the dashboard does not know. */
+  bank: ScraptfBank | null;
+  /** The static page. The chip no longer opens it: the banks page card does, through links.open. */
   url: string;
   title: string;
   ariaLabel: string;
 }
 
-/** One chip of the strip; clicking it opens `url` in the user's own browser (links.open), never fetched. */
-export function coverageChip(c: ScraptfCoverage, now: UnixMs): CoverageChip {
+/** The bank a coverage entry stands for: by its static address, else by its category (the items page is 'other'). */
+export function coverageBank(c: { url: string; category?: Category | undefined }): ScraptfBank | null {
+  const byUrl = SCRAPTF_BANKS.find((b) => b.categories.length > 0 && b.url === c.url);
+  if (byUrl) return byUrl.bank;
+  return c.category !== undefined && (CATEGORIES as readonly string[]).includes(c.category) ? bankForCategory(c.category) : null;
+}
+
+/** One chip of the strip; clicking it opens that bank's card on the scrap.tf banks page (F15). */
+export function coverageChip(c: Pick<ScraptfCoverage, 'label' | 'url' | 'lastSavedAt' | 'items'> & Partial<Pick<ScraptfCoverage, 'category'>>, now: UnixMs): CoverageChip {
   const saved = c.lastSavedAt !== null && Number.isFinite(c.lastSavedAt);
   const items = Number.isFinite(c.items) ? Math.max(0, Math.round(c.items)) : 0;
   const status = saved ? `saved ${fmtAgo(Math.min(c.lastSavedAt!, now), now)} · ${fmtInt(items)} ${items === 1 ? 'item' : 'items'}` : 'never saved';
   return {
+    kind: 'page',
     label: c.label,
     status,
     tone: coverageTone(c.lastSavedAt, now),
+    bank: coverageBank(c),
     url: c.url,
     title: COVERAGE_TIP,
-    ariaLabel: `${c.label}: ${status}. Opens the scrap.tf page in your browser. ${COVERAGE_TIP}.`,
+    ariaLabel: `${c.label}: ${status}. Opens its card on the scrap.tf banks page.`,
   };
 }
 
@@ -912,4 +1011,235 @@ export function emptyMarketReason(a: {
   if (a.paused) return 'paused';
   if (a.feedOff) return 'feed-off';
   return 'nothing-yet';
+}
+
+// ---------------------------------------------------------------------------
+// F17: bank stock in the Live market and the item drawer (spec S4, U3). Both read
+// what the service joined from the user's two newest saves of each scrap.tf page
+// (MarketRow.scraptfNewAt, ItemDetail.bankStock); nothing here loads a page (R1).
+// ---------------------------------------------------------------------------
+
+/** The Source popover's switch (MarketFilters.newOnScraptf -> MarketQuery.newOnScraptf; spec S4's source 'new'). */
+export const NEW_ON_SCRAPTF_LABEL = 'New on scrap.tf';
+export const NEW_ON_SCRAPTF_HINT = 'since your previous save';
+export const NEW_ON_SCRAPTF_TITLE =
+  'Only items on sale in your newest save of a scrap.tf bank page that your previous save of that page did not have (or had sold out). From pages you saved; the app never visits scrap.tf.';
+
+/** A "New" badge from a save older than this reads muted: scrap.tf has had a day to sell it since. */
+export const SCRAPTF_NEW_FRESH_MS = 24 * 3_600_000;
+
+export interface ScraptfNewBadge {
+  text: string;
+  tone: Tone;
+  title: string;
+}
+
+/**
+ * The Item cell's "New" badge for MarketRow.scraptfNewAt (the newest save of a scrap.tf page in which
+ * the item is new), or null. It sits in the Item cell: the grid's column budget is test-pinned.
+ */
+export function scraptfNewBadge(r: Pick<MarketRow, 'scraptfNewAt'>, now: UnixMs): ScraptfNewBadge | null {
+  const at = r.scraptfNewAt;
+  if (at === null || at === undefined || !Number.isFinite(at)) return null;
+  // A file time slightly ahead of the clock (another machine's mtime) is as fresh as now.
+  const shown = Math.min(at, now);
+  return {
+    text: 'New',
+    tone: now - shown <= SCRAPTF_NEW_FRESH_MS ? 'info' : 'muted',
+    // Per base SKU across every bank (bankStockNewAt), while the drawer names the newest save listing this
+    // exact copy (often a later scrap.tf/items save where it is unchanged): say so, or the two read as a
+    // contradiction.
+    title: `New on scrap.tf: on sale in a scrap.tf page you saved ${fmtAgo(shown, now)} (${fmtDateTime(at)}) that your previous save of the same page did not have, or had sold out (this item or a copy of it with paint or other extras). The item's details show your newest save that lists this exact item, which can be another page. Stock between your saves is unknown; the app never visits scrap.tf.`,
+  };
+}
+
+/** F20's Source switch (MarketFilters.listedOnScraptf -> MarketQuery.listedOnScraptf; the shared marketListedSideMatches decides). */
+export const LISTED_ON_SCRAPTF_LABEL = 'Listed on scrap.tf > 24 h';
+export const LISTED_ON_SCRAPTF_HINT = 'in your saves';
+export const LISTED_ON_SCRAPTF_TITLE =
+  'Only items that every one of your saves of the scrap.tf bank page they were seen on has listed on sale for at least a day, without a break. What happened between two saves is unknown. From pages you saved; the app never visits scrap.tf.';
+
+/** The empty table's advice when the filters hide everything; the F17 and F20 switches say what they need. */
+export function emptyFiltersText(f: Pick<MarketFilters, 'newOnScraptf'> & Partial<Pick<MarketFilters, 'listedOnScraptf'>>): string {
+  const base = 'Clear the search or the verdict chips, or lower the minimums. Items without buyers show only when you have a scrap.tf price for them.';
+  const parts: string[] = [];
+  if (f.newOnScraptf) {
+    parts.push(
+      `${NEW_ON_SCRAPTF_LABEL} (under Source) keeps only items new in your newest save of a scrap.tf page. Save the page again later (Ctrl+S into your watch folder, as '${SAVE_MODE}') to see what changed, or untick it.`,
+    );
+  }
+  if (f.listedOnScraptf) {
+    parts.push(`${LISTED_ON_SCRAPTF_LABEL} (under Source) keeps only items your saves have listed on sale for a day or more. Save your bank pages regularly to build that history, or untick it.`);
+  }
+  return parts.length ? `${parts.join(' ')} ${base}` : base;
+}
+
+/** U2's stock page of a bank, "banks/hats/stock" (#/banks/<bank>/stock, under banksModel's BANKS_ROUTE); null for an unknown bank. */
+export function bankStockRoute(bank: ScraptfBank | null | undefined): string | null {
+  const info = scraptfBankInfo(bank);
+  return info ? `banks/${info.bank}/stock` : null;
+}
+
+export interface DrawerBankStockLine {
+  bank: ScraptfBank;
+  /** The line up to its change: "On scrap.tf/buy/hats in your save 12 min ago: 3 in stock, ". */
+  prefix: string;
+  /** "new since your previous save", "↓ cheaper than before (was 1.33 ref)", ...; null when unchanged or on a first save. */
+  change: string | null;
+  tone: Tone | null;
+  /** prefix + change: the whole line. */
+  text: string;
+  title: string;
+  /** The bank's stock page (bankStockRoute). */
+  route: string;
+}
+
+const BANK_STOCK_CHANGE_TONES: Record<Exclude<ItemBankStock['change'], null>, Tone> = { new: 'info', cheaper: 'good', pricier: 'warn', gone: 'muted' };
+
+/**
+ * The drawer's line for ItemDetail.bankStock: "On scrap.tf/buy/hats in your save 12 min ago: 3 in stock,
+ * new since your previous save", "...: 3 in stock, ↓ cheaper than before (was 1.33 ref)", "...: sold out,
+ * gone since your previous save (was X)", or "Not on scrap.tf/buy/hats in your save 12 min ago: gone since
+ * your previous save (was X)" for a copy that save no longer lists. Static labels and paths only
+ * (SCRAPTF_BANKS), whatever the service sent; null without a bank stock save that lists the item.
+ */
+export function drawerBankStockLine(b: ItemBankStock | null | undefined, keyScrap: Scrap | null, now: UnixMs): DrawerBankStockLine | null {
+  const info = scraptfBankInfo(b?.bank);
+  const route = bankStockRoute(info?.bank);
+  if (!b || !info || route === null) return null;
+  const path = bankStockPagePath(info.url);
+  const dated = typeof b.savedAt === 'number' && Number.isFinite(b.savedAt);
+  const save = dated ? `your save ${fmtAgo(Math.min(b.savedAt, now), now)}` : 'your newest save';
+  const stock = typeof b.stock === 'number' && Number.isFinite(b.stock) ? (b.stock > 0 ? `${fmtInt(b.stock)} in stock` : 'sold out') : null;
+  const prev = b.previousCostScrap;
+  const was = typeof prev === 'number' && Number.isFinite(prev) ? ` (was ${fmtMoney(prev, keyScrap)})` : '';
+  let change: string | null = null;
+  switch (b.change) {
+    case 'new':
+      change = 'new since your previous save';
+      break;
+    case 'cheaper':
+      change = `↓ cheaper than before${was}`;
+      break;
+    case 'pricier':
+      change = `↑ pricier than before${was}`;
+      break;
+    case 'gone':
+      change = `gone since your previous save${was}`;
+      break;
+    default:
+      change = null;
+  }
+  // Gone and absent from the newest save (no stock to show): the item is not on that page any more.
+  const lead = `${b.change === 'gone' && stock === null ? 'Not on' : 'On'} ${path} in ${save}`;
+  const prefix = change === null ? (stock === null ? lead : `${lead}: ${stock}`) : `${lead}: ${stock === null ? '' : `${stock}, `}`;
+  const when = dated ? ` (${fmtDateTime(b.savedAt)})` : '';
+  // Without a change, a previous price means the same price (a stock move alone is no change, and
+  // ItemBankStock has no previous stock to show); none, a first save (or no price before).
+  const compared =
+    change !== null
+      ? 'Compared with your previous save of it (prices at the current key price).'
+      : was
+        ? 'Same price as in your previous save of it.'
+        : 'Nothing to compare: your first save of it, or the item had no price in your previous save.';
+  return {
+    bank: info.bank,
+    prefix,
+    change,
+    tone: b.change === null ? null : (BANK_STOCK_CHANGE_TONES[b.change] ?? null),
+    text: prefix + (change ?? ''),
+    title: `From your saved copy of ${path}${when}. ${compared} Stock between your saves is unknown. The app never visits scrap.tf; save the page again (Ctrl+S, as '${SAVE_MODE}') to update this.`,
+    route,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// F19: the Live market's link to scrap.tf (spec U1, U2). Out: a static bank page
+// from SCRAPTF_BANKS, whatever a row carries, handed to the user's own browser
+// by links.open on a click or a key. Back: the price the user copies there,
+// through the Live check. Nothing here loads scrap.tf (R1).
+// ---------------------------------------------------------------------------
+
+/** The grid's key for a row's scrap.tf button (no modifier, no repeat). */
+export const MARKET_SCRAPTF_KEY = 'o';
+
+export interface MarketScraptfButton {
+  bank: ScraptfBank;
+  /** The SCRAPTF_BANKS page for `bank`: never a URL taken from the row. */
+  url: string;
+  /** "scrap.tf/buy/hats". */
+  path: string;
+  /** The bank's short label: "Hats". */
+  label: string;
+  /** What is copied for scrap.tf's search, and armed with ('check.arm'). */
+  name: string;
+  /** A saved page listed the item (MarketRow.scraptfLink.source 'seen'); else its category's bank. */
+  seen: boolean;
+  title: string;
+  ariaLabel: string;
+}
+
+/** The SCRAPTF_BANKS entry a row's link names, else its category's bank (a garbled or older row). */
+function rowBank(r: Pick<MarketRow, 'category' | 'scraptfLink'>): ScraptfBankInfo {
+  return scraptfBankInfo(r.scraptfLink?.bank) ?? scraptfBankInfo(bankForCategory(r.category))!;
+}
+
+/**
+ * U1: the Item cell's scrap.tf button. "Seen on scrap.tf/buy/hats in your save 12 min ago" when a saved
+ * page listed the item, else "scrap.tf's Hats bank (not in your saves yet)"; either way it opens that
+ * page and copies the name. The URL is the bank's static one: links.open only ever gets an allowlisted page.
+ */
+export function marketScraptfButton(r: Pick<MarketRow, 'sku' | 'name' | 'category' | 'scraptfLink'>, now: UnixMs): MarketScraptfButton {
+  const info = rowBank(r);
+  const path = bankStockPagePath(info.url);
+  const link = r.scraptfLink;
+  const at = link?.seenAt;
+  const seen = link?.source === 'seen' && link.bank === info.bank && typeof at === 'number' && Number.isFinite(at);
+  // A file time slightly ahead of the clock (another machine's mtime) reads as just now.
+  const where = seen ? `Seen on ${path} in your save ${fmtAgo(Math.min(at, now), now)}.` : `scrap.tf's ${info.label} bank (not in your saves yet).`;
+  return {
+    bank: info.bank,
+    url: info.url,
+    path,
+    label: info.label,
+    name: scraptfSearchName(r),
+    seen,
+    title: `${where} Opens it and copies the name (${MARKET_SCRAPTF_KEY}). The app never visits scrap.tf.`,
+    // Starts with the visible label (WCAG 2.5.3): "click All items" by voice must find the button.
+    ariaLabel: `${info.label}: open ${path} in your browser and copy the name`,
+  };
+}
+
+/**
+ * U2: the one scrap.tf bank the category filter covers, a bank card's "See all" route included (its
+ * categories); null for every category (no filter) or categories of several banks.
+ */
+export function marketSingleBank(categories: readonly Category[]): ScraptfBankInfo | null {
+  const known = pickOrdered(categories, CATEGORIES);
+  if (!known.length) return null;
+  const banks = new Set(known.map(bankForCategory));
+  return banks.size === 1 ? scraptfBankInfo([...banks][0]) : null;
+}
+
+export interface MarketBankLink {
+  bank: ScraptfBank;
+  url: string;
+  /** "Open scrap.tf/buy/hats" (the page shows "↗" after it). */
+  text: string;
+  title: string;
+  ariaLabel: string;
+}
+
+/** U2: the header's "Open scrap.tf/buy/<bank> ↗" while the market shows one bank's items; null otherwise. */
+export function marketBankLink(categories: readonly Category[]): MarketBankLink | null {
+  const info = marketSingleBank(categories);
+  if (!info) return null;
+  const path = bankStockPagePath(info.url);
+  return {
+    bank: info.bank,
+    url: info.url,
+    text: `Open ${path}`,
+    title: `Opens scrap.tf's ${info.label} bank in your browser, to look for these items there. The app never visits scrap.tf.`,
+    ariaLabel: `Open ${path} in your browser`,
+  };
 }

@@ -7,7 +7,8 @@ import { errorMessage } from './format';
 
 type ParamArgs<M extends RpcMethod> = [RpcParams<M>] extends [void] ? [params?: undefined] : [params: RpcParams<M>];
 
-export type WindowKind = 'dashboard' | 'quick-entry';
+/** 'check' is the live check popup (F16). */
+export type WindowKind = 'dashboard' | 'quick-entry' | 'check';
 
 function nativeBridge(): FlipdeskBridge | null {
   if (typeof window === 'undefined') return null;
@@ -74,9 +75,12 @@ export function on<E extends PushEvent>(event: E, listener: (payload: PushContra
   };
 }
 
+/** The window this page runs in: the preload's kind, else the hash ("#/quick", "#/check"), which also works in a plain browser. */
 export function windowKind(): WindowKind {
-  if (nativeBridge()?.windowKind === 'quick-entry') return 'quick-entry';
+  const native = nativeBridge()?.windowKind;
+  if (native === 'quick-entry' || native === 'check') return native;
   if (typeof location !== 'undefined' && location.hash.startsWith('#/quick')) return 'quick-entry';
+  if (typeof location !== 'undefined' && location.hash.startsWith('#/check')) return 'check';
   return 'dashboard';
 }
 

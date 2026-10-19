@@ -205,7 +205,7 @@ describe('labels', () => {
   it('summarises the key price for the top bar', () => {
     const now = 10_000_000;
     expect(keyPriceSummary(null, now)).toMatchObject({ value: '—', stale: true });
-    expect(keyPriceSummary({ valueScrap: KEY, source: 'pricedb', observedAt: now - 20 * 60_000, stale: false, quotes: [] }, now)).toEqual({
+    expect(keyPriceSummary({ valueScrap: KEY, source: 'pricedb', observedAt: now - 20 * 60_000, stale: false, quotes: [], scraptfFromList: null }, now)).toEqual({
       value: '63.11 ref',
       source: 'PriceDB',
       age: '20 min',

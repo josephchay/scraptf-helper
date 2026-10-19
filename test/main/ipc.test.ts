@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   createRpcRouter,
   isKnownMethod,
+  PICK_PAGE_REFUSAL,
   registerRpcHandler,
   senderUrlOf,
   withCsvExtension,
@@ -40,6 +41,13 @@ function makeDeps(overrides: Partial<MainRpcDeps> = {}) {
     openItemInDashboard: vi.fn(),
     appInfo: vi.fn(() => ({ version: '0.1.0', dataDir: 'd', logDir: 'l', platform: 'win32', electron: '44', node: '24' })),
     serviceState: vi.fn((): ReturnType<MainRpcDeps['serviceState']> => null),
+    hotkeys: vi.fn(
+      (): ReturnType<MainRpcDeps['hotkeys']> => ({
+        quickEntry: { accelerator: 'CommandOrControl+Alt+F', registered: true, error: null },
+        check: { accelerator: 'CommandOrControl+Alt+C', registered: true, error: null },
+      }),
+    ),
+    armCheck: vi.fn((arm: Parameters<MainRpcDeps['armCheck']>[0]): ReturnType<MainRpcDeps['armCheck']> => ({ armedUntil: arm ? 1_700_000_600_000 : null })),
     isAllowedExternalUrl: vi.fn((url: string) => url.startsWith('https://backpack.tf/')),
     openExternal: vi.fn(async () => undefined),
     dialogs: {
@@ -94,7 +102,9 @@ describe('service forwarding', () => {
     const route = createRpcRouter(deps);
     for (const m of SERVICE_METHODS) {
       if (m === 'import.html') continue;
-      await expect(route(ctx(), m, { a: 1 })).resolves.toEqual({ forwarded: m, params: { a: 1 } });
+      // A page's live check is a manual one (checkBridge.test.ts); everything else passes as is.
+      const params = m === 'check.text' ? { a: 1, source: 'manual' } : { a: 1 };
+      await expect(route(ctx(), m, params)).resolves.toEqual({ forwarded: m, params });
     }
     expect(deps.service.callRaw).toHaveBeenCalledTimes(SERVICE_METHODS.length - 1);
   });
@@ -141,6 +151,22 @@ describe('main methods', () => {
     await expect(route(ctx(), 'app.serviceState', undefined)).resolves.toEqual(restarting);
     expect(deps.service.callRaw).not.toHaveBeenCalled();
     expect(isKnownMethod('app.serviceState')).toBe(true);
+  });
+
+  it('app.hotkeys reports both hotkeys from main (F16), as a copy, without asking the service', async () => {
+    const taken = {
+      quickEntry: { accelerator: 'CommandOrControl+Alt+F', registered: true, error: null },
+      check: { accelerator: 'CommandOrControl+Alt+C', registered: false, error: '"CommandOrControl+Alt+C" is already used by another application or is not a valid shortcut.' },
+    };
+    const { deps } = makeDeps({ hotkeys: vi.fn(() => taken) });
+    const route = createRpcRouter(deps);
+    const answer = (await route(ctx(), 'app.hotkeys', undefined)) as typeof taken;
+    expect(answer).toEqual(taken);
+    expect(answer).not.toBe(taken);
+    answer.check.registered = true;
+    expect(taken.check.registered).toBe(false);
+    expect(deps.service.callRaw).not.toHaveBeenCalled();
+    expect(MAIN_METHODS).toContain('app.hotkeys');
   });
 
   it('app.openItem shows the dashboard with a validated SKU', async () => {
@@ -259,10 +285,48 @@ describe('import.pickFile', () => {
     deps.files.stat.mockResolvedValueOnce({ size: 20 * 1024 * 1024 + 1, mtimeMs: 1, isFile: () => true });
     await expect(route(ctx(), 'import.pickFile', undefined)).rejects.toThrow(/larger than 20 MB/);
     deps.files.stat.mockResolvedValueOnce({ size: 10, mtimeMs: 1, isFile: () => false });
-    await expect(route(ctx(), 'import.pickFile', undefined)).rejects.toThrow(/saved \.html page/);
-    deps.dialogs.openHtmlFile.mockResolvedValueOnce('C:\\pages\\notes.txt');
-    await expect(route(ctx(), 'import.pickFile', undefined)).rejects.toThrow(/saved \.html page/);
+    await expect(route(ctx(), 'import.pickFile', undefined)).rejects.toThrow(PICK_PAGE_REFUSAL);
+    for (const name of ['C:\\pages\\notes.txt', 'C:\\pages\\hats.mhtml.crdownload', 'C:\\pages\\hats.mhtmlx']) {
+      deps.dialogs.openHtmlFile.mockResolvedValueOnce(name);
+      await expect(route(ctx(), 'import.pickFile', undefined)).rejects.toThrow(PICK_PAGE_REFUSAL);
+    }
+    expect(PICK_PAGE_REFUSAL).toBe('Choose a saved .html or .mhtml page.');
     expect(deps.files.readBytes).not.toHaveBeenCalled();
+  });
+
+  it('forwards a saved .mhtml or .mht file as its text, the size bound unchanged (F18: the service unpacks it)', async () => {
+    const mhtml = 'From: <Saved by Blink>\r\nMIME-Version: 1.0\r\nContent-Type: multipart/related; boundary="b"\r\n\r\n--b\r\nContent-Type: text/html\r\n\r\n<p>x</p>\r\n--b--\r\n';
+    for (const name of ['C:\\pages\\Buy Hats - Scrap.TF.mhtml', 'C:\\pages\\hats.MHT']) {
+      const { deps, enableImport } = makeDeps();
+      enableImport();
+      deps.dialogs.openHtmlFile.mockResolvedValueOnce(name);
+      deps.files.readBytes.mockResolvedValueOnce(new TextEncoder().encode(mhtml));
+      await createRpcRouter(deps)(ctx(), 'import.pickFile', undefined);
+      expect(deps.files.readBytes).toHaveBeenCalledWith(name, 20 * 1024 * 1024 + 1);
+      expect(deps.service.callRaw).toHaveBeenCalledWith('import.html', { html: mhtml, fileName: name.slice('C:\\pages\\'.length), mtimeMs: 1_700_000_000_124 });
+    }
+    const { deps, enableImport } = makeDeps();
+    enableImport();
+    deps.dialogs.openHtmlFile.mockResolvedValueOnce('C:\\pages\\big.mhtml');
+    deps.files.stat.mockResolvedValueOnce({ size: 20 * 1024 * 1024 + 1, mtimeMs: 1, isFile: () => true });
+    await expect(createRpcRouter(deps)(ctx(), 'import.pickFile', undefined)).rejects.toThrow(/larger than 20 MB/);
+    expect(deps.files.readBytes).not.toHaveBeenCalled();
+  });
+
+  it("offers in main's file dialog exactly the page types it accepts (F18: html, htm, mhtml, mht)", async () => {
+    // main.ts needs Electron to load, so its dialog filter is read as source.
+    const main = readFileSync(fileURLToPath(new URL('../../src/main/main.ts', import.meta.url)), 'utf8');
+    const filter = /name: 'Saved web pages', extensions: \[([^\]]*)\]/.exec(main)?.[1];
+    expect(filter).toBeDefined();
+    const extensions = [...filter!.matchAll(/'([a-z]+)'/g)].map((m) => m[1]!);
+    expect(extensions).toEqual(['html', 'htm', 'mhtml', 'mht']);
+    for (const ext of extensions) {
+      const { deps, enableImport } = makeDeps();
+      enableImport();
+      deps.dialogs.openHtmlFile.mockResolvedValueOnce(`C:\\pages\\page.${ext.toUpperCase()}`);
+      await createRpcRouter(deps)(ctx(), 'import.pickFile', undefined);
+      expect(deps.service.callRaw).toHaveBeenCalledTimes(1);
+    }
   });
 
   it('reads at most 20 MB + 1 byte and refuses a file that grew past the limit after the size check', async () => {

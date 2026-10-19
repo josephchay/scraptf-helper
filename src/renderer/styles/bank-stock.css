@@ -1,0 +1,299 @@
+/* scrap.tf bank stock (F17): one bank page's items as the user's newest save shows them, with what
+   changed since their previous save (pages/BankStockPage.tsx, route #/banks/<bank>/stock; classes
+   bs-*). The header reuses the banks page's and the price list card's note, path and boundary styles
+   (banks.css, scraptf-list.css); the table reuses the opportunities grid (.opp-scroll, .opp-row).
+   Colours come from tokens.css only, so both themes work. Nothing here loads anything: no url() and
+   no @import (the compliance scan reads style sheets too). Nothing animates, so reduced motion needs
+   nothing of its own. index.css imports it after check.css (F16), just before scraptf-history.css (F20).
+   F20's Listed and Since listed columns live here with the grid they change. */
+
+/* The full height, so the table region takes what the header leaves and scrolls inside. */
+.bank-stock-page {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  height: 100%;
+}
+
+/* ---------- header ---------- */
+
+/* The newest save's freshness runs down the card's edge, as on the banks page's cards. */
+.bs-head {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 16px;
+  box-shadow: inset 3px 0 0 var(--tone);
+}
+
+.bs-head.tone-muted {
+  box-shadow: inset 3px 0 0 var(--border);
+}
+
+.bs-back {
+  align-self: flex-start;
+}
+
+.bs-title-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 10px;
+  min-width: 0;
+}
+
+.bs-title-row > .bs-title {
+  margin: 0;
+  font-size: 15px;
+}
+
+.bs-saved {
+  margin: 0;
+  font-size: 12.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---------- toolbar and filter chips ---------- */
+
+.bs-sort {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.bs-filters {
+  align-items: center;
+}
+
+.bs-chip .status-dot {
+  width: 7px;
+  height: 7px;
+}
+
+.bs-chip.on {
+  border-color: var(--tone);
+  background: var(--tone-weak);
+  color: var(--text);
+}
+
+.bs-chip .chip-count {
+  min-width: 18px;
+  padding: 0 5px;
+  border-radius: 8px;
+  background: var(--surface-3);
+  color: var(--text-muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
+
+.bs-chip.on .chip-count {
+  background: transparent;
+  color: var(--text);
+}
+
+/* A change chip on a first save: there is nothing to compare yet. */
+.bs-chip:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+/* ---------- table ---------- */
+
+/* Item / scrap.tf price / Stock / Listed / Since listed / Sells for / Pay up to / Verdict / Confidence
+   (F20 added Listed and Since listed). The grid's container is the window minus the nav, the page
+   padding and the scrollbar (about 1087px at the 1360px default window, 1019px at 1280, 840px at 1101
+   where the nav is still wide, 849px at the 960px minimum). Full needs 1060px; at 1060 and below
+   Confidence goes (a 1280px window), at 960 and below Stock too (windows under ~1220px). The item name
+   keeps at least 160px with no sideways scroll, and the verdict pill about 146px ("Flip +19.88 ref (29%)").
+   The Gone view has no run to show (a gone row is not listed now), so it hides Listed and Since listed
+   and keeps F17's tracks (Last price, Last seen), Last seen included at every width. A hidden cell
+   leaves the grid's flow, so the tracks below list only the cells shown. */
+.bs-scroll {
+  --bs-cols: minmax(170px, 1fr) 112px 66px 64px 84px 150px 100px 148px 62px;
+}
+
+.bs-scroll.bs-gone {
+  --bs-cols: minmax(220px, 1fr) 120px 76px 210px 108px 168px 70px;
+}
+
+.bs-scroll .opp-row {
+  grid-template-columns: var(--bs-cols);
+}
+
+.bs-scroll.bs-gone .opp-row > .bs-listed,
+.bs-scroll.bs-gone .opp-row > .bs-since {
+  display: none;
+}
+
+@container (max-width: 1060px) {
+  .bs-scroll .opp-row {
+    --bs-cols: minmax(170px, 1fr) 108px 62px 62px 80px 140px 96px 148px;
+  }
+  .bs-scroll.bs-gone .opp-row {
+    --bs-cols: minmax(200px, 1fr) 112px 70px 200px 100px 156px;
+  }
+  .bs-scroll .opp-row > .bs-conf {
+    display: none;
+  }
+}
+
+@container (max-width: 960px) {
+  .bs-scroll .opp-row {
+    --bs-cols: minmax(160px, 1fr) 100px 58px 74px 124px 92px 146px;
+  }
+  .bs-scroll.bs-gone .opp-row {
+    --bs-cols: minmax(150px, 1fr) 108px 66px 166px 96px 144px;
+  }
+  .bs-scroll:not(.bs-gone) .opp-row > .bs-stock {
+    display: none;
+  }
+}
+
+/* The name ellipses first; the badges after it never shrink. */
+.bs-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.bs-item > .item-name-wrap {
+  flex: 0 1 auto;
+}
+
+.bs-row.verdict-no-buyers .bs-item .item-name {
+  opacity: 0.85;
+}
+
+.bs-new {
+  flex-shrink: 0;
+  height: 17px;
+  padding: 0 6px;
+  font-size: 10.5px;
+  cursor: help;
+}
+
+/* "↓ was 3.11 ref" / "↑ was 3.11 ref": the tone says which way. */
+.bs-was {
+  flex-shrink: 0;
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  cursor: help;
+}
+
+.bs-extras {
+  flex-shrink: 0;
+  padding: 0 4px;
+  border-radius: 3px;
+  background: var(--muted-weak);
+  color: var(--text-muted);
+  font-size: 10.5px;
+  font-weight: 650;
+  cursor: help;
+}
+
+.bs-price,
+.bs-stock,
+.bs-pay {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+}
+
+/* A long price ("98 keys 61.88 ref") ellipses at its end instead of losing its leading digits. */
+.bs-price > .money,
+.bs-pay > .money {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.bs-pay .money {
+  font-weight: 650;
+}
+
+.bs-stock {
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* F20: "2 d 4 h" listed and "↓ 8 %" since listed; the tone (tokens.css .tone-text-*) says which way. */
+.bs-listed,
+.bs-since {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Listed for at least a day (the Listed > 24 h chip). */
+.bs-row .bs-listed.long {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.bs-row .bs-since:not(.muted) {
+  font-weight: 600;
+}
+
+/* A gone row's price is its last one, from the previous save. */
+.bs-gone .bs-price .money {
+  color: var(--text-muted);
+}
+
+.bs-sells {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.bs-sells > .money {
+  flex-shrink: 0;
+}
+
+.bs-sells .buyer-type {
+  flex-shrink: 0;
+  color: var(--text-muted);
+}
+
+.bs-sells .buyer-name {
+  min-width: 0;
+  font-size: 12px;
+}
+
+.bs-verdict {
+  display: flex;
+  align-items: center;
+}
+
+/* Block-level so a long "Flip +2 keys 10.33 ref (12%)" ellipses instead of spilling. */
+.bs-verdict > .pill {
+  display: inline-block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  line-height: 20px;
+  vertical-align: middle;
+}
+
+/* "Showing 200 of 1,234" and Load more, under the table. */
+.bs-more {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 4px 10px;
+}
+
+/* ---------- empty states ---------- */
+
+.bs-steps {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0;
+  padding-left: 20px;
+  text-align: left;
+}

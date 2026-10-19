@@ -252,6 +252,12 @@ export interface JobContext {
   snapshot(baseSku: string, priority: 'user' | 'background'): Promise<void>;
   /** A key quote was stored; re-evaluate when the selected key value moved. */
   keyQuotesChanged(): void;
+  /** F14: maintenance purged saved scrap.tf/items list rows (core refreshes the list cache and pushes). */
+  scraptfListChanged?(): void;
+  /** F17: maintenance pruned bank stock rows (core refreshes the bank stock cache; ctx.bankStockChanged without an import). */
+  bankStockChanged?(): void;
+  /** F20: maintenance pruned scrap.tf change events (core: scraptfHistory.refresh()). */
+  scraptfEventsPruned?(): void;
 }
 
 function hostBlocked(http: HttpClient, host: string): string | null {
@@ -429,10 +435,18 @@ export function buildJobs(ctx: JobContext): JobSpec[] {
       network: false,
       async run() {
         const r = runMaintenance(repo, clock.now());
-        log.info(`maintenance: purged ${r.listings} listings, ${r.events} events, ${r.requests} request-log rows`);
+        log.info(
+          `maintenance: purged ${r.listings} listings, ${r.events} events, ${r.requests} request-log rows, ${r.scraptfList} scrap.tf list rows, ${r.bankStock} bank stock rows, ${r.scraptfEvents} scrap.tf change events`,
+        );
         engine.markAllDirty();
         // Purged listings were deleted without a markDirty: entries built on them must go.
         market?.markAllDirty();
+        if (r.scraptfList > 0) ctx.scraptfListChanged?.();
+        // F17: a pruned save may have been a bank's previous one, so its diff changes. F20: core also
+        // rebuilds the history index there (thinned saves leave the runs).
+        if (r.bankStock > 0) ctx.bankStockChanged?.();
+        // F20: pruned change events only shorten the feed; core refreshes the history's caches.
+        if (r.scraptfEvents > 0) ctx.scraptfEventsPruned?.();
       },
     },
   ];

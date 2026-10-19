@@ -1,0 +1,197 @@
+/* scrap.tf price list (F14): the shared ScraptfListCard, at the top of the Live market (compact,
+   the steps fold away) and on the Import page (steps shown). The Live market's "scrap.tf pays" and
+   Stock columns sit in market.css with the rest of that grid's width budget. Tokens only
+   (tokens.css), both themes; nothing here animates. */
+
+.scraptf-list-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 14px;
+}
+
+.sl-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 12px;
+  min-width: 0;
+}
+
+.scraptf-list-card .sl-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  font-size: 13.5px;
+  white-space: nowrap;
+}
+
+.sl-title > .icon {
+  color: var(--accent);
+}
+
+/* The status gives way first (ellipsis, the whole text in its tooltip), so the actions stay put. */
+.sl-status {
+  display: inline-flex;
+  flex: 1 1 260px;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  font-size: 12.5px;
+}
+
+.sl-status-text {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sl-status.tone-muted .sl-status-text {
+  color: var(--text-muted);
+}
+
+/* The pages detail gives way before the line itself (both are in the tooltip). */
+.sl-status-detail {
+  flex-shrink: 1000;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-muted);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sl-head-actions {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+}
+
+/* What to fix before the sync works (import off, no folder, a watch error), with its one action. */
+.sl-note {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+  padding: 5px 10px;
+  border: 1px solid color-mix(in srgb, var(--tone) 30%, transparent);
+  border-radius: 8px;
+  background: var(--tone-weak);
+  color: var(--text);
+  font-size: 12.5px;
+}
+
+.sl-note > .icon {
+  flex-shrink: 0;
+  color: var(--tone);
+}
+
+.sl-note-text {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.sl-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.sl-steps {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: 13px;
+}
+
+.sl-steps li {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  min-width: 0;
+}
+
+.sl-step-n {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  margin-top: 2px;
+  border-radius: 50%;
+  background: var(--accent-weak);
+  color: var(--accent);
+  font-size: 11.5px;
+  font-weight: 700;
+}
+
+.sl-step-text {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+  min-width: 0;
+  min-height: 24px;
+}
+
+/* Import is off: the steps read as not yet possible (their buttons are disabled too). */
+.sl-steps.disabled {
+  color: var(--text-muted);
+}
+
+.sl-steps.disabled .sl-step-n {
+  background: var(--muted-weak);
+  color: var(--text-muted);
+}
+
+.sl-folder {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.sl-path {
+  min-width: 0;
+  padding: 1px 6px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sl-boundary {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.sl-boundary > .icon {
+  flex-shrink: 0;
+  color: var(--info);
+}
+
+/* On the Live market the card is a header band: a little tighter than the Import page's cards. */
+.scraptf-list-card.placement-market {
+  padding: 8px 12px;
+}
+
+.scraptf-list-card.placement-market:not(.open) {
+  gap: 6px;
+}

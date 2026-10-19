@@ -124,9 +124,14 @@ describe('header totals', () => {
   });
 
   it('explains worth and P/L, with friction when set', () => {
-    expect(worthTitle({ worthNowScrap: 450, costScrap: 300 }, KEY)).toMatch(/^What today's buyers pay for every unit that has one: 50\.00 ref, against 33\.33 ref you paid/);
+    // F14: worth is at the better exit, a backpack.tf buyer or scrap.tf by the saved list.
+    expect(worthTitle({ worthNowScrap: 450, costScrap: 300 }, KEY)).toMatch(
+      /^What every unit sells for now at its better exit \(a backpack\.tf buyer, or scrap\.tf by your saved price list\): 50\.00 ref, against 33\.33 ref you paid/,
+    );
     expect(worthTitle({ worthNowScrap: KEY + 9, costScrap: 300 }, KEY)).toContain('1 key 1.00 ref');
-    expect(plTitle({ profitNowScrap: 27 }, KEY, { frictionScrap: 0 })).toMatch(/^Unrealised profit or loss if every unit with a buyer sold now: \+3\.00 ref\. Items with no buyer/);
+    expect(plTitle({ profitNowScrap: 27 }, KEY, { frictionScrap: 0 })).toMatch(
+      /^Unrealised profit or loss if every unit with a buyer \(or a fresh scrap\.tf price\) sold now: \+3\.00 ref\. Items with no buyer/,
+    );
     expect(plTitle({ profitNowScrap: -9 }, KEY, { frictionScrap: 3 })).toContain('-1.00 ref, after 0.33 ref friction per unit');
   });
 });

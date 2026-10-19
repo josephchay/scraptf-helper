@@ -1,35 +1,63 @@
 import { useRef, useState, type ReactNode } from 'react';
+import { bankStockPagePath } from '../../shared/bankStock';
+import { CHECK_PRIVACY_SENTENCE, CHECK_SAMPLE_TEXT } from '../../shared/check';
 import { parsePrice } from '../../shared/currency';
-import { BPTF_API_ACCESS_URL } from '../../shared/links';
-import type { InputKind, SecretName, Settings } from '../../shared/types';
+import { BPTF_API_ACCESS_URL, SCRAPTF_BANKS } from '../../shared/links';
+import type { HotkeysStatus } from '../../shared/rpc';
+import { SCRAPTF_RESAVE_HELP } from '../../shared/scraptfHistory';
+import type { CheckResult, InputKind, ScraptfBank, SecretName, Settings } from '../../shared/types';
 import { rpc } from '../api';
+import { checkBriefText } from '../checkModel';
 import { CheckGroup, CommitInput, Field, Segmented, Toggle } from '../components/Controls';
 import { ExternalLink } from '../components/ExternalLink';
 import { Banner, LoadingBlock } from '../components/Feedback';
 import { Icon } from '../components/Icon';
+import { TonePill } from '../components/Pills';
 import { accelLabel, errorMessage, fmtDateTime, fmtRefOnly, parseSteamIdList } from '../format';
 import { useApp } from '../hooks/appContext';
-import { useRpcQuery } from '../hooks/useRpc';
+import { usePush, useRpcQuery } from '../hooks/useRpc';
+import { useNow } from '../hooks/useTimers';
+import { CheckVerdictPill } from './CheckPopup';
 import {
+  CHECK_NOTIFY_LABEL,
+  CHECK_POPUP_HINT,
+  CHECK_POPUP_LABEL,
+  CHECK_WATCH_LABEL,
+  checkHotkeyStatus,
+  checkNotifyHint,
+  checkWatchHint,
+  type CheckHotkeySave,
   daysTextToMs,
+  quickHotkeyProblem,
   HOLDINGS_NOTIFY_LABEL,
   holdingsNotifyHint,
   inputKindsHint,
   MIN_MARGIN_PCT,
   MIN_PROFIT_PCT_OF_COST,
   msToDaysText,
+  NEW_ON_SCRAPTF_NOTIFY_LABEL,
+  newOnScraptfNotifyHint,
   NOTIFY_INPUT_KINDS,
   numberValidator,
   pctTextToRatio,
   ratioToPctText,
   REFERENCE_MAX_AGE_DAYS,
   referenceAgeHint,
+  RESAVE_LAST_BANK_TITLE,
+  resaveBanksHint,
+  resaveBanksShown,
+  resaveMinutesOf,
+  resaveReminderHint,
+  scraptfListKeyView,
+  setResaveBank,
   setInputKind,
   SUSPECT_MARGIN_PCT,
   suspectMarginHint,
   userAgentPreview,
+  validateCheckHotkey,
   validateContactUrl,
-  validateHotkey,
+  validateQuickEntryHotkey,
+  validateResaveMinutes,
 } from '../settingsFields';
 
 const SECTIONS = [
@@ -38,10 +66,12 @@ const SECTIONS = [
   ['set-key', 'Key price'],
   ['set-profit', 'Profit thresholds'],
   ['set-notify', 'Notifications'],
+  ['set-import', 'Saved-page import'],
   ['set-feed', 'Live feed'],
   ['set-connectors', 'Data sources'],
   ['set-block', 'Blocklist'],
   ['set-app', 'App behaviour'],
+  ['set-check', 'Live check'],
   ['set-look', 'Appearance'],
 ] as const;
 
@@ -75,10 +105,14 @@ export function SettingsPage() {
         <KeyPriceSection s={settings} />
         <ProfitSection s={settings} />
         <NotifySection s={settings} />
+        {/* F20: re-save reminders (the import switches themselves stay on the Import page). */}
+        <ImportSection s={settings} />
         <FeedSection s={settings} />
         <ConnectorsSection s={settings} />
         <BlocklistSection s={settings} />
         <AppSection s={settings} />
+        {/* F16. Main's settings load always adds the check group; the guard keeps the page up regardless. */}
+        {settings.check ? <CheckSection s={settings} /> : null}
         <AppearanceSection s={settings} />
         <AboutAppSection />
       </div>
@@ -229,8 +263,12 @@ function ContactSection({ s }: { s: Settings }) {
 }
 
 function KeyPriceSection({ s }: { s: Settings }) {
-  const { updateSettings, status } = useApp();
+  const { updateSettings, status, refreshStatus } = useApp();
   const kp = status?.keyPrice;
+  const now = useNow(30_000);
+  // F14: a newly saved scrap.tf/items list may carry new scrap.tf key prices (local status read).
+  usePush('scraptf.listChanged', () => refreshStatus());
+  const listKey = scraptfListKeyView(kp?.scraptfFromList, s.keyPrice, now);
   return (
     <Section id="set-key" title="Key price" intro="Keys you receive from buyers are valued at this price. Auto uses backpack.tf (with an API key), then PriceDB.">
       <Field label="Mode">
@@ -285,6 +323,12 @@ function KeyPriceSection({ s }: { s: Settings }) {
         </Field>
       </div>
       {s.keyPrice.scraptfObservedAt ? <p className="muted small">scrap.tf key prices entered {fmtDateTime(s.keyPrice.scraptfObservedAt)}.</p> : null}
+      {listKey ? (
+        <p className="small" title={listKey.title}>
+          {listKey.text}{' '}
+          <TonePill tone={listKey.pill === 'In use' ? 'good' : listKey.pill === 'Partly in use' ? 'info' : 'muted'}>{listKey.pill}</TonePill> <span className="muted">{listKey.status}</span>
+        </p>
+      ) : null}
     </Section>
   );
 }
@@ -374,7 +418,8 @@ function ProfitSection({ s }: { s: Settings }) {
   );
 }
 
-function NotifySection({ s }: { s: Settings }) {
+/** Exported for the render tests. */
+export function NotifySection({ s }: { s: Settings }) {
   const { updateSettings } = useApp();
   const n = s.notifications;
   const set = (patch: Partial<Settings['notifications']>) => updateSettings({ notifications: patch });
@@ -414,6 +459,13 @@ function NotifySection({ s }: { s: Settings }) {
       </Field>
       {/* F11: "Sell: <name>" when a held item's next lot can be sold at a profit. */}
       <Toggle checked={n.holdings} onChange={(holdings) => void set({ holdings })} label={HOLDINGS_NOTIFY_LABEL} description={holdingsNotifyHint(n.enabled)} />
+      {/* F17: "New on scrap.tf (<Bank>): <name>" when a bank page you save shows new items that are flips. */}
+      <Toggle
+        checked={n.newOnScraptf}
+        onChange={(newOnScraptf) => void set({ newOnScraptf })}
+        label={NEW_ON_SCRAPTF_NOTIFY_LABEL}
+        description={newOnScraptfNotifyHint({ notificationsOn: n.enabled, importKind: kinds.includes('import'), importOn: s.import.enabled && s.import.acknowledgedAt !== null })}
+      />
       <Toggle checked={n.silent} onChange={(silent) => void set({ silent })} label="Silent notifications" description="Shown without the Windows notification sound." />
     </Section>
   );
@@ -499,8 +551,19 @@ function BlocklistSection({ s }: { s: Settings }) {
   );
 }
 
+/**
+ * Main's registration of both global hotkeys ('app.hotkeys'), re-read after every settings change
+ * (main registers a changed hotkey before it saves it), so a chord another app took at start-up shows.
+ */
+function useHotkeys(): HotkeysStatus | null {
+  const q = useRpcQuery('app.hotkeys', undefined);
+  usePush('settings.changed', () => void q.reload());
+  return q.data ?? null;
+}
+
 function AppSection({ s }: { s: Settings }) {
   const { updateSettings } = useApp();
+  const hotkeys = useHotkeys();
   const a = s.app;
   const set = (patch: Partial<Settings['app']>) => updateSettings({ app: patch });
   return (
@@ -511,13 +574,186 @@ function AppSection({ s }: { s: Settings }) {
       <Field
         label="Quick-entry hotkey"
         htmlFor="hotkey"
+        error={quickHotkeyProblem(a.quickEntryHotkey, hotkeys?.quickEntry)}
         hint={
           a.quickEntryHotkey
             ? `Currently ${accelLabel(a.quickEntryHotkey)}. Electron accelerator format, e.g. CommandOrControl+Alt+F. Leave it empty to turn the shortcut off.`
             : 'Off. Enter a shortcut such as CommandOrControl+Alt+F to turn it on.'
         }
       >
-        <CommitInput id="hotkey" value={a.quickEntryHotkey} placeholder="Off" validate={validateHotkey} onCommit={(v) => set({ quickEntryHotkey: v.trim() })} />
+        <CommitInput
+          id="hotkey"
+          value={a.quickEntryHotkey}
+          placeholder="Off"
+          validate={(v) => validateQuickEntryHotkey(v, s.check?.hotkey ?? '')}
+          onCommit={(v) => set({ quickEntryHotkey: v.trim() })}
+        />
+      </Field>
+    </Section>
+  );
+}
+
+/**
+ * F16 Live check: every check.* setting. The check hotkey (registered by main before it is saved, so a
+ * refusal comes back as the save's error; 'app.hotkeys' says when the stored one is taken), the opt-in
+ * clipboard watcher with its privacy sentence, the flip notification and popup switches, and a Test
+ * that checks a sample string through the service. The app never reads the clipboard from here.
+ * Exported for the render tests.
+ */
+export function CheckSection({ s }: { s: Settings }) {
+  const { updateSettings, toast } = useApp();
+  const hotkeys = useHotkeys();
+  const c = s.check;
+  const [lastSave, setLastSave] = useState<CheckHotkeySave | null>(null);
+  const [test, setTest] = useState<{ busy: boolean; result: CheckResult | null; error: string | null }>({ busy: false, result: null, error: null });
+  const now = useNow(30_000);
+  const set = (patch: Partial<Settings['check']>) => updateSettings({ check: patch });
+  const hotkeyStatus = checkHotkeyStatus(c.hotkey, lastSave, hotkeys?.check ?? null);
+
+  // Not through updateSettings: its toast drops main's reason, and the field shows it instead.
+  // 'settings.changed' (main broadcasts every change) brings the new value back to the page.
+  const saveHotkey = async (v: string) => {
+    const hotkey = v.trim();
+    try {
+      const next = await rpc('settings.set', { check: { hotkey } });
+      setLastSave({ hotkey, error: null });
+      return next;
+    } catch (e) {
+      setLastSave({ hotkey, error: errorMessage(e) });
+      return null;
+    }
+  };
+
+  const setWatch = async (on: boolean) => {
+    const r = await set({ watchClipboard: on });
+    if (r && on) toast(`Clipboard check is on. ${CHECK_PRIVACY_SENTENCE}`, 'info');
+  };
+
+  const runTest = async () => {
+    setTest((t) => ({ ...t, busy: true }));
+    try {
+      setTest({ busy: false, result: await rpc('check.text', { text: CHECK_SAMPLE_TEXT, source: 'manual' }), error: null });
+    } catch (e) {
+      setTest({ busy: false, result: null, error: errorMessage(e) });
+    }
+  };
+
+  // Main pauses the watcher on the setting itself; the status poll can lag behind it.
+  const paused = s.networkPaused;
+  return (
+    <Section
+      id="set-check"
+      title="Live check"
+      intro="Copy an item name or a row of scrap.tf/items while you browse, then see its flip at once: the price, what it sells for and Pay up to. The app never visits scrap.tf or reads your browser; it only reads text you copy, on this computer."
+    >
+      <Field label="Check hotkey" htmlFor="check-hotkey" hint={hotkeyStatus.tone === 'bad' ? undefined : hotkeyStatus.text} error={hotkeyStatus.tone === 'bad' ? hotkeyStatus.text : null}>
+        <div className="lc-hotkey-row">
+          <CommitInput id="check-hotkey" value={c.hotkey} placeholder="Off" validate={(v) => validateCheckHotkey(v, s.app.quickEntryHotkey)} onCommit={saveHotkey} />
+          <TonePill tone={hotkeyStatus.tone}>{hotkeyStatus.pill}</TonePill>
+        </div>
+      </Field>
+      <Toggle checked={c.watchClipboard} onChange={(on) => void setWatch(on)} label={CHECK_WATCH_LABEL} description={checkWatchHint(c.watchClipboard, paused)} />
+      <Toggle checked={c.notifyFlips} onChange={(notifyFlips) => void set({ notifyFlips })} label={CHECK_NOTIFY_LABEL} description={checkNotifyHint(s.notifications.enabled)} />
+      <Toggle checked={c.popup} onChange={(popup) => void set({ popup })} label={CHECK_POPUP_LABEL} description={CHECK_POPUP_HINT} />
+      <div className="form-actions">
+        <button type="button" className="btn small" disabled={test.busy} onClick={() => void runTest()} title={`Checks "${CHECK_SAMPLE_TEXT}" against your local data, as if you had copied it`}>
+          {test.busy ? 'Checking…' : 'Test'}
+        </button>
+        <span className="muted small">
+          Checks <code>{CHECK_SAMPLE_TEXT}</code> as if you had copied it.
+        </span>
+      </div>
+      {test.error ? (
+        <div className="small tone-text-bad" role="alert">
+          <Icon name="warning" size={12} /> Could not check: {test.error}
+        </div>
+      ) : test.result ? (
+        <div className="lc-test small" role="status">
+          {test.result.status === 'item' ? <CheckVerdictPill result={test.result} /> : <Icon name="info" size={12} />}
+          <span>{checkBriefText(test.result, now)}</span>
+        </div>
+      ) : null}
+    </Section>
+  );
+}
+
+/**
+ * F20 Saved-page import: the re-save reminders (settings.import.resaveReminderMin and resaveBanks). The
+ * app cannot refresh scrap.tf; a reminder only asks the user to save the page again, and a click on it
+ * opens only that bank's static page (main checks it). Turning import on stays on the Import page,
+ * behind its acknowledgement. Exported for the render tests.
+ */
+export function ImportSection({ s }: { s: Settings }) {
+  const { updateSettings, navigate } = useApp();
+  const i = s.import;
+  const importOn = i.enabled && i.acknowledgedAt !== null;
+  // Arrays replace whole, so a second tick before the first save returns must build on the first one
+  // (as NotifySection's kinds). A ref, because both ticks can run before React re-renders.
+  const sent = useRef<{ base: ScraptfBank[]; next: ScraptfBank[] } | null>(null);
+  const [, rerender] = useState(0);
+  const current = () => (sent.current && sent.current.base === i.resaveBanks ? sent.current.next : i.resaveBanks);
+  const toggleBank = (bank: ScraptfBank, on: boolean) => {
+    const next = setResaveBank(current(), bank, on);
+    if (next === null) return;
+    const mark = { base: i.resaveBanks, next };
+    sent.current = mark;
+    rerender((x) => x + 1);
+    void updateSettings({ import: { resaveBanks: next } }).then((r) => {
+      if (!r && sent.current === mark) {
+        sent.current = null;
+        rerender((x) => x + 1);
+      }
+    });
+  };
+  const banks = current();
+  const shown = resaveBanksShown(banks);
+  return (
+    <Section
+      id="set-import"
+      title="Saved-page import"
+      intro={
+        <>
+          Pages you save from scrap.tf with your own browser are read from your watch folder. Import is <strong>{importOn ? 'on' : 'off'}</strong>; turn it on and pick the folder on the{' '}
+          <button type="button" className="link-btn" onClick={() => navigate('import')}>
+            Import
+          </button>{' '}
+          page.
+        </>
+      }
+    >
+      <p className="stf-resave-help small">
+        <Icon name="clock" size={13} />
+        <span>{SCRAPTF_RESAVE_HELP}.</span>
+      </p>
+      <Field
+        label="Remind me to save a bank again after"
+        htmlFor="imp-resave"
+        hint={resaveReminderHint({ minutes: i.resaveReminderMin, importOn, notificationsOn: s.notifications.enabled, networkPaused: s.networkPaused })}
+      >
+        <CommitInput
+          id="imp-resave"
+          inputMode="numeric"
+          value={String(i.resaveReminderMin)}
+          placeholder="0"
+          validate={validateResaveMinutes}
+          onCommit={(v) => updateSettings({ import: { resaveReminderMin: resaveMinutesOf(v) } })}
+          suffix="min"
+        />
+      </Field>
+      <Field label="For these banks" hint={resaveBanksHint(banks)}>
+        <div className="check-list check-group stf-resave-banks" role="group" aria-label="Remind me about these banks">
+          {SCRAPTF_BANKS.map((b) => {
+            const on = shown.includes(b.bank);
+            const last = on && shown.length === 1;
+            return (
+              <label key={b.bank} className="check-row" title={last ? RESAVE_LAST_BANK_TITLE : undefined}>
+                <input type="checkbox" checked={on} disabled={last} onChange={(e) => toggleBank(b.bank, e.target.checked)} />
+                <span>{b.label}</span>
+                <span className="muted small">{bankStockPagePath(b.url)}</span>
+              </label>
+            );
+          })}
+        </div>
       </Field>
     </Section>
   );

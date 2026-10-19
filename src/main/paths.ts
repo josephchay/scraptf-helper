@@ -11,10 +11,14 @@ export const APP_HOST = 'app';
 export const APP_ORIGIN = 'app://app';
 export const DASHBOARD_URL = 'app://app/index.html';
 export const QUICK_ENTRY_URL = 'app://app/index.html#/quick';
+/** The live check popup (F16): the same app:// page and preload as every other window. */
+export const CHECK_URL = 'app://app/index.html#/check';
 
 /** Passed through webPreferences.additionalArguments; preload.ts keeps its own copy of this prefix. */
 export const WINDOW_KIND_ARG = '--flipdesk-window=';
-export type WindowKind = 'dashboard' | 'quick-entry';
+export type WindowKind = 'dashboard' | 'quick-entry' | 'check';
+/** Every window kind; preload.ts keeps its own copy (it may import no main-process module), pinned by a test. */
+export const WINDOW_KINDS: readonly WindowKind[] = ['dashboard', 'quick-entry', 'check'];
 
 /** Image hosts the dashboard may load from (CSP img-src and the session request filter). */
 export const RENDERER_IMAGE_HOSTS: readonly string[] = [
@@ -258,6 +262,18 @@ export function isAllowedRendererRequest(url: string): boolean {
   try {
     const u = new URL(url);
     return u.protocol === 'https:' && u.port === '' && u.username === '' && RENDERER_IMAGE_HOSTS.includes(u.hostname);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * True when `url` parses as https. Checked before the links allowlist by everything that hands a URL to
+ * the user's browser (links.open, F20's notification click), so a scheme the OS shell would run never gets there.
+ */
+export function isHttpsUrl(url: string): boolean {
+  try {
+    return new URL(url).protocol === 'https:';
   } catch {
     return false;
   }

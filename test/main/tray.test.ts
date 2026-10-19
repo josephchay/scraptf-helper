@@ -40,7 +40,7 @@ vi.mock('electron', () => ({
   nativeImage: { createFromPath: (p: string) => ({ path: p, isEmpty: () => fake.empty }) },
 }));
 
-const { createTray, trayMenuTemplate, trayTooltip } = await import('../../src/main/tray');
+const { createTray, menuKey, trayMenuTemplate, trayTooltip } = await import('../../src/main/tray');
 
 const status = (over: Partial<AppStatus> = {}): AppStatus => ({
   version: '0.1.0',
@@ -59,6 +59,8 @@ const state = (over: Partial<TrayState> = {}): TrayState => ({
   status: status(),
   service: { state: 'ready', nextRestartAt: null },
   hotkey: { accelerator: 'CommandOrControl+Alt+F', registered: true, error: null },
+  checkWatch: false,
+  checkHotkey: { accelerator: 'CommandOrControl+Alt+C', registered: true, error: null },
   now: 1_000_000,
   ...over,
 });
@@ -68,6 +70,7 @@ const actions = (): TrayActions & Record<string, ReturnType<typeof vi.fn>> => ({
   quickEntry: vi.fn(),
   setLiveFeedPaused: vi.fn(),
   setNetworkPaused: vi.fn(),
+  setClipboardWatch: vi.fn(),
   quit: vi.fn(),
 });
 
@@ -98,9 +101,26 @@ describe('trayTooltip', () => {
     ).toContain('hotkey unavailable');
   });
 
+  it('F16: says when the clipboard check is on or paused, and when its hotkey is taken', () => {
+    expect(trayTooltip(state())).not.toContain('Clipboard check');
+    expect(trayTooltip(state({ checkWatch: true }))).toBe('TF2 Flip Desk\n5 profitable, 2 high confidence\nLive feed live\nClipboard check on');
+    expect(trayTooltip(state({ checkWatch: true, networkPaused: true }))).toBe('TF2 Flip Desk\nNetwork paused\nClipboard check paused');
+    expect(trayTooltip(state({ checkHotkey: { accelerator: 'Ctrl+Alt+C', registered: false, error: 'taken' } }))).toContain(
+      'Live check hotkey unavailable',
+    );
+    expect(trayTooltip(state())).not.toContain('hotkey unavailable');
+  });
+
   it('never exceeds the Windows limit of 127 characters', () => {
     const big = status({ counts: { opportunities: 1e12, profitable: 1e12, highConfidence: 1e12 }, setupNeeded: ['bptf-token', 'bptf-key', 'contact-url', 'first-price'] });
-    const tip = trayTooltip(state({ status: big, hotkey: { accelerator: 'x', registered: false, error: 'e' } }));
+    const tip = trayTooltip(
+      state({
+        status: big,
+        hotkey: { accelerator: 'x', registered: false, error: 'e' },
+        checkWatch: true,
+        checkHotkey: { accelerator: 'y', registered: false, error: 'e' },
+      }),
+    );
     expect(tip.length).toBeLessThanOrEqual(127);
   });
 });
@@ -114,9 +134,27 @@ describe('trayMenuTemplate', () => {
       'separator',
       'Pause live feed',
       'Pause all network',
+      'Clipboard check',
       'separator',
       'Quit TF2 Flip Desk',
     ]);
+  });
+
+  it('F16: the clipboard check checkbox follows the setting and turns the watcher on or off', () => {
+    const a = actions();
+    const off = trayMenuTemplate(state(), a).find((i) => i.label === 'Clipboard check')! as MenuItemConstructorOptions & {
+      click: (item: { checked: boolean }) => void;
+    };
+    expect(off.type).toBe('checkbox');
+    expect(off.checked).toBe(false);
+    off.click({ checked: true });
+    expect(a.setClipboardWatch).toHaveBeenLastCalledWith(true);
+    const on = trayMenuTemplate(state({ checkWatch: true }), a).find((i) => i.label === 'Clipboard check')! as MenuItemConstructorOptions & {
+      click: (item: { checked: boolean }) => void;
+    };
+    expect(on.checked).toBe(true);
+    on.click({ checked: false });
+    expect(a.setClipboardWatch).toHaveBeenLastCalledWith(false);
   });
 
   it('reflects the toggles and wires the clicks', () => {
@@ -174,6 +212,20 @@ describe('createTray', () => {
     expect(t.menuSets).toBe(2);
     tray.update(state({ networkPaused: true }), true);
     expect(t.menuSets).toBe(3);
+  });
+
+  it('F16: rebuilds the menu when the clipboard check turns on or off (the checkbox never goes stale)', () => {
+    const tray = createTray('tray.png', actions(), state(), log());
+    const t = fake.FakeTray.last!;
+    tray.update(state({ checkWatch: true }));
+    expect(t.menuSets).toBe(2);
+    const item = (t.menu as { template: MenuItemConstructorOptions[] }).template.find((i) => i.label === 'Clipboard check')!;
+    expect(item.checked).toBe(true);
+    tray.update(state({ checkWatch: true }));
+    expect(t.menuSets).toBe(2);
+    tray.update(state({ checkWatch: false }));
+    expect(t.menuSets).toBe(3);
+    expect(menuKey(state({ checkWatch: true }))).not.toBe(menuKey(state({ checkWatch: false })));
   });
 
   it('warns when the icon image is missing', () => {

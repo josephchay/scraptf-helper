@@ -61,6 +61,15 @@ describe('the page', () => {
     expect(page).toContain("useVisiblePush('journal.changed', reloadSoon)");
   });
 
+  it('refetches on scraptf.listChanged: a saved list or its 30-day purge moves scrap.tf exits (F14)', () => {
+    expect(page).toContain("useVisiblePush('scraptf.listChanged', reload)");
+  });
+
+  it('refetches when a scrap.tf exit turns a day old, which no push announces (UI-2)', () => {
+    expect(page).toContain('useScraptfExitLapse(data?.rows, list.reload);');
+    expect(page).toContain('scraptfLapseDelay(lapseAt, now)');
+  });
+
   it('refetches when the profit thresholds or the blocklist change (status and Pay up to follow them)', () => {
     expect(page).toMatch(/useEffect\(\(\) => \{\s*if \(!profitSettings\) return;\s*if \(settingsSeen\.current\) reloadSoon\(\);/);
     expect(page).toContain('}, [profitSettings, blocklist, reloadSoon]);');
@@ -72,7 +81,10 @@ describe('the page', () => {
 
   it('records a sale through the Record trade dialog, rendered once', () => {
     expect(page).toContain('const trade = useRecordTrade();');
-    expect(page).toContain('tradeRef.current(recordSaleInit(r))');
+    // F14: at the key price the rows are valued at (a row without the listed split splits at it), and at the
+    // click's time, so a scrap.tf exit that lapsed since the last refetch is not prefilled.
+    expect(page).toContain('tradeRef.current(recordSaleInit(r, keyRef.current, Date.now()))');
+    expect(page).toContain('keyRef.current = keyScrap;');
     expect(page.match(/\{trade\.element\}/g)).toHaveLength(1);
     expect(page.match(/\{menu\.element\}/g)).toHaveLength(1);
   });
@@ -127,9 +139,14 @@ describe('holdings.css', () => {
     expect(reduced).toMatch(/\.holding-row\.flash-up,\s*\.holding-row\.flash-down\s*\{\s*animation: none !important;/);
   });
 
-  it('is imported last by index.css', () => {
+  it('is imported after every earlier sheet by index.css (only the F14 price-list, F15 banks, F16 live check, F17 bank stock and F20 history sheets follow it)', () => {
     const index = read('styles/index.css').trim().split('\n');
-    expect(index[index.length - 1]).toBe("@import './holdings.css';");
+    expect(index[index.length - 1]).toBe("@import './scraptf-history.css';");
+    expect(index[index.length - 2]).toBe("@import './bank-stock.css';");
+    expect(index[index.length - 3]).toBe("@import './check.css';");
+    expect(index[index.length - 4]).toBe("@import './banks.css';");
+    expect(index[index.length - 5]).toBe("@import './scraptf-list.css';");
+    expect(index[index.length - 6]).toBe("@import './holdings.css';");
   });
 });
 

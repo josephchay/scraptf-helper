@@ -139,6 +139,33 @@ function pickSplit(splits: readonly Split[], resolve: (text: string) => Resolved
   return best;
 }
 
+/** One line read with the bulk paste grammar (parsePriceLine). */
+export interface PriceLine {
+  /** The resolved item; null when no split's item resolved. */
+  item: ResolvedItem | null;
+  /** The item part of the line as typed. Part of the user's text: never log it or show it as a live check reason. */
+  itemText: string;
+  price: ParsedPrice;
+  /** Why the line cannot be saved unattended (a fuzzy match, an incomplete SKU, not recognised); null when clean. May quote `itemText`. */
+  problem: string | null;
+}
+
+/**
+ * One line as `<item> <sep> <price>` (separators tab , ; = @ or " - ", else the trailing price words),
+ * the split whose item resolves cleanly winning: the grammar of bulk paste, for live check (F16) and
+ * parseBulkPrices alike. Null when no split gives a price. `spare` bounds the resolver calls after the
+ * first split (a paste shares one budget across its lines). No refusal here: callers refuse first.
+ */
+export function parsePriceLine(
+  line: string,
+  bareUnit: BareUnit,
+  resolve: (text: string) => ResolvedItem | null,
+  spare: { left: number } = { left: MAX_CANDIDATES },
+): PriceLine | null {
+  const pick = pickSplit(splitsOf(line.trim(), bareUnit), resolve, spare);
+  return pick ? { item: pick.item, itemText: pick.split.item, price: pick.split.price, problem: pick.problem } : null;
+}
+
 /**
  * One row per non-blank, non-comment line: `<item> <sep> <price>`, the item
  * resolved with `resolve` (schema.resolve), the price with parsePrice. A
@@ -175,12 +202,12 @@ export function parseBulkPrices(
       rows.push({ ...row, error: `Line is longer than ${MAX_BULK_LINE_CHARS} characters` });
       return;
     }
-    const pick = pickSplit(splitsOf(line, bareUnit), resolve, spare);
+    const pick = parsePriceLine(line, bareUnit, resolve, spare);
     if (!pick) {
       rows.push({ ...row, error: 'No price found (e.g. "Team Captain, 1 key 5 ref")' });
       return;
     }
-    const { price } = pick.split;
+    const { price } = pick;
     const priced: BulkPriceRow = { ...row, name: pick.item?.name ?? null, costKeys: price.keys, costScrap: price.scrap };
     if (pick.problem !== null || pick.item === null) {
       rows.push({ ...priced, error: pick.problem ?? 'Item not recognised' });

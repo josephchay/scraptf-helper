@@ -2,7 +2,10 @@
 // these so modules can be built and tested independently and wired together in
 // src/service/core.ts.
 
+import type { BankStockThinSave } from '../shared/bankStock';
 import type {
+  BankStockSave,
+  BankStockStored,
   Category,
   CommunityRow,
   ConnectorHealth,
@@ -26,8 +29,13 @@ import type {
   PriceSource,
   RequestLogRow,
   ResolvedItem,
+  NewScraptfEvent,
   ScrapPrice,
   ScrapPriceInput,
+  ScraptfBank,
+  ScraptfChangeKind,
+  ScraptfEventStored,
+  ScraptfListStored,
   SecretName,
   Settings,
   UnixMs,
@@ -203,6 +211,35 @@ export interface OppGroupStat {
   profitScrap: number;
 }
 
+/**
+ * Repo.createImportBatch input. `bank` (F15) is optional so callers that predate it store null;
+ * importSavedPage always passes the parser's ScrapTfParseResult.bank.
+ */
+export type NewImportBatch = Omit<ImportBatch, 'id' | 'bank'> & { bank?: ScraptfBank | null };
+
+/** Repo.scraptfEvents filters (F20). `sku` is a stored (base) SKU, matched exactly. */
+export interface ScraptfEventQuery {
+  bank?: ScraptfBank;
+  kinds?: readonly ScraptfChangeKind[];
+  sku?: string;
+  /** Only this copy of `sku` (bank_stock.special_key); ignored without `sku`. */
+  specialKey?: string;
+  /** Only ids below this ("Load older"). */
+  beforeId?: number;
+  /** Only events at or after this time. */
+  sinceAt?: UnixMs;
+  limit?: number;
+}
+
+/** Repo.scraptfListSummary(): the saved scrap.tf/items list as a whole (F14). */
+export interface ScraptfListSummary {
+  items: number;
+  newestAt: UnixMs | null;
+  oldestAt: UnixMs | null;
+  /** Distinct import batches (saved list pages) behind the rows. */
+  batches: number;
+}
+
 export interface Repo {
   readonly path: string;
   sizeBytes(): number;
@@ -246,7 +283,8 @@ export interface Repo {
   upsertKeyQuote(q: KeyPriceQuote): void;
   keyQuotes(): KeyPriceQuote[];
 
-  // scrap.tf prices typed or imported by the user
+  // scrap.tf prices typed or imported by the user. Every read joins ScrapPrice.bank from the row's
+  // import batch (null for typed rows and unrecognised pages); writes ignore `bank`.
   listScrapPrices(q?: string): ScrapPrice[];
   getScrapPrice(id: number): ScrapPrice | null;
   scrapPricesForSku(sku: string): ScrapPrice[];
@@ -296,8 +334,82 @@ export interface Repo {
   schemaInfo(): { items: number; effects: number; paintkits: number; loadedAt: UnixMs | null; etag: string | null };
 
   // saved-page imports
-  createImportBatch(b: Omit<ImportBatch, 'id'>): number;
+  /** An unknown `bank` value is stored as NULL (F15). */
+  createImportBatch(b: NewImportBatch): number;
+  /** Newest first (importedAt, then id); `bank` is null for batches from before 0.5. */
   listImportBatches(limit: number): ImportBatch[];
+
+  // scrap.tf price list (F14): the user's saved scrap.tf/items, one row per canonical base SKU
+  /**
+   * One transaction. A row replaces the stored one for its SKU only when its observedAt is at least
+   * the stored row's (a re-save replaces; an older file copied into the watch folder later never does).
+   * A missing or non-finite price is stored as NULL (a "Sold out" row has no sells price); rows without a
+   * SKU, a finite time, or any price at all are skipped. Prices are rounded to whole scrap, stock and
+   * limit to whole counts (negative: NULL). Returns the rows written.
+   */
+  upsertScraptfList(rows: readonly ScraptfListStored[]): number;
+  /** Every row, by SKU. */
+  scraptfList(): ScraptfListStored[];
+  scraptfListRow(sku: string): ScraptfListStored | null;
+  /** Row count, newest and oldest observedAt (null when empty) and distinct import batches behind the rows. */
+  scraptfListSummary(): ScraptfListSummary;
+  /** Retention (maintenance, RETENTION.scraptfListMs): deletes rows observed before `ts`; returns how many. */
+  purgeScraptfListOlderThan(ts: UnixMs): number;
+
+  // scrap.tf bank stock (F17, schema V6): what each saved bank page had in stock at that moment
+  /**
+   * Writes one save's rows (importSavedPage, inside its own transaction, after createImportBatch). A row
+   * without a SKU is skipped; a repeated (sku, specialKey) keeps its first row. Costs with no finite
+   * value are stored NULL (no price to buy), metal rounded to whole scrap, stock to a whole count
+   * (negative: NULL). `page` is which page of the bank the save is (ScrapTfParseResult.page; '' when
+   * omitted), stored on every row. Throws TypeError for a batch id that is not a positive integer or an
+   * unknown bank. Returns the rows written.
+   */
+  insertBankStock(batchId: number, bank: ScraptfBank, rows: readonly BankStockStored[], page?: string): number;
+  /**
+   * A bank's saves that have rows, newest first by save time (the batch's fileMtime, else importedAt;
+   * ties to the higher batch id), with their row counts and page. Batches no longer in import_batches
+   * are left out. F20: `perPage` keeps only each page's newest `perPage` saves, listed page by page
+   * (the page saved last first, each newest first), so `limit` never cuts a page short: the F17 cache
+   * reads every page's pair this way, whatever the other pages of the bank keep.
+   */
+  bankStockSaves(bank: ScraptfBank, limit?: number, opts?: { perPage?: number }): BankStockSave[];
+  /** One save's rows, by SKU then special key. */
+  bankStockRows(batchId: number): BankStockStored[];
+  /** bankStockSaves(bank)[0] and [1]: the newest save and the one before it (null when missing). */
+  bankStockLatestPair(bank: ScraptfBank): { newest: BankStockSave | null; previous: BankStockSave | null };
+  /**
+   * F20: every save that has rows (every bank and page): batch id, save time (batchSavedAt), bank and page,
+   * oldest first (save time, then batch id). Read from bank_stock_saves (V8, one row per kept save), so
+   * it costs per kept save, not per stored row or per import batch ever written (the thinning, the
+   * history index and the re-save reminders read it after every import and every minute).
+   */
+  bankStockSaveIndex(): BankStockThinSave[];
+  /** F20: the rows of several saves in one read (chunked), by batch id; a batch with no rows is absent. */
+  bankStockRowsOf(batchIds: readonly number[]): Map<number, BankStockStored[]>;
+  /**
+   * Retention (F20 S1, bankStockThinning): per bank page, every save of the last 24 h, the newest per UTC
+   * hour to 7 d, the newest per UTC day to 90 d, nothing older, at most `maxSaves` (300); a page's newest
+   * save and the save it is compared with are never deleted. `orphans` (default true; importSavedPage
+   * passes false, maintenance true) also deletes rows whose batch is gone, which scans the table. Returns
+   * the rows deleted. Maintenance and importSavedPage call it.
+   */
+  pruneBankStock(now: UnixMs, opts?: { maxSaves?: number; maxAgeMs?: number; orphans?: boolean }): number;
+
+  // scrap.tf change feed (F20, schema V7)
+  /**
+   * Writes change events (importSavedPage, inside its transaction, after insertBankStock). An event with
+   * an unknown bank or kind, no SKU, a non-finite time or a batch id that is not a positive integer is
+   * skipped. Prices: keys as given, metal rounded to whole scrap (non-finite: NULL); stock to a whole
+   * count (negative: NULL). Returns the rows written.
+   */
+  insertScraptfEvents(events: readonly NewScraptfEvent[]): number;
+  /** The feed, newest first (id descending), filtered by q (all optional); limit 1..5000, default 100. */
+  scraptfEvents(q?: ScraptfEventQuery): ScraptfEventStored[];
+  /** One base SKU's events (every copy and bank), newest first; limit 1..5000, default SCRAPTF_ITEM_EVENTS (50). */
+  scraptfEventsForSku(sku: string, limit?: number): ScraptfEventStored[];
+  /** Retention: deletes events older than `now - maxAgeMs` (default SCRAPTF_EVENTS_MAX_AGE_MS, 90 d); returns how many. */
+  pruneScraptfEvents(now: UnixMs, maxAgeMs?: number): number;
 
   // request log
   appendRequestLog(row: RequestLogRow): void;
@@ -322,6 +434,11 @@ export interface SchemaService {
   isLoaded(): boolean;
   health(): ConnectorHealth;
   itemByDefindex(defindex: number): SchemaItemRow | null;
+  /**
+   * The schema's item_quality for a known defindex (6 when it gives none), else null. 5 marks an item that
+   * exists only as an Unusual without an effect (Horseless Headless Horsemann's Headtaker, Haunted Metal Scrap).
+   */
+  itemQuality(defindex: number): number | null;
   /** backpack.tf-style full name for a SKU, e.g. "Burning Flames Team Captain". Uses names learned from the feed first. */
   nameForSku(sku: string): string;
   /** Plain item name without prefixes, e.g. "Team Captain". */

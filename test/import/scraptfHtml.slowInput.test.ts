@@ -4,7 +4,7 @@
 // the live feed (and the folder watch would retry the file after a restart).
 
 import { describe, expect, it } from 'vitest';
-import { cssColorToHex, pageKindFromUrl, parseScrapTfHtml } from '../../src/service/import';
+import { MAX_IMPORT_BYTES, cssColorToHex, pageKindFromUrl, parseScrapTfHtml, readMhtml } from '../../src/service/import';
 import { createStubSchema } from './schemaStub';
 
 const CANONICAL_BUY = '<link rel="canonical" href="https://scrap.tf/buy/hats">';
@@ -72,5 +72,51 @@ describe('parser time stays linear on crafted pages', () => {
     expect(performance.now() - t).toBeLessThan(100);
     // One level of archive.org nesting still works.
     expect(pageKindFromUrl('https://web.archive.org/web/20240101000000/https://scrap.tf/buy/hats')).toMatchObject({ kind: 'buy', scrapTf: true });
+  });
+});
+
+// F18: an .mhtml file is unpacked in the service too (mhtml.ts), so its scans must stay linear.
+describe('MHTML extractor time stays linear on crafted files', () => {
+  it('a boundary of dashes over a file of dashes (a restart one character on rescanned 70 characters per position: ~1 s)', () => {
+    const head = `MIME-Version: 1.0\r\nContent-Type: multipart/related; boundary="${'-'.repeat(70)}"\r\n\r\n`;
+    const file = head + '-'.repeat(MAX_IMPORT_BYTES - head.length - 16);
+    const t = performance.now();
+    expect(readMhtml(file)).toMatchObject({ ok: false, reason: 'mhtml-invalid' });
+    expect(performance.now() - t).toBeLessThan(500);
+  });
+
+  const TOP = 'MIME-Version: 1.0\r\nContent-Type: multipart/related; boundary="b"\r\n\r\n';
+  /** `part` repeated up to the 20 MB limit, then the closing delimiter: every part's header block is read. */
+  const filled = (part: string) => TOP + part.repeat(Math.floor((MAX_IMPORT_BYTES - TOP.length - 16) / part.length)) + '--b--\r\n';
+
+  it('a header line of 16 KB of spaces before an inner CR, in every part (the header regex retried each split: ~150 s)', () => {
+    const file = filled(`--b\r\nX:${' '.repeat(16_000)}\ry\r\n\r\nb\r\n`);
+    expect(file.length).toBeGreaterThan(20_000_000);
+    const t = performance.now();
+    expect(readMhtml(file)).toMatchObject({ ok: false, reason: 'mhtml-no-html' });
+    expect(performance.now() - t).toBeLessThan(1_000);
+    // The same with U+2028, which a regex's "." does not match either.
+    const ls = filled(`--b\r\nX:${' '.repeat(16_000)}\u2028y\r\n\r\nb\r\n`);
+    const t2 = performance.now();
+    expect(readMhtml(ls)).toMatchObject({ ok: false, reason: 'mhtml-no-html' });
+    expect(performance.now() - t2).toBeLessThan(1_000);
+  });
+
+  it('thousands of folds after a value already at its 4 KB clip, in every part (each fold rebuilt the clipped value: ~3 s)', () => {
+    const file = filled(`--b\r\nX-A: ${'a'.repeat(4_096)}\r\n${' z\r\n'.repeat(2_900)}\r\nb\r\n`);
+    const t = performance.now();
+    expect(readMhtml(file)).toMatchObject({ ok: false, reason: 'mhtml-no-html' });
+    expect(performance.now() - t).toBeLessThan(1_000);
+  });
+
+  it('still reads headers as before: blanks after the colon, folds, a line with an inner CR is no header', () => {
+    const page = (header: string) =>
+      readMhtml(`${TOP}--b\r\n${header}\r\nContent-Type: text/html\r\nContent-Location:\t https://scrap.tf/buy/hats\r\n\r\n<p>x</p>\r\n--b--\r\n`);
+    expect(page('X-Note: one')).toMatchObject({ ok: true, html: '<p>x</p>', contentLocation: 'https://scrap.tf/buy/hats' });
+    // A part's line that is no header is skipped; the part is still read.
+    expect(page(`X-Odd: a\rb`)).toMatchObject({ ok: true, html: '<p>x</p>' });
+    expect(page('Not a header line')).toMatchObject({ ok: true, html: '<p>x</p>' });
+    const folded = readMhtml(`MIME-Version: 1.0\r\nContent-Type: multipart/related;\r\n\tboundary="b"\r\n\r\n--b\r\nContent-Type: text/html\r\n\r\n<p>f</p>\r\n--b--\r\n`);
+    expect(folded).toMatchObject({ ok: true, html: '<p>f</p>' });
   });
 });

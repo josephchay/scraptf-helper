@@ -4,12 +4,17 @@
 // index (or the same evaluation on demand), and held SKUs only join the budgeted
 // snapshot watch list (core.watchedSet). Nothing here sells, lists or offers
 // anything (R4); the user records sales in the journal.
+//
+// F14: a held item's other exit is scrap.tf's bank, read from the price list the
+// user saved with their own browser (the in-memory list cache; never fetched, R1).
+// Status, profit and "Sell:" judge the better of the two (bestExitOf).
 
 import { z } from 'zod';
 import { categoryOfSkuOnly } from '../../shared/categories';
 import { formatScrap } from '../../shared/currency';
 import { HOLDINGS_CSV_COLUMNS, holdingRow, holdingsCsvCells, holdingsMatching, holdingsResult, type HoldingBuySide } from '../../shared/holdings';
 import type { PushContract } from '../../shared/rpc';
+import { SCRAPTF_LIST_FRESH_MS } from '../../shared/scraptfList';
 import { baseSku as toBaseSku, fromString } from '../../shared/sku';
 import { CATEGORIES, CURRENCY_SKUS } from '../../shared/types';
 import type {
@@ -21,6 +26,7 @@ import type {
   KeyPriceState,
   Listing,
   Scrap,
+  ScraptfListRow,
   Settings,
   UnixMs,
 } from '../../shared/types';
@@ -33,6 +39,7 @@ import { DEFAULT_KEY_SCRAP } from './keyprice';
 import { evaluateMarketBase, type MarketEval, type MarketIndex } from './market';
 import { anyEffectBaseOf, matchContext } from './matcher';
 import { lookupReferences, referencePrices } from './pricing';
+import type { ScraptfListCache } from './scraptfList';
 
 /** Repo meta key holding { sku: lastNotifiedAt } for "Sell:" notifications (survives restarts, like engine.lastNotified). */
 export const HOLDINGS_NOTIFY_META_KEY = 'holdings.lastNotified';
@@ -68,6 +75,11 @@ export interface HoldingsDeps extends ServiceDeps {
   keyPrice(): KeyPriceState;
   /** Desktop notification through main (push 'notify'); main applies notifications.silent. */
   notify(n: PushContract['notify']): void;
+  /**
+   * F14: the saved scrap.tf/items list (core's createScraptfListCache): a held base's row is its scrap.tf
+   * exit (bestExitOf in src/shared/scraptfList.ts). Omitted: backpack.tf is the only exit (tests).
+   */
+  scraptfList?: Pick<ScraptfListCache, 'rowFor'>;
   /** Injected in tests; defaults to unref'd real timers. */
   timers?: TimerApi;
 }
@@ -116,16 +128,38 @@ function buySideOf(e: Readonly<MarketEval>): HoldingBuySide {
   };
 }
 
-/** 'Sell: <name>' / '<buyer> pays <revenue> (<bot|human>), +<profit> over your cost'. */
-export function holdingNotification(r: HoldingRow, keyScrap: Scrap | null): PushContract['notify'] {
+const MINUTE_MS = 60_000;
+const HOUR_MS = 60 * MINUTE_MS;
+const DAY_MS = 24 * HOUR_MS;
+
+/** How long ago the scrap.tf list was saved, as a notification says it ("just now", "12 min ago", "3 h ago"). */
+export function listAgeText(at: UnixMs | null, now: UnixMs): string {
+  // A clock that moved back reads "just now" rather than a negative age.
+  const ms = finite(at) && finite(now) ? Math.max(0, now - at) : 0;
+  if (ms < MINUTE_MS) return 'just now';
+  if (ms < HOUR_MS) return `${Math.floor(ms / MINUTE_MS)} min ago`;
+  if (ms < DAY_MS) return `${Math.floor(ms / HOUR_MS)} h ago`;
+  return `${Math.floor(ms / DAY_MS)} d ago`;
+}
+
+/**
+ * 'Sell: <name>', with a body naming the venue of the better exit (HoldingRow.bestExit, F14):
+ * backpack.tf: '<buyer> pays <revenue> (<bot|human>), +<profit> over your cost' (as in 0.3);
+ * scrap.tf: "scrap.tf's bank pays <price> (price list saved 12 min ago), +<profit> over your cost".
+ * `now` dates the saved list; without it the body says the price is from the saved list.
+ */
+export function holdingNotification(r: HoldingRow, keyScrap: Scrap | null, now?: UnixMs): PushContract['notify'] {
+  const title = `Sell: ${r.name || r.sku}`;
+  const profit = `+${formatScrap(r.profitNowScrap, keyScrap)} over your cost`;
+  if (r.bestExit === 'scraptf') {
+    // The list is as fresh as the user's last save, so the age is part of the claim.
+    const when = finite(now) && finite(r.scraptfListAt) ? `price list saved ${listAgeText(r.scraptfListAt, now)}` : 'from your saved price list';
+    return { title, body: `scrap.tf's bank pays ${formatScrap(r.exitScrap, keyScrap)} (${when}), ${profit}`, sku: r.sku };
+  }
   const o = r.revenueOrder;
   const buyer = o ? o.userName || o.steamid : 'A buyer';
   const kind = o?.isBot ? 'bot' : 'human';
-  return {
-    title: `Sell: ${r.name || r.sku}`,
-    body: `${buyer} pays ${formatScrap(r.revenueScrap, keyScrap)} (${kind}), +${formatScrap(r.profitNowScrap, keyScrap)} over your cost`,
-    sku: r.sku,
-  };
+  return { title, body: `${buyer} pays ${formatScrap(r.revenueScrap, keyScrap)} (${kind}), ${profit}`, sku: r.sku };
 }
 
 export function createHoldings(deps: HoldingsDeps): Holdings {
@@ -136,6 +170,16 @@ export function createHoldings(deps: HoldingsDeps): Holdings {
   let held: Held[] | null = null;
   const state = new Map<string, SellState>();
   let notified: Map<string, number> | null = null;
+  let listFailing = false;
+  /** The held items on the saved list were queued for a check by the first start(). */
+  let listChecked = false;
+  /**
+   * F14: base -> when its 'sell' through scrap.tf ends (its list row turns a day old). Nothing else
+   * re-checks an item only scrap.tf buys, so without this the next day's save would find it still
+   * marked in 'sell' and never tell it again; with it, re-entering 'sell' is told like any other.
+   */
+  const listExpiry = new Map<string, number>();
+  let expiryTimer: unknown = null;
 
   // Checks are batched: a key move arrives with its settings change, a burst of book changes with
   // the next market push.
@@ -297,8 +341,30 @@ export function createHoldings(deps: HoldingsDeps): Holdings {
         log.warn('Holdings could not read order books', { error: String(err) });
       }
     }
-    // Lots at the key price the revenue is valued at, so profit is what the journal will book (lotCostAt).
-    return list.map((h) => holdingRow(named(h.pos), categoryOf(h), h.base !== null ? (sides.get(h.base) ?? null) : null, settings.profit, K));
+    // Lots at the key price the revenue is valued at, so profit is what the journal will book (lotCostAt);
+    // the saved scrap.tf list row at that same price is the other exit (F14, judged at `now`).
+    return list.map((h) =>
+      holdingRow(named(h.pos), categoryOf(h), h.base !== null ? (sides.get(h.base) ?? null) : null, settings.profit, K, {
+        list: h.base !== null ? listRowOf(h.base, K) : null,
+        now,
+      }),
+    );
+  }
+
+  /** The base's saved scrap.tf/items row (in memory, no query); a failed read leaves backpack.tf as the only exit. */
+  function listRowOf(base: string, K: Scrap | null): ScraptfListRow | null {
+    const list = deps.scraptfList;
+    if (!list) return null;
+    try {
+      const row = list.rowFor(base, K ?? undefined);
+      listFailing = false;
+      return row;
+    } catch (err) {
+      // Once per failure streak, not once per held row.
+      if (!listFailing) log.warn('Holdings could not read the saved scrap.tf list', { sku: base, error: String(err) });
+      listFailing = true;
+      return null;
+    }
   }
 
   // ----- sell notifications -----
@@ -349,10 +415,12 @@ export function createHoldings(deps: HoldingsDeps): Holdings {
     if (scope === null) {
       const skus = new Set(all.map((h) => h.pos.sku));
       for (const sku of state.keys()) if (!skus.has(sku)) state.delete(sku);
+      listExpiry.clear();
     }
     const list = scope === null ? all : all.filter((h) => h.base !== null && (scope.has(h.base) || (h.generic !== null && scope.has(h.generic))));
     if (list.length === 0) return;
     const rows = rowsOf(list, now);
+    trackListExpiry(list, rows);
     const n = deps.settings().notifications;
     const on = n?.enabled === true && n.holdings !== false;
     const minConfidence = finite(n?.minConfidence) ? n.minConfidence : 0;
@@ -372,7 +440,9 @@ export function createHoldings(deps: HoldingsDeps): Holdings {
       // Tracked whatever the gates say, so switching notifications on does not replay every sellable item.
       state.set(r.sku, { inSell: true, baseline });
       if (!(entering || rising) || last === null) continue;
-      if (r.confidence < minConfidence) {
+      // The confidence scores the backpack.tf buyers. A scrap.tf exit is the bank's own price from a
+      // saved list that bestExitOf already requires to be fresh and not full (and the body says how old).
+      if (r.bestExit !== 'scraptf' && r.confidence < minConfidence) {
         // Not told yet: an entry stays pending (baseline null), so more buyers raising the confidence
         // later still tell it, without waiting for the profit to rise.
         if (entering) state.set(r.sku, { inSell: true, baseline: null });
@@ -391,7 +461,7 @@ export function createHoldings(deps: HoldingsDeps): Holdings {
     saveNotified(last, now, Math.max(dedupMs, 1));
     const K = keyPrice()?.valueScrap ?? null;
     const individual = due.slice(0, MAX_NOTIFICATIONS_PER_RUN);
-    for (const r of individual) send(holdingNotification(r, K));
+    for (const r of individual) send(holdingNotification(r, K, now));
     const rest = due.length - individual.length;
     if (rest > 0) {
       send({
@@ -405,6 +475,44 @@ export function createHoldings(deps: HoldingsDeps): Holdings {
   function arm(): void {
     if (!started || timer !== null) return;
     timer = timers.setTimeout(run, HOLDINGS_CHECK_MS);
+  }
+
+  /** Records when each checked row's 'sell' through scrap.tf goes stale (rows are in `list` order). */
+  function trackListExpiry(list: readonly Held[], rows: readonly HoldingRow[]): void {
+    // Every copy of a base is in the same check, so its old time can go before the new one is set.
+    for (const h of list) if (h.base !== null) listExpiry.delete(h.base);
+    rows.forEach((r, i) => {
+      const base = list[i]?.base ?? null;
+      if (base === null || r.status !== 'sell' || r.bestExit !== 'scraptf' || !finite(r.scraptfListAt)) return;
+      // scraptfListFresh: stale once now - observedAt > SCRAPTF_LIST_FRESH_MS.
+      const at = r.scraptfListAt + SCRAPTF_LIST_FRESH_MS + 1;
+      const prev = listExpiry.get(base);
+      listExpiry.set(base, prev === undefined ? at : Math.min(prev, at));
+    });
+    armExpiry();
+  }
+
+  function armExpiry(): void {
+    if (expiryTimer !== null) timers.clearTimeout(expiryTimer);
+    expiryTimer = null;
+    if (!started || listExpiry.size === 0) return;
+    let next = Infinity;
+    for (const at of listExpiry.values()) if (at < next) next = at;
+    // A list dated ahead of the clock is looked at again after a day at most.
+    expiryTimer = timers.setTimeout(listExpired, Math.min(Math.max(0, next - clock.now()), SCRAPTF_LIST_FRESH_MS + 1));
+  }
+
+  function listExpired(): void {
+    expiryTimer = null;
+    if (!started) return;
+    const now = clock.now();
+    for (const [base, at] of listExpiry) {
+      if (at > now) continue;
+      listExpiry.delete(base);
+      pendingBases.add(base);
+    }
+    arm();
+    armExpiry();
   }
 
   function run(): void {
@@ -466,18 +574,36 @@ export function createHoldings(deps: HoldingsDeps): Holdings {
       started = true;
       // The market's first build reports every entry, so held items are checked then; this only
       // catches up on triggers that arrived while stopped.
+      if (!listChecked && deps.scraptfList) {
+        listChecked = true;
+        // F14: an item only scrap.tf buys has no entry, so no build reports it. Held items on the saved
+        // list are checked once at start instead, as their scrap.tf exit may already be the better one.
+        try {
+          // Only whether a row exists matters here; an explicit key value keeps the cache from reading
+          // (and keeping) the engine's key price this early.
+          for (const h of heldPositions()) if (h.base !== null && listRowOf(h.base, DEFAULT_KEY_SCRAP) !== null) pendingBases.add(h.base);
+        } catch (err) {
+          log.warn('Holdings could not list the held items on the scrap.tf list', { error: String(err) });
+        }
+      }
       if (pendingAll || pendingBases.size > 0) arm();
+      armExpiry();
     },
 
     stop() {
       started = false;
       if (timer !== null) timers.clearTimeout(timer);
       timer = null;
+      if (expiryTimer !== null) timers.clearTimeout(expiryTimer);
+      expiryTimer = null;
     },
   };
 }
 
-/** Columns: sku, name, qty, cost, next_lot_cost, held_since, sells_for, buyer, profit_now, profit_all, status, confidence. */
+/**
+ * Columns: sku, name, qty, cost, next_lot_cost, held_since, sells_for, buyer, profit_now, profit_all, status, confidence,
+ * exit, exit_venue, scraptf_pays (HOLDINGS_CSV_COLUMNS).
+ */
 export function holdingsCsv(rows: readonly HoldingRow[], keyScrap: Scrap | null): string {
   return toCsv([HOLDINGS_CSV_COLUMNS, ...rows.map((r) => holdingsCsvCells(r, keyScrap))]);
 }

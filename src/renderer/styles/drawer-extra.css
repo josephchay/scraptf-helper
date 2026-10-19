@@ -1,4 +1,4 @@
-/* Item drawer: buyer actions, price actions, copy buttons and trade recording (F3, F8, F9, F12). The menus are styled in item-menu.css. Block buyer's Undo is a toast action (H3). */
+/* Item drawer: buyer actions, price actions, copy buttons, trade recording, the scrap.tf price list and the bank stock line (F3, F8, F9, F12, F14, F17). The menus are styled in item-menu.css. Block buyer's Undo is a toast action (H3). */
 
 /* ---------- header copy buttons ---------- */
 
@@ -14,6 +14,38 @@
   height: 24px;
 }
 
+/* F15: "· Seen on scrap.tf/buy/stranges · 12 min ago" wraps as one piece after the category. */
+.drawer-seen {
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* F17: "On scrap.tf/buy/hats in your save 12 min ago: 3 in stock, new since your previous save". */
+.drawer-bank-stock {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px 6px;
+  margin: 4px 0 0;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.drawer-bank-stock > .icon {
+  flex-shrink: 0;
+  color: var(--text-faint);
+}
+
+.drawer-bank-stock-text {
+  min-width: 0;
+}
+
+/* The change takes its tone (tokens.css .tone-*): new info, cheaper good, pricier warn, gone muted. */
+.drawer-bank-stock-change {
+  color: var(--tone, var(--text));
+  font-weight: 600;
+}
+
 /* ---------- record a trade (F12) ---------- */
 
 .drawer-trade-row {
@@ -26,6 +58,44 @@
 .drawer-trade-row > .muted {
   flex: 1 1 220px;
   min-width: 0;
+}
+
+/* ---------- scrap.tf price list (F14) ---------- */
+
+/* One line, "sells X · pays Y · stock n/limit · saved 3 min ago", wrapping at the separators. */
+.stf-list-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px 6px;
+  margin: 0 0 8px;
+}
+
+.stf-list-line .money {
+  font-weight: 600;
+}
+
+.stf-list-line .num {
+  font-variant-numeric: tabular-nums;
+}
+
+.stf-sep {
+  color: var(--text-faint);
+}
+
+.stf-list-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.stf-list-actions .btn.small {
+  height: 26px;
+}
+
+.stf-list-note {
+  margin: 6px 0 0;
 }
 
 /* ---------- your scrap.tf prices ---------- */

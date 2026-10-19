@@ -157,6 +157,8 @@ describe('scrap.tf prices', () => {
       special: null,
       assetId: null,
       stock: null,
+      // F15: joined from the import batch; a typed price has none.
+      bank: null,
     });
     expect(p.id).toBeGreaterThan(0);
     expect(repo.getScrapPrice(p.id)).toEqual(p);
@@ -355,8 +357,8 @@ describe('imports, request log and snapshots', () => {
     const b = repo.createImportBatch({ fileName: 'b.html', pageKind: 'unusuals', fileMtime: 2, importedAt: 20, itemCount: 0 });
     expect(b).toBeGreaterThan(a);
     expect(repo.listImportBatches(10)).toEqual([
-      { id: b, fileName: 'b.html', pageKind: 'unusuals', fileMtime: 2, importedAt: 20, itemCount: 0, categories: null },
-      { id: a, fileName: 'a.html', pageKind: 'buy', fileMtime: 1, importedAt: 10, itemCount: 3, categories: null },
+      { id: b, fileName: 'b.html', pageKind: 'unusuals', fileMtime: 2, importedAt: 20, itemCount: 0, categories: null, bank: null },
+      { id: a, fileName: 'a.html', pageKind: 'buy', fileMtime: 1, importedAt: 10, itemCount: 3, categories: null, bank: null },
     ]);
     expect(repo.listImportBatches(1)).toHaveLength(1);
   });

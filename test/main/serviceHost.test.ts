@@ -227,6 +227,15 @@ describe('service host: messages from the service', () => {
     expect(h.log.warn).toHaveBeenCalledWith('service sent an unrecognised message', { type: 'push' });
   });
 
+  it('forwards the scrap.tf banks push (scraptf.banksChanged, F15)', async () => {
+    const h = setup();
+    const p = await startReady(h);
+    const seen: unknown[] = [];
+    h.host.onPush((e, payload) => seen.push([e, payload]));
+    p.reply({ type: 'push', event: 'scraptf.banksChanged', payload: { at: 42 } });
+    expect(seen).toEqual([['scraptf.banksChanged', { at: 42 }]]);
+  });
+
   it('drops the pushes only main may send (settings.changed, ui.openItem, service.state)', async () => {
     const h = setup();
     const p = await startReady(h);
@@ -238,7 +247,9 @@ describe('service host: messages from the service', () => {
     p.reply({ type: 'push', event: 'import.done', payload: { stored: 1 } });
     expect(seen).toEqual(['import.done']);
     expect(h.log.warn).toHaveBeenCalledTimes(3);
-    expect(SERVICE_PUSH_EVENTS).toEqual(expect.arrayContaining(['opps.changed', 'market.changed', 'journal.changed', 'status.changed', 'import.done', 'notify']));
+    expect(SERVICE_PUSH_EVENTS).toEqual(
+      expect.arrayContaining(['opps.changed', 'market.changed', 'journal.changed', 'scraptf.listChanged', 'scraptf.banksChanged', 'status.changed', 'import.done', 'notify']),
+    );
     for (const e of MAIN_ONLY_PUSH_EVENTS) expect(SERVICE_PUSH_EVENTS).not.toContain(e);
     expect(MAIN_ONLY_PUSH_EVENTS).toContain('ui.quickPrefill');
     expect([...SERVICE_PUSH_EVENTS, ...MAIN_ONLY_PUSH_EVENTS].sort()).toEqual([...PUSH_EVENTS].sort());

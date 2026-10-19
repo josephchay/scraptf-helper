@@ -5,9 +5,9 @@
 import { contextBridge, ipcRenderer } from 'electron';
 import { MAIN_METHODS, PUSH_EVENTS, SERVICE_METHODS, type FlipdeskBridge, type PushContract, type PushEvent } from '../shared/rpc';
 
-// Keep in sync with WINDOW_KIND_ARG in src/main/paths.ts.
+// Keep in sync with WINDOW_KIND_ARG and WINDOW_KINDS in src/main/paths.ts (a test compares them).
 const WINDOW_KIND_ARG = '--flipdesk-window=';
-const WINDOW_KINDS = ['dashboard', 'quick-entry'];
+export const PRELOAD_WINDOW_KINDS: readonly string[] = ['dashboard', 'quick-entry', 'check'];
 
 const pushEvents = new Set<string>(PUSH_EVENTS);
 
@@ -16,7 +16,7 @@ const methods = new Set<string>([...MAIN_METHODS, ...SERVICE_METHODS]);
 export function windowKindFromArgv(argv: readonly string[]): string {
   const arg = argv.find((a) => a.startsWith(WINDOW_KIND_ARG));
   const kind = arg?.slice(WINDOW_KIND_ARG.length) ?? '';
-  return WINDOW_KINDS.includes(kind) ? kind : 'dashboard';
+  return PRELOAD_WINDOW_KINDS.includes(kind) ? kind : 'dashboard';
 }
 
 /** Strips Electron's "Error invoking remote method 'rpc': Error: " prefix. */
@@ -29,7 +29,7 @@ type Listener = (payload: unknown) => void;
 const listeners = new Map<string, Set<Listener>>();
 
 /** One-shot UI requests from main that may arrive before the page subscribed (window just created). */
-const HELD_EVENTS: ReadonlySet<string> = new Set(['ui.openItem', 'ui.quickPrefill']);
+export const HELD_EVENTS: ReadonlySet<string> = new Set(['ui.openItem', 'ui.quickPrefill', 'ui.checkShow']);
 /** The latest held request per event, delivered to the first listener. */
 const pending = new Map<string, { payload: unknown }>();
 

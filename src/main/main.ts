@@ -1,6 +1,7 @@
 // Electron main process: single instance, app:// protocol, tray, windows,
-// settings and secrets, the service host, notifications and the global
-// quick-entry hotkey. Flags: --hidden (login item), --user-data-dir=<path>;
+// settings and secrets, the service host, notifications, the global
+// quick-entry hotkey and the live check (F16: its hotkey, the opt-in clipboard
+// watcher and the check popup). Flags: --hidden (login item), --user-data-dir=<path>;
 // development builds only (or FLIPDESK_DIAGNOSTICS=1): --dev (DevTools),
 // --smoke-test=<report.json>, --smoke-wait=<seconds>.
 
@@ -10,11 +11,13 @@ import path from 'node:path';
 import {
   app,
   BrowserWindow,
+  clipboard,
   dialog,
   globalShortcut,
   ipcMain,
   Menu,
   Notification,
+  powerMonitor,
   protocol,
   safeStorage,
   session,
@@ -24,12 +27,16 @@ import {
   type SaveDialogOptions,
 } from 'electron';
 import { z } from 'zod';
+import { CHECK_PRIVACY_SENTENCE } from '../shared/check';
 import { isAllowedExternalUrl } from '../shared/links';
 import type { AppInfo, PushContract } from '../shared/rpc';
 import type { AppStatus, HealthReport } from '../shared/types';
+import { createSystemPause, type SystemPause } from './clipboardWatch';
+import { applyGlobalHotkey, startupHotkeyNotice } from './hotkeys';
 import { acquireMachineLock, type MachineLock } from './instanceLock';
 import { createRpcRouter, isJsonExportName, registerRpcHandler } from './ipc';
-import { clip, notificationContent, notificationOptions } from './notify';
+import { CHECK_CALL_TIMEOUT_MS, createLiveCheckMain, type LiveCheckMain } from './liveCheck';
+import { clip, droppedOpenUrl, handleNotificationClick, notificationContent, notificationOptions } from './notify';
 import { APP_USER_MODEL_ID, parseLaunchArgs, readFileBounded, resolveAppPaths, safeErrorMessage, type AppPaths } from './paths';
 import { APP_SCHEME_PRIVILEGES, registerAppProtocol } from './protocol';
 import { createSecretsStore, type SecretsStore } from './secrets';
@@ -70,6 +77,9 @@ interface Runtime {
   windows: WindowManager;
   host: ServiceHost;
   tray: TrayController | null;
+  /** F16 hotkey and clipboard watcher; null in a smoke test, which never reads the clipboard. */
+  liveCheck: LiveCheckMain | null;
+  systemPause: SystemPause | null;
 }
 
 let log: MainLog;
@@ -95,30 +105,8 @@ function writeReport(file: string, report: unknown): void {
 // Hotkey and login item (settings side effects)
 // ---------------------------------------------------------------------------
 
-function tryRegister(accel: string, onTrigger: () => void): boolean {
-  try {
-    return globalShortcut.register(accel, onTrigger);
-  } catch {
-    return false;
-  }
-}
-
 function applyHotkey(next: string, prev: string | null, onTrigger: () => void): HotkeyResult {
-  if (next === '') {
-    if (prev) globalShortcut.unregister(prev);
-    return { ok: true };
-  }
-  let ok = tryRegister(next, onTrigger);
-  // "Ctrl+Alt+F" -> "CommandOrControl+Alt+F" is the same key combination we already hold.
-  if (!ok && prev) {
-    globalShortcut.unregister(prev);
-    ok = tryRegister(next, onTrigger);
-    if (!ok) tryRegister(prev, onTrigger);
-    return ok ? { ok: true } : { ok: false, error: `"${next}" is already used by another application or is not a valid shortcut.` };
-  }
-  if (!ok) return { ok: false, error: `"${next}" is already used by another application or is not a valid shortcut.` };
-  if (prev && prev !== next) globalShortcut.unregister(prev);
-  return { ok: true };
+  return applyGlobalHotkey(globalShortcut, next, prev, onTrigger);
 }
 
 function applyLoginItem(openAtLogin: boolean): void {
@@ -139,6 +127,8 @@ function showNotification(rt: Runtime, payload: unknown): void {
     log.warn('ignored a malformed notify push');
     return;
   }
+  // F20: the toast still shows; its click just does what it did before 0.6. Never the URL in the log.
+  if (droppedOpenUrl(payload, data)) log.warn('dropped a notify link that is not a static scrap.tf bank page');
   const prefs = rt.settings.get().notifications;
   if (args.smokeTest || !prefs.enabled || !Notification.isSupported()) return;
   const n = new Notification(notificationOptions(data, prefs, rt.paths.iconPng));
@@ -147,8 +137,13 @@ function showNotification(rt: Runtime, payload: unknown): void {
   const release = () => liveNotifications.delete(n);
   n.on('click', () => {
     release();
-    if (data.sku) openItemInDashboard(rt, data.sku);
-    else rt.windows.showDashboard();
+    // F20: an openUrl is re-checked at click time and goes only to the user's browser (as links.open).
+    void handleNotificationClick(data, {
+      openExternal: (url) => shell.openExternal(url),
+      openItem: (sku) => openItemInDashboard(rt, sku),
+      showDashboard: () => rt.windows.showDashboard(),
+      log,
+    });
   });
   n.on('close', release);
   n.on('failed', (_e, error) => {
@@ -159,6 +154,19 @@ function showNotification(rt: Runtime, payload: unknown): void {
   if (liveNotifications.size > 25) {
     const oldest = liveNotifications.values().next().value;
     if (oldest) liveNotifications.delete(oldest);
+  }
+}
+
+/**
+ * A notice answering something the user did or must act on (a hotkey that is taken, the watcher
+ * turned on from the tray): shown even with alerts off in Settings > Notifications, only `silent` applies.
+ */
+function showNotice(rt: Runtime, notice: { title: string; body: string }): void {
+  if (args.smokeTest || !Notification.isSupported()) return;
+  try {
+    new Notification(notificationOptions(notice, rt.settings.get().notifications, rt.paths.iconPng)).show();
+  } catch (err) {
+    log.warn('desktop notice failed', err);
   }
 }
 
@@ -176,6 +184,8 @@ function trayState(rt: Runtime): TrayState {
     status: lastStatus,
     service: rt.host.status(),
     hotkey: rt.settings.hotkeyStatus(),
+    checkWatch: s.check.watchClipboard,
+    checkHotkey: rt.settings.checkHotkeyStatus(),
     now: Date.now(),
   };
 }
@@ -220,6 +230,7 @@ function handlePush(rt: Runtime, event: keyof PushContract, payload: unknown): v
     case 'settings.changed':
     case 'ui.openItem':
     case 'ui.quickPrefill':
+    case 'ui.checkShow':
     case 'service.state':
       // Main owns these; the service host already drops them (MAIN_ONLY_PUSH_EVENTS).
       return;
@@ -318,6 +329,10 @@ function liveSummary(h: HealthReport | null, st: AppStatus | null, waitedSec: nu
   };
   if (feed?.state !== 'live') errors.push(`live feed is ${feed?.state ?? 'unknown'} after ${waitedSec} s`);
   if (!((feed?.listingsTotal ?? 0) > 0)) errors.push('no backpack.tf listings were stored');
+  // A connected but silent feed is usually backpack.tf going quiet; the socket's own watchdog reconnects after 120 s.
+  if (feed?.state === 'live' && (feed.lastFrameAt === null || feed.lastFrameAt === undefined)) {
+    warnings.push(`backpack.tf feed connected but sent no frames during the ${waitedSec} s wait`);
+  }
   if (!((h.schema?.items ?? 0) > 0)) errors.push('the item schema did not load');
   if (!h.keyPrice || h.keyPrice.source === 'default') errors.push('no key price from PriceDB or backpack.tf');
   if (!((h.pricedb?.rows ?? 0) > 0)) warnings.push('no PriceDB reference prices stored yet');
@@ -479,6 +494,8 @@ function shutdown(): Promise<void> {
       } catch {
         // not ready yet
       }
+      runtime?.liveCheck?.stop();
+      runtime?.systemPause?.dispose();
       runtime?.tray?.destroy();
       try {
         await runtime?.host.shutdown(2000);
@@ -514,15 +531,22 @@ function start(): void {
   log.setRedactions(Object.values(secrets.getAll()));
   if (!secrets.available()) log.warn('secure storage is not available; API keys cannot be saved');
 
-  // Assigned below; the hotkey effect only fires after startup.
+  // Assigned below; the hotkey effects only fire after startup.
   let windows: WindowManager | null = null;
+  let liveCheck: LiveCheckMain | null = null;
   const toggleQuick = () => windows?.toggleQuickEntry();
+  const checkClipboard = () => void liveCheck?.hotkey();
   const settings = createSettingsStore({
     file: paths.settingsFile,
     log,
+    // A smoke test registers no hotkey, so it never reads the clipboard either.
     effects: args.smokeTest
       ? undefined
-      : { applyHotkey: (next, prev) => applyHotkey(next, prev, toggleQuick), applyLoginItem },
+      : {
+          applyHotkey: (next, prev) => applyHotkey(next, prev, toggleQuick),
+          applyCheckHotkey: (next, prev) => applyHotkey(next, prev, checkClipboard),
+          applyLoginItem,
+        },
   });
 
   windows = createWindowManager({
@@ -549,12 +573,33 @@ function start(): void {
     log,
   });
 
-  const rt: Runtime = { paths, settings, secrets, windows, host, tray: null };
+  const rt: Runtime = { paths, settings, secrets, windows, host, tray: null, liveCheck: null, systemPause: null };
   runtime = rt;
+
+  if (!args.smokeTest) {
+    // powerMonitor is usable now (after 'ready'): the watcher reads nothing while locked or suspended.
+    const systemPause = createSystemPause(powerMonitor);
+    rt.systemPause = systemPause;
+    liveCheck = createLiveCheckMain({
+      // Plain text only, in main only (the compliance scan forbids every other clipboard read).
+      readText: () => clipboard.readText(),
+      // F19: the hint (the armed SKU) only while an arm lasts; never a key that is present but undefined.
+      check: (text, source, hint) => host.call('check.text', hint ? { text, source, hint } : { text, source }, { timeoutMs: CHECK_CALL_TIMEOUT_MS }),
+      serviceReady: () => host.status().state === 'ready',
+      showPopup: (result, opts) => rt.windows.showCheck(result, opts),
+      notify: (payload) => showNotification(rt, payload),
+      settings: () => settings.get(),
+      systemPaused: () => systemPause.paused(),
+      log,
+    });
+    rt.liveCheck = liveCheck;
+  }
 
   settings.onChange((next) => {
     host.sendSettings(next);
     rt.windows.broadcast('settings.changed', next);
+    // Starts or stops the clipboard watcher with check.watchClipboard (Settings or the tray).
+    rt.liveCheck?.syncWatch();
     refreshTray(rt);
   });
   secrets.onChange((all) => {
@@ -584,13 +629,22 @@ function start(): void {
       settings,
       secrets,
       service: host,
-      showQuickEntry: (sku) => rt.windows.showQuickEntry(sku),
+      showQuickEntry: (sku, price) => {
+        // The check popup's "Quick entry…" hands over to quick entry; both on top would overlap.
+        rt.windows.hideCheck();
+        rt.windows.showQuickEntry(sku, price);
+      },
       openItemInDashboard: (sku) => {
         rt.windows.hideQuickEntry();
+        rt.windows.hideCheck();
         openItemInDashboard(rt, sku);
       },
       appInfo,
       serviceState: () => serviceStatePush(host.status(), Date.now()),
+      hotkeys: () => ({ quickEntry: settings.hotkeyStatus(), check: settings.checkHotkeyStatus() }),
+      // F19: validated in ipc.ts, kept by the controller (memory only). A smoke test has no controller:
+      // nothing is armed there, so the page reads it as lapsed.
+      armCheck: (arm) => rt.liveCheck?.arm(arm) ?? { armedUntil: null },
       isAllowedExternalUrl,
       openExternal: (url) => shell.openExternal(url),
       dialogs: {
@@ -598,7 +652,8 @@ function start(): void {
           pickPath(win, {
             title: 'Import a saved scrap.tf page',
             properties: ['openFile'],
-            filters: [{ name: 'Saved web pages', extensions: ['html', 'htm'] }],
+            // F18: .mhtml/.mht ("Webpage, Single File") too; the service unpacks it from the file's text.
+            filters: [{ name: 'Saved web pages', extensions: ['html', 'htm', 'mhtml', 'mht'] }],
           }),
         openFolder: (win) =>
           pickPath(win, { title: 'Choose the folder you save pages into', properties: ['openDirectory', 'createDirectory'] }),
@@ -618,12 +673,14 @@ function start(): void {
     log,
   );
 
-  const trySet = (patch: unknown) => {
+  const trySet = (patch: unknown): boolean => {
     try {
       settings.set(patch);
+      return true;
     } catch (err) {
       log.warn(`tray toggle refused: ${safeErrorMessage(err)}`);
       refreshTray(rt, true);
+      return false;
     }
   };
   try {
@@ -634,6 +691,12 @@ function start(): void {
         quickEntry: () => rt.windows.showQuickEntry(),
         setLiveFeedPaused: (paused) => trySet({ liveFeed: { enabled: !paused } }),
         setNetworkPaused: (paused) => trySet({ networkPaused: paused }),
+        setClipboardWatch: (on) => {
+          // Settings shows the privacy sentence beside the switch; the tray says it as a notice.
+          if (trySet({ check: { watchClipboard: on } }) && on) {
+            showNotice(rt, { title: 'Clipboard check is on', body: CHECK_PRIVACY_SENTENCE });
+          }
+        },
         quit: () => app.quit(),
       },
       trayState(rt),
@@ -651,14 +714,10 @@ function start(): void {
   }
 
   const hotkey: HotkeyStatus = settings.applyStartupEffects();
+  rt.liveCheck?.syncWatch();
   refreshTray(rt);
-  if (hotkey.error && Notification.isSupported()) {
-    new Notification({
-      title: 'Quick-entry hotkey unavailable',
-      body: `${hotkey.accelerator} is already in use. Choose another shortcut in Settings.`,
-      icon: paths.iconPng,
-    }).show();
-  }
+  const notice = startupHotkeyNotice(hotkey, settings.checkHotkeyStatus());
+  if (notice) showNotice(rt, notice);
 
   if (!(args.hidden || settings.get().app.startHidden)) rt.windows.showDashboard();
 }

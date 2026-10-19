@@ -269,6 +269,8 @@ describe('migrations', () => {
       .map((r) => r['name']);
     expect(tables).toEqual(
       [
+        'bank_stock',
+        'bank_stock_saves',
         'bptf_community',
         'bptf_names',
         'effects',
@@ -286,6 +288,8 @@ describe('migrations', () => {
         'request_log',
         'schema_items',
         'scrap_prices',
+        'scraptf_events',
+        'scraptf_list',
         'sku_aliases',
         'snapshot_times',
       ].sort(),

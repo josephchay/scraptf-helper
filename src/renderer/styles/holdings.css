@@ -1,4 +1,4 @@
-/* Holdings page (F11) and the Record trade dialog (F12). Reuse the opportunities grid (.opp-scroll,
+/* Holdings page (F11, with the scrap.tf exit of F14) and the Record trade dialog (F12). Reuse the opportunities grid (.opp-scroll,
    .opp-row) and the market's patterns; only the holdings' own tracks, status pills, header totals and
    the dialog's comparison line live here. Colours come from tokens.css; the flash respects
    prefers-reduced-motion. */
@@ -89,14 +89,51 @@
   font-weight: 600;
 }
 
+/* "Sells now for": the better exit on the main line; the other venue (F14: "scrap.tf pays Y",
+   "scrap.tf full", "backpack.tf pays X") on a short second line that fits the compact row too. */
 .h-sells {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+}
+
+.h-sells-main {
   display: flex;
   align-items: center;
   gap: 8px;
+  min-width: 0;
 }
 
-.h-sells > .money {
+.h-sells-main > .money {
   flex-shrink: 0;
+}
+
+.h-sells.has-sub .h-sells-main {
+  line-height: 16px;
+}
+
+.h-sells-sub {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 13px;
+}
+
+.h-sells-sub.tone-text-warn {
+  color: var(--warn);
+}
+
+/* scrap.tf's bank is the better exit (F14): it stands where the buyer would. It always has a second
+   line under it, so it is shorter than a status pill: 16px + 13px fits the 30px compact row. */
+.exit-pill {
+  flex-shrink: 0;
+  height: 16px;
+  padding: 0 6px;
+  font-size: 11px;
+  line-height: 16px;
 }
 
 .h-sells .buyer-type {

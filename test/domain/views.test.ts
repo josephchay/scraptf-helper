@@ -7,7 +7,7 @@ import { buildItemDetail, groupLabel, listOpportunities, previewRule, summarizeG
 import { HOUR, MIN, T0, createStubSchema, makeListing, special, testSettings } from './helpers';
 
 const K = 567;
-const KP: KeyPriceState = { valueScrap: K, source: 'pricedb', observedAt: T0, stale: false, quotes: [] };
+const KP: KeyPriceState = { valueScrap: K, source: 'pricedb', observedAt: T0, stale: false, quotes: [], scraptfFromList: null };
 const repos: Repo[] = [];
 
 afterEach(() => {

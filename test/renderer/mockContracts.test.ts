@@ -64,11 +64,12 @@ describe('mock contracts', () => {
   it('caps the automatic key price at the scrap.tf sell price like the service, but never a manual one', async () => {
     const b = make();
     const auto = (await b.rpc('status.get', undefined)).keyPrice!.valueScrap;
-    await b.rpc('settings.set', { keyPrice: { scraptfSellScrap: auto - 10 } });
+    // Dated as the Settings page dates them: the newer of these and the saved list's key row applies (F14).
+    await b.rpc('settings.set', { keyPrice: { scraptfSellScrap: auto - 10, scraptfObservedAt: T0 } });
     expect((await b.rpc('status.get', undefined)).keyPrice!.valueScrap).toBe(auto - 10);
-    await b.rpc('settings.set', { keyPrice: { scraptfSellScrap: auto + 10 } });
+    await b.rpc('settings.set', { keyPrice: { scraptfSellScrap: auto + 10, scraptfObservedAt: T0 } });
     expect((await b.rpc('status.get', undefined)).keyPrice!.valueScrap).toBe(auto);
-    await b.rpc('settings.set', { keyPrice: { mode: 'manual', manualScrap: auto + 20, scraptfSellScrap: auto - 10 } });
+    await b.rpc('settings.set', { keyPrice: { mode: 'manual', manualScrap: auto + 20, scraptfSellScrap: auto - 10, scraptfObservedAt: T0 } });
     expect((await b.rpc('status.get', undefined)).keyPrice!.valueScrap).toBe(auto + 20);
   });
 });

@@ -3,13 +3,54 @@
 // is persisted and nothing leaves the page.
 
 import type { AppInfo, FlipdeskBridge, PushContract, PushEvent, RpcMethod, RpcParams, RpcResult } from '../shared/rpc';
+import { sameAccelerator } from '../shared/accelerator';
+import { blankCheckResult, CHECK_ARM_MS, CHECK_ARM_NAME_MAX, CHECK_HOTKEY_CONFLICT, CHECK_MAX_CHARS, CHECK_PRICE_TEXT_MAX, CHECK_RECENT_MAX, checkHintedNote } from '../shared/check';
 import { formatScrap } from '../shared/currency';
 import { DEFAULT_SETTINGS, mergeSettings } from '../shared/defaults';
 import { HOLDINGS_CSV_COLUMNS, holdingRow, holdingsCsvCells, holdingsMatching, holdingsResult } from '../shared/holdings';
-import { MARKET_CSV_COLUMNS, MARKET_MAX_LIMIT, MARKET_MAX_SEARCH_CHARS, countCategories, marketCsvCells, scraptfCoverage } from '../shared/market';
-import { baseSku, canonical, fromString, looksLikeSku } from '../shared/sku';
+import { NO_BANK_FLIPS, bankFlips, bankLookFor } from '../shared/banks';
+import {
+  BANK_STOCK_CSV_COLUMNS,
+  BANK_STOCK_KEEP_SAVES,
+  BANK_STOCK_MAX_LIMIT,
+  BANK_STOCK_MAX_SEARCH_CHARS,
+  bankStockCounts,
+  bankStockCsvCells,
+  bankStockItemOf,
+  bankStockMatching,
+  bankStockNewAt,
+  bankStockResult,
+  bankStockRows,
+  bankStockThinning,
+  bankStockWhatsNew,
+  diffBankStock,
+  type BankStockBankDiff,
+} from '../shared/bankStock';
+import { SCRAPTF_BANKS, bankForCategory, preferScraptfSeen, scraptfSeenOn, type ScraptfSeen } from '../shared/links';
+import { MARKET_CSV_COLUMNS, MARKET_MAX_LIMIT, MARKET_MAX_SEARCH_CHARS, batchSavedAt, countCategories, isEmptyBankSave, marketCsvCells, scraptfCoverage } from '../shared/market';
+import {
+  SCRAPTF_CHANGES_CSV_COLUMNS,
+  SCRAPTF_CHANGES_EXPORT_MAX,
+  SCRAPTF_CHANGES_MAX_LIMIT,
+  scraptfChangeCsvCells,
+  scraptfChangeEvent,
+  scraptfChangesLimit,
+  scraptfEventMatches,
+  scraptfEventsOf,
+  scraptfItemHistoryOf,
+  scraptfListedSinceOf,
+  scraptfRunsOf,
+  type ScraptfSaveRows,
+} from '../shared/scraptfHistory';
+import { scraptfListCoverage, scraptfListKeyOf, scraptfListPriceSaved, valueScraptfListRow } from '../shared/scraptfList';
+import { baseSku, canonical, fromString, isValidSku, looksLikeSku } from '../shared/sku';
 import type {
   AppStatus,
+  BankStockQuery,
+  BankStockResult,
+  BankStockRow,
+  CheckResult,
+  CheckSource,
   HoldingRow,
   HoldingsQuery,
   BuyerCheck,
@@ -32,7 +73,21 @@ import type {
   PriceRule,
   RequestLogRow,
   ResolvedItem,
+  Scrap,
   ScrapPrice,
+  ScraptfBank,
+  ScraptfBankSummary,
+  ScraptfBanksResult,
+  ScraptfChangeEvent,
+  ScraptfChangeKind,
+  ScraptfChangesQuery,
+  ScraptfEventStored,
+  ScraptfItemHistory,
+  ScraptfKeyRun,
+  ScraptfListKey,
+  ScraptfListRow,
+  ScraptfListStatus,
+  ScraptfListStored,
   SecretsStatus,
   Settings,
   SetupCode,
@@ -40,11 +95,12 @@ import type {
   ShoppingQuery,
   UnixMs,
 } from '../shared/types';
-import { SECRET_NAMES } from '../shared/types';
+import { BANK_STOCK_FILTERS, BANK_STOCK_SORTS, KEY_SKU, SCRAPTF_BANK_IDS, SCRAPTF_CHANGE_KINDS, SECRET_NAMES } from '../shared/types';
 import {
   CATALOG,
   MARKET_ONLY,
   MOCK_KEY_SCRAP,
+  MOCK_LIST_PAGES,
   SEED_RULES,
   allSearchable,
   createRng,
@@ -66,11 +122,17 @@ import {
   mockShoppingList,
   ruleMatches,
   seedJournal,
+  seedBankStock,
+  seedBankStockHistory,
   seedPrices,
+  seedScraptfList,
   type CatalogItem,
   type MockBook,
   type MockInput,
+  type MockStockSave,
 } from './mockData';
+import { NO_CARDS_SAVED, NO_CARDS_SAVED_REASON } from './importModel';
+import { checkDemoFromHash, mockCheckDemo, mockCheckResult, mockHintedParse, mockParseCheck, type MockParsedCheck } from './mockCheck';
 import { filterOpportunities, orderByGroup, sortOpportunities, summarizeGroups } from './oppModel';
 
 export interface MockOptions {
@@ -187,14 +249,66 @@ export function createMockBridge(opts: MockOptions = {}): MockBridge {
   // Each carries the categories it stored, as the service records them at import time (the seeded
   // prices' batch ids are random, so the rows could not say).
   const batches: ImportBatch[] = [
-    { id: 6, fileName: 'scrap.tf - Buy Hats.html', pageKind: 'buy', fileMtime: t0 - 4 * MIN, importedAt: t0 - 4 * MIN + 2_000, itemCount: 48, categories: { hats: 48 } },
-    { id: 5, fileName: 'scrap.tf - Unusuals.html', pageKind: 'unusuals', fileMtime: t0 - 12 * MIN, importedAt: t0 - 12 * MIN + 2_000, itemCount: 31, categories: { unusuals: 31 } },
-    { id: 4, fileName: 'scrap.tf - Buy Stranges.html', pageKind: 'buy', fileMtime: t0 - 70 * MIN, importedAt: t0 - 69 * MIN, itemCount: 22, categories: { stranges: 22 } },
-    { id: 3, fileName: 'scrap.tf - Items.html', pageKind: 'items-list', fileMtime: t0 - 2 * HOUR, importedAt: t0 - 2 * HOUR + MIN, itemCount: 140, categories: { other: 140 } },
-    { id: 2, fileName: 'scrap.tf - Buy Weapons.html', pageKind: 'buy', fileMtime: t0 - 5 * HOUR, importedAt: t0 - 5 * HOUR + MIN, itemCount: 64, categories: { weapons: 64 } },
-    { id: 1, fileName: 'scrap.tf - Buy Killstreaks.html', pageKind: 'buy', fileMtime: t0 - 26 * HOUR, importedAt: t0 - 26 * HOUR + MIN, itemCount: 17, categories: { killstreaks: 17 } },
+    { id: 6, fileName: 'scrap.tf - Buy Hats.html', pageKind: 'buy', fileMtime: t0 - 4 * MIN, importedAt: t0 - 4 * MIN + 2_000, itemCount: 48, categories: { hats: 48 }, bank: 'hats' },
+    { id: 5, fileName: 'scrap.tf - Unusuals.html', pageKind: 'unusuals', fileMtime: t0 - 12 * MIN, importedAt: t0 - 12 * MIN + 2_000, itemCount: 31, categories: { unusuals: 31 }, bank: 'unusuals' },
+    { id: 4, fileName: 'scrap.tf - Buy Stranges.html', pageKind: 'buy', fileMtime: t0 - 70 * MIN, importedAt: t0 - 69 * MIN, itemCount: 22, categories: { stranges: 22 }, bank: 'stranges' },
+    { id: 3, fileName: 'scrap.tf - Items.html', pageKind: 'items-list', fileMtime: t0 - 2 * HOUR, importedAt: t0 - 2 * HOUR + MIN, itemCount: 140, categories: { other: 140 }, bank: 'list' },
+    { id: 2, fileName: 'scrap.tf - Buy Weapons.html', pageKind: 'buy', fileMtime: t0 - 5 * HOUR, importedAt: t0 - 5 * HOUR + MIN, itemCount: 64, categories: { weapons: 64 }, bank: 'weapons' },
+    { id: 1, fileName: 'scrap.tf - Buy Killstreaks.html', pageKind: 'buy', fileMtime: t0 - 26 * HOUR, importedAt: t0 - 26 * HOUR + MIN, itemCount: 17, categories: { killstreaks: 17 }, bank: 'killstreaks' },
   ];
   let batchSeq = 7;
+  // F15: a seeded imported price comes from the saved page that sells it (its bank's batch, else the
+  // /items list), dated at that page's save as the import dates it, so its ScrapPrice.bank, the
+  // drawer's "Seen on" and the bank card's "saved … ago" agree. No RNG: seeds unchanged.
+  {
+    const batchOfBank = new Map<ScraptfBank, ImportBatch>();
+    for (const b of batches) if (b.bank && !batchOfBank.has(b.bank)) batchOfBank.set(b.bank, b);
+    prices = prices.map((p) => {
+      if (p.source !== 'import') return p;
+      const category = findCatalogItem(p.sku)?.category ?? guessCategory(p.sku);
+      const page = batchOfBank.get(bankForCategory(category)) ?? batchOfBank.get('list');
+      return page ? { ...p, importBatch: page.id, observedAt: batchSavedAt(page) } : p;
+    });
+  }
+  // F14: the saved scrap.tf/items list (three pages of mixed ages, the key row included).
+  let listRows: ScraptfListStored[] = seedScraptfList(t0);
+  // F17: bank-stock saves. Two of hats, unusuals, stranges, weapons and the /items list (their newest is
+  // the bank's batch above, the list's its newest page), with new, gone, cheaper and pricier rows between
+  // them; one of killstreaks (a first save); none of skins and items (never saved, as on the strip). The
+  // previous saves are not in `batches` (the coverage strip and the banks cards date banks by their newest).
+  let stockSaves: MockStockSave[] = (() => {
+    const at = (bank: ScraptfBank) => batches.find((b) => b.bank === bank)!;
+    const save = (bank: ScraptfBank, previousAgo: number | null, previousId: number) => {
+      const b = at(bank);
+      return { bank, batchId: b.id, savedAt: batchSavedAt(b), previous: previousAgo === null ? null : { batchId: previousId, savedAt: batchSavedAt(b) - previousAgo } };
+    };
+    return seedBankStock({
+      saves: [
+        save('hats', 3 * HOUR, 191),
+        save('unusuals', 20 * HOUR, 192),
+        save('stranges', 5 * HOUR, 193),
+        save('weapons', 48 * HOUR, 194),
+        save('killstreaks', null, 0),
+        { bank: 'list', batchId: MOCK_LIST_PAGES[0]!.batchId, savedAt: t0 - MOCK_LIST_PAGES[0]!.ageMs, previous: { batchId: 195, savedAt: t0 - MOCK_LIST_PAGES[0]!.ageMs - 24 * HOUR } },
+      ],
+      prices,
+      listRows,
+    });
+  })();
+  // F20: about 20 saves per bank over 10 days, older than the two above (killstreaks keeps its first save).
+  stockSaves = [...stockSaves, ...seedBankStockHistory(stockSaves)];
+  // F20 S2: the change feed, written save by save as the service writes it at import (oldest first),
+  // then the S1 thinning, as maintenance would leave it.
+  const stockEvents: ScraptfEventStored[] = [];
+  let stockEventSeq = 1;
+  {
+    const done: MockStockSave[] = [];
+    for (const save of [...stockSaves].sort((a, b) => a.savedAt - b.savedAt || a.batchId - b.batchId)) {
+      recordStockEvents(save, done, MOCK_KEY_SCRAP);
+      done.push(save);
+    }
+    stockSaves = thinnedStockSaves(stockSaves, t0);
+  }
 
   let opps = new Map<string, Opportunity>();
   let events: OpportunityEvent[] = [];
@@ -217,8 +331,26 @@ export function createMockBridge(opts: MockOptions = {}): MockBridge {
   // Derived state
   // ---------------------------------------------------------------------------
 
+  /** The saved list's key row (F14), read raw like the service's scraptfList.keyRow(). */
+  function listKey(): ScraptfListKey | null {
+    return scraptfListKeyOf(listRows.find((r) => r.sku === KEY_SKU));
+  }
+
+  /**
+   * What scrap.tf pays for a key, as the service's effectiveScraptfKey picks it: the newer of the typed
+   * value (dated scraptfObservedAt; undated counts as older) and the saved list's key row.
+   */
+  function scraptfKeyCap(): Scrap | null {
+    const k = settings.keyPrice;
+    const typed = k.scraptfSellScrap || null;
+    const lk = listKey();
+    const listNewer = lk !== null && (!(k.scraptfSellScrap || k.scraptfBuyScrap) || k.scraptfObservedAt === null || lk.observedAt > k.scraptfObservedAt);
+    return listNewer ? (lk.paysScrap ?? typed) : (typed ?? lk?.paysScrap ?? null);
+  }
+
   function keyPrice(): KeyPriceState {
     const t = now();
+    const scraptfFromList = listKey();
     const quotes: KeyPriceQuote[] = [
       { source: 'pricedb', buyScrap: MOCK_KEY_SCRAP + keyDrift, sellScrap: MOCK_KEY_SCRAP + 12 + keyDrift, observedAt: t0 - 22 * MIN },
     ];
@@ -227,12 +359,323 @@ export function createMockBridge(opts: MockOptions = {}): MockBridge {
     }
     if (settings.keyPrice.mode === 'manual' && settings.keyPrice.manualScrap) {
       quotes.push({ source: 'manual', buyScrap: settings.keyPrice.manualScrap, sellScrap: null, observedAt: t0 });
-      return { valueScrap: settings.keyPrice.manualScrap, source: 'manual', observedAt: t0, stale: false, quotes };
+      return { valueScrap: settings.keyPrice.manualScrap, source: 'manual', observedAt: t0, stale: false, quotes, scraptfFromList };
     }
     const q = quotes[0]!;
     let value = q.buyScrap ?? MOCK_KEY_SCRAP;
-    if (settings.keyPrice.scraptfSellScrap) value = Math.min(value, settings.keyPrice.scraptfSellScrap);
-    return { valueScrap: value, source: q.source, observedAt: q.observedAt, stale: t - q.observedAt > 6 * HOUR, quotes };
+    const cap = scraptfKeyCap();
+    if (cap) value = Math.min(value, cap);
+    return { valueScrap: value, source: q.source, observedAt: q.observedAt, stale: t - q.observedAt > 6 * HOUR, quotes, scraptfFromList };
+  }
+
+  /** The saved list row of a SKU's base (paint dropped), valued at `keyScrap` (the service's rowFor). */
+  function listRowFor(sku: string, keyScrap: Scrap = keyPrice().valueScrap): ScraptfListRow | null {
+    let base = sku;
+    try {
+      base = baseSku(sku);
+    } catch {
+      // an unparseable SKU is its own base
+    }
+    const r = listRows.find((x) => x.sku === base);
+    return r ? valueScraptfListRow(r, keyScrap) : null;
+  }
+
+  /** Row count, newest and oldest row and the saved pages behind them (the service's scraptfListSummary). */
+  function listSummary(): { items: number; newestAt: UnixMs | null; oldestAt: UnixMs | null; batches: number } {
+    let newestAt: UnixMs | null = null;
+    let oldestAt: UnixMs | null = null;
+    for (const r of listRows) {
+      if (newestAt === null || r.observedAt > newestAt) newestAt = r.observedAt;
+      if (oldestAt === null || r.observedAt < oldestAt) oldestAt = r.observedAt;
+    }
+    return { items: listRows.length, newestAt, oldestAt, batches: new Set(listRows.map((r) => r.batchId)).size };
+  }
+
+  function listStatus(): ScraptfListStatus {
+    const s = listSummary();
+    const importEnabled = settings.import.enabled && settings.import.acknowledgedAt !== null;
+    const watchActive = importEnabled && !!settings.import.watchFolder;
+    // The mock has no file system: a chosen folder counts as watched, and never fails.
+    return { items: s.items, newestAt: s.newestAt, oldestAt: s.oldestAt, pages: s.batches, importEnabled, watchFolder: settings.import.watchFolder, watchActive, watchError: null };
+  }
+
+  // ---------------------------------------------------------------------------
+  // scrap.tf banks (F15)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * A price as the repo reads it: with its import batch's bank joined in. Imported rows only, as the
+   * repo joins: an imported price edited by hand turns 'user' but keeps its batch, and is no page's.
+   */
+  function withBank(p: ScrapPrice): ScrapPrice {
+    const bank = p.source !== 'import' || p.importBatch === null ? null : (batches.find((b) => b.id === p.importBatch)?.bank ?? null);
+    return { ...p, bank };
+  }
+
+  /** The bank of the imported price behind an opportunity ('price:<id>'), as the service reads it. */
+  function opportunityBanks(): (o: Opportunity) => ScraptfBank | null {
+    const byId = new Map(prices.map((p) => [p.id, p]));
+    return (o) => {
+      if (o.inputKind !== 'import' || !o.inputRef.startsWith('price:')) return null;
+      const p = byId.get(Number(o.inputRef.slice('price:'.length)));
+      return p ? withBank(p).bank ?? null : null;
+    };
+  }
+
+  /**
+   * 'scraptf.banks' with the shared rules (bankFlips, bankLookFor): bank pages from the newest batch of
+   * each bank, the 'list' card from the saved list (F14 status), or from its batches while it holds no
+   * rows. In-stock counts on bank pages are made up: the mock keeps no per-page stock.
+   */
+  function banksResult(): ScraptfBanksResult {
+    const t = now();
+    const flips = bankFlips([...opps.values()], opportunityBanks());
+    const rows = marketRows();
+    const market = new Map(rows.map((r) => [r.sku, r]));
+    const list = listSummary();
+    // As the service counts a bank's pages: the saves behind its prices today, plus its newest save.
+    const behind = new Map<ScraptfBank, Set<number>>();
+    for (const p of prices) {
+      const bank = withBank(p).bank;
+      if (!bank || p.importBatch === null) continue;
+      const ids = behind.get(bank) ?? new Set<number>();
+      ids.add(p.importBatch);
+      behind.set(bank, ids);
+    }
+    const banks = SCRAPTF_BANKS.map((info): ScraptfBankSummary => {
+      // F18 S3, as scraptfBankSaves: a bank page saved without its cards dates nothing.
+      const saves = batches.filter((b) => b.bank === info.bank && !isEmptyBankSave(b, info.bank));
+      const newest = saves.reduce<ImportBatch | null>((n, b) => (n === null || batchSavedAt(b) > batchSavedAt(n) ? b : n), null);
+      const isList = info.bank === 'list';
+      // As the service: the saved list, else (no rows: purged, or a 0.3 import) the list's own batches.
+      const fromList = isList && list.items > 0;
+      const items = fromList ? list.items : (newest?.itemCount ?? 0);
+      const pages = new Set(behind.get(info.bank));
+      if (newest) pages.add(newest.id);
+      return {
+        bank: info.bank,
+        label: info.label,
+        url: info.url,
+        lastSavedAt: fromList ? list.newestAt : newest ? batchSavedAt(newest) : null,
+        pages: fromList ? list.batches : pages.size,
+        items,
+        // A list batch stores in-stock rows only.
+        inStock: fromList ? listRows.filter((r) => (r.stock ?? 0) > 0).length : isList ? items : Math.round(items * 0.65),
+        ...(flips.get(info.bank) ?? NO_BANK_FLIPS),
+        ...bankLookFor(rows, info.categories),
+        // F17: as the service, the change counts between the bank's two newest stock saves.
+        whatsNew: whatsNewOf(info.bank, market),
+      };
+    });
+    const status = listStatus();
+    return { banks: structuredClone(banks), importEnabled: status.importEnabled, watchActive: status.watchActive, generatedAt: t };
+  }
+
+  /** Like the service's throttled push; the mock tells every change at once (the page throttles its refetch). */
+  function banksChanged(): void {
+    emit('scraptf.banksChanged', { at: now() });
+  }
+
+  // ---------------------------------------------------------------------------
+  // scrap.tf bank stock (F17): the service's rules, from src/shared/bankStock.ts
+  // ---------------------------------------------------------------------------
+
+  /** A bank's kept saves, newest first (save time, then batch id), as repo.bankStockSaves orders them. */
+  function stockSavesOf(bank: ScraptfBank): MockStockSave[] {
+    return stockSaves.filter((s) => s.bank === bank).sort((a, b) => b.savedAt - a.savedAt || b.batchId - a.batchId);
+  }
+
+  /** Each saved bank's two newest saves, diffed at the key price (what the service caches). */
+  function stockDiffs(keyScrap: Scrap): BankStockBankDiff[] {
+    const out: BankStockBankDiff[] = [];
+    for (const info of SCRAPTF_BANKS) {
+      const [newest, previous] = stockSavesOf(info.bank);
+      if (!newest) continue;
+      out.push({ bank: info.bank, savedAt: newest.savedAt, previousSavedAt: previous?.savedAt ?? null, diff: diffBankStock(newest.rows, previous?.rows ?? null, keyScrap) });
+    }
+    return out;
+  }
+
+  /** Every row a bank's page shows, joined to the Live market rows (`market`: by base SKU, read once per call). */
+  function bankStockAll(
+    bank: ScraptfBank,
+    market?: ReadonlyMap<string, MarketRow>,
+  ): { rows: BankStockRow[]; items: number; savedAt: UnixMs | null; previousSavedAt: UnixMs | null; saves: number } {
+    const saves = stockSavesOf(bank);
+    const [newest, previous] = saves;
+    if (!newest) return { rows: [], items: 0, savedAt: null, previousSavedAt: null, saves: 0 };
+    const byBase = market ?? new Map(marketRows().map((r) => [r.sku, r]));
+    const rows = bankStockRows({
+      newest: newest.rows,
+      previous: previous?.rows ?? null,
+      keyScrap: keyPrice().valueScrap,
+      profit: settings.profit,
+      categoryOf: (sku) => findCatalogItem(sku)?.category ?? guessCategory(sku),
+      // As the service's market.entryFor: an entry only while the item has eligible buyers.
+      buySideOf: (sku) => {
+        const r = byBase.get(sku);
+        return r && r.buyerCount > 0 ? r : null;
+      },
+      // F20: listed since, first seen and the change since listed, from the bank's runs.
+      runOf: (key) => runsFor(bank).get(key) ?? null,
+    });
+    return { rows, items: newest.rows.length, savedAt: newest.savedAt, previousSavedAt: previous?.savedAt ?? null, saves: Math.min(BANK_STOCK_KEEP_SAVES, saves.length) };
+  }
+
+  function whatsNewOf(bank: ScraptfBank, market: ReadonlyMap<string, MarketRow>): ScraptfBankSummary['whatsNew'] {
+    const s = bankStockAll(bank, market);
+    return bankStockWhatsNew(bankStockCounts(s.rows, s.items), s.previousSavedAt);
+  }
+
+  /** The service's zod for BankStockQuery, with its messages' shape. */
+  function bankStockQuery(q: unknown, method: string): BankStockQuery {
+    const bad = (why: string): never => {
+      throw new Error(`Invalid parameters for ${method}: ${why}`);
+    };
+    if (!q || typeof q !== 'object') return bad('bank: required');
+    const p = q as Partial<Record<keyof BankStockQuery, unknown>>;
+    if (typeof p.bank !== 'string' || !(SCRAPTF_BANK_IDS as readonly string[]).includes(p.bank)) bad('bank: not a scrap.tf bank');
+    if (p.filter !== undefined && !(BANK_STOCK_FILTERS as readonly unknown[]).includes(p.filter)) bad('filter: not a filter');
+    if (p.sort !== undefined && !(BANK_STOCK_SORTS as readonly unknown[]).includes(p.sort)) bad('sort: not a sort');
+    if (p.dir !== undefined && p.dir !== 'asc' && p.dir !== 'desc') bad('dir: asc or desc');
+    if (p.search !== undefined && (typeof p.search !== 'string' || p.search.length > BANK_STOCK_MAX_SEARCH_CHARS)) bad(`search: at most ${BANK_STOCK_MAX_SEARCH_CHARS} characters`);
+    if (p.limit !== undefined && (typeof p.limit !== 'number' || !Number.isInteger(p.limit) || p.limit < 1 || p.limit > BANK_STOCK_MAX_LIMIT)) bad(`limit: must be 1 to ${BANK_STOCK_MAX_LIMIT}`);
+    if (p.offset !== undefined && (typeof p.offset !== 'number' || !Number.isInteger(p.offset) || p.offset < 0)) bad('offset: must be zero or more');
+    const out: Record<string, unknown> = { bank: p.bank };
+    for (const k of ['filter', 'search', 'sort', 'dir', 'limit', 'offset'] as const) if (p[k] !== undefined) out[k] = p[k];
+    return out as unknown as BankStockQuery;
+  }
+
+  function bankStockList(q: BankStockQuery): BankStockResult {
+    const s = bankStockAll(q.bank);
+    return bankStockResult({ q, rows: s.rows, items: s.items, savedAt: s.savedAt, previousSavedAt: s.previousSavedAt, saves: s.saves, keyPrice: keyPrice(), now: now() });
+  }
+
+  /**
+   * A new save of a bank (an import): its change events first (F20 S2, against the saves before it), then
+   * kept with the others and thinned (S1). Returns the events written ('scraptf.changed' when any).
+   */
+  function addStockSave(save: MockStockSave): number {
+    const written = recordStockEvents(save, stockSaves, keyPrice().valueScrap);
+    stockSaves = thinnedStockSaves([...stockSaves, save], now());
+    return written;
+  }
+
+  // ---------------------------------------------------------------------------
+  // scrap.tf history (F20): the service's rules, from src/shared/scraptfHistory.ts
+  // ---------------------------------------------------------------------------
+
+  /** A mock save as the history rules read it (the mock's banks have one page each). */
+  function saveRows(s: MockStockSave): ScraptfSaveRows {
+    return { batchId: s.batchId, savedAt: s.savedAt, page: '', rows: s.rows };
+  }
+
+  /** S1: what Repo.pruneBankStock keeps (bankStockThinning), every bank at once. */
+  function thinnedStockSaves(saves: MockStockSave[], at: UnixMs): MockStockSave[] {
+    const drop = bankStockThinning(saves.map((s) => ({ batchId: s.batchId, savedAt: s.savedAt, bank: s.bank, page: '' })), at);
+    return drop.size === 0 ? saves : saves.filter((s) => !drop.has(s.batchId));
+  }
+
+  /**
+   * S2 as importSavedPage runs it: the save's changes against the newest earlier save of its bank (none for
+   * a first save, or one not newer than every save already kept), 'restocked' when an earlier save listed it.
+   */
+  function recordStockEvents(save: MockStockSave, before: readonly MockStockSave[], keyScrap: Scrap): number {
+    const mine = before.filter((s) => s.bank === save.bank);
+    if (mine.some((s) => s.savedAt >= save.savedAt)) return 0;
+    const previous = [...mine].sort((a, b) => b.savedAt - a.savedAt || b.batchId - a.batchId)[0];
+    if (!previous) return 0;
+    const runs = scraptfRunsOf(mine.map(saveRows));
+    const events = scraptfEventsOf({ bank: save.bank, page: '', at: save.savedAt, batchId: save.batchId, newest: save.rows, previous: previous.rows, keyScrap, seenBefore: (key) => runs.has(key) });
+    for (const e of events) stockEvents.push({ ...e, id: stockEventSeq++ });
+    return events.length;
+  }
+
+  let runsMemo: { saves: MockStockSave[]; byBank: Map<ScraptfBank, Map<string, ScraptfKeyRun>> } | null = null;
+  /** The runs index of a bank (ScraptfHistory.runsFor), memoised until the saves change. */
+  function runsFor(bank: ScraptfBank): ReadonlyMap<string, ScraptfKeyRun> {
+    if (runsMemo === null || runsMemo.saves !== stockSaves) runsMemo = { saves: stockSaves, byBank: new Map() };
+    let runs = runsMemo.byBank.get(bank);
+    if (!runs) runsMemo.byBank.set(bank, (runs = scraptfRunsOf(stockSavesOf(bank).map(saveRows))));
+    return runs;
+  }
+
+  /** The service's zod for 'scraptf.changes' (every key optional), with its messages' shape. */
+  function changesQuery(q: unknown, method: string): ScraptfChangesQuery {
+    const bad = (why: string): never => {
+      throw new Error(`Invalid parameters for ${method}: ${why}`);
+    };
+    if (q === undefined || q === null) return {};
+    if (typeof q !== 'object') return bad('expected an object');
+    const p = q as Partial<Record<keyof ScraptfChangesQuery, unknown>>;
+    const out: ScraptfChangesQuery = {};
+    if (p.bank !== undefined) {
+      if (typeof p.bank !== 'string' || !(SCRAPTF_BANK_IDS as readonly string[]).includes(p.bank)) bad('bank: not a scrap.tf bank');
+      out.bank = p.bank as ScraptfBank;
+    }
+    if (p.kinds !== undefined) {
+      if (!Array.isArray(p.kinds) || p.kinds.length > SCRAPTF_CHANGE_KINDS.length || !p.kinds.every((k) => (SCRAPTF_CHANGE_KINDS as readonly unknown[]).includes(k))) bad('kinds: not a change kind');
+      out.kinds = [...(p.kinds as ScraptfChangeKind[])];
+    }
+    if (p.sku !== undefined) {
+      if (typeof p.sku !== 'string' || !isValidSku(p.sku.trim().toLowerCase())) bad('sku: not a SKU (pick an item first)');
+      out.sku = (p.sku as string).trim().toLowerCase();
+    }
+    if (p.beforeId !== undefined) {
+      if (typeof p.beforeId !== 'number' || !Number.isInteger(p.beforeId) || p.beforeId < 1) bad('beforeId: must be 1 or more');
+      out.beforeId = p.beforeId as number;
+    }
+    if (p.limit !== undefined) {
+      if (typeof p.limit !== 'number' || !Number.isInteger(p.limit) || p.limit < 1 || p.limit > SCRAPTF_CHANGES_MAX_LIMIT) bad(`limit: must be 1 to ${SCRAPTF_CHANGES_MAX_LIMIT}`);
+      out.limit = p.limit as number;
+    }
+    return out;
+  }
+
+  /** Stored events valued now and joined to the Live market rows of their base SKUs (market.entryFor). */
+  function valuedEvents(list: readonly ScraptfEventStored[]): ScraptfChangeEvent[] {
+    const kp = keyPrice().valueScrap;
+    const byBase = new Map(marketRows().map((r) => [r.sku, r]));
+    return list.map((e) => {
+      const r = byBase.get(e.sku);
+      return scraptfChangeEvent(e, kp, r && r.buyerCount > 0 ? r : null);
+    });
+  }
+
+  /** 'scraptf.changes': newest first, filtered and paged like the service. */
+  function changesList(q: ScraptfChangesQuery, limit: number = scraptfChangesLimit(q.limit)): ScraptfChangeEvent[] {
+    let base: string | undefined;
+    if (q.sku !== undefined) {
+      try {
+        base = baseSku(q.sku);
+      } catch {
+        base = q.sku;
+      }
+    }
+    const list = stockEvents
+      .filter((e) => scraptfEventMatches(e, { bank: q.bank, kinds: q.kinds, baseSku: base }) && (q.beforeId === undefined || e.id < q.beforeId))
+      .sort((a, b) => b.id - a.id)
+      .slice(0, limit);
+    return valuedEvents(list);
+  }
+
+  /** 'scraptf.itemHistory': the shared rules over every bank's kept saves and this base SKU's events. */
+  function itemHistory(p: { sku: string; special?: string | null }): ScraptfItemHistory {
+    const bad = (why: string): never => {
+      throw new Error(`Invalid parameters for scraptf.itemHistory: ${why}`);
+    };
+    if (!p || typeof p.sku !== 'string' || !isValidSku(p.sku.trim().toLowerCase())) bad('sku: not a SKU (pick an item first)');
+    if (p.special !== undefined && p.special !== null && (typeof p.special !== 'string' || p.special.length > 2000)) bad('special: at most 2000 characters');
+    const sku = p.sku.trim().toLowerCase();
+    let base = sku;
+    try {
+      base = baseSku(sku);
+    } catch {
+      // an unparseable SKU is its own base
+    }
+    const banks = SCRAPTF_BANKS.map((info) => ({ bank: info.bank, saves: stockSavesOf(info.bank).map(saveRows) })).filter((b) => b.saves.length > 0);
+    const events = valuedEvents(stockEvents.filter((e) => e.sku === base));
+    return scraptfItemHistoryOf({ sku, specialKey: p.special ?? null, name: findCatalogItem(sku)?.name, banks, events, keyPrice: keyPrice(), now: now() });
   }
 
   function bookFor(sku: string, name?: string): MockBook {
@@ -378,7 +821,7 @@ export function createMockBridge(opts: MockOptions = {}): MockBridge {
     const all = [...opps.values()];
     const profitable = all.filter((o) => o.status === 'profitable');
     return {
-      version: '0.3.0',
+      version: '0.6.0',
       networkPaused: settings.networkPaused,
       feed: feedState(),
       keyPrice: keyPrice(),
@@ -554,6 +997,8 @@ export function createMockBridge(opts: MockOptions = {}): MockBridge {
   /** Like the service: every price or rule write tells all windows. */
   function pricesChanged(): void {
     emit('prices.changed', { at: now() });
+    // F15: imports and price writes move each bank's flips and lookFor.
+    banksChanged();
   }
 
   // ---------------------------------------------------------------------------
@@ -576,6 +1021,11 @@ export function createMockBridge(opts: MockOptions = {}): MockBridge {
   function marketRows(known = mockKnownPrices(prices)): MarketRow[] {
     const t = now();
     const kp = keyPrice().valueScrap;
+    // F17: "New on scrap.tf", joined per read like the service's bankStock.newAtFor.
+    const diffs = stockDiffs(kp);
+    const newAt = bankStockNewAt(diffs);
+    // F19: where each row's scrap.tf button points, joined per read like the service's.
+    const sightings = scraptfSeenByBase(diffs);
     const all = [...books.values(), ...extraBooks.values()].filter((b) => !/;p\d/.test(b.item.sku));
     const progress = marketProgress();
     const reached = progress >= 1 ? all.length : Math.floor(all.length * progress);
@@ -585,15 +1035,48 @@ export function createMockBridge(opts: MockOptions = {}): MockBridge {
       const sku = book.item.sku;
       seen.add(sku);
       if (i >= reached) return;
-      const row = mockMarketRow({ item: book.item, book, known: known.get(sku), rules, settings, keyScrap: kp, now: t });
+      const seenAt = sightings.get(sku) ?? null;
+      const row = mockMarketRow({ item: book.item, book, known: known.get(sku), rules, settings, keyScrap: kp, now: t, list: listRowFor(sku, kp), newAt: newAt.get(sku) ?? null, seen: seenAt, listedSince: listedSinceOf(sku, seenAt) });
       if (row) out.push(row);
     });
     // Prices for items the mock has no book for: shown with no buyers.
     for (const [sku, k] of known) {
       if (seen.has(sku)) continue;
       const item = findCatalogItem(sku) ?? { sku, name: k.typed?.name ?? k.page?.name ?? sku, category: guessCategory(sku) };
-      const row = mockMarketRow({ item, book: null, known: k, rules, settings, keyScrap: kp, now: t });
+      const seenAt = sightings.get(sku) ?? null;
+      const row = mockMarketRow({ item, book: null, known: k, rules, settings, keyScrap: kp, now: t, list: listRowFor(sku, kp), newAt: newAt.get(sku) ?? null, seen: seenAt, listedSince: listedSinceOf(sku, seenAt) });
       if (row) out.push(row);
+    }
+    return out;
+  }
+
+  /** F20, MarketRow.scraptfListedSince: the runs of the bank the row was seen on (ScraptfHistory.listedSinceFor). */
+  function listedSinceOf(sku: string, seen: ScraptfSeen | null): UnixMs | null {
+    return seen ? scraptfListedSinceOf(runsFor(seen.bank), sku) : null;
+  }
+
+  /**
+   * F19, MarketRow.scraptfLink as the service joins it: per base SKU, the saved page that last listed it,
+   * a bank's newest stock save that still shows it or the bank of an imported price (preferScraptfSeen:
+   * bank pages before the list). Absent: the row falls back to its category's bank.
+   */
+  function scraptfSeenByBase(diffs: readonly BankStockBankDiff[]): Map<string, ScraptfSeen> {
+    const out = new Map<string, ScraptfSeen>();
+    const add = (sku: string, s: ScraptfSeen): void => {
+      const best = preferScraptfSeen(out.get(sku), s);
+      if (best) out.set(sku, best);
+    };
+    for (const b of diffs) for (const d of b.diff) if (d.current !== null) add(d.sku, { bank: b.bank, at: b.savedAt });
+    for (const p of prices) {
+      const bank = withBank(p).bank;
+      if (!bank) continue;
+      let base = p.sku;
+      try {
+        base = baseSku(p.sku);
+      } catch {
+        // an unparseable SKU is its own base
+      }
+      add(base, { bank, at: p.observedAt });
     }
     return out;
   }
@@ -626,7 +1109,15 @@ export function createMockBridge(opts: MockOptions = {}): MockBridge {
     }
     const importEnabled = settings.import.enabled && settings.import.acknowledgedAt !== null;
     // The service reports the watch as it runs; the mock has no file system, so a chosen folder counts as watched.
-    return { typed, pages, newestPageAt, importEnabled, watchFolder: importEnabled && !!settings.import.watchFolder, coverage: coverage() };
+    return {
+      typed,
+      pages,
+      newestPageAt,
+      importEnabled,
+      watchFolder: importEnabled && !!settings.import.watchFolder,
+      coverage: coverage(),
+      allItems: scraptfListCoverage(listSummary()),
+    };
   }
 
   /** The same rule as the service (scraptfCoverage): a page counts for the bank page most of its items belong to. */
@@ -651,7 +1142,8 @@ export function createMockBridge(opts: MockOptions = {}): MockBridge {
       }
       const book = books.get(base) ?? extraBooks.get(base) ?? null;
       const category = (findCatalogItem(pos.sku) ?? findCatalogItem(base))?.category ?? guessCategory(base);
-      return holdingRow(pos, category, book ? mockHoldingBuySide(book, settings, kp, t) : null, settings.profit, kp);
+      // F14: the saved list row is the held item's scrap.tf exit (bestExitOf).
+      return holdingRow(pos, category, book ? mockHoldingBuySide(book, settings, kp, t) : null, settings.profit, kp, { list: listRowFor(base, kp), now: t });
     });
   }
 
@@ -676,7 +1168,7 @@ export function createMockBridge(opts: MockOptions = {}): MockBridge {
     if (q.search !== undefined && q.search.length > MARKET_MAX_SEARCH_CHARS) bad(`search: at most ${MARKET_MAX_SEARCH_CHARS} characters`);
     const known = mockKnownPrices(prices);
     const all = marketRows(known);
-    const res = mockMarketQuery(all, q);
+    const res = mockMarketQuery(all, q, now());
     return {
       rows: res.rows,
       total: res.total,
@@ -699,6 +1191,8 @@ export function createMockBridge(opts: MockOptions = {}): MockBridge {
     if (changed === 0) return;
     marketChangeAt = now();
     emit('market.changed', { changed, total: next.size, at: marketChangeAt });
+    // F15: market rows feed each bank's lookFor.
+    banksChanged();
   }
 
   /** A buyer re-prices the order a market row sells to, so the Live market visibly moves every few seconds. */
@@ -835,7 +1329,11 @@ export function createMockBridge(opts: MockOptions = {}): MockBridge {
     const known = books.get(sku) ?? extraBooks.get(sku) ?? (findCatalogItem(sku) || prices.some((p) => p.sku === sku) ? bookFor(sku) : null);
     if (!known) return null;
     const t = now();
-    const scrapPrices = prices.filter((p) => p.sku === sku).sort((a, b) => b.observedAt - a.observedAt);
+    const scrapPrices = prices
+      .filter((p) => p.sku === sku)
+      .sort((a, b) => b.observedAt - a.observedAt)
+      .map(withBank);
+    const list = listRowFor(sku);
     const assetId = scrapPrices.find((p) => p.assetId)?.assetId ?? null;
     const blocked = new Set(settings.blocklist);
     const buyOrders = known.buy
@@ -861,6 +1359,13 @@ export function createMockBridge(opts: MockOptions = {}): MockBridge {
         nextAllowedAt: lastRefreshAt && t - lastRefreshAt < 10_000 ? lastRefreshAt + 10_000 : null,
       },
       keyPrice: keyPrice(),
+      scraptfList: list,
+      // As the service: the plain copy's saved list price, which a painted SKU's own prices leave out.
+      scraptfListSaved: list !== null && scraptfListPriceSaved(list, prices.filter((p) => p.sku === list.sku)),
+      // F15: as the service, the bank of the newest imported price shown.
+      seenOn: scraptfSeenOn(scrapPrices),
+      // F17: as the service, this copy in the newest bank-stock save that lists it.
+      bankStock: bankStockItemOf(stockDiffs(keyPrice().valueScrap), sku, keyPrice().valueScrap),
     };
   }
 
@@ -904,6 +1409,155 @@ export function createMockBridge(opts: MockOptions = {}): MockBridge {
     if (!settings.import.enabled) throw new Error('Import is turned off. Enable it on the Import page first.');
   }
 
+  /**
+   * A saved scrap.tf/items page, as the service imports one (F14): every list row is re-dated to the
+   * file (no newer row is replaced), then 'import.done', 'scraptf.listChanged' and 'prices.changed'.
+   * Prices, stock and limits stay as seeded: the mock parses nothing.
+   */
+  function importList(fileName: string, mtimeMs: number): ImportResult {
+    const t = now();
+    const at = Number.isFinite(mtimeMs) && mtimeMs > 0 ? Math.min(Math.round(mtimeMs), t) : t;
+    const batchId = batchSeq++;
+    let stored = 0;
+    listRows = listRows.map((r) => {
+      if (r.observedAt > at) return r;
+      stored++;
+      return { ...r, batchId, observedAt: at };
+    });
+    const outOfStock = listRows.filter((r) => r.batchId === batchId && r.stock === 0);
+    const result: ImportResult = {
+      batchId,
+      fileName,
+      pageKind: 'items-list',
+      parsed: listRows.length,
+      stored: stored - outOfStock.length,
+      skipped: outOfStock.slice(0, 500).map((r) => ({ reason: 'out of stock on scrap.tf', title: r.name })),
+      warnings: ['Mock mode: the saved list is not parsed in the browser preview; the seeded list was re-dated.'],
+      listRows: stored,
+      bank: 'list',
+    };
+    batches.unshift({ id: batchId, fileName, pageKind: 'items-list', fileMtime: at, importedAt: t, itemCount: result.stored, categories: null, bank: 'list' });
+    pricesChanged();
+    // As the service: an older copy that changed no row announces nothing.
+    if (stored > 0) emit('scraptf.listChanged', { at: t, items: listRows.length });
+    changedAndEmit();
+    emit('import.done', result);
+    return result;
+  }
+
+  /**
+   * F18 S3, as the service: a recognised bank page with no card warns 'no-cards-saved', stores nothing
+   * and removes nothing. Its batch keeps the bank and time with 0 items, so the shared rules
+   * (isEmptyBankSave) keep the strip and the banks card on the save before; no bank stock save is made.
+   */
+  function importWithoutCards(fileName: string, mtimeMs: number): ImportResult {
+    const t = now();
+    const at = Number.isFinite(mtimeMs) && mtimeMs > 0 ? Math.min(Math.round(mtimeMs), t) : t;
+    const batchId = batchSeq++;
+    const result: ImportResult = { batchId, fileName, pageKind: 'buy', bank: 'hats', parsed: 0, stored: 0, skipped: [], warnings: [`${NO_CARDS_SAVED}: ${NO_CARDS_SAVED_REASON}`] };
+    batches.unshift({ id: batchId, fileName, pageKind: 'buy', fileMtime: at, importedAt: t, itemCount: 0, categories: {}, bank: 'hats' });
+    pricesChanged();
+    emit('import.done', result);
+    return result;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Live check (F16): as the service, results only (never text), newest first
+  // ---------------------------------------------------------------------------
+
+  let checkSeq = 0;
+  /** F19: main's 'check.arm', in memory (the SKU only: the mock has no watcher to compare the name with). */
+  let checkArmed: { sku: string; until: UnixMs } | null = null;
+
+  /** main's checkArmParams: a SKU and a name (1 to CHECK_ARM_NAME_MAX characters, one line), or null. Fixed messages. */
+  function armCheck(p: unknown): { armedUntil: UnixMs | null } {
+    if (p === null) {
+      checkArmed = null;
+      return { armedUntil: null };
+    }
+    if (typeof p !== 'object') throw new Error('Invalid parameters for check.arm: expected { sku, name } or null');
+    const { sku: rawSku, name: rawName } = p as { sku?: unknown; name?: unknown };
+    const sku = typeof rawSku === 'string' ? rawSku.trim().toLowerCase() : '';
+    if (!sku || sku.length > 300 || !isValidSku(sku)) throw new Error('Invalid parameters for check.arm: sku: not a SKU');
+    if (typeof rawName !== 'string') throw new Error('Invalid parameters for check.arm: name: must be a string');
+    const name = rawName.trim();
+    if (!name) throw new Error('Invalid parameters for check.arm: name: an item name is required');
+    if (name.length > CHECK_ARM_NAME_MAX) throw new Error(`Invalid parameters for check.arm: name: at most ${CHECK_ARM_NAME_MAX} characters`);
+    if (/[\u0000-\u001f\u007f]/.test(name)) throw new Error('Invalid parameters for check.arm: name: not an item name');
+    checkArmed = { sku, until: now() + CHECK_ARM_MS };
+    return { armedUntil: checkArmed.until };
+  }
+
+  /** What main adds to a hotkey or watcher check while armed (never to a manual one). */
+  function armedHint(source: unknown): { sku: string } | null {
+    if (source === 'manual' || checkArmed === null) return null;
+    if (now() >= checkArmed.until) {
+      checkArmed = null;
+      return null;
+    }
+    return { sku: checkArmed.sku };
+  }
+  let recentChecks: CheckResult[] = [];
+
+  /** The service's zod for 'check.text' hint: an object whose SKU passes the SKU rule (fixed messages). */
+  function checkHintOf(hint: unknown): { sku: string } | null {
+    if (hint === undefined) return null;
+    if (!hint || typeof hint !== 'object') throw new Error('Invalid parameters for check.text: hint: expected { sku }');
+    const raw = (hint as { sku?: unknown }).sku;
+    const sku = typeof raw === 'string' ? raw.trim().toLowerCase() : '';
+    if (!sku || sku.length > 300 || !isValidSku(sku)) throw new Error('Invalid parameters for check.text: hint.sku: not a SKU (pick an item first)');
+    return { sku };
+  }
+
+  function liveCheck(text: unknown, source: unknown, rawHint?: unknown): CheckResult {
+    // As the service's zod: fixed messages, never the text.
+    if (typeof text !== 'string') throw new Error('Invalid parameters for check.text: text: must be a string');
+    if (text.length > CHECK_MAX_CHARS) throw new Error(`Invalid parameters for check.text: text: at most ${CHECK_MAX_CHARS} characters`);
+    if (source !== 'hotkey' && source !== 'watch' && source !== 'manual') throw new Error('Invalid parameters for check.text: source: must be hotkey, watch or manual');
+    // The mock plays main too: a hotkey or watcher check while armed carries the arm's hint.
+    const hint = checkHintOf(rawHint) ?? armedHint(source);
+    const t = now();
+    const id = ++checkSeq;
+    const kp = keyPrice().valueScrap;
+    const read = mockParseCheck(text, resolve);
+    let parsed: MockParsedCheck;
+    // F19: only a bare price takes the hinted item; text that names an item wins.
+    let hinted = false;
+    if (read.ok) parsed = read.parsed;
+    else {
+      const hintItem = read.status === 'not-item' && hint ? resolve(hint.sku) : null;
+      const fromHint = hintItem ? mockHintedParse(text, hintItem, source as CheckSource) : null;
+      if (!fromHint) return blankCheckResult(read.status, read.reason, source as CheckSource, t, id, kp);
+      parsed = fromHint;
+      hinted = true;
+    }
+    const sku = parsed.item.sku;
+    let base = sku;
+    try {
+      base = baseSku(sku);
+    } catch {
+      // an unparseable SKU is its own base
+    }
+    // Buyer confidence as the Live market row's (the service reads the market entry).
+    const book = books.get(base) ?? extraBooks.get(base) ?? null;
+    const row = book ? mockMarketRow({ item: book.item, book, known: undefined, rules: [], settings, keyScrap: kp, now: t }) : null;
+    const checked = mockCheckResult({
+      id,
+      source: source as CheckSource,
+      now: t,
+      parsed,
+      detail: detail(sku),
+      keyScrap: kp,
+      settings,
+      confidence: row && row.buyerCount > 0 ? { value: row.confidence, level: row.confidenceLevel } : null,
+    });
+    // The copied price is used, so no sold-out or extras note applies; the name is the resolved item's.
+    const result = hinted ? { ...checked, reason: checkHintedNote(checked.name ?? sku) } : checked;
+    recentChecks = [result, ...recentChecks].slice(0, CHECK_RECENT_MAX);
+    emit('check.done', result);
+    return result;
+  }
+
   const handlers: Handlers = {
     'status.get': () => status(),
     'opps.list': (q) => {
@@ -922,9 +1576,24 @@ export function createMockBridge(opts: MockOptions = {}): MockBridge {
       if (q?.beforeId !== undefined) list = list.filter((e) => e.id < q.beforeId!);
       return [...list].sort((a, b) => b.id - a.id).slice(0, Math.max(1, Math.min(2000, q?.limit ?? 200)));
     },
-    'opps.exportCsv': ({ kind, query, shopping, market, holdings }) => {
+    'opps.exportCsv': ({ kind, query, shopping, market, holdings, bankStock, scraptfChanges }) => {
       const t = now();
       const kp = keyPrice().valueScrap;
+      if (kind === 'scraptfChanges') {
+        // F20, as the service: the feed's filters, newest first; paging does not apply to the file.
+        const { beforeId: _beforeId, limit: _limit, ...filters } = changesQuery(scraptfChanges, 'opps.exportCsv');
+        const rows: unknown[][] = [[...SCRAPTF_CHANGES_CSV_COLUMNS]];
+        for (const e of changesList(filters, SCRAPTF_CHANGES_EXPORT_MAX)) rows.push(scraptfChangeCsvCells(e, kp));
+        return { csv: csv(rows), suggestedName: `flipdesk-scraptf-changes-${stamp(t)}.csv` };
+      }
+      if (kind === 'bankStock') {
+        // As the service: the bank is required; the page's filter, search and sort, paging ignored.
+        if (!bankStock) throw new Error('Invalid parameters for opps.exportCsv: bankStock: required for kind bankStock');
+        const { limit: _limit, offset: _offset, ...filters } = bankStockQuery(bankStock, 'opps.exportCsv');
+        const rows: unknown[][] = [[...BANK_STOCK_CSV_COLUMNS]];
+        for (const r of bankStockMatching(bankStockAll(filters.bank).rows, filters, t)) rows.push(bankStockCsvCells(r, kp));
+        return { csv: csv(rows), suggestedName: `flipdesk-bank-stock-${filters.bank}-${stamp(t)}.csv` };
+      }
       if (kind === 'holdings') {
         const rows: unknown[][] = [[...HOLDINGS_CSV_COLUMNS]];
         for (const r of holdingsMatching(holdingRows(), holdingsQuery(holdings, 'opps.exportCsv'))) rows.push(holdingsCsvCells(r, kp));
@@ -934,7 +1603,7 @@ export function createMockBridge(opts: MockOptions = {}): MockBridge {
         // The page's filters and sort; paging does not apply to the file.
         const { limit: _limit, offset: _offset, ...filters } = market ?? {};
         const rows: unknown[][] = [[...MARKET_CSV_COLUMNS]];
-        for (const r of mockMarketQuery(marketRows(), filters).matched) rows.push(marketCsvCells(r, kp));
+        for (const r of mockMarketQuery(marketRows(), filters, t).matched) rows.push(marketCsvCells(r, kp));
         return { csv: csv(rows), suggestedName: `flipdesk-market-${stamp(t)}.csv` };
       }
       if (kind === 'shopping') {
@@ -999,7 +1668,8 @@ export function createMockBridge(opts: MockOptions = {}): MockBridge {
       const tokens = (p?.q ?? '').toLowerCase().split(/\s+/).filter(Boolean);
       return prices
         .filter((x) => tokens.every((t) => `${x.name} ${x.sku}`.toLowerCase().includes(t)))
-        .sort((a, b) => b.observedAt - a.observedAt);
+        .sort((a, b) => b.observedAt - a.observedAt)
+        .map(withBank);
     },
     'prices.upsert': (input) => {
       if (!input || typeof input.sku !== 'string' || !input.sku.trim()) throw new Error('An item is required.');
@@ -1025,7 +1695,7 @@ export function createMockBridge(opts: MockOptions = {}): MockBridge {
       prices = existing ? prices.map((p) => (p.id === row.id ? row : p)) : [...prices, row];
       pricesChanged();
       changedAndEmit();
-      return row;
+      return withBank(row);
     },
     'prices.delete': ({ id }) => {
       prices = prices.filter((p) => p.id !== id);
@@ -1180,11 +1850,22 @@ export function createMockBridge(opts: MockOptions = {}): MockBridge {
     },
     'import.html': ({ fileName, mtimeMs }) => {
       requireImportEnabled();
-      const result: ImportResult = { batchId: batchSeq++, fileName, pageKind: 'unknown', parsed: 0, stored: 0, skipped: [], warnings: ['Mock mode: saved pages are not parsed in the browser preview.'] };
-      batches.unshift({ id: result.batchId, fileName, pageKind: 'unknown', fileMtime: mtimeMs, importedAt: now(), itemCount: 0 });
+      // A saved scrap.tf/items page ("Items.html", "items_2.html"): the whole list counts as re-saved (F14).
+      if (/items/i.test(fileName)) return importList(fileName, mtimeMs);
+      // F18 S3 in the preview: a hats page "saved without its cards" (a name with "empty" or "no cards").
+      if (/\b(empty|no[ -]?cards)\b/i.test(fileName)) return importWithoutCards(fileName, mtimeMs);
+      const result: ImportResult = { batchId: batchSeq++, fileName, pageKind: 'unknown', bank: null, parsed: 0, stored: 0, skipped: [], warnings: ['Mock mode: saved pages are not parsed in the browser preview.'] };
+      batches.unshift({ id: result.batchId, fileName, pageKind: 'unknown', fileMtime: mtimeMs, importedAt: now(), itemCount: 0, bank: null });
       return result;
     },
     'import.batches': (p) => batches.slice(0, Math.max(1, p?.limit ?? 20)),
+    'scraptf.listStatus': () => listStatus(),
+    'scraptf.banks': () => banksResult(),
+    'scraptf.bankStock': (q) => bankStockList(bankStockQuery(q, 'scraptf.bankStock')),
+    'scraptf.itemHistory': (p) => itemHistory(p),
+    'scraptf.changes': (q) => changesList(changesQuery(q, 'scraptf.changes')),
+    'check.text': (p) => liveCheck(p?.text, p?.source, p?.hint),
+    'check.recent': () => recentChecks,
     'health.get': () => health(),
     // The mock never disables a host, so there is nothing to re-enable.
     'net.unblock': () => ({ ok: true }),
@@ -1197,7 +1878,7 @@ export function createMockBridge(opts: MockOptions = {}): MockBridge {
       return { evaluated: opps.size, ms: lastEngineMs ?? 1 };
     },
     'app.info': (): AppInfo => ({
-      version: '0.3.0',
+      version: '0.6.0',
       dataDir: 'C:\\Users\\you\\AppData\\Roaming\\TF2 Flip Desk',
       logDir: 'C:\\Users\\you\\AppData\\Roaming\\TF2 Flip Desk\\logs',
       platform: 'browser (mock)',
@@ -1206,14 +1887,23 @@ export function createMockBridge(opts: MockOptions = {}): MockBridge {
     }),
     // The mock has no separate service process to restart.
     'app.serviceState': () => ({ state: 'ready', detail: null, nextAttemptAt: null }),
+    // A browser registers no global hotkey: every stored chord counts as held, '' as off.
+    'app.hotkeys': () => ({
+      quickEntry: { accelerator: settings.app.quickEntryHotkey, registered: settings.app.quickEntryHotkey !== '', error: null },
+      check: { accelerator: settings.check.hotkey, registered: settings.check.hotkey !== '', error: null },
+    }),
+    'check.arm': (p) => armCheck(p),
     'app.showQuickEntry': (p) => {
       if (typeof location !== 'undefined') location.hash = '#/quick';
       // Like main: the quick-entry page gets the SKU once it listens.
       // Lower-cased first, as main's ipc.ts does, so 'U17'-style effect letters keep the effect.
       const sku = p && typeof p === 'object' && typeof p.sku === 'string' ? p.sku.trim().toLowerCase() : '';
+      // F16: price text rides along with a SKU only, under main's limits.
+      const price = p && typeof p === 'object' && typeof p.price === 'string' ? p.price.trim() : '';
+      if (price.length > CHECK_PRICE_TEXT_MAX || /[\u0000-\u001f\u007f<>]/.test(price)) throw new Error('Invalid parameters for app.showQuickEntry: price: not a price');
       if (sku) {
         if (!looksLikeSku(sku)) throw new Error('Invalid parameters for app.showQuickEntry: sku: not a SKU');
-        emitHeld('ui.quickPrefill', { sku: canonical(sku) });
+        emitHeld('ui.quickPrefill', price ? { sku: canonical(sku), price } : { sku: canonical(sku) });
       }
       return { ok: true };
     },
@@ -1229,9 +1919,15 @@ export function createMockBridge(opts: MockOptions = {}): MockBridge {
     },
     'settings.get': () => settings,
     'settings.set': (patch) => {
-      settings = mergeSettings(settings, patch);
+      const importBefore = JSON.stringify(settings.import);
+      const next = mergeSettings(settings, patch);
+      // As main's schema (crossFieldProblem): one chord cannot be both global hotkeys.
+      if (sameAccelerator(next.check.hotkey, next.app.quickEntryHotkey)) throw new Error(`Invalid settings: ${CHECK_HOTKEY_CONFLICT}`);
+      settings = next;
       emit('settings.changed', settings);
       changedAndEmit();
+      // F15: importEnabled and watchActive are part of the banks summary.
+      if (JSON.stringify(settings.import) !== importBefore) banksChanged();
       return settings;
     },
     'secrets.status': () => ({ ...secrets }),
@@ -1279,6 +1975,7 @@ export function createMockBridge(opts: MockOptions = {}): MockBridge {
         batchId,
         fileName: 'scrap.tf - Buy Hats.html',
         pageKind: 'buy',
+        bank: 'hats',
         parsed: picks.length + 2,
         stored: picks.length,
         skipped: [
@@ -1287,7 +1984,16 @@ export function createMockBridge(opts: MockOptions = {}): MockBridge {
         ],
         warnings: ['2 cards had unparsed attributes; they were skipped rather than guessed.'],
       };
-      batches.unshift({ id: batchId, fileName: result.fileName, pageKind: 'buy', fileMtime: t - 30_000, importedAt: t, itemCount: picks.length, categories: countCategories(picks.map((c) => c.category)) });
+      batches.unshift({ id: batchId, fileName: result.fileName, pageKind: 'buy', fileMtime: t - 30_000, importedAt: t, itemCount: picks.length, categories: countCategories(picks.map((c) => c.category)), bank: 'hats' });
+      // F17: the page is the hats bank's newest save: the previous newest minus its first row on sale
+      // (gone), with the picked cards at their new prices (new, or cheaper/pricier).
+      const before = stockSavesOf('hats')[0]?.rows ?? [];
+      const picked = new Map(picks.map((item) => [baseSku(item.sku), { sku: baseSku(item.sku), specialKey: '', name: item.name, costKeys: 0, costScrap: Math.max(1, item.value - 4), stock: 1, assetId: null }]));
+      const dropped = before.find((r) => r.costScrap !== null && r.stock !== 0 && !picked.has(r.sku));
+      const kept = before.filter((r) => r !== dropped && !(r.specialKey === '' && picked.has(r.sku)));
+      const written = addStockSave({ bank: 'hats', batchId, savedAt: t - 30_000, rows: [...kept, ...picked.values()] });
+      // F20: as the service, after the bank stock and before the prices.
+      if (written > 0) emit('scraptf.changed', { at: t - 30_000, count: written });
       pricesChanged();
       changedAndEmit();
       emit('import.done', result);
@@ -1305,10 +2011,20 @@ export function createMockBridge(opts: MockOptions = {}): MockBridge {
   // The starting index is not a change; only later feed moves are pushed as 'market.changed'.
   for (const r of marketRows()) if (r.buyerCount > 0) marketSigs.set(r.sku, marketSignature(r));
 
+  // F16: '#/check?demo=flip|over|no-price|not-item' shows a fixed result in the popup page, as main's
+  // 'ui.checkShow' would (held until the page subscribes); changing the hash shows another.
+  const showCheckDemo = (): void => {
+    const demo = typeof location !== 'undefined' ? checkDemoFromHash(location.hash) : null;
+    if (demo) emitHeld('ui.checkShow', mockCheckDemo(demo, now(), keyPrice().valueScrap, settings));
+  };
+  showCheckDemo();
+  if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') window.addEventListener('hashchange', showCheckDemo);
+
   const delay = () => new Promise<void>((res) => setTimeout(res, latency > 0 ? 15 + Math.random() * latency : 0));
 
+  const hash = typeof location !== 'undefined' ? location.hash : '';
   return {
-    windowKind: typeof location !== 'undefined' && location.hash.startsWith('#/quick') ? 'quick-entry' : 'dashboard',
+    windowKind: hash.startsWith('#/quick') ? 'quick-entry' : hash.startsWith('#/check') ? 'check' : 'dashboard',
     async rpc<M extends RpcMethod>(method: M, params: RpcParams<M>): Promise<RpcResult<M>> {
       await delay();
       const h = handlers[method] as Handler<M> | undefined;
@@ -1339,6 +2055,7 @@ export function createMockBridge(opts: MockOptions = {}): MockBridge {
       if (timer) clearInterval(timer);
       timer = null;
       listeners.clear();
+      if (typeof window !== 'undefined' && typeof window.removeEventListener === 'function') window.removeEventListener('hashchange', showCheckDemo);
     },
   };
 }

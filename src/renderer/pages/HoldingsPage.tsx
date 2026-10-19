@@ -1,5 +1,6 @@
 // Holdings (F11): what you still hold from the journal's open FIFO lots, priced
-// live against the backpack.tf buyers in the local book, with who to sell to.
+// live against the backpack.tf buyers in the local book, with who to sell to,
+// or scrap.tf when the user's saved scrap.tf/items list pays more (F14).
 // Reads 'holdings.list' only (no request of its own); the buyer's profile opens
 // in the user's browser through 'links.open'. Recording a sale writes only the
 // user's journal. Nothing here trades, offers or contacts scrap.tf (R1, R4).
@@ -28,8 +29,9 @@ import {
   emptyHoldingsReason,
   heldForText,
   heldForTitle,
+  holdingExitView,
   holdingKeyAction,
-  holdingSellsForTitle,
+  holdingStatusTitle,
   holdingsQuery,
   holdingsSnapshot,
   noBuyerProfileText,
@@ -37,7 +39,10 @@ import {
   plTone,
   profitNowTitle,
   recordSaleInit,
+  recordSaleTitle,
   sanitizeHoldingsSearch,
+  scraptfExitLapseAt,
+  scraptfLapseDelay,
   unitsText,
   worthTitle,
   type HoldingFlash,
@@ -46,7 +51,7 @@ import {
 import { useApp } from '../hooks/appContext';
 import { usePersistentState } from '../hooks/usePersistentState';
 import { useRpcQuery, useThrottled, useVisiblePush } from '../hooks/useRpc';
-import { useDebounced, useNow } from '../hooks/useTimers';
+import { useDebounced, useDocumentVisible, useNow } from '../hooks/useTimers';
 import { isMenuKeyEcho, isSearchShortcut, menuAnchorRect, moveCursor } from '../oppModel';
 
 type MenuPoint = { x: number; y: number };
@@ -77,6 +82,31 @@ function useHoldingsFlash(rows: readonly HoldingRow[] | undefined): HoldingsFlas
   return flash;
 }
 
+/**
+ * F14: a scrap.tf exit ends when its list row turns a day old, and nothing pushes that (the service
+ * judges freshness per read), so status, profit and the totals would keep counting scrap.tf until some
+ * unrelated push. Refetch once when the first scrap.tf exit among `rows` lapses, while the window is
+ * shown (a hidden one catches up when shown). A lapse already refetched for is not chased again, so a
+ * service that still answers 'scraptf' (another clock) cannot start a loop.
+ */
+export function useScraptfExitLapse(rows: readonly HoldingRow[] | undefined, reload: () => Promise<void>): void {
+  const visible = useDocumentVisible();
+  const lapseAt = useMemo(() => (rows ? scraptfExitLapseAt(rows) : null), [rows]);
+  const done = useRef<number | null>(null);
+  useEffect(() => {
+    if (lapseAt === null || !visible || done.current === lapseAt) return;
+    const now = Date.now();
+    const delay = scraptfLapseDelay(lapseAt, now);
+    // Cut short by the one-day cap: the answer re-arms this with the time left.
+    const capped = lapseAt - now > delay;
+    const t = setTimeout(() => {
+      if (!capped) done.current = lapseAt;
+      void reload();
+    }, delay);
+    return () => clearTimeout(t);
+  }, [rows, lapseAt, visible, reload]);
+}
+
 export function HoldingsPage() {
   const { keyScrap: statusKey, settings, status, openItem, navigate, toast, updateSettings, itemSku } = useApp();
   const [searchText, setSearchText] = usePersistentState<string>('holdings.search', '', sanitizeHoldingsSearch);
@@ -97,6 +127,9 @@ export function HoldingsPage() {
   useVisiblePush('market.changed', reload);
   useVisiblePush('prices.changed', reload);
   useVisiblePush('journal.changed', reloadSoon);
+  // F14: a saved scrap.tf list (or maintenance dropping old rows) moves scrap.tf exits without a
+  // market or price push of its own.
+  useVisiblePush('scraptf.listChanged', reload);
   // Status and Pay up to follow settings.profit and the blocklist, read by the service on each list;
   // main hands the service new settings before it tells this window, so a refetch sees them.
   const profitSettings = settings?.profit;
@@ -109,6 +142,7 @@ export function HoldingsPage() {
   }, [profitSettings, blocklist, reloadSoon]);
 
   const data = list.data;
+  useScraptfExitLapse(data?.rows, list.reload);
   const flash = useHoldingsFlash(data?.rows);
   const keyScrap = data?.keyPrice?.valueScrap ?? statusKey;
   const profit = settings?.profit ?? null;
@@ -120,9 +154,12 @@ export function HoldingsPage() {
   menuRef.current = menu.open;
   const tradeRef = useRef(trade.open);
   tradeRef.current = trade.open;
+  // The key price the rows are valued at: a scrap.tf exit's price is split into keys and metal at it.
+  const keyRef = useRef(keyScrap);
+  keyRef.current = keyScrap;
   const onOpen = useCallback((r: HoldingRow) => openItem(r.sku), [openItem]);
-  const onMenu = useCallback((r: HoldingRow, at: MenuPoint) => menuRef.current({ sku: r.sku, name: r.name }, at), []);
-  const onRecordSale = useCallback((r: HoldingRow) => tradeRef.current(recordSaleInit(r)), []);
+  const onMenu = useCallback((r: HoldingRow, at: MenuPoint) => menuRef.current({ sku: r.sku, name: r.name, category: r.category }, at), []);
+  const onRecordSale = useCallback((r: HoldingRow) => tradeRef.current(recordSaleInit(r, keyRef.current, Date.now())), []);
   const onOpenBuyer = useCallback((r: HoldingRow) => {
     const url = buyerProfileUrl(r);
     // The b key reaches rows without a buyer too; say why nothing opens.
@@ -284,7 +321,7 @@ export function HoldingsTotals({ data, keyScrap, profit }: { data: HoldingsResul
         <div className="stat-label">Unrealised P/L</div>
         <div className="stat-value">{t ? <Money scrap={t.profitNowScrap} keyScrap={keyScrap} tone="profit" signed title={plTitle(t, keyScrap, profit)} /> : DASH}</div>
       </div>
-      <div className={`stat card${t && t.sellable > 0 ? ' holdings-sellable tone-good' : ''}`} title="Items whose oldest unit clears your profit thresholds against today's best buyer">
+      <div className={`stat card${t && t.sellable > 0 ? ' holdings-sellable tone-good' : ''}`} title="Items whose oldest unit clears your profit thresholds at its better exit: today's best buyer, or scrap.tf by your saved price list">
         <div className="stat-label">Sellable now</div>
         <div className="stat-value">
           {t ? (
@@ -350,9 +387,9 @@ const HEAD: readonly { cls: string; label: string; title?: string }[] = [
   { cls: 'h-qty num', label: 'Qty', title: 'Units still held (open buys not matched by a sale)' },
   { cls: 'h-cost num', label: 'Your cost', title: 'What the oldest unit cost you: the one a sale closes first (FIFO). Hover a cell for the total.' },
   { cls: 'h-held num', label: 'Held for', title: 'Since you bought the oldest unit' },
-  { cls: 'h-sells', label: 'Sells now for', title: 'The buy order your settings sell to, and who placed it' },
+  { cls: 'h-sells', label: 'Sells now for', title: 'The better exit now: the buy order your settings sell to and who placed it, or scrap.tf when your saved price list pays more' },
   { cls: 'h-buyers num', label: 'Buyers', title: 'Distinct buyers with eligible orders' },
-  { cls: 'h-profit', label: 'Profit now', title: 'Selling the oldest unit to that buyer now, after friction' },
+  { cls: 'h-profit', label: 'Profit now', title: 'Selling the oldest unit at the better exit now (that buyer, or scrap.tf), after friction' },
   { cls: 'h-conf', label: 'Confidence', title: 'How far the buy side can be trusted' },
   { cls: 'h-updated num', label: 'Updated', title: 'Last change to an eligible buy order' },
   { cls: 'h-actions', label: '' },
@@ -544,6 +581,8 @@ const HoldingItemRow = memo(function HoldingItemRow({
   const bad = r.flags.map(flagInfo).filter((f) => f.tone === 'bad');
   const cost = costTitle(r, keyScrap);
   const profitTitle = profitNowTitle(r, keyScrap, profit);
+  // F14: the better exit (a buyer, or scrap.tf by the saved list) and what the other venue offers.
+  const exit = holdingExitView(r, keyScrap, now);
   const flashCls = flash ? ` flash-${flash} flash-${flashOdd ? 'b' : 'a'}` : '';
   return (
     <div
@@ -581,32 +620,41 @@ const HoldingItemRow = memo(function HoldingItemRow({
       <div role="gridcell" className="h-held num muted" title={heldForTitle(r)}>
         {heldForText(r, now)}
       </div>
-      <div role="gridcell" className="h-sells" title={holdingSellsForTitle(r, keyScrap)}>
-        <Money scrap={r.revenueScrap} keyScrap={keyScrap} title={holdingSellsForTitle(r, keyScrap)} />
-        {order ? (
-          <span className="buyer-type">
-            <OnlineDot online={order.online} />
-            <Icon name={order.isBot ? 'bolt' : 'user'} size={12} title={order.isBot ? 'Bot' : 'Human'} />
-          </span>
-        ) : null}
-        {order && profileUrl ? (
-          <button
-            type="button"
-            className="link-btn buyer-link"
-            tabIndex={-1}
-            title={`Open ${buyerName(order)}'s backpack.tf profile in your browser (b). The app never trades for you.`}
-            onClick={(e) => {
-              e.stopPropagation();
-              onSelect(r.sku);
-              onOpenBuyer(r);
-            }}
-          >
-            <span className="buyer-name">{buyerName(order)}</span>
-            <Icon name="external" size={11} />
-          </button>
-        ) : order ? (
-          <span className="buyer-name muted">{buyerName(order)}</span>
-        ) : null}
+      <div role="gridcell" className={`h-sells${exit.sub ? ' has-sub' : ''}`} title={exit.title}>
+        <div className="h-sells-main">
+          <Money scrap={exit.priceScrap} keyScrap={keyScrap} title={exit.title} />
+          {exit.scraptf ? (
+            <span className="pill tone-info exit-pill">scrap.tf</span>
+          ) : (
+            <>
+              {order ? (
+                <span className="buyer-type">
+                  <OnlineDot online={order.online} />
+                  <Icon name={order.isBot ? 'bolt' : 'user'} size={12} title={order.isBot ? 'Bot' : 'Human'} />
+                </span>
+              ) : null}
+              {order && profileUrl ? (
+                <button
+                  type="button"
+                  className="link-btn buyer-link"
+                  tabIndex={-1}
+                  title={`Open ${buyerName(order)}'s backpack.tf profile in your browser (b). The app never trades for you.`}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onSelect(r.sku);
+                    onOpenBuyer(r);
+                  }}
+                >
+                  <span className="buyer-name">{buyerName(order)}</span>
+                  <Icon name="external" size={11} />
+                </button>
+              ) : order ? (
+                <span className="buyer-name muted">{buyerName(order)}</span>
+              ) : null}
+            </>
+          )}
+        </div>
+        {exit.sub ? <div className={`h-sells-sub${exit.sub.tone === 'warn' ? ' tone-text-warn' : ''}`}>{exit.sub.text}</div> : null}
       </div>
       <div role="gridcell" className={`h-buyers num${r.buyerCount === 0 ? ' muted' : ''}`}>
         {fmtInt(r.buyerCount)}
@@ -614,7 +662,9 @@ const HoldingItemRow = memo(function HoldingItemRow({
       <div role="gridcell" className="h-profit" title={profitTitle}>
         {flash ? <Icon name={flash === 'up' ? 'arrowUp' : 'arrowDown'} size={11} className={`flash-arrow tone-text-${flash === 'up' ? 'good' : 'bad'}`} title={flash === 'up' ? 'Went up' : 'Went down'} /> : null}
         {r.profitNowScrap !== null ? <Money scrap={r.profitNowScrap} keyScrap={keyScrap} tone="profit" signed title={profitTitle} /> : null}
-        <span className={`pill holding-pill tone-${HOLDING_STATUS_TONES[r.status]}`}>{HOLDING_STATUS_LABELS[r.status]}</span>
+        <span className={`pill holding-pill tone-${HOLDING_STATUS_TONES[r.status]}`} title={holdingStatusTitle(r)}>
+          {HOLDING_STATUS_LABELS[r.status]}
+        </span>
       </div>
       <div role="gridcell" className="h-conf">
         {r.revenueScrap !== null ? <ConfidenceBadge score={r.confidence} level={r.confidenceLevel} compact /> : <span className="muted">{DASH}</span>}
@@ -627,7 +677,7 @@ const HoldingItemRow = memo(function HoldingItemRow({
           type="button"
           className={`btn small${r.status === 'sell' ? ' primary' : ''}`}
           tabIndex={-1}
-          title={order ? `Record a sale in your journal, prefilled for ${buyerName(order)} (s)` : 'Record a sale in your journal (s)'}
+          title={recordSaleTitle(r)}
           onClick={(e) => {
             e.stopPropagation();
             // Focus moves to the grid first (its onFocus may pick a row); this row is selected last.

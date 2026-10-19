@@ -121,6 +121,26 @@ describe('preload bridge', () => {
     await expect(bridge.rpc('holdings.list', {})).resolves.toEqual({ rows: [] });
   });
 
+  it('accepts the scrap.tf price list push (scraptf.listChanged) and allows scraptf.listStatus (F14)', async () => {
+    const { bridge } = await load();
+    const l = vi.fn();
+    bridge.on('scraptf.listChanged', l);
+    electron.pushListener!({}, 'scraptf.listChanged', { at: 7, items: 2341 });
+    expect(l).toHaveBeenCalledWith({ at: 7, items: 2341 });
+    electron.invoke.mockResolvedValueOnce({ ok: true, result: { items: 2341 } });
+    await expect(bridge.rpc('scraptf.listStatus', undefined)).resolves.toEqual({ items: 2341 });
+  });
+
+  it('accepts the banks push (scraptf.banksChanged) and allows scraptf.banks (F15)', async () => {
+    const { bridge } = await load();
+    const l = vi.fn();
+    bridge.on('scraptf.banksChanged', l);
+    electron.pushListener!({}, 'scraptf.banksChanged', { at: 9 });
+    expect(l).toHaveBeenCalledWith({ at: 9 });
+    electron.invoke.mockResolvedValueOnce({ ok: true, result: { banks: [] } });
+    await expect(bridge.rpc('scraptf.banks', undefined)).resolves.toEqual({ banks: [] });
+  });
+
   it('never hands the IPC event object to listeners', async () => {
     const { bridge } = await load();
     const l = vi.fn();

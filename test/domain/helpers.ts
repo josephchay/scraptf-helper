@@ -229,6 +229,7 @@ export function createStubSchema(opts: StubSchemaOptions = {}): SchemaService & 
     isLoaded: () => opts.loaded ?? true,
     health: () => health,
     itemByDefindex: (d) => items.get(d) ?? null,
+    itemQuality: (d) => (items.has(d) ? 6 : null),
     nameForSku: (sku) => {
       count('nameForSku');
       return nameForSku(sku);

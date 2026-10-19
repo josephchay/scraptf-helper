@@ -63,8 +63,11 @@ const MANN_CO_CRATE_SERIES: ReadonlyMap<number, readonly number[]> = new Map([
 const SALVAGED_CRATE = 5068;
 const SALVAGED_SERIES: readonly number[] = [30, 40, 50];
 const SELECT_RESERVE_CRATE = 5660;
-/** Director's Cut Reel, Audition Reel and Stockpile Crate have no series (upstream checkExistence). */
-const SERIESLESS_CRATES: ReadonlySet<number> = new Set([5737, 5738, 5739, 5760]);
+/**
+ * Director's Cut Reel, Audition Reel and Stockpile Crate have no series (upstream checkExistence). The
+ * saved-page parser reads it too: every other crate is priced per series.
+ */
+export const SERIESLESS_CRATES: ReadonlySet<number> = new Set([5737, 5738, 5739, 5760]);
 
 /** Mann Co. Supply Munition series -> defindex (upstream munitionCrate). */
 const MUNITION_CRATES: ReadonlyMap<number, number> = new Map([

@@ -161,21 +161,22 @@ export function scoreConfidence(input: ConfidenceInput): ConfidenceResult {
 
   // F5: with few orders and no usable reference nothing checks the price, and a huge
   // margin is then most likely a unit or variant mix-up. Kept visible, never notified.
-  const suspect = suspectMarginOf(input.profit.suspectMargin);
-  const margin = input.margin;
-  if (
-    suspect > 0 &&
-    typeof margin === 'number' &&
-    !Number.isNaN(margin) &&
-    margin > suspect &&
-    input.eligible.length < SUSPECT_MIN_ORDERS &&
-    !hasReferenceValue(refs)
-  ) {
+  if (isSuspectMargin(input.margin, input.eligible.length, hasReferenceValue(refs), input.profit.suspectMargin)) {
     flag('suspect-margin');
     score = Math.min(score, LOW_CAP);
-    reasons.push(`Margin over ${Math.round(suspect * 100)}% with no reference and few buyers. Check the variant and units`);
+    reasons.push(`Margin over ${Math.round(suspectMarginOf(input.profit.suspectMargin) * 100)}% with no reference and few buyers. Check the variant and units`);
   }
   return { score, level: confidenceLevel(score), reasons, flags };
+}
+
+/**
+ * F5's suspect-margin rule: a margin above profit.suspectMargin (Infinity for a free item with a
+ * profit) with fewer than SUSPECT_MIN_ORDERS eligible orders and no usable reference. Shared with the
+ * "New on scrap.tf" notifications (F17), which read the Live market entry instead of an opportunity.
+ */
+export function isSuspectMargin(margin: number | null | undefined, eligibleCount: number, referenced: boolean, suspectMargin: number | undefined): boolean {
+  const suspect = suspectMarginOf(suspectMargin);
+  return suspect > 0 && typeof margin === 'number' && !Number.isNaN(margin) && margin > suspect && eligibleCount < SUSPECT_MIN_ORDERS && !referenced;
 }
 
 /** 0 turns the guard off; a missing or broken value uses the default (200%). */

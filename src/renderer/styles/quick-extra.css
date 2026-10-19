@@ -1,4 +1,4 @@
-/* Quick entry: live preview, pay-up-to and link row (F2); "Bought it" after Save (F12). */
+/* Quick entry: live preview, pay-up-to and link row (F2); "Bought it" after Save (F12); the scrap.tf price list hint (F14). */
 
 /* The key hints give way before the title when the window is narrow (mock pill shown). */
 .quick-head h1 {
@@ -114,6 +114,27 @@
 .qp-copy .btn.small {
   height: 22px;
   padding: 0 6px;
+}
+
+/* ---------- scrap.tf price list hint (F14) ---------- */
+
+/* "sells 1.33 ref · stock 2, saved 3 min ago" gives way before its Use button in a narrow window. */
+.qp-list {
+  flex-wrap: nowrap;
+}
+
+.qp-list-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.qp-list .qp-use {
+  flex-shrink: 0;
+  height: 22px;
+  padding: 0 8px;
 }
 
 /* ---------- after Save: "Bought it" (F12) ---------- */

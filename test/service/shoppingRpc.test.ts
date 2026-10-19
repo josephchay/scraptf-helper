@@ -19,7 +19,7 @@ const mocks = vi.hoisted(() => ({
 vi.mock('../../src/service/domain/shopping', () => mocks);
 
 const NOW = Date.UTC(2026, 9, 14, 12, 0, 0);
-const KEY: KeyPriceState = { valueScrap: 450, source: 'bptf', observedAt: NOW, stale: false, quotes: [] };
+const KEY: KeyPriceState = { valueScrap: 450, source: 'bptf', observedAt: NOW, stale: false, quotes: [], scraptfFromList: null };
 
 let repo: Repo;
 let rpc: RpcHandler;

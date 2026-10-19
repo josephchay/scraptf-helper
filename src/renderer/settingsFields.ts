@@ -2,9 +2,14 @@
 // settings schema accepts, so a value that passes here is never rejected
 // there (a rejected value would otherwise look saved). Pure: unit tested.
 
-import { isReservedAccelerator, isValidAccelerator } from '../shared/accelerator';
-import type { InputKind } from '../shared/types';
-import { isValidContactUrl } from './format';
+import { isReservedAccelerator, isValidAccelerator, sameAccelerator } from '../shared/accelerator';
+import { BANK_STOCK_MAX_NOTIFICATIONS, BANK_STOCK_NOTIFY_DEDUP_MS } from '../shared/bankStock';
+import { CHECK_PRIVACY_SENTENCE } from '../shared/check';
+import type { HotkeyState } from '../shared/rpc';
+import { SCRAPTF_RESAVE_MAX_MIN } from '../shared/scraptfHistory';
+import { SCRAPTF_BANK_IDS } from '../shared/types';
+import type { InputKind, ScraptfBank, ScraptfListKey, Settings, UnixMs } from '../shared/types';
+import { accelLabel, fmtAgo, fmtDateTime, fmtRefOnly, isValidContactUrl } from './format';
 
 /** Plain decimal text; Number() alone also takes '', '0x10' and '1e3' (and '' becomes 0). */
 const DECIMAL = /^\s*[-+]?(\d+\.?\d*|\.\d+)\s*$/;
@@ -91,6 +96,103 @@ export function holdingsNotifyHint(notificationsOn: boolean): string {
   return notificationsOn ? base : `Desktop notifications are off, so this shows nothing until they are on. ${base}`;
 }
 
+/** notifications.newOnScraptf (F17): new flips on a scrap.tf bank page the user saved. */
+export const NEW_ON_SCRAPTF_NOTIFY_LABEL = 'New flips on scrap.tf pages you save';
+
+/**
+ * The switch's description. The service also needs desktop notifications on, "Imported pages" under
+ * Notify for, and saved-page import (behind its acknowledgement): each missing one is said first.
+ */
+export function newOnScraptfNotifyHint(a: { notificationsOn: boolean; importKind: boolean; importOn: boolean }): string {
+  const dedupMin = Math.round(BANK_STOCK_NOTIFY_DEDUP_MS / 60_000);
+  const base =
+    `When a scrap.tf page you save has new items that are flips: "New on scrap.tf (Hats): <name>". ` +
+    `At most ${BANK_STOCK_MAX_NOTIFICATIONS} per save, then one summary; each item once per page every ${dedupMin} minutes. A first save of a page notifies nothing. ` +
+    'Uses the minimum confidence and profit above. The app never visits scrap.tf.';
+  const missing: string[] = [];
+  if (!a.notificationsOn) missing.push('Desktop notifications are off');
+  if (!a.importKind) missing.push('"Imported pages" is not ticked under Notify for');
+  if (!a.importOn) missing.push('saved-page import is off (Import)');
+  if (!missing.length) return base;
+  const first = missing[0]!;
+  const list = [first.charAt(0).toUpperCase() + first.slice(1), ...missing.slice(1)];
+  const said = list.length === 1 ? list[0]! : `${list.slice(0, -1).join(', ')} and ${list[list.length - 1]!}`;
+  return `${said}, so this shows nothing yet. ${base}`;
+}
+
+// ---------------------------------------------------------------------------
+// Re-save reminders (F20 S5/U4): settings.import.resaveReminderMin and resaveBanks. The app cannot
+// refresh scrap.tf; a reminder only tells the user to save the page again (SCRAPTF_RESAVE_HELP).
+// ---------------------------------------------------------------------------
+
+/** The schema's range: whole minutes, 0 (off) to a day. */
+export const RESAVE_MINUTES = { min: 0, max: SCRAPTF_RESAVE_MAX_MIN } as const;
+
+/** Whole minutes 0..1440, as the schema's int; an empty field is not 0 here (it says how to turn reminders off). */
+export function validateResaveMinutes(v: string): string | null {
+  const t = v.trim();
+  if (t === '') return 'Enter the minutes; 0 turns reminders off.';
+  if (!/^\d+$/.test(t)) return `Whole minutes, ${RESAVE_MINUTES.min} to ${RESAVE_MINUTES.max}.`;
+  if (Number(t) > RESAVE_MINUTES.max) return `At most ${RESAVE_MINUTES.max} minutes (a day).`;
+  return null;
+}
+
+/** Field text (already validated) to the stored minutes. */
+export function resaveMinutesOf(v: string): number {
+  const n = Math.round(Number(v.trim()));
+  return Number.isFinite(n) ? Math.min(RESAVE_MINUTES.max, Math.max(RESAVE_MINUTES.min, n)) : 0;
+}
+
+/** The ticked boxes: [] (the default) means every bank, so every box shows ticked. */
+export function resaveBanksShown(stored: readonly ScraptfBank[] | null | undefined): ScraptfBank[] {
+  const set = new Set(stored ?? []);
+  return set.size === 0 ? [...SCRAPTF_BANK_IDS] : SCRAPTF_BANK_IDS.filter((b) => set.has(b));
+}
+
+/**
+ * The resaveBanks to save after one box is ticked or unticked, in SCRAPTF_BANKS order, or null when it
+ * would leave none: [] means every bank, so the last box stays ticked (minutes 0 turns reminders off).
+ * Every box ticked saves [], which also takes in a bank saved for the first time later.
+ */
+export function setResaveBank(stored: readonly ScraptfBank[] | null | undefined, bank: ScraptfBank, on: boolean): ScraptfBank[] | null {
+  const want = new Set(resaveBanksShown(stored));
+  if (on) want.add(bank);
+  else want.delete(bank);
+  const next = SCRAPTF_BANK_IDS.filter((b) => want.has(b));
+  if (next.length === 0) return null;
+  return next.length === SCRAPTF_BANK_IDS.length ? [] : next;
+}
+
+export const RESAVE_LAST_BANK_TITLE = 'Keep at least one bank ticked. To stop the reminders, set the minutes to 0.';
+
+/** Under the bank boxes: what the stored list means. */
+export function resaveBanksHint(stored: readonly ScraptfBank[] | null | undefined): string {
+  return !stored || stored.length === 0
+    ? 'Every bank you have saved at least once, including ones you save later. Never a bank you have not saved.'
+    : 'Only the ticked banks, and only once you have saved them at least once.';
+}
+
+/**
+ * The minutes field's description: what a reminder does, then (first) whatever keeps it silent: import
+ * off, desktop notifications off, the network paused, like the service's gates.
+ */
+export function resaveReminderHint(a: { minutes: number; importOn: boolean; notificationsOn: boolean; networkPaused: boolean }): string {
+  if (!Number.isFinite(a.minutes) || a.minutes < 1) {
+    return 'Off. Enter the minutes after which a bank you have saved, but not since, gets a desktop notification to save it again.';
+  }
+  const m = Math.round(a.minutes);
+  const base =
+    `A desktop notification for each bank below that you have saved, once it has not been saved for ${m} ${m === 1 ? 'minute' : 'minutes'}, then at most once every ${m} ${m === 1 ? 'minute' : 'minutes'} until you save it: ` +
+    '"Re-save scrap.tf/buy/hats". Clicking it opens that page in your browser. Silent notifications apply.';
+  const missing: string[] = [];
+  if (!a.importOn) missing.push('saved-page import is off (Import)');
+  if (!a.notificationsOn) missing.push('desktop notifications are off (Notifications)');
+  if (a.networkPaused) missing.push('the network is paused');
+  if (!missing.length) return base;
+  const said = missing.length === 1 ? missing[0]! : `${missing.slice(0, -1).join(', ')} and ${missing[missing.length - 1]!}`;
+  return `${said.charAt(0).toUpperCase()}${said.slice(1)}, so none come yet. ${base}`;
+}
+
 export const HOTKEY_HINT_ERROR = 'Needs Ctrl, Alt or Win plus a key (an F-key works alone), e.g. CommandOrControl+Alt+F. Leave it empty to turn the shortcut off.';
 
 /** Empty turns the global shortcut off, as main and the schema allow. */
@@ -101,6 +203,96 @@ export function validateHotkey(v: string): string | null {
   return HOTKEY_HINT_ERROR;
 }
 
+// ---------------------------------------------------------------------------
+// Live check (F16): its hotkey must not be the quick-entry one (main refuses that too,
+// CHECK_HOTKEY_CONFLICT in settingsSchema.ts: one global registration per chord).
+// ---------------------------------------------------------------------------
+
+export const CHECK_HOTKEY_CONFLICT_ERROR = 'That is the quick-entry hotkey. The live check needs a shortcut of its own.';
+export const QUICK_HOTKEY_CONFLICT_ERROR = 'That is the live check hotkey. Pick another, or change the live check hotkey first.';
+
+/** The check hotkey: the quick-entry rules, and never the quick-entry chord ("Ctrl+Alt+C" equals "CommandOrControl+Alt+C"). */
+export function validateCheckHotkey(v: string, quickEntryHotkey: string): string | null {
+  const base = validateHotkey(v);
+  if (base) return base;
+  return sameAccelerator(v.trim(), quickEntryHotkey) ? CHECK_HOTKEY_CONFLICT_ERROR : null;
+}
+
+/** The quick-entry hotkey, the other way round. */
+export function validateQuickEntryHotkey(v: string, checkHotkey: string): string | null {
+  const base = validateHotkey(v);
+  if (base) return base;
+  return sameAccelerator(v.trim(), checkHotkey) ? QUICK_HOTKEY_CONFLICT_ERROR : null;
+}
+
+/** The last save of the check hotkey in this session: main registers it before saving, so a failure is never stored. */
+export interface CheckHotkeySave {
+  hotkey: string;
+  error: string | null;
+}
+
+export interface CheckHotkeyStatus {
+  tone: 'good' | 'bad' | 'muted';
+  pill: string;
+  text: string;
+}
+
+/** `held` is main's registration of `hotkey` itself ('app.hotkeys'): never one left from an older chord. */
+function heldFor(hotkey: string, held: HotkeyState | null | undefined): HotkeyState | null {
+  if (!held || !hotkey) return null;
+  return held.accelerator === hotkey || sameAccelerator(held.accelerator, hotkey) ? held : null;
+}
+
+/**
+ * Registration status beside the field: on (with the chord), off, why the last change was refused, or
+ * main's own word that the stored chord is not held ('app.hotkeys': taken by another app at start-up).
+ */
+export function checkHotkeyStatus(hotkey: string, last: CheckHotkeySave | null, held: HotkeyState | null = null): CheckHotkeyStatus {
+  const current = hotkey.trim();
+  const keep = current ? `Still using ${accelLabel(current)}.` : 'The hotkey stays off.';
+  if (last?.error && last.hotkey.trim() !== current) {
+    return { tone: 'bad', pill: 'Not changed', text: `Could not use ${last.hotkey.trim() ? accelLabel(last.hotkey.trim()) : 'that'}: ${last.error} ${keep}` };
+  }
+  if (!current) return { tone: 'muted', pill: 'Off', text: 'Off. Enter a shortcut such as CommandOrControl+Alt+C to turn it on.' };
+  const reg = heldFor(current, held);
+  if (reg && !reg.registered && reg.error) {
+    return { tone: 'bad', pill: 'Unavailable', text: `${accelLabel(current)} is not working: ${reg.error} Pick another shortcut; the clipboard check and the box on the Live market still work.` };
+  }
+  if (reg && !reg.registered) {
+    return { tone: 'muted', pill: 'Not active', text: `${accelLabel(current)} is saved but not registered right now. It is registered when the app starts or when you change it.` };
+  }
+  return {
+    tone: 'good',
+    pill: 'On',
+    text: `Copy an item while you browse, then press ${accelLabel(current)}: the clipboard is read once, on this computer. Electron accelerator format; leave it empty to turn it off.`,
+  };
+}
+
+/** The quick-entry field's error when main could not register its stored chord (start-up included); null otherwise. */
+export function quickHotkeyProblem(hotkey: string, held: HotkeyState | null | undefined): string | null {
+  const reg = heldFor(hotkey.trim(), held);
+  return reg && !reg.registered && reg.error ? `${accelLabel(hotkey.trim())} is not working: ${reg.error} Pick another shortcut.` : null;
+}
+
+export const CHECK_WATCH_LABEL = 'Watch the clipboard';
+
+/** The watch switch's description: the privacy sentence first (it is shown with the switch), then when it pauses. */
+export function checkWatchHint(on: boolean, networkPaused: boolean): string {
+  const base = `${CHECK_PRIVACY_SENTENCE} Off by default. It only reacts to new text, ignores anything that looks like a password or key and any link that is not an item link, and pauses while the screen is locked. You can also switch it off from the tray menu.`;
+  return on && networkPaused ? `${base} Paused now: the network is paused.` : base;
+}
+
+export const CHECK_NOTIFY_LABEL = 'Notify me about flips the watcher finds';
+
+export function checkNotifyHint(notificationsOn: boolean): string {
+  const base = 'A desktop notification for flips only, at most once a minute per item. Silent notifications apply.';
+  return notificationsOn ? base : `Desktop notifications are off (Notifications above), so this shows nothing until they are on. ${base}`;
+}
+
+export const CHECK_POPUP_LABEL = 'Show the check popup';
+export const CHECK_POPUP_HINT =
+  'A small window at the bottom right with the price, what it sells for and Pay up to. It hides itself after 10 s unless you point at it. When off, the watcher only notifies; the hotkey still shows its result.';
+
 export const CONTACT_ERROR = 'Use an https:// address or mailto:, in plain ASCII without spaces or parentheses, at most 200 characters.';
 
 export function validateContactUrl(v: string): string | null {
@@ -110,4 +302,161 @@ export function validateContactUrl(v: string): string | null {
 /** What the service sends (src/service/net/http.ts buildUserAgent) for a saved contact. */
 export function userAgentPreview(version: string, contactUrl: string): string {
   return `TF2FlipDesk/${version} (+${contactUrl.trim() || 'no-contact-set'})`;
+}
+
+// ---------------------------------------------------------------------------
+// Key price: scrap.tf's key prices from the saved scrap.tf/items list (F14)
+// ---------------------------------------------------------------------------
+
+/** keyprice.ts's sanity range: a key outside 2..2000 ref is a broken value, not a key price. */
+const KEY_SANE_SCRAP = { min: 18, max: 18_000 } as const;
+
+function saneKey(v: unknown): number | null {
+  return typeof v === 'number' && Number.isFinite(v) && v >= KEY_SANE_SCRAP.min && v <= KEY_SANE_SCRAP.max ? Math.round(v) : null;
+}
+
+type TypedScraptfKey = Pick<Settings['keyPrice'], 'scraptfBuyScrap' | 'scraptfSellScrap' | 'scraptfObservedAt'>;
+
+/**
+ * Whether the saved list's key row supplies scrap.tf's key prices: the service's effectiveScraptfKey
+ * rule (keyprice.ts), replicated because the dashboard cannot import service code. The list wins
+ * when it has a usable price and the typed values are missing, undated or older.
+ */
+export function scraptfListKeyInUse(list: ScraptfListKey | null | undefined, typed: TypedScraptfKey): boolean {
+  if (!list || !Number.isFinite(list.observedAt) || (saneKey(list.paysScrap) === null && saneKey(list.sellsScrap) === null)) return false;
+  const hasTyped = saneKey(typed.scraptfSellScrap) !== null || saneKey(typed.scraptfBuyScrap) !== null;
+  const at = typed.scraptfObservedAt;
+  return !hasTyped || typeof at !== 'number' || !Number.isFinite(at) || list.observedAt > at;
+}
+
+/** Where each of scrap.tf's key prices comes from: the saved list, the typed values, or nowhere. */
+export interface ScraptfListKeySources {
+  /** What scrap.tf pays for a key (caps the automatic key price). */
+  pays: 'list' | 'settings' | null;
+  /** What scrap.tf charges for a key (display only). */
+  sells: 'list' | 'settings' | null;
+}
+
+/**
+ * Per price, effectiveScraptfKey's pick (keyprice.ts): the newer source supplies what it has and a
+ * price it lacks comes from the other. So a list older than the typed values still supplies what
+ * scrap.tf pays when none is typed, and that one caps the automatic key price.
+ */
+export function scraptfListKeySources(list: ScraptfListKey | null | undefined, typed: TypedScraptfKey): ScraptfListKeySources {
+  const listPays = list ? saneKey(list.paysScrap) : null;
+  const listSells = list ? saneKey(list.sellsScrap) : null;
+  const typedPays = saneKey(typed.scraptfSellScrap);
+  const typedSells = saneKey(typed.scraptfBuyScrap);
+  const pick = (first: 'list' | 'settings', a: number | null, b: number | null): 'list' | 'settings' | null =>
+    a !== null ? first : b !== null ? (first === 'list' ? 'settings' : 'list') : null;
+  if (scraptfListKeyInUse(list, typed)) return { pays: pick('list', listPays, typedPays), sells: pick('list', listSells, typedSells) };
+  if (typedPays === null && typedSells === null) return { pays: null, sells: null };
+  return { pays: pick('settings', typedPays, listPays), sells: pick('settings', typedSells, listSells) };
+}
+
+/** One of Data health's key price rows for scrap.tf's own key prices (F14). */
+export interface ScraptfKeyHealthRow {
+  /** The values typed in Settings, or the saved scrap.tf/items list's key row. */
+  source: 'settings' | 'list';
+  label: string;
+  /** What scrap.tf charges for a key (the table's Buy column). */
+  buyScrap: number | null;
+  /** What scrap.tf pays for a key (the Sell column). */
+  sellScrap: number | null;
+  observedAt: UnixMs | null;
+  /** This row's pays price is the one in effect: it caps the automatic key value. */
+  caps: boolean;
+}
+
+/**
+ * Data health's scrap.tf rows: the typed values and the saved list's key row (KeyPriceState.scraptfFromList),
+ * each labelled by what effectiveScraptfKey takes from it (scraptfListKeySources). A newer list replaces the
+ * typed values, so the table must not go on calling the typed price the cap once the list sets it.
+ */
+export function scraptfKeyHealthRows(list: ScraptfListKey | null | undefined, typed: TypedScraptfKey): ScraptfKeyHealthRow[] {
+  const src = scraptfListKeySources(list, typed);
+  const label = (who: string, from: 'settings' | 'list'): string => {
+    if (src.pays === from) return `scrap.tf (${who}; sell caps the automatic value)`;
+    if (src.sells === from) return `scrap.tf (${who}; buy price only)`;
+    const other = from === 'list' ? 'settings' : 'list';
+    if (src.pays === other || src.sells === other) return `scrap.tf (${who}; not in use: ${from === 'list' ? 'your typed values are newer' : 'your saved list is newer'})`;
+    return `scrap.tf (${who}; not in use)`;
+  };
+  const rows: ScraptfKeyHealthRow[] = [];
+  if (typed.scraptfBuyScrap || typed.scraptfSellScrap) {
+    rows.push({
+      source: 'settings',
+      label: label('yours', 'settings'),
+      buyScrap: typed.scraptfBuyScrap ?? null,
+      sellScrap: typed.scraptfSellScrap ?? null,
+      observedAt: typed.scraptfObservedAt ?? null,
+      caps: src.pays === 'settings',
+    });
+  }
+  if (list && Number.isFinite(list.observedAt) && (saneKey(list.paysScrap) !== null || saneKey(list.sellsScrap) !== null)) {
+    rows.push({ source: 'list', label: label('saved list', 'list'), buyScrap: saneKey(list.sellsScrap), sellScrap: saneKey(list.paysScrap), observedAt: list.observedAt, caps: src.pays === 'list' });
+  }
+  return rows;
+}
+
+/**
+ * The key price tip's scrap.tf line: what scrap.tf pays for a key, from whichever source effectiveScraptfKey
+ * takes it from (that price caps the automatic value), with the list's age; null when neither has one.
+ */
+export function scraptfKeyTipText(list: ScraptfListKey | null | undefined, typed: TypedScraptfKey, now: UnixMs): string | null {
+  const src = scraptfListKeySources(list, typed);
+  if (src.pays === 'list' && list) return `scrap.tf sell (saved list, ${fmtAgo(list.observedAt, now)}): ${fmtRefOnly(saneKey(list.paysScrap))}`;
+  if (src.pays === 'settings') return `scrap.tf sell (yours): ${fmtRefOnly(saneKey(typed.scraptfSellScrap))}`;
+  return null;
+}
+
+export interface ScraptfListKeyView {
+  /** "From your saved scrap.tf list (3 min ago): scrap.tf sells a key for 63.33 ref, pays 62.11 ref." */
+  text: string;
+  title: string;
+  /** At least one of the list's key prices is used. */
+  inUse: boolean;
+  /** The pill: 'In use', 'Partly in use' (the typed values are newer but lack one the list has) or 'Not in use'. */
+  pill: 'In use' | 'Partly in use' | 'Not in use';
+  /** Why it is (or is not) in use, next to the pill. */
+  status: string;
+}
+
+/**
+ * Settings → Key price's line for KeyPriceState.scraptfFromList (null without a key row). Naming
+ * trap: the list's `sells` is what scrap.tf charges (the typed "key buy price"), `pays` is what it
+ * pays you (the typed "key sell price", which caps the automatic value).
+ */
+export function scraptfListKeyView(list: ScraptfListKey | null | undefined, typed: TypedScraptfKey & Pick<Settings['keyPrice'], 'mode'>, now: UnixMs): ScraptfListKeyView | null {
+  if (!list || !Number.isFinite(list.observedAt)) return null;
+  const sells = saneKey(list.sellsScrap);
+  const pays = saneKey(list.paysScrap);
+  if (sells === null && pays === null) return null;
+  const listWins = scraptfListKeyInUse(list, typed);
+  const src = scraptfListKeySources(list, typed);
+  const fromList = Number(src.pays === 'list') + Number(src.sells === 'list');
+  const available = Number(pays !== null) + Number(sells !== null);
+  const pill: ScraptfListKeyView['pill'] = fromList === 0 ? 'Not in use' : fromList < available ? 'Partly in use' : 'In use';
+  const hasTyped = saneKey(typed.scraptfSellScrap) !== null || saneKey(typed.scraptfBuyScrap) !== null;
+  const text = `From your saved scrap.tf list (${fmtAgo(list.observedAt, now)}): ${sells !== null ? `scrap.tf sells a key for ${fmtRefOnly(sells)}` : 'scrap.tf has no keys to sell (sold out)'}, pays ${pays !== null ? fmtRefOnly(pays) : '—'}.`;
+  let status: string;
+  if (listWins) {
+    status = hasTyped ? 'Newer than the values typed below, so it replaces them.' : 'No values are typed below, so these are used.';
+    // The list lacks a price the typed values have: that one is still the typed one.
+    if (src.pays === 'settings') status += ' What scrap.tf pays for a key still comes from the value typed below.';
+    if (src.sells === 'settings') status += ' What scrap.tf charges for a key still comes from the value typed below.';
+  } else if (fromList > 0) {
+    status = `The values typed below are newer, but none says what scrap.tf ${src.pays === 'list' ? 'pays' : 'charges'} for a key, so that comes from this list.`;
+  } else {
+    status = 'The values typed below are newer, so they are used instead.';
+  }
+  // Only what scrap.tf pays caps the key value, and only the automatic one.
+  if (src.pays === 'list') status += typed.mode === 'auto' ? ' What scrap.tf pays caps the automatic key price.' : ' In Manual mode your own key price is used as typed.';
+  return {
+    text,
+    title: `Read from the Mann Co. Supply Crate Key row of the scrap.tf/items page you saved ${fmtDateTime(list.observedAt)}. The app never visits scrap.tf.`,
+    inUse: fromList > 0,
+    pill,
+    status,
+  };
 }

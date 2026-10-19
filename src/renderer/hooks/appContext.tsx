@@ -1,10 +1,12 @@
 import type { PushContract } from '../../shared/rpc';
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import type { AppStatus, DeepPartial, Scrap, SecretsStatus, Settings } from '../../shared/types';
-import { isMock, rpc } from '../api';
+import type { AppStatus, DeepPartial, ImportResult, Scrap, SecretsStatus, Settings } from '../../shared/types';
+import { isMock, rpc, windowKind } from '../api';
 import { errorMessage } from '../format';
+import { NO_CARDS_TOAST_MS, importNoticeToastText } from '../importModel';
 import { createServiceStateTracker, type ServiceStateTracker } from '../serviceStateModel';
 import { createToastTimers, pushToast, toastTimeoutMs, type ToastHold, type ToastItem, type ToastOptions, type ToastTimers, type ToastTone } from '../toastModel';
+import { useDocumentVisible } from './useTimers';
 import { useHashRoute } from './useHashRoute';
 import { usePush } from './useRpc';
 import { writePref } from './usePersistentState';
@@ -42,6 +44,11 @@ export interface AppContextValue {
   /** Bumped after local mutations so counts elsewhere refresh. */
   dataVersion: number;
   bumpData: () => void;
+  /**
+   * F18: the newest 'import.done' this dashboard heard of, on any page, so the Import page opened from
+   * the no-cards toast's "How to save" shows that save instead of "Nothing imported".
+   */
+  lastImport: ImportResult | null;
 }
 
 const Ctx = createContext<AppContextValue | null>(null);
@@ -70,6 +77,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [itemSku, setItemSku] = useState<string | null>(null);
   const [toasts, setToasts] = useState<ToastItem[]>([]);
   const [dataVersion, setDataVersion] = useState(0);
+  const [lastImport, setLastImport] = useState<ImportResult | null>(null);
   const toastSeq = useRef(1);
   const { segments, navigate } = useHashRoute();
 
@@ -89,6 +97,28 @@ export function AppProvider({ children }: { children: ReactNode }) {
     setToasts((t) => t.filter((x) => x.id !== id));
   }, []);
   const holdToast = useCallback((id: number, why: ToastHold, on: boolean) => toastTimers.current?.hold(id, why, on), []);
+
+  // F18: a page saved without its cards (folder watch or "Import saved page…"), or one the folder watch
+  // passed over for its size, says so on any page of the dashboard, once per batch; a newer one
+  // replaces the last, so a backlog cannot fill the stack.
+  const notice = useRef<{ batchId: number; toastId: number } | null>(null);
+  usePush('import.done', (r) => {
+    if (windowKind() !== 'dashboard') return;
+    setLastImport(r);
+    const text = importNoticeToastText(r);
+    if (text === null || notice.current?.batchId === r.batchId) return;
+    if (notice.current) dismissToast(notice.current.toastId);
+    const toastId = toast(text, 'warn', { timeoutMs: NO_CARDS_TOAST_MS, action: { label: 'How to save', onClick: () => navigate('import') } });
+    // The user saves in the browser, often with the dashboard hidden or behind it: the countdown runs
+    // only while the dashboard is shown, so the notice is still there when they come back.
+    holdToast(toastId, 'hidden', document.visibilityState === 'hidden');
+    notice.current = { batchId: r.batchId, toastId };
+  });
+  const visible = useDocumentVisible();
+  useEffect(() => {
+    // A toast already gone (dismissed, expired) ignores this.
+    if (notice.current) holdToast(notice.current.toastId, 'hidden', !visible);
+  }, [visible, holdToast]);
 
   const refreshStatus = useCallback(() => {
     rpc('status.get')
@@ -171,8 +201,9 @@ export function AppProvider({ children }: { children: ReactNode }) {
       holdToast,
       dataVersion,
       bumpData,
+      lastImport,
     }),
-    [status, settings, secrets, bridgeError, serviceState, updateSettings, refreshStatus, segments, navigate, itemSku, openItem, closeItem, toasts, toast, dismissToast, holdToast, dataVersion, bumpData],
+    [status, settings, secrets, bridgeError, serviceState, updateSettings, refreshStatus, segments, navigate, itemSku, openItem, closeItem, toasts, toast, dismissToast, holdToast, dataVersion, bumpData, lastImport],
   );
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;

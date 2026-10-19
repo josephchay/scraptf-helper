@@ -14,6 +14,7 @@ import {
   COVERAGE_TIP,
   DEFAULT_MARKET_FILTERS,
   DEFAULT_MARKET_SORT,
+  MARKET_BANK_ROUTE,
   MARKET_PAGE,
   MARKET_WINDOW_MAX,
   MAX_MIN_BUYERS,
@@ -29,6 +30,7 @@ import {
   anchoredScrollTop,
   appendMarketRows,
   buildPercent,
+  coverageBank,
   coverageChip,
   coverageChips,
   coverageTone,
@@ -43,11 +45,13 @@ import {
   marketDisplayRows,
   marketErrorText,
   marketExportQuery,
+  marketBankPath,
   marketListParams,
   marketLiveState,
   marketPayTitle,
   marketPollMs,
   marketQuery,
+  marketRouteIntent,
   marketSellsForTitle,
   marketWindowQuery,
   nextPageRequest,
@@ -71,9 +75,10 @@ import {
   type MarketWindowQuery,
 } from '../../src/renderer/marketModel';
 import { readMinCeiling } from '../../src/renderer/shoppingModel';
-import { SCRAPTF_BANK_PAGES } from '../../src/shared/links';
+import { SCRAPTF_BANK_PAGES, scraptfLinkFor } from '../../src/shared/links';
 import { MARKET_MAX_LIMIT, MARKET_MAX_SEARCH_CHARS, MARKET_SORTS, marketComparator } from '../../src/shared/market';
-import { MARKET_SOURCES, MARKET_VERDICTS, type MarketListResult, type MarketQuery, type MarketRow, type MarketStats, type OrderSummary, type ScraptfCoverage } from '../../src/shared/types';
+import { scraptfListCoverage } from '../../src/shared/scraptfList';
+import { CATEGORIES, MARKET_SOURCES, MARKET_VERDICTS, type MarketListResult, type MarketQuery, type MarketRow, type MarketStats, type OrderSummary, type ScraptfCoverage } from '../../src/shared/types';
 
 const KEY = 568;
 const NOW = Date.UTC(2026, 9, 15, 12, 0, 0);
@@ -121,6 +126,14 @@ function row(over: Partial<MarketRow> & { sku: string }): MarketRow {
     verdict: 'unchecked',
     lastOrderChangeAt: NOW - MIN,
     evaluatedAt: NOW,
+    scraptfPaysScrap: null,
+    scraptfStock: null,
+    scraptfStockLimit: null,
+    scraptfFull: false,
+    scraptfListAt: null,
+    scraptfNewAt: null,
+    scraptfListedSince: null,
+    scraptfLink: scraptfLinkFor(over.category ?? 'hats', null),
     ...over,
   };
 }
@@ -134,7 +147,7 @@ function result(rows: MarketRow[], over: Partial<MarketListResult> = {}): Market
     rows,
     total: rows.length,
     counts: { flip: 0, 'rule-flip': 0, unchecked: rows.length, over: 0, 'no-buyers': 0 },
-    scraptf: { typed: 0, pages: 0, newestPageAt: null, importEnabled: false, watchFolder: false, coverage: [] },
+    scraptf: { typed: 0, pages: 0, newestPageAt: null, importEnabled: false, watchFolder: false, coverage: [], allItems: scraptfListCoverage(null) },
     stats: stats(),
     keyPrice: null,
     generatedAt: NOW,
@@ -169,6 +182,7 @@ describe('filters', () => {
       minCeiling: '1 key'.padEnd(80, ' '),
       onlyBotBuyers: 'yes',
       minBuyers: 7.9,
+      onScraptfList: 1,
     });
     expect(s.search).toHaveLength(MARKET_MAX_SEARCH_CHARS);
     expect(s.categories).toEqual(['hats', 'taunts']);
@@ -177,6 +191,8 @@ describe('filters', () => {
     expect(s.minCeiling.length).toBeLessThanOrEqual(40);
     expect(s.onlyBotBuyers).toBe(false);
     expect(s.minBuyers).toBe(7);
+    expect(s.onScraptfList).toBe(false);
+    expect(sanitizeMarketFilters({ onScraptfList: true }).onScraptfList).toBe(true);
     expect(sanitizeMarketFilters({ minBuyers: -3 }).minBuyers).toBe(0);
     expect(sanitizeMarketFilters({ minBuyers: 1e9 }).minBuyers).toBe(MAX_MIN_BUYERS);
     expect(sanitizeMarketFilters({ minBuyers: Number.NaN }).minBuyers).toBe(0);
@@ -187,9 +203,9 @@ describe('filters', () => {
     expect(activeMarketFilterCount(filters({ search: '   ' }))).toBe(0);
     expect(
       activeMarketFilterCount(
-        filters({ search: 'hat', categories: ['hats', 'taunts'], verdicts: ['flip'], sources: ['page'], minCeiling: '2 ref', onlyBotBuyers: true, minBuyers: 3 }),
+        filters({ search: 'hat', categories: ['hats', 'taunts'], verdicts: ['flip'], sources: ['page'], minCeiling: '2 ref', onlyBotBuyers: true, minBuyers: 3, onScraptfList: true }),
       ),
-    ).toBe(7);
+    ).toBe(8);
   });
 
   it('toggles verdict chips in chip order', () => {
@@ -241,6 +257,7 @@ describe('query building', () => {
       sources: ['none', 'page'],
       onlyBotBuyers: true,
       minBuyers: 3,
+      onScraptfList: true,
     });
     expect(marketQuery(f, 90.4, { sort: 'buyers', dir: 'asc' })).toEqual({
       sort: 'buyers',
@@ -252,6 +269,7 @@ describe('query building', () => {
       minCeilingScrap: 90,
       onlyBotBuyers: true,
       minBuyers: 3,
+      onScraptfList: true,
     });
     const long = marketQuery(filters({ search: 'y'.repeat(400) }), null, DEFAULT_MARKET_SORT);
     expect(long.search).toHaveLength(MARKET_MAX_SEARCH_CHARS);
@@ -260,6 +278,7 @@ describe('query building', () => {
   it('leaves out a zero or missing minimum and a zero buyer floor', () => {
     expect(marketQuery(filters({ minBuyers: 0 }), 0, DEFAULT_MARKET_SORT)).not.toHaveProperty('minCeilingScrap');
     expect(marketQuery(filters(), null, DEFAULT_MARKET_SORT)).not.toHaveProperty('minBuyers');
+    expect(marketQuery(filters({ onScraptfList: false }), null, DEFAULT_MARKET_SORT)).not.toHaveProperty('onScraptfList');
     expect(marketQuery(filters(), Number.NaN, DEFAULT_MARKET_SORT)).not.toHaveProperty('minCeilingScrap');
   });
 
@@ -953,13 +972,13 @@ describe('header strip', () => {
   });
 
   it('summarises the scrap.tf side as the user supplied it', () => {
-    const s = scraptfSideText({ typed: 12, pages: 30, newestPageAt: NOW - 4 * MIN, importEnabled: true, watchFolder: true, coverage: [] }, NOW);
+    const s = scraptfSideText({ typed: 12, pages: 30, newestPageAt: NOW - 4 * MIN, importEnabled: true, watchFolder: true, coverage: [], allItems: scraptfListCoverage(null) }, NOW);
     expect(s).toEqual({ text: 'Your scrap.tf data: 12 typed, 30 from saved pages (newest page 4 min ago). Folder watch on.', watch: 'on' });
-    expect(scraptfSideText({ typed: 1, pages: 0, newestPageAt: null, importEnabled: true, watchFolder: false, coverage: [] }, NOW)).toEqual({
+    expect(scraptfSideText({ typed: 1, pages: 0, newestPageAt: null, importEnabled: true, watchFolder: false, coverage: [], allItems: scraptfListCoverage(null) }, NOW)).toEqual({
       text: 'Your scrap.tf data: 1 typed, 0 from saved pages. Folder watch off.',
       watch: 'off',
     });
-    expect(scraptfSideText({ typed: 0, pages: 0, newestPageAt: null, importEnabled: false, watchFolder: false, coverage: [] }, NOW).watch).toBe('import-off');
+    expect(scraptfSideText({ typed: 0, pages: 0, newestPageAt: null, importEnabled: false, watchFolder: false, coverage: [], allItems: scraptfListCoverage(null) }, NOW).watch).toBe('import-off');
   });
 
   it('states the boundary plainly', () => {
@@ -1029,11 +1048,11 @@ describe('scrap.tf saved-page coverage strip (F13)', () => {
 
   it('labels each chip with when it was saved and how many items it had', () => {
     const c = coverageChip(page({ lastSavedAt: NOW - 4 * MIN, items: 48 }), NOW);
-    expect(c).toMatchObject({ label: 'Hats', status: 'saved 4 min ago · 48 items', tone: 'good', url: 'https://scrap.tf/buy/hats' });
-    expect(c.title).toBe('Save this page (Ctrl+S) into your watch folder to update its prices');
+    expect(c).toMatchObject({ label: 'Hats', status: 'saved 4 min ago · 48 items', tone: 'good', url: 'https://scrap.tf/buy/hats', bank: 'hats' });
+    // F15: a chip opens its card on the scrap.tf banks page, which has Open in browser.
     expect(c.title).toBe(COVERAGE_TIP);
-    expect(c.ariaLabel).toContain('Hats: saved 4 min ago · 48 items.');
-    expect(c.ariaLabel).toContain('in your browser');
+    expect(COVERAGE_TIP).toContain('scrap.tf banks page');
+    expect(c.ariaLabel).toBe('Hats: saved 4 min ago · 48 items. Opens its card on the scrap.tf banks page.');
     expect(coverageChip(page({ lastSavedAt: NOW - 1000, items: 1 }), NOW).status).toBe('saved just now · 1 item');
     expect(coverageChip(page({ lastSavedAt: NOW + 60_000, items: 3 }), NOW).status).toBe('saved just now · 3 items');
     expect(coverageChip(page({ lastSavedAt: NOW - 3 * 3_600_000, items: 1234 }), NOW)).toMatchObject({ status: 'saved 3 h ago · 1,234 items', tone: 'muted' });
@@ -1045,10 +1064,53 @@ describe('scrap.tf saved-page coverage strip (F13)', () => {
     const on = coverageChips({ importEnabled: true, coverage }, NOW);
     expect(on.map((c) => c.label)).toEqual(['Hats', 'Weapons', 'Stranges', 'Killstreaks', 'Skins', 'Items', 'Unusuals']);
     expect(on.map((c) => c.url)).toEqual(SCRAPTF_BANK_PAGES.map((p) => p.url));
-    // Every chip only ever opens one of the static bank pages the link generator knows.
+    // Every chip stands for one of the static bank pages the link generator knows, and its bank's card.
     for (const c of on) expect(c.url).toMatch(/^https:\/\/scrap\.tf\/(buy\/[a-z]+|unusuals)$/);
+    expect(on.map((c) => c.bank)).toEqual(SCRAPTF_BANK_PAGES.map((p) => p.bank));
     expect(coverageChips({ importEnabled: false, coverage }, NOW)).toEqual([]);
     expect(coverageChips(null, NOW)).toEqual([]);
+  });
+
+  it('names the bank by its static page, else by its category (the items page is "other"), else none', () => {
+    expect(coverageBank({ url: 'https://scrap.tf/buy/items' })).toBe('items');
+    expect(coverageBank({ url: 'https://scrap.tf/unusuals' })).toBe('unusuals');
+    expect(coverageBank({ url: 'https://example.com/x', category: 'other' })).toBe('items');
+    expect(coverageBank({ url: 'https://example.com/x', category: 'stranges' })).toBe('stranges');
+    // The /items list is not a bank page chip; allItemsChip names it itself.
+    expect(coverageBank({ url: 'https://scrap.tf/items' })).toBeNull();
+    expect(coverageBank({ url: 'https://example.com/x', category: 'nope' as never })).toBeNull();
+  });
+});
+
+describe('"See all" from a scrap.tf bank card (F15)', () => {
+  it('routes a bank page to the Live market by its id, and the /items list nowhere', () => {
+    expect(MARKET_BANK_ROUTE).toBe('bank');
+    expect(marketBankPath('hats')).toBe('market/bank/hats');
+    expect(marketBankPath('items')).toBe('market/bank/items');
+    expect(marketBankPath('list')).toBeNull();
+    expect(marketBankPath('nope' as never)).toBeNull();
+  });
+
+  it("opens that bank's categories and Not checked, nothing else, highest Pay up to first", () => {
+    const hats = marketRouteIntent(['market', 'bank', 'hats'])!;
+    expect(hats.key).toBe('bank/hats');
+    expect(hats.filters).toEqual({ ...defaultMarketFilters(), categories: ['hats'], verdicts: ['unchecked'] });
+    expect(hats.sort).toEqual(DEFAULT_MARKET_SORT);
+    expect(marketQuery(hats.filters, null, hats.sort)).toEqual({ sort: 'ceiling', dir: 'desc', categories: ['hats'], verdicts: ['unchecked'] });
+    // The items bank sells taunts and everything else, in the canonical category order.
+    expect(marketRouteIntent(['market', 'bank', 'items'])!.filters.categories).toEqual(CATEGORIES.filter((c) => c === 'taunts' || c === 'other'));
+    // The filters are a fresh copy each time (state must not share the frozen defaults).
+    expect(marketRouteIntent(['market', 'bank', 'hats'])!.filters).not.toBe(hats.filters);
+  });
+
+  it('ignores any other route', () => {
+    expect(marketRouteIntent([])).toBeNull();
+    expect(marketRouteIntent(['market'])).toBeNull();
+    expect(marketRouteIntent(['market', 'bank'])).toBeNull();
+    expect(marketRouteIntent(['market', 'bank', 'list'])).toBeNull();
+    expect(marketRouteIntent(['market', 'bank', '__proto__'])).toBeNull();
+    expect(marketRouteIntent(['market', 'other', 'hats'])).toBeNull();
+    expect(marketRouteIntent(['banks', 'bank', 'hats'])).toBeNull();
   });
 });
 

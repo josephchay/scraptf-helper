@@ -2,12 +2,14 @@
 // and merged on update, written atomically. A file that exists but cannot be
 // read is never overwritten: the app starts with the network paused and keeps
 // changes in memory until the file can be read again. Side effects that can
-// fail (the global hotkey) run before the change is committed so a refused
-// hotkey never gets saved; the login item follows startAtLogin. Listeners get
-// every committed change (main pushes it to the service and to renderers).
+// fail (the global hotkeys: quick entry and, since F16, the live check) run
+// before the change is committed so a refused hotkey never gets saved; the
+// login item follows startAtLogin. Listeners get every committed change (main
+// pushes it to the service and to renderers).
 
 import { renameSync } from 'node:fs';
 import type { Logger } from '../service/contracts';
+import type { HotkeyState } from '../shared/rpc';
 import { applySettingsPatch, parseSettingsWithReport, SettingsValidationError } from '../shared/settingsSchema';
 import type { Settings } from '../shared/types';
 import { readFileRetrySync, writeFileAtomicSync } from './paths';
@@ -17,14 +19,13 @@ export type HotkeyResult = { ok: true } | { ok: false; error: string };
 export interface SettingsEffects {
   /** Registers `next` (empty = none) and releases `prev`. Must leave `prev` working when it fails. */
   applyHotkey(next: string, prev: string | null): HotkeyResult;
+  /** F16: the live check hotkey (`check.hotkey`), with the same contract as applyHotkey. */
+  applyCheckHotkey?(next: string, prev: string | null): HotkeyResult;
   applyLoginItem(openAtLogin: boolean): void;
 }
 
-export interface HotkeyStatus {
-  accelerator: string;
-  registered: boolean;
-  error: string | null;
-}
+/** The shared shape, so 'app.hotkeys' hands main's own status to Settings unchanged. */
+export type HotkeyStatus = HotkeyState;
 
 export interface SettingsStore {
   /** Deeply frozen; clone before modifying. */
@@ -32,9 +33,14 @@ export interface SettingsStore {
   /** Validates, merges and saves a DeepPartial<Settings>. Throws SettingsValidationError. */
   set(patch: unknown): Settings;
   onChange(listener: (next: Settings, prev: Settings) => void): () => void;
-  /** Registers the stored hotkey and syncs the login item; call once after app 'ready'. */
+  /**
+   * Registers the stored hotkeys and syncs the login item; call once after app 'ready'. Returns the
+   * quick-entry hotkey's status; checkHotkeyStatus() has the live check's.
+   */
   applyStartupEffects(): HotkeyStatus;
   hotkeyStatus(): HotkeyStatus;
+  /** F16: the live check hotkey (`check.hotkey`). */
+  checkHotkeyStatus(): HotkeyStatus;
 }
 
 export interface SettingsStoreOptions {
@@ -52,6 +58,16 @@ function deepFreeze<T>(obj: T): T {
     for (const v of Object.values(obj)) deepFreeze(v);
   }
   return obj;
+}
+
+type HotkeyId = 'quick' | 'check';
+
+interface HotkeySlot {
+  id: HotkeyId;
+  /** For log lines. */
+  label: string;
+  of(s: Settings): string;
+  status: HotkeyStatus;
 }
 
 type LoadResult =
@@ -102,7 +118,19 @@ export function createSettingsStore(opts: SettingsStoreOptions): SettingsStore {
   if (unreadable) log.warn('settings.json is kept untouched; starting from defaults with the network paused until it can be read');
   // Fail closed: the stored "Pause all network" switch may have been on.
   let current: Settings = deepFreeze(initial.state === 'unreadable' ? { ...defaults(), networkPaused: true } : initial.settings);
-  let hotkey: HotkeyStatus = { accelerator: current.app.quickEntryHotkey, registered: false, error: null };
+  const quick: HotkeySlot = {
+    id: 'quick',
+    label: 'quick-entry',
+    of: (s) => s.app.quickEntryHotkey,
+    status: { accelerator: current.app.quickEntryHotkey, registered: false, error: null },
+  };
+  const check: HotkeySlot = {
+    id: 'check',
+    label: 'live check',
+    of: (s) => s.check.hotkey,
+    status: { accelerator: current.check.hotkey, registered: false, error: null },
+  };
+  const slots: readonly HotkeySlot[] = [quick, check];
 
   /** What a change applies to (the file's own settings once it can be read again) and whether it may be saved. */
   function baseForChange(): { base: Settings; canWrite: boolean } {
@@ -129,13 +157,61 @@ export function createSettingsStore(opts: SettingsStoreOptions): SettingsStore {
     }
   }
 
-  function tryHotkey(next: string, prev: string | null): HotkeyResult {
-    if (!opts.effects) return { ok: true };
+  function tryHotkey(slot: HotkeySlot, next: string, prev: string | null): HotkeyResult {
+    const effects = opts.effects;
+    if (!effects) return { ok: true };
     try {
-      return opts.effects.applyHotkey(next, prev);
+      if (slot.id === 'quick') return effects.applyHotkey(next, prev);
+      return effects.applyCheckHotkey ? effects.applyCheckHotkey(next, prev) : { ok: true };
     } catch (err) {
       return { ok: false, error: err instanceof Error ? err.message : String(err) };
     }
+  }
+
+  /**
+   * Registers the hotkeys `next` changes before anything is saved. Throws SettingsValidationError
+   * (Settings shows it) when one is refused, with the old ones working again. Returns the changed
+   * slots and how to undo their registration when the save fails.
+   */
+  function applyHotkeyChanges(prev: Settings, next: Settings): { changed: HotkeySlot[]; undo(): void } {
+    const changed = slots.filter((s) => s.of(next) !== s.of(prev));
+    if (changed.length === 0) return { changed, undo: () => undefined };
+    if (changed.length === 1) {
+      const slot = changed[0]!;
+      const r = tryHotkey(slot, slot.of(next), slot.status.registered ? slot.of(prev) : null);
+      if (!r.ok) throw new SettingsValidationError(r.error);
+      return { changed, undo: () => void tryHotkey(slot, slot.of(prev), slot.of(next)) };
+    }
+    // Both in one patch (a swap, or one taking the chord the other gives up): registering either
+    // first would find its chord still held by the other, so both are released, then both registered.
+    const held = changed.filter((s) => s.status.registered);
+    for (const s of held) tryHotkey(s, '', s.of(prev));
+    const done: HotkeySlot[] = [];
+    const undo = () => {
+      for (const s of done) tryHotkey(s, '', s.of(next));
+      for (const s of held) tryHotkey(s, s.of(prev), null);
+    };
+    for (const s of changed) {
+      const r = tryHotkey(s, s.of(next), null);
+      if (!r.ok) {
+        undo();
+        throw new SettingsValidationError(r.error);
+      }
+      done.push(s);
+    }
+    return { changed, undo };
+  }
+
+  function registerAtStartup(slot: HotkeySlot): HotkeyStatus {
+    const accel = slot.of(current);
+    if (accel === '') {
+      slot.status = { accelerator: '', registered: false, error: null };
+      return slot.status;
+    }
+    const r = tryHotkey(slot, accel, null);
+    slot.status = r.ok ? { accelerator: accel, registered: true, error: null } : { accelerator: accel, registered: false, error: r.error };
+    if (!r.ok) log.warn(`${slot.label} hotkey ${accel} could not be registered: ${r.error}`);
+    return slot.status;
   }
 
   return {
@@ -147,24 +223,21 @@ export function createSettingsStore(opts: SettingsStoreOptions): SettingsStore {
       const next = applySettingsPatch(base, patch);
       if (JSON.stringify(next) === JSON.stringify(prev)) return prev;
 
-      const hotkeyChanged = next.app.quickEntryHotkey !== prev.app.quickEntryHotkey;
-      if (hotkeyChanged) {
-        const r = tryHotkey(next.app.quickEntryHotkey, hotkey.registered ? prev.app.quickEntryHotkey : null);
-        if (!r.ok) throw new SettingsValidationError(r.error);
-      }
+      const hotkeys = applyHotkeyChanges(prev, next);
 
       try {
         // Writing now would replace the user's real file with defaults plus this change.
         if (!canWrite) log.warn('settings.json still cannot be read; this change applies until the app quits but is not saved');
         else persist(next);
       } catch (err) {
-        if (hotkeyChanged) tryHotkey(prev.app.quickEntryHotkey, next.app.quickEntryHotkey);
+        hotkeys.undo();
         log.error('could not save settings.json', err);
         throw new Error('Could not save settings to disk.');
       }
 
-      if (hotkeyChanged) {
-        hotkey = { accelerator: next.app.quickEntryHotkey, registered: next.app.quickEntryHotkey !== '', error: null };
+      for (const slot of hotkeys.changed) {
+        const accel = slot.of(next);
+        slot.status = { accelerator: accel, registered: accel !== '', error: null };
       }
       if (canWrite) unreadable = false;
       current = deepFreeze(next);
@@ -187,19 +260,13 @@ export function createSettingsStore(opts: SettingsStoreOptions): SettingsStore {
 
     applyStartupEffects() {
       applyLogin(current.app.startAtLogin);
-      const accel = current.app.quickEntryHotkey;
-      if (accel === '') {
-        hotkey = { accelerator: '', registered: false, error: null };
-        return hotkey;
-      }
-      const r = tryHotkey(accel, null);
-      hotkey = r.ok
-        ? { accelerator: accel, registered: true, error: null }
-        : { accelerator: accel, registered: false, error: r.error };
-      if (!r.ok) log.warn(`quick-entry hotkey ${accel} could not be registered: ${r.error}`);
-      return hotkey;
+      // The settings schema keeps the two chords apart, so neither can take the other's.
+      const status = registerAtStartup(quick);
+      registerAtStartup(check);
+      return status;
     },
 
-    hotkeyStatus: () => hotkey,
+    hotkeyStatus: () => quick.status,
+    checkHotkeyStatus: () => check.status,
   };
 }

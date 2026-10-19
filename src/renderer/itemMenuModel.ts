@@ -3,15 +3,33 @@
 // (F9) and trade recording prefills (F12). No DOM and no RPC here, so all of it
 // is unit-tested; the components only wire it up.
 
+import { bankStockPagePath } from '../shared/bankStock';
+import { SCRAPTF_BANK_PAGES, SCRAPTF_ITEMS_URL, bankForCategory, scraptfBankInfo, scraptfPageFor } from '../shared/links';
 import { communityMaxAgeMs } from '../shared/referenceAge';
+import { bestExitOf, scraptfListFresh, scraptfListPriceSaved, scraptfListUsePrice } from '../shared/scraptfList';
 import { fromString } from '../shared/sku';
-import type { BuyerCheck, ItemDetail, LinkGroup, LinkSpec, Opportunity, OrderSummary, Scrap, ScrapPrice, ScrapPriceInput, UnixMs } from '../shared/types';
+import { CATEGORIES, HOLDING_EXIT_VENUES } from '../shared/types';
+import type {
+  BuyerCheck,
+  Category,
+  ItemDetail,
+  LinkGroup,
+  LinkSpec,
+  Opportunity,
+  OrderSummary,
+  Scrap,
+  ScrapPrice,
+  ScrapPriceInput,
+  ScraptfListRow,
+  ScraptfSeenOn,
+  UnixMs,
+} from '../shared/types';
 import type { IconName } from './components/Icon';
 import type { ItemMenuTarget } from './components/ItemMenu';
 import type { RecordTradeInit } from './components/RecordTradeDialog';
-import { fmtAgo, fmtKeysMetal, truncate } from './format';
+import { fmtAgo, fmtDateTime, fmtInt, fmtKeysMetal, fmtRefOnly, truncate } from './format';
 import { revenueOrderOf, type UseOrder } from './oppModel';
-import { BUY_VENUE, previewRevenue, type PreviewSettings } from './quickModel';
+import { BUY_VENUE, LIST_PRICE_NOTE, listSellsText, previewRevenue, type PreviewSettings } from './quickModel';
 
 // ---------------------------------------------------------------------------
 // Placement
@@ -341,6 +359,8 @@ export type ItemMenuAction =
   | { kind: 'quick-entry' }
   /** F12: open the Record trade dialog for this item (a journal row; nothing is traded). */
   | { kind: 'record'; side: 'buy' | 'sell' }
+  /** F14: copy the name for scrap.tf's search, then open its page in the user's browser (links.open). */
+  | { kind: 'scraptf'; url: string; name: string }
   | { kind: 'link'; url: string };
 
 export type LinksState = { status: 'loading' } | { status: 'error'; message: string } | { status: 'ready'; links: readonly LinkSpec[] };
@@ -370,9 +390,13 @@ export function hostLabel(url: string): string {
 /**
  * Item menu content: Open details; Copy SKU / name / backpack.tf name; Record
  * scrap.tf price… (quick entry, prefilled); Record buy… / Record sale… (the
- * journal, F12); then the link groups once 'links.forSku' answers.
+ * journal, F12); Open on scrap.tf (copies name) (F14); then the link groups
+ * once 'links.forSku' answers. `seenOn` is the item's ItemDetail.seenOn once read (F15); a row
+ * that names its scrap.tf page itself (ItemMenuTarget.bank, the banks page) goes there instead.
  */
-export function itemMenuSections(target: ItemMenuTarget, links: LinksState): MenuSection<ItemMenuAction>[] {
+export function itemMenuSections(target: ItemMenuTarget, links: LinksState, seenOn: Pick<ScraptfSeenOn, 'bank'> | null = null): MenuSection<ItemMenuAction>[] {
+  const stfUrl = scraptfOpenUrl(target.category, links, target.bank ? { bank: target.bank } : seenOn);
+  const stfName = scraptfSearchName(target);
   const sections: MenuSection<ItemMenuAction>[] = [
     { id: 'open', items: [{ id: 'details', label: 'Open details', icon: 'chevronRight', action: { kind: 'details' } }] },
     {
@@ -385,6 +409,21 @@ export function itemMenuSections(target: ItemMenuTarget, links: LinksState): Men
       items: [
         { id: 'record-buy', label: 'Record buy…', hint: 'Journal', title: RECORD_BUY_TITLE, icon: 'cart', action: { kind: 'record', side: 'buy' } },
         { id: 'record-sale', label: 'Record sale…', hint: 'Journal', title: RECORD_SALE_TITLE, icon: 'journal', action: { kind: 'record', side: 'sell' } },
+      ],
+    },
+    {
+      id: 'scraptf',
+      items: [
+        {
+          id: 'scraptf-open',
+          label: OPEN_ON_SCRAPTF_LABEL,
+          hint: 'scrap.tf',
+          // Without the item's category the page is known once links.forSku answers.
+          title: stfUrl ? scraptfOpenTitle(stfUrl, stfName) : 'Finding the scrap.tf page for this item…',
+          icon: 'external',
+          disabled: stfUrl === null,
+          action: stfUrl ? { kind: 'scraptf', url: stfUrl, name: stfName } : null,
+        },
       ],
     },
   ];
@@ -699,8 +738,28 @@ export function recordBuyInit(item: { sku: string; name: string }, prices: reado
   return { side: 'buy', sku: item.sku, name: item.name, venue: RECORD_BUY_VENUE, ...(p ? { keys: p.costKeys, scrap: p.costScrap } : {}) };
 }
 
-/** A sale on backpack.tf at `order`'s price, noted "Sold to <buyer>"; without an order only the venue is filled. */
-export function recordSaleInit(item: { sku: string; name: string }, order: OrderSummary | null): RecordTradeInit {
+/** The journal note of a sale to scrap.tf's bank at its saved list price (F14). */
+export const SCRAPTF_SALE_NOTE = 'Sold to scrap.tf';
+
+/**
+ * A sale to scrap.tf at what its saved list pays, keys and metal as the list shows them (so the
+ * journal books what scrap.tf hands over). Without a pays price only the venue is filled.
+ */
+export function scraptfSaleInit(item: { sku: string; name: string }, list: Pick<ScraptfListRow, 'paysKeys' | 'paysScrapRaw'>): RecordTradeInit {
+  const keys = typeof list.paysKeys === 'number' && Number.isFinite(list.paysKeys) && list.paysKeys > 0 ? list.paysKeys : 0;
+  const scrap = typeof list.paysScrapRaw === 'number' && Number.isFinite(list.paysScrapRaw) ? Math.max(0, Math.round(list.paysScrapRaw)) : 0;
+  const base: RecordTradeInit = { side: 'sell', sku: item.sku, name: item.name, venue: HOLDING_EXIT_VENUES.scraptf };
+  return keys || scrap ? { ...base, keys, scrap, note: SCRAPTF_SALE_NOTE } : base;
+}
+
+/**
+ * A sale on backpack.tf at `order`'s price, noted "Sold to <buyer>"; without an order only the venue is filled.
+ * With `exit` (the item's saved scrap.tf/items row and the time to judge it at), the sale goes to the better
+ * exit by Holdings' own rule (bestExitOf: fresh, not full, pays more, backpack.tf wins a tie), so the drawer,
+ * the item menu and Holdings prefill the same venue and price.
+ */
+export function recordSaleInit(item: { sku: string; name: string }, order: OrderSummary | null, exit: { list: ScraptfListRow | null; now: UnixMs } | null = null): RecordTradeInit {
+  if (exit?.list && bestExitOf(order?.valueScrap ?? null, exit.list, exit.now).bestExit === 'scraptf') return scraptfSaleInit(item, exit.list);
   return {
     side: 'sell',
     sku: item.sku,
@@ -721,17 +780,216 @@ export function recordInitTitle(init: RecordTradeInit): string {
 
 /**
  * The item menu's prefill, from 'item.detail' (local only, history off). The sale uses the
- * revenue order (Settings: revenue used for profit), as the drawer does. `d` null (the read
- * failed) opens the dialog with the venue only; the user types the price.
+ * revenue order (Settings: revenue used for profit), as the drawer does, or scrap.tf when the
+ * saved list makes it the better exit (recordSaleInit). `d` null (the read failed) opens the
+ * dialog with the venue only; the user types the price.
  */
 export function recordTradeInit(
   side: 'buy' | 'sell',
   target: Pick<ItemMenuTarget, 'sku' | 'name'>,
-  d: Pick<ItemDetail, 'name' | 'scrapPrices' | 'revenue' | 'buyOrders'> | null,
+  d: (Pick<ItemDetail, 'name' | 'scrapPrices' | 'revenue' | 'buyOrders'> & Partial<Pick<ItemDetail, 'scraptfList'>>) | null,
   p: PreviewSettings,
+  now: UnixMs = Date.now(),
 ): RecordTradeInit {
   const item = { sku: target.sku, name: target.name.trim() || d?.name || target.sku };
   if (side === 'buy') return recordBuyInit(item, d?.scrapPrices ?? []);
-  return recordSaleInit(item, d ? previewRevenue(d, p).order : null);
+  return recordSaleInit(item, d ? previewRevenue(d, p).order : null, d?.scraptfList ? { list: d.scraptfList, now } : null);
+}
+
+// ---------------------------------------------------------------------------
+// scrap.tf price list (F14): the drawer's block, "Use as my price" and
+// "Open on scrap.tf (copies name)" (drawer and item menu)
+// ---------------------------------------------------------------------------
+
+export const OPEN_ON_SCRAPTF_LABEL = 'Open on scrap.tf (copies name)';
+export const SCRAPTF_NAME_COPIED = "Name copied. Paste it into scrap.tf's search.";
+
+const BANK_PAGE_URLS: ReadonlySet<string> = new Set(SCRAPTF_BANK_PAGES.map((p) => p.url));
+
+function isCategory(c: unknown): c is Category {
+  return typeof c === 'string' && (CATEGORIES as readonly string[]).includes(c);
+}
+
+/**
+ * F15: the static bank page where the user last saw the item (ItemDetail.seenOn), or null. The
+ * /items list is not a bank page (nothing is bought there), so an item last seen on it falls back to
+ * its category's bank like an item never seen on a saved page.
+ */
+export function seenBankPageUrl(seenOn: Pick<ScraptfSeenOn, 'bank'> | null | undefined): string | null {
+  const info = scraptfBankInfo(seenOn?.bank);
+  return info && info.categories.length > 0 ? info.url : null;
+}
+
+/** Every "Open bank page": where the user last saw the item, else the bank of its category (bankForCategory). */
+export function bankPageUrl(seenOn: Pick<ScraptfSeenOn, 'bank'> | null | undefined, category: Category): string {
+  return seenBankPageUrl(seenOn) ?? scraptfBankInfo(bankForCategory(category))!.url;
+}
+
+/**
+ * The scrap.tf page "Open on scrap.tf" hands to the browser: the bank page the user last saw the item
+ * on (F15, `seenOn`), else the item's bank page (scraptfPageFor) when its category is known, else the
+ * one links.forSku gave ('scraptf-page'), else the full price list (scrap.tf/items lists every item).
+ * null while the links are still loading. Every one of them is a static allowlisted page (links.ts);
+ * the app never fetches them (R1).
+ */
+export function scraptfOpenUrl(category: Category | null | undefined, links: LinksState | null, seenOn: Pick<ScraptfSeenOn, 'bank'> | null = null): string | null {
+  const seen = seenBankPageUrl(seenOn);
+  if (seen) return seen;
+  if (isCategory(category)) return scraptfPageFor(category);
+  if (links === null) return SCRAPTF_ITEMS_URL;
+  if (links.status === 'loading') return null;
+  if (links.status === 'ready') {
+    const page = links.links.find((l) => l.id === 'scraptf-page' && BANK_PAGE_URLS.has(l.url));
+    if (page) return page.url;
+  }
+  return SCRAPTF_ITEMS_URL;
+}
+
+/**
+ * The name without the schema's " (Paint: X)" suffix (schemaNames.ts appends it to painted SKUs).
+ * scrap.tf names and searches items unpainted, and its list rows are the unpainted base SKU.
+ */
+export function unpaintedName(name: string): string {
+  return name.replace(/\s*\(Paint: [^()]*\)\s*$/, '').trim();
+}
+
+/** What to paste into scrap.tf's search box: the unpainted item name (the SKU when there is none). */
+export function scraptfSearchName(item: { sku: string; name: string }): string {
+  return unpaintedName(item.name) || item.name.trim() || item.sku;
+}
+
+export function scraptfOpenTitle(url: string, name: string): string {
+  return `Copies "${truncate(name, 60)}" for scrap.tf's search and opens ${url} in your browser. The app never visits scrap.tf.`;
+}
+
+/**
+ * The toast after "Open on scrap.tf": copied and opened is the usual case. The name is copied first
+ * (a page loses clipboard access once the browser takes focus), so either step may fail alone.
+ * F19: `back` (checkModel's scraptfBackHint) says how the price found there comes back through the
+ * Live check; with it the toast names the page it opened.
+ */
+export function scraptfOpenedToast(
+  copied: boolean,
+  opened: { opened: boolean; reason: string | null },
+  url: string,
+  back: string | null = null,
+): { text: string; tone: 'good' | 'warn' } {
+  const tail = back ? ` ${back}` : '';
+  if (opened.opened) {
+    if (!copied) return { text: `scrap.tf is open in your browser, but the name could not be copied. Type it into scrap.tf's search.${tail}`, tone: 'warn' };
+    return back ? { text: `Opened ${bankStockPagePath(url)} in your browser. The name is copied; paste it into scrap.tf's search.${tail}`, tone: 'good' } : { text: SCRAPTF_NAME_COPIED, tone: 'good' };
+  }
+  const why = opened.reason ?? 'The link could not be opened.';
+  return copied
+    ? { text: `${why} The name was copied: open ${url} in your browser and paste it into scrap.tf's search.${tail}`, tone: 'warn' }
+    : { text: `${why} ${url}`, tone: 'warn' };
+}
+
+export interface ScraptfListView {
+  /** "Price to buy" as the list shows it ("1 key 5.11 ref"), or "sold out" when it shows none. */
+  sells: string;
+  /** "Price we pay" as listed, or "—" when the list shows none. */
+  pays: string;
+  /** Hover for sells / pays: the value at today's key price (when keys are involved) or why there is none. */
+  sellsTitle: string | undefined;
+  paysTitle: string | undefined;
+  /** "2/5", "3", or null when the list shows no stock. */
+  stock: string | null;
+  /** scrap.tf is at its limit (stock >= limit): it buys no more right now. */
+  full: boolean;
+  /** At most a day old (SCRAPTF_LIST_FRESH_MS): only then does Holdings count scrap.tf as an exit. */
+  fresh: boolean;
+  /** "saved 3 min ago" */
+  saved: string;
+  /** Hover for the whole block: the save time and what it means. */
+  title: string;
+  /** The list shows a price to buy (the line reads "sells X"; else "sold out"). */
+  hasSells: boolean;
+  /** "Use as my price" has a price to save: a price to buy, and scrap.tf has the item in stock. */
+  canUse: boolean;
+  /** Why "Use as my price" has nothing to save (sold out, or stock 0); null when it can. */
+  unusable: string | null;
+  /** The block's line: "sells X · pays Y · stock n/limit · saved 3 min ago". */
+  line: string;
+}
+
+/** The drawer's "scrap.tf price list" block for the item's row of the saved scrap.tf/items list. */
+export function scraptfListView(row: ScraptfListRow, keyScrap: Scrap | null, now: UnixMs): ScraptfListView {
+  const sellsText = listSellsText(row);
+  const paysKeys = typeof row.paysKeys === 'number' && Number.isFinite(row.paysKeys) && row.paysKeys > 0 ? row.paysKeys : 0;
+  const hasPays = typeof row.paysScrapRaw === 'number' && Number.isFinite(row.paysScrapRaw);
+  const pays = hasPays ? fmtKeysMetal(paysKeys, Math.round(row.paysScrapRaw ?? 0)) : '—';
+  const valued = (keys: number | null, v: Scrap | null): string | undefined =>
+    keys && v !== null && keyScrap ? `${fmtRefOnly(v)} at today's key price (${fmtRefOnly(keyScrap)})` : undefined;
+  const stock = typeof row.stock === 'number' && Number.isFinite(row.stock) ? (typeof row.stockLimit === 'number' && Number.isFinite(row.stockLimit) ? `${fmtInt(row.stock)}/${fmtInt(row.stockLimit)}` : fmtInt(row.stock)) : null;
+  const fresh = scraptfListFresh(row, now);
+  const saved = `saved ${fmtAgo(row.observedAt, now)}`;
+  const title = [
+    `Your saved copy of scrap.tf/items, ${fmtDateTime(row.observedAt)}.`,
+    fresh ? 'Prices and stock may have changed since.' : 'Older than a day: Holdings no longer counts scrap.tf as a place to sell this. Save scrap.tf/items again.',
+    row.full ? 'scrap.tf is at its limit for this item, so it buys no more right now.' : '',
+  ]
+    .filter(Boolean)
+    .join(' ');
+  const sells = sellsText ?? 'sold out';
+  // A priced row with stock 0 is refused as a price by the import too (scraptfListUsePrice).
+  const canUse = scraptfListUsePrice(row) !== null;
+  return {
+    sells,
+    pays,
+    sellsTitle: sellsText ? valued(row.sellsKeys, row.sellsScrap) : 'The saved list shows no price to buy: scrap.tf has none in stock.',
+    paysTitle: hasPays ? valued(row.paysKeys, row.paysScrap) : 'The saved list shows no price scrap.tf pays for this item.',
+    stock,
+    full: row.full,
+    fresh,
+    saved,
+    title,
+    hasSells: sellsText !== null,
+    canUse,
+    unusable: canUse
+      ? null
+      : sellsText === null
+        ? 'The saved list shows no price to buy (sold out), so there is nothing to use.'
+        : 'Out of stock on scrap.tf (stock 0 in your saved list), so there is nothing to buy at this price.',
+    line: [sellsText ? `sells ${sellsText}` : 'sold out', `pays ${pays}`, stock !== null ? `stock ${stock}${row.full ? ' (full)' : ''}` : null, saved].filter((x) => x !== null).join(' · '),
+  };
+}
+
+/**
+ * "Use as my price": the list's price to buy saved as a typed price (source 'user', LIST_PRICE_NOTE),
+ * as an import of the list would store it: under the base SKU the list row is for (a plain copy),
+ * keys and metal as listed, dated when the list was saved (an old list reads stale, as it should).
+ * The name drops a painted drawer's "(Paint: X)": the row prices the unpainted copy. null when there
+ * is nothing to buy: a sold-out row, or one with stock 0, which the import refuses as a price too.
+ */
+export function listPriceInput(row: ScraptfListRow, item: { name: string }): ScrapPriceInput | null {
+  const price = scraptfListUsePrice(row);
+  if (price === null) return null;
+  return {
+    sku: row.sku,
+    name: unpaintedName(item.name) || row.name.trim() || row.sku,
+    costKeys: price.keys,
+    costScrap: price.scrap,
+    source: 'user',
+    observedAt: row.observedAt,
+    note: LIST_PRICE_NOTE,
+  };
+}
+
+/**
+ * "Use as my price" already saved this very list price (same plain copy, keys and metal, list date and
+ * note), so another click would only add the same row again (prices.upsert adds a row per call). A
+ * painted drawer's prices never hold the plain copy's row: it reads ItemDetail.scraptfListSaved instead.
+ */
+export function listPriceAlreadySaved(
+  row: ScraptfListRow,
+  prices: readonly Pick<ScrapPrice, 'sku' | 'source' | 'note' | 'observedAt' | 'costKeys' | 'costScrap' | 'special'>[],
+): boolean {
+  return scraptfListPriceSaved(row, prices);
+}
+
+/** The confirmation after "Use as my price". */
+export function listPriceSavedText(saved: Pick<ScrapPrice, 'name' | 'costKeys' | 'costScrap'>, observedAt: UnixMs, now: UnixMs): string {
+  return `Saved ${saved.name} at ${fmtKeysMetal(saved.costKeys, saved.costScrap)}, from your scrap.tf list saved ${fmtAgo(observedAt, now)}.`;
 }
 

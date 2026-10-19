@@ -1,15 +1,23 @@
 import { describe, expect, it } from 'vitest';
 import {
   ALLOWED_EXTERNAL_HOSTS,
+  SCRAPTF_BANKS,
+  SCRAPTF_BANK_PAGES,
+  SCRAPTF_ITEMS_URL,
   STATIC_EXTERNAL_URLS,
+  bankForCategory,
   bptfPriceindex,
   buildLinks,
   isAllowedExternalUrl,
+  isScraptfBank,
+  scraptfBankInfo,
   scraptfPageFor,
+  scraptfSeenOn,
 } from '../../src/shared/links';
+import { SCRAPTF_LIST_LABEL } from '../../src/shared/scraptfList';
 import { fromString } from '../../src/shared/sku';
-import { CATEGORIES } from '../../src/shared/types';
-import type { LinkContext, LinkSpec } from '../../src/shared/types';
+import { CATEGORIES, SCRAPTF_BANK_IDS } from '../../src/shared/types';
+import type { LinkContext, LinkSpec, ScraptfBank } from '../../src/shared/types';
 
 function ctx(sku: string, extra: Partial<LinkContext> = {}): LinkContext {
   return {
@@ -543,6 +551,30 @@ describe('STATIC_EXTERNAL_URLS', () => {
     }
   });
 
+  it('includes the scrap.tf/items price list (F14) as an exact page only', () => {
+    expect(SCRAPTF_ITEMS_URL).toBe('https://scrap.tf/items');
+    expect(STATIC_EXTERNAL_URLS).toContain(SCRAPTF_ITEMS_URL);
+    expect(isAllowedExternalUrl(SCRAPTF_ITEMS_URL)).toBe(true);
+    expect(isAllowedExternalUrl('https://SCRAP.TF/items')).toBe(true);
+    // The list being allowed must not open the rest of scrap.tf: the app only hands the user exact pages.
+    for (const url of [
+      'https://scrap.tf/items/',
+      'https://scrap.tf/items/2',
+      'https://scrap.tf/items?page=2',
+      'https://scrap.tf/items#hats',
+      'https://scrap.tf/item',
+      'https://scrap.tf/itemsx',
+      'https://scrap.tf/ajax/items',
+      'https://scrap.tf/api/items',
+      'https://ws.scrap.tf/items',
+      'https://www.scrap.tf/items',
+      'http://scrap.tf/items',
+    ]) {
+      expect(isAllowedExternalUrl(url), url).toBe(false);
+    }
+    expect(ALLOWED_EXTERNAL_HOSTS).not.toContain('scrap.tf');
+  });
+
   it('keeps the whole-host list to the link generator hosts of §7.3.7', () => {
     expect([...ALLOWED_EXTERNAL_HOSTS].sort()).toEqual(
       ['backpack.tf', 'mannco.store', 'marketplace.tf', 'next.backpack.tf', 'pricedb.io', 'steamcommunity.com', 'stntrading.eu'].sort(),
@@ -573,5 +605,122 @@ describe('buildLinks: scrap.tf category page', () => {
     expect(hat({ category: null }).some((l) => l.id === 'scraptf-page')).toBe(false);
     expect(hat({ category: 'toString' as never }).some((l) => l.id === 'scraptf-page')).toBe(false);
     expect(hat({ category: 'https://evil.example' as never }).some((l) => l.id === 'scraptf-page')).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// F15: every scrap.tf page the user saves (the banks)
+// ---------------------------------------------------------------------------
+
+describe('SCRAPTF_BANKS', () => {
+  it('lists the seven bank pages then the /items list, with their static pages', () => {
+    expect(SCRAPTF_BANKS.map((b) => [b.bank, b.label, b.url])).toEqual([
+      ['hats', 'Hats', 'https://scrap.tf/buy/hats'],
+      ['weapons', 'Weapons', 'https://scrap.tf/buy/weapons'],
+      ['stranges', 'Stranges', 'https://scrap.tf/buy/stranges'],
+      ['killstreaks', 'Killstreaks', 'https://scrap.tf/buy/killstreaks'],
+      ['skins', 'Skins', 'https://scrap.tf/buy/skins'],
+      ['items', 'Items', 'https://scrap.tf/buy/items'],
+      ['unusuals', 'Unusuals', 'https://scrap.tf/unusuals'],
+      ['list', 'All items', SCRAPTF_ITEMS_URL],
+    ]);
+    expect(SCRAPTF_BANKS.map((b) => b.bank)).toEqual(SCRAPTF_BANK_IDS);
+    expect(SCRAPTF_BANKS.find((b) => b.bank === 'list')!.label).toBe(SCRAPTF_LIST_LABEL);
+  });
+
+  it('only names pages the allowlist already had, so links.open opens exactly them', () => {
+    for (const b of SCRAPTF_BANKS) {
+      expect(STATIC_EXTERNAL_URLS).toContain(b.url);
+      expect(isAllowedExternalUrl(b.url)).toBe(true);
+    }
+    // The allowlist itself is unchanged by F15: the same scrap.tf pages as 0.4, nothing more.
+    expect(STATIC_EXTERNAL_URLS.filter((u) => new URL(u).hostname === 'scrap.tf').sort()).toEqual(
+      [
+        'https://scrap.tf/terms',
+        'https://scrap.tf/buy/hats',
+        'https://scrap.tf/buy/weapons',
+        'https://scrap.tf/buy/stranges',
+        'https://scrap.tf/buy/killstreaks',
+        'https://scrap.tf/buy/skins',
+        'https://scrap.tf/unusuals',
+        'https://scrap.tf/buy/items',
+        'https://scrap.tf/items',
+      ].sort(),
+    );
+    // Pages the parser recognises but the app never opens.
+    for (const url of ['https://scrap.tf/buy/unusuals', 'https://scrap.tf/items/2', 'https://scrap.tf/buy/cards']) {
+      expect(isAllowedExternalUrl(url), url).toBe(false);
+    }
+  });
+
+  it('sells every category on exactly one bank page, and the list on none', () => {
+    for (const c of CATEGORIES) {
+      const selling = SCRAPTF_BANKS.filter((b) => b.categories.includes(c));
+      expect(selling.map((b) => b.bank)).toEqual([bankForCategory(c)]);
+      expect(selling[0]!.url).toBe(scraptfPageFor(c));
+    }
+    expect(SCRAPTF_BANKS.find((b) => b.bank === 'list')!.categories).toEqual([]);
+  });
+
+  it('is the source of the coverage strip pages (F13), each carrying its bank', () => {
+    expect(SCRAPTF_BANK_PAGES.map((p) => [p.bank, p.category, p.label, p.url])).toEqual(
+      SCRAPTF_BANKS.filter((b) => b.bank !== 'list').map((b) => [b.bank, b.bank === 'items' ? 'other' : b.bank, b.label, b.url]),
+    );
+    for (const p of SCRAPTF_BANK_PAGES) expect(p.categories).toEqual(scraptfBankInfo(p.bank)!.categories);
+  });
+});
+
+describe('bankForCategory', () => {
+  it.each([
+    ['hats', 'hats'],
+    ['weapons', 'weapons'],
+    ['stranges', 'stranges'],
+    ['killstreaks', 'killstreaks'],
+    ['skins', 'skins'],
+    ['unusuals', 'unusuals'],
+    ['taunts', 'items'],
+    ['other', 'items'],
+  ] as const)('%s -> %s', (category, bank) => {
+    expect(bankForCategory(category)).toBe(bank);
+  });
+
+  it('sends anything unexpected to the items bank, like scraptfPageFor', () => {
+    expect(bankForCategory('toString' as never)).toBe('items');
+    expect(bankForCategory('list' as never)).toBe('items');
+  });
+});
+
+describe('isScraptfBank and scraptfBankInfo', () => {
+  it('accept the bank ids only', () => {
+    for (const id of SCRAPTF_BANK_IDS) {
+      expect(isScraptfBank(id)).toBe(true);
+      expect(scraptfBankInfo(id)!.bank).toBe(id);
+    }
+    for (const v of ['other', 'taunts', 'toString', '__proto__', 'HATS', '', null, undefined, 3, {}]) {
+      expect(isScraptfBank(v), String(v)).toBe(false);
+      expect(scraptfBankInfo(v), String(v)).toBeNull();
+    }
+  });
+});
+
+describe('scraptfSeenOn', () => {
+  const T = 1_791_958_000_000;
+  const price = (id: number, source: 'user' | 'import', observedAt: number, bank: ScraptfBank | null | undefined) => ({ id, source, observedAt, bank });
+
+  it('is the bank of the newest imported price that names one', () => {
+    expect(
+      scraptfSeenOn([price(1, 'import', T - 60_000, 'hats'), price(2, 'import', T - 5_000, 'stranges'), price(3, 'import', T - 1_000, null)]),
+    ).toEqual({ bank: 'stranges', url: 'https://scrap.tf/buy/stranges', at: T - 5_000 });
+    expect(scraptfSeenOn([price(1, 'import', T, 'list')])).toEqual({ bank: 'list', url: SCRAPTF_ITEMS_URL, at: T });
+  });
+
+  it('ignores typed prices (even a newer one), unknown banks and prices read without one', () => {
+    expect(scraptfSeenOn([price(1, 'import', T - 60_000, 'hats'), price(2, 'user', T, 'weapons')])!.bank).toBe('hats');
+    expect(scraptfSeenOn([price(1, 'import', T, 'cards' as ScraptfBank), price(2, 'import', T - 1, undefined)])).toBeNull();
+    expect(scraptfSeenOn([])).toBeNull();
+  });
+
+  it('breaks a tie on time by the higher id (the later write)', () => {
+    expect(scraptfSeenOn([price(4, 'import', T, 'skins'), price(9, 'import', T, 'weapons'), price(5, 'import', T, 'hats')])!.bank).toBe('weapons');
   });
 });

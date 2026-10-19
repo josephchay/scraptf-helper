@@ -23,6 +23,7 @@ import { lookupReferences, referencePrices } from '../../src/service/domain/pric
 import { LOW_CAP } from '../../src/service/domain/tiers';
 import { CSV_BOM } from '../../src/service/domain/csv';
 import { DEFAULT_SETTINGS, mergeSettings } from '../../src/shared/defaults';
+import { SCRAPTF_ITEMS_URL } from '../../src/shared/links';
 import { MARKET_CSV_COLUMNS, MARKET_SORTS, marketComparator, marketProfit, marketVerdict } from '../../src/shared/market';
 import type { DeepPartial, Listing, MarketRow, MarketSort, PriceRule, Settings, UnixMs } from '../../src/shared/types';
 import type { TimerApi } from '../../src/service/net/ratelimit';
@@ -359,7 +360,7 @@ describe('createMarketIndex: entries and the engine', () => {
     expect(rowOf(h, '30920;6')).toMatchObject({ knownSource: 'page', knownCostScrap: 55, stock: 1 });
 
     const r = h.market.list({}, T0);
-    expect(r.scraptf).toEqual({ typed: 4, pages: 3, newestPageAt: T0 - 2 * MIN, importEnabled: false, watchFolder: false, coverage: expect.any(Array) });
+    expect(r.scraptf).toEqual({ typed: 4, pages: 3, newestPageAt: T0 - 2 * MIN, importEnabled: false, watchFolder: false, coverage: expect.any(Array), allItems: { label: 'All items', url: SCRAPTF_ITEMS_URL, lastSavedAt: null, items: 0 } });
     // These page prices belong to no import batch, so every bank page reads "never saved" (F13, marketHooks.test.ts).
     expect(r.scraptf.coverage.map((c) => [c.label, c.lastSavedAt, c.items])).toEqual(
       ['Hats', 'Weapons', 'Stranges', 'Killstreaks', 'Skins', 'Items', 'Unusuals'].map((l) => [l, null, 0]),
