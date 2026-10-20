@@ -127,7 +127,8 @@ export function useVisiblePush(event: PushEvent, fn: () => void, enabled = true)
 
 /**
  * Returns a function that runs `fn` at most once per `ms`; calls during the
- * quiet period collapse into one trailing call.
+ * quiet period collapse into one trailing call. A clock stepped back delays a
+ * call by at most one period.
  */
 export function useThrottled(fn: () => void, ms: number): () => void {
   const ref = useRef(fn);
@@ -142,7 +143,8 @@ export function useThrottled(fn: () => void, ms: number): () => void {
   );
   return useCallback(() => {
     const now = Date.now();
-    const wait = last.current + ms - now;
+    // Clamped: a clock that moved back must not hold the call longer than one period (as market.ts flushNotify).
+    const wait = Math.min(ms, last.current + ms - now);
     if (wait <= 0) {
       last.current = now;
       ref.current();

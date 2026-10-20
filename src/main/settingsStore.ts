@@ -1,7 +1,8 @@
 // settings.json in userData: validated on load (per-field fallback), validated
 // and merged on update, written atomically. A file that exists but cannot be
-// read is never overwritten: the app starts with the network paused and keeps
-// changes in memory until the file can be read again. Side effects that can
+// read is never overwritten: the app starts with the network paused, leaves the
+// login item as it is and keeps changes in memory until the file can be read
+// again. A leading UTF-8 BOM (hand edits) is ignored. Side effects that can
 // fail (the global hotkeys: quick entry and, since F16, the live check) run
 // before the change is committed so a refused hotkey never gets saved; the
 // login item follows startAtLogin. Listeners get every committed change (main
@@ -96,7 +97,8 @@ export function createSettingsStore(opts: SettingsStoreOptions): SettingsStore {
     }
     let raw: unknown;
     try {
-      raw = JSON.parse(text);
+      // 0.7.3: a hand edit saved as "UTF-8 with BOM" (Windows PowerShell 5.1) is valid, not corrupt.
+      raw = JSON.parse(text.charCodeAt(0) === 0xfeff ? text.slice(1) : text);
     } catch {
       const backup = `${opts.file}.corrupt-${now()}`;
       try {
@@ -239,9 +241,11 @@ export function createSettingsStore(opts: SettingsStoreOptions): SettingsStore {
         const accel = slot.of(next);
         slot.status = { accelerator: accel, registered: accel !== '', error: null };
       }
+      // 0.7.3: the first save after an unreadable start syncs the login item applyStartupEffects skipped.
+      const recovered = unreadable && canWrite;
       if (canWrite) unreadable = false;
       current = deepFreeze(next);
-      if (next.app.startAtLogin !== prev.app.startAtLogin) applyLogin(next.app.startAtLogin);
+      if (recovered || next.app.startAtLogin !== prev.app.startAtLogin) applyLogin(next.app.startAtLogin);
 
       for (const fn of listeners) {
         try {
@@ -259,7 +263,12 @@ export function createSettingsStore(opts: SettingsStoreOptions): SettingsStore {
     },
 
     applyStartupEffects() {
-      applyLogin(current.app.startAtLogin);
+      // 0.7.3: while settings.json cannot be read `current` holds defaults, so the OS login item keeps
+      // what the unread file set (set() syncs it once the file is saved again).
+      if (unreadable) log.info('login item left as it is: settings.json could not be read');
+      else applyLogin(current.app.startAtLogin);
+      // The hotkeys last only for this session and set() reconciles them with the file once it reads
+      // again; skipping them here would leave the default chords dead for the session.
       // The settings schema keeps the two chords apart, so neither can take the other's.
       const status = registerAtStartup(quick);
       registerAtStartup(check);

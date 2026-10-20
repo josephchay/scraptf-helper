@@ -2,7 +2,8 @@
 // a URL and a method in, a status, headers and a body out, built from the repo's saved-page fixtures
 // (passed in as text) and a few small pages of its own. Nothing here opens a file or a connection; the
 // harness hands each request of the scrap.tf window's sessions to routeSmokeRequest and answers with what
-// it returns, so no request of the window ever leaves the machine.
+// it returns, so no request of the window ever leaves the machine. 0.7.2: also what a read of the killstreaks
+// fixture must store (smokeKitProblems), pure as well, so the check itself is tested without Electron.
 
 import { SCRAPTF_BANKS, SCRAPTF_HOME_URL } from '../shared/links';
 import { isScraptfPageUrl } from '../shared/scraptfWindowPolicy';
@@ -33,6 +34,8 @@ function bankUrl(bank: string): string {
 export const SMOKE_HOME_URL = SCRAPTF_HOME_URL;
 export const SMOKE_HATS_URL = bankUrl('hats');
 export const SMOKE_UNUSUALS_URL = bankUrl('unusuals');
+/** 0.7.2: the killstreaks bank, whose fixture ends with kit cards in the real page's shape (K11-K15). */
+export const SMOKE_KILLSTREAKS_URL = bankUrl('killstreaks');
 /** A Cloudflare-style check: 403 with `cf-mitigated: challenge`. */
 export const SMOKE_CHALLENGE_URL = new URL('/smoke/challenge', SCRAPTF_HOME_URL).href;
 /**
@@ -121,6 +124,72 @@ const CARD_BLOCK = /<!-- C(\d+):[^\n]*-->\r?\n<div\r?\n[\s\S]*?\r?\n<\/div>\r?\n
 /** The hats fixture with every numbered card after the first PARTIAL_KEEP removed (a look caught while cards still arrive). */
 export function partialHatsHtml(full: string): string {
   return full.replace(CARD_BLOCK, (block, n: string) => (Number(n) <= PARTIAL_KEEP ? block : ''));
+}
+
+// ---------------------------------------------------------------------------
+// 0.7.2: the kits of buy_killstreaks.html, as a read of the page must store them
+// ---------------------------------------------------------------------------
+
+/** K11 and K12: one Professional Rocket Launcher Kit, keyed by its weapon (205) and Non-Craftable. */
+export const SMOKE_KIT_ROCKET_LAUNCHER = '6526;6;uncraftable;kt-3;td-205';
+/** The fixture's kits by weapon: K11 and K12, K13 (a Specialized Scattergun Kit), K14 (a Killstreak Shotgun Kit). */
+export const SMOKE_KIT_SKUS = Object.freeze([SMOKE_KIT_ROCKET_LAUNCHER, '6523;6;uncraftable;kt-2;td-200', '6527;6;uncraftable;kt-1;td-199'] as const);
+/** K11's and K12's sheen/killstreaker: Team Shine and Hypno-Beam, Mean Green and Cerebral Discharge. */
+const ROCKET_LAUNCHER_COPIES = Object.freeze(['1/2008', '4/2003']);
+/** K15's title: it names no weapon, so the import skips it (needs-target) rather than store the bare kit. */
+export const SMOKE_WEAPONLESS_KIT_TITLE = 'Professional Kit';
+
+/** A stored price as 'prices.list' returns it: the fields the kit check reads. */
+export interface SmokeKitPrice {
+  sku: string;
+  importBatch: number | null;
+  special: { sheen: number | null; killstreaker: number | null } | null;
+}
+
+/** A card of a read's parser report ('import.report' items: the refused ones, and stored ones with a guess). */
+export interface SmokeKitCard {
+  title: string | null;
+  sku: string | null;
+  warnings: readonly string[];
+}
+
+/** A kit stored without its weapon: a kit defindex (6523, 6526, 6527) with no target, "6526;6" say. */
+export function isBareKitSku(sku: string): boolean {
+  return /^652[367](?:;|$)/.test(sku) && !/;td-\d+(?:;|$)/.test(sku);
+}
+
+/**
+ * What is wrong with what a read of the killstreaks fixture stored ([] when nothing): `batchId` the read's
+ * import batch, `prices` every stored price, `stockSkus` the SKU of every bank stock row, `cards` the read's
+ * parser report (null: none). The read must store each kit by its weapon and both Rocket Launcher Kit copies
+ * (the sheen and killstreaker set them apart), store no bare kit anywhere, and skip K15 with needs-target.
+ */
+export function smokeKitProblems(batchId: number, prices: readonly SmokeKitPrice[], stockSkus: readonly string[], cards: readonly SmokeKitCard[] | null): string[] {
+  const out: string[] = [];
+  const read = prices.filter((p) => p.importBatch === batchId);
+  const missing = SMOKE_KIT_SKUS.filter((sku) => !read.some((p) => p.sku === sku));
+  if (missing.length > 0) out.push(`the read stored no price of ${missing.join(', ')}`);
+  const copies = read
+    .filter((p) => p.sku === SMOKE_KIT_ROCKET_LAUNCHER)
+    .map((p) => `${p.special?.sheen ?? '-'}/${p.special?.killstreaker ?? '-'}`)
+    .sort();
+  if (copies.join(',') !== ROCKET_LAUNCHER_COPIES.join(',')) {
+    out.push(`the read stored ${copies.length} copies of ${SMOKE_KIT_ROCKET_LAUNCHER} (sheen/killstreaker ${copies.join(', ') || 'none'}), not ${ROCKET_LAUNCHER_COPIES.join(' and ')}`);
+  }
+  const stockCopies = stockSkus.filter((sku) => sku === SMOKE_KIT_ROCKET_LAUNCHER).length;
+  if (stockCopies !== ROCKET_LAUNCHER_COPIES.length) out.push(`the bank stock lists ${stockCopies} copies of ${SMOKE_KIT_ROCKET_LAUNCHER}, not ${ROCKET_LAUNCHER_COPIES.length}`);
+  const barePrices = [...new Set(prices.map((p) => p.sku).filter(isBareKitSku))];
+  if (barePrices.length > 0) out.push(`kits stored without their weapon: ${barePrices.join(', ')}`);
+  const bareStock = [...new Set(stockSkus.filter(isBareKitSku))];
+  if (bareStock.length > 0) out.push(`the bank stock lists kits without their weapon: ${bareStock.join(', ')}`);
+  if (cards === null) out.push('no parser report of the read');
+  else {
+    const k15 = cards.find((c) => c.title === SMOKE_WEAPONLESS_KIT_TITLE);
+    if (k15 === undefined) out.push(`'${SMOKE_WEAPONLESS_KIT_TITLE}' is not in the read's parser report`);
+    else if (k15.sku !== null) out.push(`'${SMOKE_WEAPONLESS_KIT_TITLE}' was keyed ${k15.sku}, not skipped`);
+    else if (!k15.warnings.some((w) => /^needs-target(?::|$)/.test(w))) out.push(`'${SMOKE_WEAPONLESS_KIT_TITLE}' was skipped without needs-target (${k15.warnings.join('; ') || 'no warning'})`);
+  }
+  return out;
 }
 
 /** The path without trailing slashes ('/' stays). */

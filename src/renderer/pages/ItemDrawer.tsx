@@ -51,6 +51,7 @@ import {
   describeBuyerCheck,
   drawerCeiling,
   drawerPriceInput,
+  drawerPriceTargets,
   fmtDays,
   groupLinks,
   isSteamId64,
@@ -60,6 +61,7 @@ import {
   modalHostOf,
   OPEN_ON_SCRAPTF_LABEL,
   priceFormHeading,
+  priceIsForSku,
   recordBuyInit,
   recordInitTitle,
   recordSaleInit,
@@ -75,7 +77,7 @@ import {
   type MenuPoint,
 } from '../itemMenuModel';
 import { drawerBankStockLine } from '../marketModel';
-import { listRowIsOtherCopy, previewRevenue } from '../quickModel';
+import { listRowIsOtherCopy, noRevenueTextOf, previewRevenue } from '../quickModel';
 import { listBoundaryNote } from '../scraptfListModel';
 import { scraptfLinksInWindow, scraptfWindowOn } from '../scraptfWindowModel';
 
@@ -114,12 +116,15 @@ function ItemDetailView({ sku }: { sku: string }) {
   const [busy, setBusy] = useState(false);
 
   const reloadDetail = detail.reload;
+  // 0.7.3: a refusal with a wait clears too once the wait is over (only a queued refresh reloads);
+  // one without a wait stays until the next click.
   useEffect(() => {
-    if (!refresh?.queued || refresh.until === null) return;
+    if (!refresh || refresh.until === null) return;
+    const { queued, until } = refresh;
     const id = setTimeout(() => {
-      void reloadDetail();
+      if (queued) void reloadDetail();
       setRefresh(null);
-    }, Math.max(500, refresh.until - Date.now() + 500));
+    }, Math.max(500, until - Date.now() + 500));
     return () => clearTimeout(id);
   }, [refresh, reloadDetail]);
 
@@ -138,7 +143,8 @@ function ItemDetailView({ sku }: { sku: string }) {
   const checkListings = useMemo(() => backgroundCheckListings(d?.opportunities ?? [], useOrder), [d, useOrder]);
   // The buy prefills with your newest scrap.tf price, the sale with the order your profit uses, or with
   // scrap.tf's saved list price when Holdings' rule makes it the better exit (F14).
-  const buyInit = useMemo<RecordTradeInit | null>(() => (d ? recordBuyInit(d, d.scrapPrices) : null), [d]);
+  // 0.7.2: of copies seen at one time (a kit's sheens), the cheapest at the key price shown here.
+  const buyInit = useMemo<RecordTradeInit | null>(() => (d ? recordBuyInit(d, d.scrapPrices, null, keyScrap) : null), [d, keyScrap]);
   const saleInit = useMemo<RecordTradeInit | null>(
     () => (d ? recordSaleInit(d, previewRevenue(d, profit).order, d.scraptfList ? { list: d.scraptfList, now } : null) : null),
     [d, profit, now],
@@ -418,6 +424,11 @@ function InputCard({ o, keyScrap, now, ruleName }: { o: Opportunity; keyScrap: S
                 </span>
               ) : null}
             </>
+          ) : o.revenueScrap === null && o.buyerCount > 0 ? (
+            // 0.7.3: eligible orders none of which is usable (all outliers, or no bot for Instant); the hover says which.
+            <span className="muted" title={noRevenueTextOf(o)}>
+              — (no usable buy order)
+            </span>
           ) : (
             <span className="muted">{o.revenueScrap === null ? '— (no eligible buy order)' : '— (no price clears your thresholds)'}</span>
           )}
@@ -648,6 +659,10 @@ function PriceSection({
                     {fmtAgo(p.observedAt, now)}
                   </span>
                   {p.stock !== null ? ` · stock ${p.stock}` : ''}
+                  {/* 0.7.3: a painted or spelled copy stored under this base SKU; the form below never updates it. */}
+                  {priceIsForSku(p, d.sku) ? null : (
+                    <span title={`Stored for another copy of this item: ${p.name}. Seen now and Delete change that copy's price.`}> · other copy</span>
+                  )}
                 </span>
                 {p.note ? <span className="muted">· {p.note}</span> : null}
                 <span className="row-actions price-line-actions">
@@ -688,8 +703,9 @@ function PriceSection({
 
 function DrawerPriceForm({ d, keyScrap, now, ceiling, onSaved }: { d: ItemDetail; keyScrap: Scrap | null; now: number; ceiling: Scrap | null; onSaved: () => void }) {
   const { toast } = useApp();
-  const userPrices = useMemo(() => d.scrapPrices.filter((p) => p.source === 'user').sort((a, b) => b.observedAt - a.observedAt), [d.scrapPrices]);
-  const [targetId, setTargetId] = useState<number | null>(() => defaultPriceTarget(d.scrapPrices));
+  // 0.7.3: this copy's typed prices only; another copy's row would take this copy's price.
+  const userPrices = useMemo(() => drawerPriceTargets(d.scrapPrices, d.sku), [d.scrapPrices, d.sku]);
+  const [targetId, setTargetId] = useState<number | null>(() => defaultPriceTarget(d.scrapPrices, d.sku));
   // A price deleted meanwhile (here or elsewhere) turns the form back into "add".
   const target = userPrices.find((p) => p.id === targetId) ?? null;
   const [text, setText] = useState('');
@@ -1162,6 +1178,9 @@ function BuyerProfileLink({ url }: { url: string }) {
 
 type ScmResult = { lowest: string | null; median: string | null; volume: string | null; marketHashName: string | null } | null;
 
+/** 0.7.3: item.scm answers null only when the service finds the check off (turned off while it ran); a failure throws. */
+const SCM_TURNED_OFF_TEXT = 'Nothing was read: the Steam Community Market price check was turned off in Settings.';
+
 /** Steam Community Market price overview: off unless enabled in Settings, one request per click. */
 function SteamMarketCheck({ sku, unusual }: { sku: string; unusual: boolean }) {
   const { settings } = useApp();
@@ -1182,7 +1201,7 @@ function SteamMarketCheck({ sku, unusual }: { sku: string; unusual: boolean }) {
         {state.busy ? 'Checking…' : 'Check Steam Market price'}
       </button>
       {state.error ? <span className="small tone-text-bad">{state.error}</span> : null}
-      {r === null ? <span className="muted small">Steam Market lookups are off or paused.</span> : null}
+      {r === null ?<span className="muted small">{SCM_TURNED_OFF_TEXT}</span> : null}
       {r ? (
         r.marketHashName === null ? (
           <span className="muted small">This item is not sold on the Steam Market.</span>

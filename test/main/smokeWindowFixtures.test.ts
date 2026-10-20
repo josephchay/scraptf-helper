@@ -1,12 +1,15 @@
 // The window test's local router (main/smokeWindowFixtures.ts): which address gets which fixture or page,
 // what status, and a 404 with no body for everything else; that it is pure (no file, network or Electron
-// access); and that its partial hats page really reads as a partial look of /buy/hats in the service's
-// import (DM-2), which step 6 of the window test relies on. Nothing is fetched or launched here.
+// access); that its partial hats page really reads as a partial look of /buy/hats in the service's import
+// (DM-2), which step 6 of the window test relies on; and (0.7.2) that step 2b's kit check passes on what the
+// real import, with TF2's own item data, stores from the killstreaks fixture, and fails on each way of getting
+// the kits wrong. Nothing is fetched or launched here.
 
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import {
+  isBareKitSku,
   partialHatsHtml,
   routeSmokeRequest,
   SMOKE_CHALLENGE_AT_HATS_URL,
@@ -14,30 +17,42 @@ import {
   SMOKE_FIXTURE_FILES,
   SMOKE_HATS_URL,
   SMOKE_HOME_URL,
+  SMOKE_KILLSTREAKS_URL,
+  SMOKE_KIT_ROCKET_LAUNCHER,
+  SMOKE_KIT_SKUS,
   SMOKE_PARTIAL_AT_HATS_URL,
   SMOKE_PARTIAL_HATS_URL,
   SMOKE_STEAM_LINK_POINT,
   SMOKE_STEAM_LOGIN_URL,
   SMOKE_STEAM_SENTINEL,
   SMOKE_UNUSUALS_URL,
+  SMOKE_WEAPONLESS_KIT_TITLE,
+  smokeKitProblems,
   smokeWindowSettings,
   type SmokeFixtureName,
+  type SmokeKitCard,
+  type SmokeKitPrice,
 } from '../../src/main/smokeWindowFixtures';
 import { createSettingsStore } from '../../src/main/settingsStore';
-import type { Engine, Logger, Repo } from '../../src/service/contracts';
+import { createSchemaService } from '../../src/service/connectors/schema';
+import type { Engine, Logger, Repo, SchemaService } from '../../src/service/contracts';
 import { openRepo } from '../../src/service/db';
 import { createBankStock } from '../../src/service/domain/bankStock';
 import type { MarketEval } from '../../src/service/domain/market';
 import { createScraptfHistory } from '../../src/service/domain/scraptfHistory';
+import { clearImportReports } from '../../src/service/import/reports';
 import { createRpcHandlers, type HandlerContext } from '../../src/service/rpcHandlers';
+import { BANK_STOCK_MAX_LIMIT } from '../../src/shared/bankStock';
 import { DEFAULT_SETTINGS, mergeSettings } from '../../src/shared/defaults';
 import { PARTIAL_READ, PARTIAL_READ_MIN_KEYS } from '../../src/shared/importCodes';
 import { SCRAPTF_BANKS, SCRAPTF_HOME_URL } from '../../src/shared/links';
+import type { RpcMethod, RpcParams, RpcResult } from '../../src/shared/rpc';
 import { scraptfImportablePath } from '../../src/shared/scraptfPaths';
 import { isAllowedWindowStart, shouldReadUrl, topLevelNavigationDecision } from '../../src/shared/scraptfWindowPolicy';
 import type { ImportResult, KeyPriceState } from '../../src/shared/types';
 import { fixture } from '../import/mhtmlFixture';
 import { createStubSchema } from '../import/schemaStub';
+import { makeDeps, schemaRoute } from '../pricedb/helpers';
 
 const FIXTURES = new Map<SmokeFixtureName, string>(SMOKE_FIXTURE_FILES.map((n) => [n, fixture(n)]));
 const read = (name: SmokeFixtureName) => FIXTURES.get(name) ?? null;
@@ -185,7 +200,11 @@ describe('the window test addresses', () => {
     expect(SMOKE_HOME_URL).toBe(SCRAPTF_HOME_URL);
     expect(SMOKE_HATS_URL).toBe(SCRAPTF_BANKS.find((b) => b.bank === 'hats')!.url);
     expect(SMOKE_UNUSUALS_URL).toBe(SCRAPTF_BANKS.find((b) => b.bank === 'unusuals')!.url);
-    for (const url of [SMOKE_HOME_URL, SMOKE_HATS_URL, SMOKE_UNUSUALS_URL]) expect(isAllowedWindowStart(url), url).toBe(true);
+    expect(SMOKE_KILLSTREAKS_URL).toBe(SCRAPTF_BANKS.find((b) => b.bank === 'killstreaks')!.url);
+    for (const url of [SMOKE_HOME_URL, SMOKE_HATS_URL, SMOKE_UNUSUALS_URL, SMOKE_KILLSTREAKS_URL]) expect(isAllowedWindowStart(url), url).toBe(true);
+    // 0.7.2: step 2b's page is the killstreaks fixture, which the import reads as that bank.
+    expect(get(SMOKE_KILLSTREAKS_URL)).toMatchObject({ status: 200, body: fixture('buy_killstreaks.html') });
+    expect(scraptfImportablePath(SMOKE_KILLSTREAKS_URL)).toBe(true);
     for (const url of [SMOKE_CHALLENGE_URL, SMOKE_CHALLENGE_AT_HATS_URL, SMOKE_PARTIAL_HATS_URL, SMOKE_PARTIAL_AT_HATS_URL]) {
       expect(isAllowedWindowStart(url), url).toBe(false);
       expect(shouldReadUrl(url), url).toBe(true);
@@ -237,56 +256,60 @@ describe('smokeWindowFixtures.ts is pure', () => {
   });
 });
 
+// The real import, bank stock and history over an in-memory repo, with `schema` as the item data: a file save
+// of a fixture and a window read of a page as the router serves it, as the window test makes them.
+const NOW = 1_800_000_000_000;
+const MIN = 60_000;
+const KEY: KeyPriceState = { valueScrap: 600, source: 'bptf', observedAt: NOW, stale: false, quotes: [], scraptfFromList: null };
+const repos: Repo[] = [];
+afterEach(() => {
+  while (repos.length) repos.pop()!.close();
+});
+
+function importer(schema: SchemaService = createStubSchema()) {
+  const repo = openRepo(':memory:');
+  repos.push(repo);
+  const settings = mergeSettings(DEFAULT_SETTINGS, {
+    import: { enabled: true, acknowledgedAt: NOW - 60 * MIN },
+    scraptfWindow: { enabled: true, acknowledgedAt: NOW - 60 * MIN },
+  });
+  const quiet = () => undefined;
+  const log: Logger = { debug: quiet, info: quiet, warn: quiet, error: quiet };
+  const clock = { now: () => NOW };
+  const o = { listingId: 'l1', steamid: '76561198000000002', userName: 'KeyBot', keys: 0, metalScrap: 1e6, valueScrap: 1e6, isBot: true, online: true, lastEventAt: NOW - MIN, bumpedAt: null, details: '', flags: [], eligible: true };
+  const e: MarketEval = { bestScrap: 1e6, consScrap: 1e6, instantScrap: 1e6, revenueScrap: 1e6, revenueOrder: o, bestOrder: o, buyerCount: 3, eligibleCount: 3, maxCostScrap: 1e6 - 100, confidence: 80, confidenceLevel: 'high', flags: [], lastOrderChangeAt: NOW - MIN, referenced: true };
+  const stock = createBankStock({ clock, log, repo, market: { entryFor: () => e }, keyPrice: () => KEY, settings: () => settings, categoryOf: () => 'hats' });
+  const history = createScraptfHistory({ clock, log, repo, market: { entryFor: () => e }, keyPrice: () => KEY });
+  const ctx = {
+    clock,
+    log,
+    repo,
+    http: {},
+    schema,
+    engine: { keyPrice: () => KEY, markDirty: quiet } as unknown as Engine,
+    settings: () => settings,
+    push: quiet,
+    pricesChanged: quiet,
+    scraptfListChanged: quiet,
+    bankStock: stock,
+    scraptfHistory: history,
+    bankStockChanged: () => {
+      stock.refresh();
+      history.refresh();
+    },
+  } as unknown as HandlerContext;
+  const handle = createRpcHandlers(ctx);
+  const call = <M extends RpcMethod>(method: M, params: RpcParams<M>) => handle(method, params) as Promise<RpcResult<M>>;
+  const fileSave = (name: SmokeFixtureName, at: number) => call('import.html', { html: fixture(name), fileName: name, mtimeMs: at });
+  const windowRead = (url: string, at: number) =>
+    handle('import.html', { html: get(url).body, fileName: `scrap.tf window ${new URL(url).pathname}`, mtimeMs: at, address: url, origin: 'window' }) as Promise<ImportResult>;
+  return { repo, call, fileSave, windowRead };
+}
+
 // Step 6 of the window test reads the partial page at the hats address after a full read of /buy/hats.
 // The real import, bank stock and history over an in-memory repo show that this is a partial look: prices
 // stored, no bank stock save, no gone event.
 describe('the partial hats page in the import (DM-2)', () => {
-  const NOW = 1_800_000_000_000;
-  const MIN = 60_000;
-  const KEY: KeyPriceState = { valueScrap: 600, source: 'bptf', observedAt: NOW, stale: false, quotes: [], scraptfFromList: null };
-  const repos: Repo[] = [];
-  afterEach(() => {
-    while (repos.length) repos.pop()!.close();
-  });
-
-  function importer() {
-    const repo = openRepo(':memory:');
-    repos.push(repo);
-    const settings = mergeSettings(DEFAULT_SETTINGS, {
-      import: { enabled: true, acknowledgedAt: NOW - 60 * MIN },
-      scraptfWindow: { enabled: true, acknowledgedAt: NOW - 60 * MIN },
-    });
-    const quiet = () => undefined;
-    const log: Logger = { debug: quiet, info: quiet, warn: quiet, error: quiet };
-    const clock = { now: () => NOW };
-    const o = { listingId: 'l1', steamid: '76561198000000002', userName: 'KeyBot', keys: 0, metalScrap: 1e6, valueScrap: 1e6, isBot: true, online: true, lastEventAt: NOW - MIN, bumpedAt: null, details: '', flags: [], eligible: true };
-    const e: MarketEval = { bestScrap: 1e6, consScrap: 1e6, instantScrap: 1e6, revenueScrap: 1e6, revenueOrder: o, bestOrder: o, buyerCount: 3, eligibleCount: 3, maxCostScrap: 1e6 - 100, confidence: 80, confidenceLevel: 'high', flags: [], lastOrderChangeAt: NOW - MIN, referenced: true };
-    const stock = createBankStock({ clock, log, repo, market: { entryFor: () => e }, keyPrice: () => KEY, settings: () => settings, categoryOf: () => 'hats' });
-    const history = createScraptfHistory({ clock, log, repo, market: { entryFor: () => e }, keyPrice: () => KEY });
-    const ctx = {
-      clock,
-      log,
-      repo,
-      http: {},
-      schema: createStubSchema(),
-      engine: { keyPrice: () => KEY, markDirty: quiet } as unknown as Engine,
-      settings: () => settings,
-      push: quiet,
-      pricesChanged: quiet,
-      scraptfListChanged: quiet,
-      bankStock: stock,
-      scraptfHistory: history,
-      bankStockChanged: () => {
-        stock.refresh();
-        history.refresh();
-      },
-    } as unknown as HandlerContext;
-    const handle = createRpcHandlers(ctx);
-    const windowRead = (url: string, at: number) =>
-      handle('import.html', { html: get(url).body, fileName: `scrap.tf window ${new URL(url).pathname}`, mtimeMs: at, address: url, origin: 'window' }) as Promise<ImportResult>;
-    return { repo, windowRead };
-  }
-
   it('after a full read of /buy/hats, stores prices but no bank stock save and no gone event', async () => {
     const h = importer();
     const full = await h.windowRead(SMOKE_HATS_URL, NOW - 10 * MIN);
@@ -303,5 +326,84 @@ describe('the partial hats page in the import (DM-2)', () => {
     expect(Number(counts?.[2])).toBeGreaterThanOrEqual(PARTIAL_READ_MIN_KEYS);
     expect(h.repo.bankStockSaves('hats').map((s) => s.batchId)).toEqual([full.batchId]);
     expect(h.repo.scraptfEvents({ bank: 'hats', kinds: ['gone'] })).toEqual([]);
+  });
+});
+
+// 0.7.2: step 2b of the window test reads /buy/killstreaks after a file save of the same fixture, and checks
+// the kits with smokeKitProblems. Here the same two imports, with TF2's own item data (the schema subset, not
+// the stub, whose kit names once hid that every kit was stored bare), must pass that check.
+describe('the killstreaks fixture in the import, as step 2b checks it (0.7.2)', () => {
+  let schema: SchemaService;
+  beforeAll(async () => {
+    schema = createSchemaService(makeDeps(schemaRoute()));
+    await schema.init();
+  });
+  beforeEach(() => clearImportReports());
+
+  it('stores each kit by its weapon, both Rocket Launcher copies and no bare kit, and skips K15 with needs-target', async () => {
+    const h = importer(schema);
+    const file = await h.fileSave('buy_killstreaks.html', NOW - 60 * MIN);
+    const read = await h.windowRead(SMOKE_KILLSTREAKS_URL, NOW - 5 * MIN);
+    expect(read).toMatchObject({ bank: 'killstreaks', origin: 'window', stockSave: 'written', parsed: file.parsed, stored: file.stored });
+    expect([file.parsed, file.stored, file.skippedCounts]).toEqual([15, 14, { 'needs-target': 1 }]);
+    const prices = await h.call('prices.list', {});
+    const stock = (await h.call('scraptf.bankStock', { bank: 'killstreaks', limit: BANK_STOCK_MAX_LIMIT })).rows.map((r) => r.sku);
+    const report = (await h.call('import.report', { limit: 20 })).find((r) => r.batchId === read.batchId) ?? null;
+    expect(report).not.toBeNull();
+    expect(smokeKitProblems(read.batchId, prices, stock, report!.items)).toEqual([]);
+    // The window read rewrote the file save's prices in place, under its own batch.
+    expect(prices.filter((p) => SMOKE_KIT_SKUS.some((sku) => sku === p.sku)).map((p) => p.importBatch)).toEqual([read.batchId, read.batchId, read.batchId, read.batchId]);
+    // Against the file save's batch, nothing was stored by it any more: the check names every kit missing.
+    expect(smokeKitProblems(file.batchId, prices, stock, report!.items)[0]).toBe(`the read stored no price of ${SMOKE_KIT_SKUS.join(', ')}`);
+  });
+});
+
+describe('smokeKitProblems', () => {
+  const BATCH = 7;
+  const price = (sku: string, sheen: number | null = null, killstreaker: number | null = null, importBatch: number | null = BATCH): SmokeKitPrice => ({ sku, importBatch, special: { sheen, killstreaker } });
+  const PRICES: readonly SmokeKitPrice[] = [
+    price(SMOKE_KIT_ROCKET_LAUNCHER, 4, 2003),
+    price(SMOKE_KIT_ROCKET_LAUNCHER, 1, 2008),
+    price('6523;6;uncraftable;kt-2;td-200', 3),
+    price('6527;6;uncraftable;kt-1;td-199'),
+    price('205;6;kt-1'),
+  ];
+  const STOCK: readonly string[] = [SMOKE_KIT_ROCKET_LAUNCHER, SMOKE_KIT_ROCKET_LAUNCHER, '6523;6;uncraftable;kt-2;td-200', '6527;6;uncraftable;kt-1;td-199', '205;6;kt-1'];
+  const K15: SmokeKitCard = { title: SMOKE_WEAPONLESS_KIT_TITLE, sku: null, warnings: [`needs-target: "${SMOKE_WEAPONLESS_KIT_TITLE}" names no weapon for its kit`] };
+
+  it('finds nothing wrong with the kits as the fixture holds them', () => {
+    expect(smokeKitProblems(BATCH, PRICES, STOCK, [K15])).toEqual([]);
+  });
+
+  it('names a kit not stored by the read, and a Rocket Launcher copy missing or merged', () => {
+    expect(smokeKitProblems(BATCH, PRICES.filter((p) => !p.sku.startsWith('6527;')), STOCK, [K15])).toEqual(['the read stored no price of 6527;6;uncraftable;kt-1;td-199']);
+    // A price an earlier save stored is not the read's.
+    expect(smokeKitProblems(BATCH, [...PRICES.slice(1), { ...PRICES[0]!, importBatch: BATCH - 1 }], STOCK, [K15])).toEqual([
+      `the read stored 1 copies of ${SMOKE_KIT_ROCKET_LAUNCHER} (sheen/killstreaker 1/2008), not 1/2008 and 4/2003`,
+    ]);
+    // Two copies, but one of them stored without its sheen and killstreaker.
+    expect(smokeKitProblems(BATCH, [price(SMOKE_KIT_ROCKET_LAUNCHER), ...PRICES.slice(1)], STOCK, [K15])).toEqual([
+      `the read stored 2 copies of ${SMOKE_KIT_ROCKET_LAUNCHER} (sheen/killstreaker -/-, 1/2008), not 1/2008 and 4/2003`,
+    ]);
+    expect(smokeKitProblems(BATCH, PRICES, STOCK.slice(1), [K15])).toEqual([`the bank stock lists 1 copies of ${SMOKE_KIT_ROCKET_LAUNCHER}, not 2`]);
+  });
+
+  it('names a kit stored without its weapon, in the prices (any batch) or the bank stock', () => {
+    expect(smokeKitProblems(BATCH, [...PRICES, price('6526;6', null, null, 1), price('6523;6;uncraftable')], STOCK, [K15])).toEqual(['kits stored without their weapon: 6526;6, 6523;6;uncraftable']);
+    expect(smokeKitProblems(BATCH, PRICES, [...STOCK, '6527;6', '6526;6;uncraftable;kt-3'], [K15])).toEqual(['the bank stock lists kits without their weapon: 6527;6, 6526;6;uncraftable;kt-3']);
+  });
+
+  it('names K15 missing from the report, keyed, or skipped for another reason, and a read with no report', () => {
+    expect(smokeKitProblems(BATCH, PRICES, STOCK, [])).toEqual([`'${SMOKE_WEAPONLESS_KIT_TITLE}' is not in the read's parser report`]);
+    expect(smokeKitProblems(BATCH, PRICES, STOCK, [{ ...K15, sku: '6526;6;uncraftable;kt-3;td-18' }])).toEqual([`'${SMOKE_WEAPONLESS_KIT_TITLE}' was keyed 6526;6;uncraftable;kt-3;td-18, not skipped`]);
+    expect(smokeKitProblems(BATCH, PRICES, STOCK, [{ ...K15, warnings: ['no-price: no price on the card'] }])).toEqual([`'${SMOKE_WEAPONLESS_KIT_TITLE}' was skipped without needs-target (no-price: no price on the card)`]);
+    expect(smokeKitProblems(BATCH, PRICES, STOCK, [{ ...K15, warnings: ['needs-targets'] }])).toHaveLength(1);
+    expect(smokeKitProblems(BATCH, PRICES, STOCK, null)).toEqual(['no parser report of the read']);
+  });
+
+  it('takes a kit defindex with no target as bare, and nothing else', () => {
+    for (const sku of ['6526;6', '6523;6', '6527;6', '6526;6;uncraftable', '6526;6;uncraftable;kt-3', '6523;11;kt-2']) expect(isBareKitSku(sku), sku).toBe(true);
+    // A fabricator names its kit only as its output; 6522 is the Strangifier.
+    for (const sku of [...SMOKE_KIT_SKUS, '6526;6;td-205', '20003;6;kt-3;td-205;od-6526;oq-6', '65260;6', '205;6;kt-1', '6522;6']) expect(isBareKitSku(sku), sku).toBe(false);
   });
 });

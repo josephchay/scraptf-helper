@@ -57,7 +57,7 @@ import {
   type NetPauseState,
 } from './net';
 import { createRpcHandlers, importSavedPage, recordSkippedImport, type HandlerContext } from './rpcHandlers';
-import { buildJobs, createScheduler, SNAPSHOT_STALE_MS, type Scheduler } from './scheduler';
+import { buildJobs, createScheduler, snapshotIsStale, type Scheduler } from './scheduler';
 
 export const DB_FILE_NAME = 'flipdesk.sqlite';
 export const STATUS_INTERVAL_MS = 10_000;
@@ -177,12 +177,18 @@ export function newestScraptfBuys(entries: readonly Pick<JournalEntry, 'side' | 
   return out;
 }
 
+/**
+ * 0.7.3: the core's logger may buffer (ServiceLogger does); stop() flushes it. Kept off the shared
+ * Logger contract, whose keys are the level names (http.ts indexes it by them).
+ */
+export type CoreLogger = Logger & { flush?(): void };
+
 export interface ServiceCoreOptions {
   dataDir: string;
   version: string;
   settings: Settings;
   secrets: Partial<Record<SecretName, string>>;
-  log: Logger;
+  log: CoreLogger;
   fetchImpl?: typeof fetch;
   wsFactory?: (url: string, headers: Record<string, string>) => WebSocketLike;
   socketFactory?: PricedbSocketFactory;
@@ -200,6 +206,11 @@ export interface ServiceCore {
   updateSettings(settings: Settings): void;
   updateSecrets(secrets: Partial<Record<SecretName, string>>): void;
   onPush(cb: (event: PushEvent, payload: unknown) => void): () => void;
+  /**
+   * 0.7.2: set only on a core that could not open its database: the reason every RPC rejects with.
+   * entry.ts puts it in the 'ready' message, so main logs a warning instead of a plain "service ready".
+   */
+  readonly failure?: string;
 }
 
 /** Unref'd real timers: the parent port keeps the utilityProcess alive, tests exit cleanly. */
@@ -247,11 +258,15 @@ function selfTest(log: Logger): void {
 }
 
 /** A core that only reports why it could not start (e.g. a database from a newer version). */
-function failedCore(reason: string, log: Logger): ServiceCore {
+function failedCore(reason: string, log: CoreLogger): ServiceCore {
   log.error(`service cannot start: ${reason}`);
   return {
+    failure: reason,
     start: async () => undefined,
-    stop: async () => undefined,
+    // 0.7.3: the reason line is still buffered; write it now, as a running core's stop() does.
+    stop: async () => {
+      log.flush?.();
+    },
     handle: async () => {
       throw new Error(reason);
     },
@@ -1188,10 +1203,8 @@ export function createServiceCore(opts: ServiceCoreOptions): ServiceCore {
     },
     queueSnapshot,
     snapshot,
-    snapshotStale: (base) => {
-      const at = repo.getSnapshotAt(base);
-      return at === null || clock.now() - at >= SNAPSHOT_STALE_MS;
-    },
+    // 0.7.3: the scheduler's test, so a snapshot stamped in the future (clock moved back) is stale too.
+    snapshotStale: (base) => snapshotIsStale(repo.getSnapshotAt(base), clock.now()),
     hostUnblocked: (host) => {
       for (const id of HOST_JOBS[host] ?? []) scheduler.kick(id);
       if (host === 'ws.backpack.tf') {
@@ -1301,6 +1314,8 @@ export function createServiceCore(opts: ServiceCoreOptions): ServiceCore {
       }
       log.info('service stopped');
       applySecrets({});
+      // 0.7.3: write the buffer now; a late timer flush would recreate a log folder deleted after stop().
+      log.flush?.();
     },
 
     async handle(method, params) {

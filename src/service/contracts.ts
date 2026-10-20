@@ -270,6 +270,7 @@ export interface Repo {
   searchBptfNames(q: string, limit: number): BptfNameRow[];
 
   // PriceDB
+  /** An older `time` never replaces a newer stored row (0.7.3); an equal or undated (0) one does. */
   upsertPricedb(rows: PricedbRow[]): void;
   getPricedb(sku: string): PricedbRow | null;
   pricedbCount(): number;
@@ -546,6 +547,11 @@ export interface BptfApi {
   ): Promise<Map<string, { banned: boolean; name: string | null; banDetails?: string[] }>>;
   test(name: Extract<SecretName, 'bptfApiKey' | 'bptfAccessToken'>): Promise<{ ok: boolean; message: string }>;
   snapshotAvailable(): boolean;
+  /**
+   * 0.7.3: why backpack.tf rejected this credential, or null when it was not rejected or the user
+   * changed it since (a Settings test also clears it). Sends nothing; the scheduler parks the jobs on it.
+   */
+  credentialRejected(name: Extract<SecretName, 'bptfApiKey' | 'bptfAccessToken'>): string | null;
   health(): ConnectorHealth[];
 }
 

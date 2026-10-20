@@ -10,6 +10,7 @@
 import {
   BANK_STOCK_PLAIN_KEY,
   SCRAPTF_LONG_LISTED_MS,
+  bankStockIsOwnCopy,
   bankStockKey,
   bankStockOnSale,
   bankStockPagePath,
@@ -136,6 +137,9 @@ export function scraptfEventsOf(a: {
 export interface ScraptfEventBuySide {
   revenueScrap: Scrap | null;
   maxCostScrap: Scrap | null;
+  /** 0.7.3: why a null revenue with buyers is null (ScraptfChangeEvent.buyerCount, flags). Absent: not known. */
+  buyerCount?: number;
+  flags?: readonly string[];
 }
 
 /**
@@ -150,6 +154,8 @@ export function scraptfChangeEvent(e: ScraptfEventStored, keyScrap: Scrap, buy: 
   const deltaScrap = fromValueScrap !== null && toValueScrap !== null ? (sameRaw ? 0 : toValueScrap - fromValueScrap) : null;
   const revenueScrap = buy && finite(buy.revenueScrap) ? buy.revenueScrap : null;
   const maxCostScrap = buy && finite(buy.maxCostScrap) ? buy.maxCostScrap : null;
+  // 0.7.3: who buys, so a null Sells for with buyers says why (none usable), not "no eligible buy order".
+  const buyers = buy === null ? { buyerCount: 0, flags: [] } : finite(buy.buyerCount) ? { buyerCount: buy.buyerCount, flags: [...(buy.flags ?? [])] } : {};
   return {
     ...e,
     key: bankStockKey(e.sku, e.specialKey),
@@ -161,6 +167,7 @@ export function scraptfChangeEvent(e: ScraptfEventStored, keyScrap: Scrap, buy: 
     revenueScrap,
     maxCostScrap,
     flip: e.kind !== 'gone' && toValueScrap !== null && maxCostScrap !== null && toValueScrap <= maxCostScrap,
+    ...buyers,
   };
 }
 
@@ -390,6 +397,8 @@ function observe(st: RunState, at: UnixMs, row: BankStockStored | null): void {
     const raw = rawOf(row);
     if (r.firstSeenAt === null) r.firstSeenAt = at;
     r.lastSeenAt = at;
+    // 0.7.3: never cleared off sale, so a gone row shows the price it was last on sale at.
+    r.lastOnSale = { keys: raw.keys, scrap: raw.scrap };
     if (!st.listed) {
       r.listedSince = at;
       r.runStart = raw;
@@ -429,7 +438,7 @@ export function scraptfRunsOf(saves: readonly ScraptfSaveRows[]): Map<string, Sc
       let st = state.get(key);
       if (!st) {
         st = {
-          run: { key, sku: row.sku, specialKey: row.specialKey, seenAt: save.savedAt, firstSeenAt: null, lastSeenAt: null, listedSince: null, runStart: null, current: null },
+          run: { key, sku: row.sku, specialKey: row.specialKey, seenAt: save.savedAt, firstSeenAt: null, lastSeenAt: null, listedSince: null, runStart: null, current: null, lastOnSale: null },
           home: save.page,
           listed: false,
         };
@@ -469,7 +478,7 @@ function runOfObservations(key: string, sku: string, specialKey: string, obs: re
   const first = obs.find((o) => o.row !== null);
   if (!first) return null;
   const st: RunState = {
-    run: { key, sku, specialKey, seenAt: first.at, firstSeenAt: null, lastSeenAt: null, listedSince: null, runStart: null, current: null },
+    run: { key, sku, specialKey, seenAt: first.at, firstSeenAt: null, lastSeenAt: null, listedSince: null, runStart: null, current: null, lastOnSale: null },
     home: first.page,
     listed: false,
   };
@@ -485,40 +494,20 @@ function better(a: { bank: ScraptfBank; at: UnixMs }, b: { bank: ScraptfBank; at
   return a.at > b.at;
 }
 
-/**
- * 'scraptf.itemHistory' for one copy (`sku`'s base and its paint, or `specialKey` when given) from each
- * bank's retained saves. The history is read from one bank: the one whose newest observation lists it on
- * sale (a bank page before the /items list, then the newest), else the one that last listed it on sale,
- * else the one that last listed it at all. `events` are this base SKU's stored events valued now (the
- * caller reads them; this keeps the copy's own, newest first, at most SCRAPTF_ITEM_EVENTS price events
- * and, 0.7.1, at most SCRAPTF_ITEM_STOCK_EVENTS 'stock' ones besides). change.hN
- * compares the current price with the newest observation at or before now - N (null when it was not on
- * sale then, or nothing is on sale now); change.listed with the run's first save. All prices are raw keys
- * + metal valued at the key price now.
- */
-export function scraptfItemHistoryOf(a: {
-  sku: string;
-  /** bank_stock.special_key of the copy; null or omitted: the SKU's own (its paint, else a clean copy). */
-  specialKey?: string | null;
-  /** Fallback when no retained save names it (the schema's name). */
-  name?: string;
-  banks: readonly { bank: ScraptfBank; saves: readonly ScraptfSaveRows[] }[];
-  events: readonly ScraptfChangeEvent[];
-  keyPrice: KeyPriceState | null;
-  now: UnixMs;
-}): ScraptfItemHistory {
-  const target = bankStockTargetOf(a.sku);
-  const base = target?.base ?? a.sku.trim();
-  const specialKey = typeof a.specialKey === 'string' ? a.specialKey : (target?.specialKey ?? BANK_STOCK_PLAIN_KEY);
-  const key = bankStockKey(base, specialKey);
-  const K = a.keyPrice && finite(a.keyPrice.valueScrap) && a.keyPrice.valueScrap > 0 ? a.keyPrice.valueScrap : 0;
+type ItemBanks = readonly { bank: ScraptfBank; saves: readonly ScraptfSaveRows[] }[];
+type CopyPick = { bank: ScraptfBank; obs: ScraptfObservation[]; run: ScraptfKeyRun; at: UnixMs };
 
-  type Chosen = { bank: ScraptfBank; obs: ScraptfObservation[]; run: ScraptfKeyRun; at: UnixMs };
-  let onSaleNow: Chosen | null = null;
-  let lastOnSale: Chosen | null = null;
-  let lastListed: Chosen | null = null;
+/**
+ * The bank one copy's history is read from (scraptfItemHistoryOf): the one whose newest observation lists it
+ * on sale (tier 0), else the one that last listed it on sale (1), else the one that last listed it (2); null
+ * when no save lists it. `name`: the newest name a save gives it.
+ */
+function copyPickOf(banks: ItemBanks, key: string, base: string, specialKey: string): { pick: CopyPick | null; tier: number; name: string | null } {
+  let onSaleNow: CopyPick | null = null;
+  let lastOnSale: CopyPick | null = null;
+  let lastListed: CopyPick | null = null;
   let name: string | null = null;
-  for (const b of a.banks) {
+  for (const b of banks) {
     const obs = scraptfObservationsOf(b.saves, key);
     const run = runOfObservations(key, base, specialKey, obs);
     if (!run) continue;
@@ -529,7 +518,86 @@ export function scraptfItemHistoryOf(a: {
     const listedAt = [...obs].reverse().find((o) => o.row !== null)!.at;
     if (better({ bank: b.bank, at: listedAt }, lastListed)) lastListed = { bank: b.bank, obs, run, at: listedAt };
   }
-  const pick = onSaleNow ?? lastOnSale ?? lastListed;
+  return { pick: onSaleNow ?? lastOnSale ?? lastListed, tier: onSaleNow ? 0 : lastOnSale ? 1 : 2, name };
+}
+
+function keyScrapOf(kp: KeyPriceState | null): Scrap {
+  return kp && finite(kp.valueScrap) && kp.valueScrap > 0 ? kp.valueScrap : 0;
+}
+
+/**
+ * 0.7.3: the special key of the copy 'scraptf.itemHistory' reads. `specialKey` when given (that copy
+ * exactly); else the SKU's own copy (its paint, else clean) or a saved copy that differs from it only by
+ * a sheen or killstreaker (bankStockIsOwnCopy, the 0.7.2 rule: a specialized or professional item has no
+ * copy without one). Of several, the first by scraptfItemHistoryOf's bank rule (on sale on its newest
+ * observation, then last on sale, then last listed; a bank page before the list, then the newer), then the
+ * cheapest on sale at the key price, then the SKU's exact copy, then the lower key. The own key when no
+ * save lists any.
+ */
+export function scraptfItemCopyOf(a: { sku: string; specialKey?: string | null; banks: ItemBanks; keyPrice: KeyPriceState | null }): string {
+  if (typeof a.specialKey === 'string') return a.specialKey;
+  const target = bankStockTargetOf(a.sku);
+  const own = target?.specialKey ?? BANK_STOCK_PLAIN_KEY;
+  if (!target) return own;
+  const keys = new Set<string>();
+  for (const b of a.banks) for (const s of b.saves) for (const r of s.rows) if (r.specialKey !== own && bankStockIsOwnCopy(r, target)) keys.add(r.specialKey);
+  if (keys.size === 0) return own;
+  keys.add(own);
+  const K = keyScrapOf(a.keyPrice);
+  type Candidate = { key: string; tier: number; pick: CopyPick; cost: number };
+  const ahead = (x: Candidate, y: Candidate): boolean => {
+    if (x.tier !== y.tier) return x.tier < y.tier;
+    // `better` is strict: at most one of the two holds.
+    if (better(x.pick, y.pick)) return true;
+    if (better(y.pick, x.pick)) return false;
+    if (x.cost !== y.cost) return x.cost < y.cost;
+    if ((x.key === own) !== (y.key === own)) return x.key === own;
+    return x.key < y.key;
+  };
+  let best: Candidate | null = null;
+  for (const key of keys) {
+    const { pick, tier } = copyPickOf(a.banks, bankStockKey(target.base, key), target.base, key);
+    if (!pick) continue;
+    const cur = pick.run.current;
+    const next: Candidate = { key, tier, pick, cost: cur ? valueScrap(cur.keys, cur.scrap, K) : Infinity };
+    if (best === null || ahead(next, best)) best = next;
+  }
+  return best?.key ?? own;
+}
+
+/**
+ * 'scraptf.itemHistory' for one copy (`sku`'s base and its paint, or `specialKey` when given; 0.7.3: else
+ * scraptfItemCopyOf, a sheen or killstreaker aside) from each bank's retained saves. The history is read
+ * from one bank (copyPickOf): the one whose newest observation lists it on
+ * sale (a bank page before the /items list, then the newest), else the one that last listed it on sale,
+ * else the one that last listed it at all. `events` are this base SKU's stored events valued now (the
+ * caller reads them; this keeps the copy's own, newest first, at most SCRAPTF_ITEM_EVENTS price events
+ * and, 0.7.1, at most SCRAPTF_ITEM_STOCK_EVENTS 'stock' ones besides). change.hN
+ * compares the current price with the newest observation at or before now - N (null when it was not on
+ * sale then, or nothing is on sale now); change.listed with the run's first save. All prices are raw keys
+ * + metal valued at the key price now.
+ */
+export function scraptfItemHistoryOf(a: {
+  sku: string;
+  /**
+   * bank_stock.special_key of the copy; null or omitted: the SKU's own (its paint, else a clean copy), 0.7.3:
+   * or its copy with a sheen or killstreaker (scraptfItemCopyOf).
+   */
+  specialKey?: string | null;
+  /** Fallback when no retained save names it (the schema's name). */
+  name?: string;
+  banks: ItemBanks;
+  events: readonly ScraptfChangeEvent[];
+  keyPrice: KeyPriceState | null;
+  now: UnixMs;
+}): ScraptfItemHistory {
+  const target = bankStockTargetOf(a.sku);
+  const base = target?.base ?? a.sku.trim();
+  const specialKey = scraptfItemCopyOf(a);
+  const key = bankStockKey(base, specialKey);
+  const K = keyScrapOf(a.keyPrice);
+
+  const { pick, name } = copyPickOf(a.banks, key, base, specialKey);
   // DM-6: price events and stock moves are capped apart, so 60 stock moves cannot push out a price drop.
   let prices = 0;
   let stocks = 0;

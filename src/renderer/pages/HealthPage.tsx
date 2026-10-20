@@ -335,9 +335,19 @@ export function KeyPriceTable({ kp, typed, now }: { kp: KeyPriceState; typed: Se
   );
 }
 
+/**
+ * Host filter options. The selected host stays listed after it drops out of the
+ * latest rows, so the select keeps showing the real filter and "All hosts" clears it.
+ */
+export function requestLogHostOptions(rows: readonly { host: string }[], selected: string): string[] {
+  const set = new Set(rows.map((r) => r.host));
+  if (selected) set.add(selected);
+  return [...set].sort();
+}
+
 function RequestLog({ rows, now }: { rows: HealthReport['recentRequests']; now: number }) {
   const [host, setHost] = useState('');
-  const hosts = [...new Set(rows.map((r) => r.host))].sort();
+  const hosts = requestLogHostOptions(rows, host);
   const shown = host ? rows.filter((r) => r.host === host) : rows;
   return (
     <section className="card" aria-labelledby="h-req">
@@ -381,6 +391,13 @@ function RequestLog({ rows, now }: { rows: HealthReport['recentRequests']; now: 
                 <td className="num small">{fmtBytes(r.bytes)}</td>
               </tr>
             ))}
+            {shown.length === 0 ? (
+              <tr>
+                <td colSpan={6} className="muted small">
+                  {host ? `No requests to ${host} among the latest ${rows.length}.` : 'No requests yet.'}
+                </td>
+              </tr>
+            ) : null}
           </tbody>
         </table>
       </div>

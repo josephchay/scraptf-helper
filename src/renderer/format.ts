@@ -84,7 +84,23 @@ export function fmtBytes(n: number | null | undefined): string {
     v /= 1000;
     i++;
   }
-  return `${v >= 100 ? v.toFixed(0) : v >= 10 ? v.toFixed(1) : v.toFixed(2)} ${units[i]}`;
+  let text = scaledBytes(v);
+  // 999,999 B rounds to "1000 KB": step up a unit so it reads "1.00 MB".
+  if (Number(text) >= 1000 && i < units.length - 1) {
+    v /= 1000;
+    i++;
+    text = scaledBytes(v);
+  }
+  return `${text} ${units[i]}`;
+}
+
+/** Three significant digits, picked from the rounded text so 9.995 reads "10.0", not "10.00". */
+function scaledBytes(v: number): string {
+  const two = v.toFixed(2);
+  if (Number(two) < 10) return two;
+  const one = v.toFixed(1);
+  if (Number(one) < 100) return one;
+  return v.toFixed(0);
 }
 
 // ---------------------------------------------------------------------------
@@ -134,12 +150,15 @@ export function serviceBannerDetail(p: { state: string; detail: string | null; n
   return parts.length ? parts.join(' ') : null;
 }
 
-/** Elapsed processing time: "140 ms", "1.4 s". */
+/** Elapsed processing time: "140 ms", "1.4 s", "2 min 0 s". */
 export function fmtDuration(ms: number | null | undefined): string {
   if (ms === null || ms === undefined || !Number.isFinite(ms)) return DASH;
-  if (ms < 1000) return `${Math.round(ms)} ms`;
-  if (ms < 60_000) return `${(ms / 1000).toFixed(1)} s`;
-  return `${Math.floor(ms / 60_000)} min ${Math.round((ms % 60_000) / 1000)} s`;
+  // Round first and pick the unit from the rounded value, so 119,600 ms reads "2 min 0 s", not "1 min 60 s".
+  if (Math.round(ms) < 1000) return `${Math.round(ms)} ms`;
+  const tenths = Math.round(ms / 100);
+  if (tenths < 600) return `${(tenths / 10).toFixed(1)} s`;
+  const s = Math.round(ms / 1000);
+  return `${Math.floor(s / 60)} min ${s % 60} s`;
 }
 
 const pad2 = (n: number) => String(n).padStart(2, '0');
@@ -440,7 +459,7 @@ const FLAGS: Record<string, FlagInfo> = {
   outlier: { label: 'Outlier', help: 'Much higher than the other orders or the reference price, so it is not used as the conservative price.', tone: 'warn' },
   'notes-flag': { label: 'Note flag', help: "The buyer's note mentions paint, spells, parts, dupes or 'only'. They may reject your copy.", tone: 'warn' },
   'attribute-specific': { label: 'Specific', help: 'Asks for a specific paint, spell, part, sheen or name. Your copy does not have it (or its extras are unknown), so it is excluded.', tone: 'bad' },
-  'has-extras': { label: 'Has extras', help: 'Your copy has extras (paint, spells) but this order is generic. It still matches, but you may be underselling.', tone: 'warn' },
+  'has-extras': { label: 'Has extras', help: 'Your copy has extras (paint, spells, a sheen or killstreaker) but this order is generic. It still matches, but you may be underselling.', tone: 'warn' },
   unverified: { label: 'Unverified', help: 'Not confirmed by the live feed or a snapshot for over 24 hours.', tone: 'warn' },
   banned: { label: 'Banned', help: 'The buyer is banned on backpack.tf. Excluded.', tone: 'bad' },
   marketplace: { label: 'Marketplace', help: 'Mirrored from marketplace.tf and priced in USD. Never used as an exit.', tone: 'bad' },

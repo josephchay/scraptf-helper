@@ -106,6 +106,9 @@ function setup(opts: { repo?: Repo; settings?: DeepPartial<Settings>; now?: Unix
     onChanged: () => undefined,
     folderWatchActive: () => false,
     onBasesChanged: (b) => holdings.onBasesChanged(b),
+    // 0.7.3: a constant slice clock keeps each build one slice (MARKET_SLICE_MS is wall-clock time
+    // otherwise), so the fake clock alone decides the change pushes.
+    sliceNow: () => 0,
   });
   holdings = createHoldings({ ...deps, schema, market, timers, keyPrice, notify: (n) => notes.push(n) });
   const settle = () => timers.advance(MARKET_DIRTY_BATCH_MS + MARKET_NOTIFY_MS + HOLDINGS_CHECK_MS);

@@ -257,6 +257,38 @@ export function bankStockTargetOf(sku: string): { base: string; specialKey: stri
 }
 
 /**
+ * 0.7.3: a special key with its sheen and killstreaker set aside ('' when nothing else is left); a key the
+ * import does not write comes back as is. The 0.7.2 rule (liveCheck isOtherCopy, priceIsForSku): every
+ * specialized and professional kit or weapon carries one, so neither makes another copy.
+ */
+export function bankStockKeyWithoutKillstreak(specialKey: string): string {
+  if (specialKey === BANK_STOCK_PLAIN_KEY) return BANK_STOCK_PLAIN_KEY;
+  try {
+    const v: unknown = JSON.parse(specialKey);
+    if (!Array.isArray(v) || v.length !== 7) return specialKey;
+    const [paint, spells, parts, , , customName, customDesc] = v as unknown[];
+    return bankStockSpecialKey({
+      paint: finite(paint) ? paint : null,
+      spells: Array.isArray(spells) ? (spells as string[]) : [],
+      parts: Array.isArray(parts) ? (parts as string[]) : [],
+      customName: customName === true,
+      customDesc: customDesc === true,
+    });
+  } catch {
+    return specialKey;
+  }
+}
+
+/**
+ * 0.7.3: a stored copy is the SKU's own (`target`, bankStockTargetOf) when it is that copy or differs from it
+ * only by a sheen or killstreaker (bankStockKeyWithoutKillstreak): a SKU never names them, so a specialized
+ * or professional item read by its SKU has no other copy.
+ */
+export function bankStockIsOwnCopy(row: { sku: string; specialKey: string }, target: { base: string; specialKey: string }): boolean {
+  return row.sku === target.base && (row.specialKey === target.specialKey || bankStockKeyWithoutKillstreak(row.specialKey) === target.specialKey);
+}
+
+/**
  * On sale on that save: a price to buy, and stock not known to be 0. Cards are on sale; a "Sold out"
  * /items row (no price) or one showing 0 in stock is not. Only on-sale rows can be new, kept or gone.
  */
@@ -486,10 +518,12 @@ export function bankStockVerdict(profitScrap: Scrap | null, costScrap: Scrap, p:
 /**
  * A diff entry as a BankStockRow, valued at `keyScrap` and joined to its buy side (null: no eligible
  * buyer). Null for an entry the page does not show: not on sale now and not gone (sold out in both).
- * A gone row shows its last price (the previous save's) and the newest save's stock (0 when still listed).
- * F20: `run` (the runs index's entry for this key in this bank, ScraptfHistory.runsFor) fills listedSince,
- * firstSeenAt and changeSinceListed; without it they are null. A gone row has no current run. 0.7.1
- * (DM-5): a current run also fills lastSeenAt (its newest save on sale); absent otherwise.
+ * A gone row shows its last price and the newest save's stock (0 when still listed). F20: `run` (the runs
+ * index's entry for this key in this bank, ScraptfHistory.runsFor) fills listedSince, firstSeenAt and
+ * changeSinceListed; without it they are null. A gone row has no current run. 0.7.1 (DM-5): a current run
+ * also fills lastSeenAt (its newest save on sale); absent otherwise. 0.7.3: a gone row takes its last
+ * price and lastSeenAt from the run (the newest save that listed it on sale, often a window read inside
+ * the latest run of saves), else its price is the previous save's (the session baseline it is judged by).
  */
 export function bankStockRow(
   d: BankStockDiffRow,
@@ -497,15 +531,18 @@ export function bankStockRow(
 ): BankStockRow | null {
   const shown = d.change === 'gone' ? d.previous : d.onSale ? d.current : null;
   if (!shown || !finite(shown.costScrap)) return null;
-  const costKeys = finite(shown.costKeys) ? shown.costKeys : 0;
-  const costScrapRaw = shown.costScrap;
+  const run = a.run ?? null;
+  const goneRun = d.change === 'gone' && run && finite(run.lastSeenAt) ? run : null;
+  const last = goneRun?.lastOnSale && finite(goneRun.lastOnSale.scrap) ? goneRun.lastOnSale : null;
+  const priced = last ?? { keys: shown.costKeys, scrap: shown.costScrap };
+  const costKeys = finite(priced.keys) ? priced.keys : 0;
+  const costScrapRaw = priced.scrap;
   const costScrap = valueScrap(costKeys, costScrapRaw, a.keyScrap);
   const prev = d.previous;
   const previousCostScrap = prev && finite(prev.costScrap) ? valueScrap(finite(prev.costKeys) ? prev.costKeys : 0, prev.costScrap, a.keyScrap) : null;
   const buy = a.buy;
   const revenueScrap = buy && finite(buy.revenueScrap) ? buy.revenueScrap : null;
   const profitScrap = revenueScrap === null ? null : revenueScrap - costScrap - frictionOf(a.profit);
-  const run = a.run ?? null;
   const listedSince = d.change !== 'gone' && run && finite(run.listedSince) ? run.listedSince : null;
   return {
     sku: d.sku,
@@ -533,8 +570,8 @@ export function bankStockRow(
     firstSeenAt: run && finite(run.firstSeenAt) ? run.firstSeenAt : null,
     changeSinceListed:
       listedSince !== null && run?.runStart ? scraptfPriceChange(run.runStart, { keys: costKeys, scrap: costScrapRaw }, listedSince, a.keyScrap) : null,
-    // Only with a current run, so rows without history keep their shape.
-    ...(listedSince !== null && run && finite(run.lastSeenAt) ? { lastSeenAt: run.lastSeenAt } : {}),
+    // Only with a current run (0.7.3: or a gone row's last sighting), so rows without history keep their shape.
+    ...(listedSince !== null && run && finite(run.lastSeenAt) ? { lastSeenAt: run.lastSeenAt } : goneRun ? { lastSeenAt: goneRun.lastSeenAt } : {}),
   };
 }
 
@@ -827,20 +864,38 @@ export function marketNewSideMatches(r: { scraptfNewAt: UnixMs | null }, q: { ne
 }
 
 /**
- * ItemDetail.bankStock for a SKU (its base and its own paint as the special key): from the newest save
- * that lists that copy, among each bank's newest save. A copy gone from a bank's newest save counts
- * there as 'gone' (stock null). Ties prefer a copy on sale, then one listed sold out, then a gone one.
+ * ItemDetail.bankStock for a SKU (its base and its own paint as the special key; 0.7.3: a sheen or
+ * killstreaker aside, bankStockIsOwnCopy): from the newest save that lists that copy, among each bank's
+ * newest save. A copy gone from a bank's newest save counts there as 'gone' (stock null). Ties prefer a
+ * copy on sale, then one listed sold out, then a gone one; 0.7.3: within one save, then the cheapest on
+ * sale (the Live market's price), then the SKU's exact copy.
  */
 export function bankStockItemOf(banks: readonly BankStockBankDiff[], sku: string, keyScrap: Scrap): ItemBankStock | null {
   const target = bankStockTargetOf(sku);
   if (!target) return null;
-  const key = bankStockKey(target.base, target.specialKey);
   const rank = (d: BankStockDiffRow): number => (d.onSale ? 2 : d.current ? 1 : 0);
+  const cost = (d: BankStockDiffRow): number =>
+    d.onSale && d.current && finite(d.current.costScrap) ? valueScrap(finite(d.current.costKeys) ? d.current.costKeys : 0, d.current.costScrap, keyScrap) : Infinity;
+  // Two copies of one save at the same rank (a kit's sheens): the cheaper, then the exact one, then by key.
+  const ahead = (d: BankStockDiffRow, o: BankStockDiffRow): boolean => {
+    if (cost(d) !== cost(o)) return cost(d) < cost(o);
+    const exact = d.specialKey === target.specialKey;
+    if (exact !== (o.specialKey === target.specialKey)) return exact;
+    return d.key < o.key;
+  };
   let best: { b: BankStockBankDiff; d: BankStockDiffRow } | null = null;
   for (const b of banks) {
-    const d = b.diff.find((x) => x.key === key);
-    if (!d || (d.current === null && d.change !== 'gone')) continue;
-    if (!best || b.savedAt > best.b.savedAt || (b.savedAt === best.b.savedAt && rank(d) > rank(best.d))) best = { b, d };
+    for (const d of b.diff) {
+      if (!bankStockIsOwnCopy(d, target) || (d.current === null && d.change !== 'gone')) continue;
+      if (
+        !best ||
+        b.savedAt > best.b.savedAt ||
+        (b.savedAt === best.b.savedAt && rank(d) > rank(best.d)) ||
+        (b === best.b && rank(d) === rank(best.d) && ahead(d, best.d))
+      ) {
+        best = { b, d };
+      }
+    }
   }
   if (!best) return null;
   const prev = best.d.previous;

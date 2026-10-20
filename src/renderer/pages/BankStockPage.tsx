@@ -14,7 +14,7 @@ import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useStat
 import { bankStockDefaultDir } from '../../shared/bankStock';
 import { SCRAPTF_BOUNDARY_SHORT } from '../../shared/boundaryText';
 import { scraptfBankInfo } from '../../shared/links';
-import type { BankStockQuery, BankStockResult, BankStockRow, BankStockSort, Scrap, ScraptfBank, ScraptfListStatus, UnixMs } from '../../shared/types';
+import type { BankStockQuery, BankStockResult, BankStockRow, BankStockSort, ProfitSettings, Scrap, ScraptfBank, ScraptfListStatus, UnixMs } from '../../shared/types';
 import { rpc, saveCsv } from '../api';
 import {
   BANK_STOCK_PAGE,
@@ -249,6 +249,7 @@ export function BankStockPage({ bank }: { bank: ScraptfBank }) {
         view={view}
         now={now}
         keyScrap={keyScrap}
+        useOrder={settings?.profit.useOrder ?? null}
         density={settings?.ui.density ?? 'comfortable'}
         selectedKey={selectedKey}
         picking={folder.picking}
@@ -297,6 +298,8 @@ export interface BankStockPageViewProps {
   view: BankStockView;
   now: UnixMs;
   keyScrap: Scrap | null;
+  /** 0.7.3: Settings' Revenue used for profit, which says why buyers give no revenue (bankStockSellsTitle); null until read. */
+  useOrder?: ProfitSettings['useOrder'] | null;
   density: 'comfortable' | 'compact';
   selectedKey: string | null;
   /** The folder dialog is open. */
@@ -421,6 +424,7 @@ export function BankStockPageView(p: BankStockPageViewProps) {
               gone={answeredFilter === 'gone'}
               previousSavedAt={r.previousSavedAt}
               keyScrap={p.keyScrap}
+              useOrder={p.useOrder ?? null}
               now={p.now}
               density={p.density}
               selectedKey={p.selectedKey}
@@ -742,14 +746,14 @@ const HEAD: readonly HeadDef[] = [
   {
     sort: 'cost',
     label: 'scrap.tf price',
-    gone: { label: 'Last price', title: "Sort by the price in your previous save, the last one it was on sale in, at today's key price" },
+    gone: { label: 'Last price', title: "Sort by its price in the last of your saves that listed it on sale, at today's key price" },
     cls: 'bs-price num',
     title: "Sort by scrap.tf's price in your newest save, at today's key price",
   },
   {
     sort: null,
     label: 'Stock',
-    gone: { label: 'Last seen', title: 'When your previous save, the last one it was on sale in, was made' },
+    gone: { label: 'Last seen', title: 'When the last of your saves that listed it on sale was made' },
     cls: 'bs-stock num',
     title: 'Stock in your newest save; "5 → 3" when your previous save showed another count',
   },
@@ -792,6 +796,8 @@ export interface BankStockTableProps {
   gone: boolean;
   previousSavedAt: UnixMs | null;
   keyScrap: Scrap | null;
+  /** 0.7.3: for the Sells for hover (bankStockSellsTitle); null or absent while unknown. */
+  useOrder?: ProfitSettings['useOrder'] | null;
   now: UnixMs;
   density: 'comfortable' | 'compact';
   selectedKey: string | null;
@@ -807,7 +813,7 @@ export interface BankStockTableProps {
  * The bank's rows (up to 2,000), virtualised like the Live market and with its keyboard model; rows
  * are keyed by `key` (SKU and extras), so a plain and a painted copy are two rows. Exported for tests.
  */
-export function BankStockTable({ rows, dataKey, gone, previousSavedAt, keyScrap, now, density, selectedKey, sort, dir, onSort, onSelect, onOpen, onMenu }: BankStockTableProps) {
+export function BankStockTable({ rows, dataKey, gone, previousSavedAt, keyScrap, useOrder = null, now, density, selectedKey, sort, dir, onSort, onSelect, onOpen, onMenu }: BankStockTableProps) {
   const scroller = useRef<HTMLDivElement>(null);
   const header = useRef<HTMLDivElement>(null);
   // Only the first visible row is state, so scrolling within a row costs no render.
@@ -987,6 +993,7 @@ export function BankStockTable({ rows, dataKey, gone, previousSavedAt, keyScrap,
               hasPrevious={hasPrevious}
               previousSavedAt={previousSavedAt}
               keyScrap={keyScrap}
+              useOrder={useOrder}
               now={now}
               onSelect={onSelect}
               onOpen={onOpen}
@@ -1012,6 +1019,7 @@ const StockRow = memo(function StockRow({
   hasPrevious,
   previousSavedAt,
   keyScrap,
+  useOrder,
   now,
   onSelect,
   onOpen,
@@ -1025,6 +1033,7 @@ const StockRow = memo(function StockRow({
   hasPrevious: boolean;
   previousSavedAt: UnixMs | null;
   keyScrap: Scrap | null;
+  useOrder: ProfitSettings['useOrder'] | null;
   now: UnixMs;
   onSelect: (key: string) => void;
   onOpen: (r: BankStockRow) => void;
@@ -1033,9 +1042,9 @@ const StockRow = memo(function StockRow({
   const order = r.revenueOrder;
   const buyer = bankStockBuyer(r);
   const change = bankStockChangeTag(r, keyScrap, previousSavedAt, now);
-  const pill = bankStockVerdictPill(r, keyScrap);
+  const pill = bankStockVerdictPill(r, keyScrap, useOrder);
   const priceTitle = bankStockPriceTitle(r, keyScrap);
-  const payTitle = bankStockPayTitle(r, keyScrap);
+  const payTitle = bankStockPayTitle(r, keyScrap, useOrder);
   const stock = gone ? null : bankStockStockCell(r, hasPrevious);
   const seen = gone ? bankStockLastSeen(r, previousSavedAt, now) : null;
   const listed = bankStockListedCell(r, now);
@@ -1094,7 +1103,7 @@ const StockRow = memo(function StockRow({
       <div role="gridcell" className={`bs-since num${since.tone === 'good' || since.tone === 'bad' ? ` tone-text-${since.tone}` : ' muted'}`} title={since.title}>
         {since.text}
       </div>
-      <div role="gridcell" className="bs-sells" title={bankStockSellsTitle(r, keyScrap)}>
+      <div role="gridcell" className="bs-sells" title={bankStockSellsTitle(r, keyScrap, useOrder)}>
         {r.revenueScrap !== null ? <Money scrap={r.revenueScrap} keyScrap={keyScrap} /> : <span className="muted">{DASH}</span>}
         {order ? (
           <span className="buyer-type">

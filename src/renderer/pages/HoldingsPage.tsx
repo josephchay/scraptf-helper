@@ -52,6 +52,7 @@ import { useApp } from '../hooks/appContext';
 import { usePersistentState } from '../hooks/usePersistentState';
 import { useRpcQuery, useThrottled, useVisiblePush } from '../hooks/useRpc';
 import { useDebounced, useDocumentVisible, useNow } from '../hooks/useTimers';
+import { FEED_OFF_UPDATES } from '../marketModel';
 import { isMenuKeyEcho, isSearchShortcut, menuAnchorRect, moveCursor } from '../oppModel';
 
 type MenuPoint = { x: number; y: number };
@@ -240,7 +241,7 @@ export function HoldingsPage() {
         </Banner>
       ) : held && feedOff ? (
         <Banner tone="info" icon="feed">
-          The live feed is off, so sale prices only change when you refresh items by hand.{' '}
+          The live feed is off, so {FEED_OFF_UPDATES}.{' '}
           <button type="button" className="link-btn" onClick={() => void updateSettings({ liveFeed: { enabled: true } })}>
             Turn on live feed
           </button>
@@ -637,7 +638,10 @@ const HoldingItemRow = memo(function HoldingItemRow({
                 <button
                   type="button"
                   className="link-btn buyer-link"
+                  // 0.7.3: out of the Tab order (keyboard users press b), and a click leaves the focus on
+                  // the grid, so j/k, Enter, s and b go on working.
                   tabIndex={-1}
+                  onMouseDown={(e) => e.preventDefault()}
                   title={`Open ${buyerName(order)}'s backpack.tf profile in your browser (b). The app never trades for you.`}
                   onClick={(e) => {
                     e.stopPropagation();

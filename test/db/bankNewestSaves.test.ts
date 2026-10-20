@@ -40,8 +40,8 @@ function save(repo: Repo, bank: ScraptfBank | null, at: number, over: Partial<Ne
 }
 
 describe('migration V10', () => {
-  it('is the newest migration and adds the bank and save-time index to a V9 database, keeping its batches', () => {
-    expect(SCHEMA_VERSION).toBe(10);
+  it('adds the bank and save-time index to a V9 database, keeping its batches', () => {
+    expect(SCHEMA_VERSION).toBeGreaterThanOrEqual(10);
     expect(MIGRATIONS[9]).toMatchObject({ version: 10, name: 'saved-page batch bank and save time' });
     const t = tempDir();
     cleanups.push(t.cleanup);

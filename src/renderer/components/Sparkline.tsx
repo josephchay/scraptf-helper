@@ -15,16 +15,16 @@ export function Sparkline({ history, keyScrap }: { history: HistoryPoint[]; keyS
   const geom = useMemo(() => {
     if (pts.length < 2) return null;
     const vals = pts.flatMap((p) => [p.buyScrap, p.sellScrap]).filter((v): v is number => v !== null);
-    let lo = Math.min(...vals);
-    let hi = Math.max(...vals);
-    if (hi === lo) {
-      hi += 1;
-      lo -= 1;
-    }
+    const lo = Math.min(...vals);
+    const hi = Math.max(...vals);
+    // 0.7.3: pad only the y scale for a flat series (as stepChartGeom does); lo/hi stay the real range shown.
+    const flat = hi === lo;
+    const yLo = flat ? lo - 1 : lo;
+    const yHi = flat ? hi + 1 : hi;
     const t0 = pts[0]!.t;
     const t1 = pts[pts.length - 1]!.t;
     const x = (t: number) => PAD.l + ((t - t0) / Math.max(1, t1 - t0)) * (W - PAD.l - PAD.r);
-    const y = (v: number) => PAD.t + (1 - (v - lo) / (hi - lo)) * (H - PAD.t - PAD.b);
+    const y = (v: number) => PAD.t + (1 - (v - yLo) / (yHi - yLo)) * (H - PAD.t - PAD.b);
     const line = (key: 'buyScrap' | 'sellScrap') => {
       let d = '';
       let pen = false;
@@ -39,7 +39,7 @@ export function Sparkline({ history, keyScrap }: { history: HistoryPoint[]; keyS
       }
       return d;
     };
-    return { lo, hi, x, y, buy: line('buyScrap'), sell: line('sellScrap'), t0, t1 };
+    return { lo, hi, yLo, yHi, x, y, buy: line('buyScrap'), sell: line('sellScrap'), t0, t1 };
   }, [pts]);
 
   if (!geom) {
@@ -48,6 +48,8 @@ export function Sparkline({ history, keyScrap }: { history: HistoryPoint[]; keyS
 
   const h = hover !== null ? pts[hover] : null;
   const last = pts[pts.length - 1]!;
+  const flat = geom.lo === geom.hi;
+  const range = flat ? `at ${fmtMoney(geom.lo, keyScrap)}` : `between ${fmtMoney(geom.lo, keyScrap)} and ${fmtMoney(geom.hi, keyScrap)}`;
 
   return (
     <figure className="spark">
@@ -78,7 +80,7 @@ export function Sparkline({ history, keyScrap }: { history: HistoryPoint[]; keyS
         preserveAspectRatio="none"
         className="spark-svg"
         role="img"
-        aria-label={`Price history from ${fmtDate(geom.t0 * 1000)} to ${fmtDate(geom.t1 * 1000)}, between ${fmtMoney(geom.lo, keyScrap)} and ${fmtMoney(geom.hi, keyScrap)}`}
+        aria-label={`Price history from ${fmtDate(geom.t0 * 1000)} to ${fmtDate(geom.t1 * 1000)}, ${range}`}
         onMouseLeave={() => setHover(null)}
         onMouseMove={(e) => {
           const r = e.currentTarget.getBoundingClientRect();
@@ -95,17 +97,15 @@ export function Sparkline({ history, keyScrap }: { history: HistoryPoint[]; keyS
           setHover(best);
         }}
       >
-        <line x1={PAD.l} x2={W - PAD.r} y1={geom.y(geom.hi)} y2={geom.y(geom.hi)} className="spark-grid" />
-        <line x1={PAD.l} x2={W - PAD.r} y1={geom.y(geom.lo)} y2={geom.y(geom.lo)} className="spark-grid" />
+        <line x1={PAD.l} x2={W - PAD.r} y1={geom.y(geom.yHi)} y2={geom.y(geom.yHi)} className="spark-grid" />
+        <line x1={PAD.l} x2={W - PAD.r} y1={geom.y(geom.yLo)} y2={geom.y(geom.yLo)} className="spark-grid" />
         <path d={geom.sell} className="spark-sell" vectorEffect="non-scaling-stroke" />
         <path d={geom.buy} className="spark-buy" vectorEffect="non-scaling-stroke" />
         {h ? <line x1={geom.x(h.t)} x2={geom.x(h.t)} y1={PAD.t} y2={H - PAD.b} className="spark-cursor" vectorEffect="non-scaling-stroke" /> : null}
       </svg>
       <figcaption className="spark-axis muted">
         <span>{fmtDate(geom.t0 * 1000)}</span>
-        <span>
-          {fmtMoney(geom.lo, keyScrap)} – {fmtMoney(geom.hi, keyScrap)}
-        </span>
+        <span>{flat ? fmtMoney(geom.lo, keyScrap) : `${fmtMoney(geom.lo, keyScrap)} – ${fmtMoney(geom.hi, keyScrap)}`}</span>
         <span>{fmtDate(geom.t1 * 1000)}</span>
       </figcaption>
     </figure>

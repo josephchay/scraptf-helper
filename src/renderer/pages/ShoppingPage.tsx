@@ -224,14 +224,15 @@ export function ShoppingPage() {
                 {loaded < total ? <span className="muted"> (showing {fmtInt(loaded)})</span> : null}
               </span>
               <span className="sep" aria-hidden="true" />
-              <span title="Items whose latest typed or imported scrap.tf price is at or under the ceiling and not stale (Settings, Profit: stale-input limit)">
+              <span title="Items whose latest typed or imported scrap.tf price is at or under the ceiling and not stale (Settings → Profit thresholds → Price is stale after)">
                 <strong className="num tone-text-good">{fmtInt(underCount)}</strong> already at or under it at your last price
               </span>
             </>
           ) : (
             <span className="muted">Loading…</span>
           )}
-          {list.reloading && list.data ? <span className="muted small"> · updating</span> : null}
+          {/* 0.7.3: visual only; this is a live region and the live feed reloads it every 1.5 s. */}
+          {list.reloading && list.data ? <span className="muted small" aria-hidden="true"> · updating</span> : null}
         </div>
         <div className="summary-actions">
           <button type="button" className="btn ghost small" onClick={() => setAllCollapsed(false)} title="Expand all groups">
@@ -510,7 +511,8 @@ function ShoppingTable({ rows, keyScrap, now, density, selectedId, onSelect, onO
         if (selectedIndex < 0 && rows.length) onSelect(rows[0]!.id);
       }}
     >
-      <div className="opp-row opp-head" role="row" ref={header}>
+      {/* 0.7.3: only a window of rows is in the DOM, so each says where it sits (as in the Live market). */}
+      <div className="opp-row opp-head" role="row" aria-rowindex={1} ref={header}>
         <div role="columnheader" className="s-item">
           Item
         </div>
@@ -572,6 +574,7 @@ const GroupRow = memo(function GroupRow({
     <div
       id={`shoprow-${index}`}
       role="row"
+      aria-rowindex={index + 2}
       aria-expanded={!row.collapsed}
       aria-selected={selected}
       className={`opp-row opp-group${selected ? ' selected' : ''}`}
@@ -590,8 +593,11 @@ const GroupRow = memo(function GroupRow({
         <button
           type="button"
           className="link-btn shop-bank"
+          // 0.7.3: out of the Tab order (keyboard users press o), and a click leaves the focus on the
+          // grid, so j/k, Enter and o go on working.
           tabIndex={-1}
           title={`Open ${page} in your browser (o). ${SCRAPTF_BOUNDARY_SHORT}`}
+          onMouseDown={(e) => e.preventDefault()}
           onClick={(e) => {
             e.stopPropagation();
             onSelect(row.id);
@@ -621,7 +627,7 @@ const MoreRow = memo(function MoreRow({
 }) {
   const g = row.group;
   return (
-    <div id={`shoprow-${index}`} role="row" aria-selected={selected} className={`opp-row opp-more${selected ? ' selected' : ''}`} style={rowStyle(index, rowH)} onClick={() => onSelect(row.id)}>
+    <div id={`shoprow-${index}`} role="row" aria-rowindex={index + 2} aria-selected={selected} className={`opp-row opp-more${selected ? ' selected' : ''}`} style={rowStyle(index, rowH)} onClick={() => onSelect(row.id)}>
       <div role="gridcell" className="more-cell">
         <span className="muted small">
           Showing {fmtInt(g.rows.length)} of {fmtInt(g.count)}, the most one list shows. Narrow the filters, or Export CSV for every item.
@@ -663,6 +669,7 @@ const ItemRow = memo(function ItemRow({
     <div
       id={`shoprow-${index}`}
       role="row"
+      aria-rowindex={index + 2}
       aria-selected={selected}
       className={`opp-row opp-item${selected ? ' selected' : ''}`}
       style={rowStyle(index, rowH)}

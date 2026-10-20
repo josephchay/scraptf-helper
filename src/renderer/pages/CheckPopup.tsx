@@ -384,7 +384,8 @@ function CheckItemView({
             ) : null}
           </>
         ) : (
-          <span className="muted">no eligible buy order</span>
+          // 0.7.3: "no usable buy order" when buyers exist but none is usable; the line's hover says why.
+          <span className="muted">{sells.none}</span>
         )}
         <span className="muted small cp-count">{sells.count}</span>
       </div>

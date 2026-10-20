@@ -53,7 +53,10 @@ export const CHANGE_PROFIT_DELTA: Scrap = 9;
  * { opportunityKey: lastNotifiedAt }; such entries still parse, as records without a fingerprint.
  */
 export const NOTIFY_META_KEY = 'engine.lastNotified';
-/** Individual toasts per run; the rest are folded into one summary toast. */
+/**
+ * Individual toasts per run, one per SKU (copies of one SKU share the most profitable copy's toast); the
+ * rest are folded into one summary toast.
+ */
 export const MAX_NOTIFICATIONS_PER_RUN = 3;
 /**
  * 'notified' events written per run (most profitable first). Every qualifying
@@ -1060,11 +1063,20 @@ export function createEngine(deps: EngineDeps): Engine {
     if (toNotify.length > 0) {
       // Before the toasts: the summary's items count as told too.
       if (deps.notified) safeCall(() => deps.notified?.(toNotify, now));
-      const individual = toNotify.slice(0, MAX_NOTIFICATIONS_PER_RUN);
+      // 0.7.3: one toast per item. Copies stored under one SKU (a kit's or killstreak weapon's sheen/killstreaker
+      // combos, painted or spelled copies) share their most profitable copy's toast (toNotify is sorted by
+      // profit); the others were recorded as told above, so the next run does not toast them either.
+      const seenSku = new Set<string>();
+      const leads = toNotify.filter((o) => {
+        if (seenSku.has(o.sku)) return false;
+        seenSku.add(o.sku);
+        return true;
+      });
+      const individual = leads.slice(0, MAX_NOTIFICATIONS_PER_RUN);
       for (const opp of individual) {
         safeCall(() => events.onNotify({ title: notificationTitle(opp), body: notificationBody(opp, K, p.useOrder), sku: opp.sku }));
       }
-      const rest = toNotify.slice(individual.length);
+      const rest = leads.slice(individual.length);
       if (rest.length > 0) {
         safeCall(() =>
           events.onNotify({

@@ -30,6 +30,7 @@ import {
   isCheckKey,
   isChecked,
   listPriceStamp,
+  noRevenueText,
   prefillPriceText,
   previewRevenue,
   previewTone,
@@ -600,6 +601,11 @@ function QuickPreview({
               ) : null}
               {order.flags.includes('outlier') ? <TonePill tone="warn">outlier</TonePill> : null}
             </>
+          ) : (rev?.eligibleCount ?? 0) > 0 ? (
+            // 0.7.3: orders exist but none is usable (all outliers, or no bot for Instant); the hover says which.
+            <span className="muted" title={noRevenueText(rev)}>
+              no usable buy order
+            </span>
           ) : (
             <span className="muted">no eligible buy order</span>
           )}
@@ -616,7 +622,7 @@ function QuickPreview({
               —
             </span>
           )}
-          {pv && tone ? <TonePill tone={tone}>{ceilingVerdict(pv, k)}</TonePill> : null}
+          {pv && tone ? <TonePill tone={tone}>{ceilingVerdict(pv, k, rev?.eligibleCount ?? 0)}</TonePill> : null}
         </div>
         <div className="qp-line">
           <span className="qp-label">Profit</span>
@@ -656,7 +662,7 @@ function QuickPreview({
     );
   })();
 
-  const verdict = pv ? `${STATUS_LABELS[pv.status]}, profit ${fmtSignedMoney(pv.profitScrap, k)}, ${ceilingVerdict(pv, k)}${ceiling !== null ? ` (pay up to ${fmtMoney(ceiling, k)})` : ''}.` : null;
+  const verdict = pv ? `${STATUS_LABELS[pv.status]}, profit ${fmtSignedMoney(pv.profitScrap, k)}, ${ceilingVerdict(pv, k, rev?.eligibleCount ?? 0)}${ceiling !== null ? ` (pay up to ${fmtMoney(ceiling, k)})` : ''}.` : null;
 
   return (
     <section className={`quick-preview${tone === 'good' ? ' under' : ''}`} aria-label="Preview">

@@ -5,51 +5,32 @@
 // is shown or sent a link (R1), or (F21) in the user's own opt-in scrap.tf window,
 // whose module is held to the F21 block at the end. The runtime side is covered in test/net.
 
-import { readdirSync, readFileSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { checkUrl } from '../../src/service/net/policy';
 import { READ_SCRIPT, READ_WORLD_ID, readScriptProblems } from '../../src/shared/scraptfWindowPolicy';
+// 0.7.3: the source helpers and the dashboard's window scans live in a module the audit tests import too.
+import {
+  blockEnd,
+  callArgs,
+  DEFERRED_CALL,
+  deferredSpans,
+  deferredWindowCalls,
+  deferredWindowOpens,
+  deferredWindowWrappers,
+  enclosing,
+  functionSpans,
+  lineAt,
+  sourceFile,
+  walk,
+  windowWrappers,
+  type SourceFile,
+  type Span,
+} from './windowWrapperScan';
 
 const SRC = fileURLToPath(new URL('../../src/', import.meta.url));
-
-function walk(dir: string): string[] {
-  const out: string[] = [];
-  for (const entry of readdirSync(dir, { withFileTypes: true })) {
-    const full = path.join(dir, entry.name);
-    if (entry.isDirectory()) out.push(...walk(full));
-    // Style sheets too: a CSS url() or @import is a request from the dashboard.
-    else if (/\.(ts|tsx|js|mjs|cjs|html|css)$/.test(entry.name)) out.push(full);
-  }
-  return out;
-}
-
-/** Blanks block comments, keeping line numbers. */
-function stripBlockComments(src: string): string {
-  return src.replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, ' '));
-}
-
-/** Blanks block and line comments (keeping line numbers); `://` inside strings is left alone. */
-function stripComments(src: string): string {
-  return stripBlockComments(src)
-    .split('\n')
-    .map((line) => line.replace(/(^|[^:'"`\\/])\/\/.*$/, '$1'))
-    .join('\n');
-}
-
-interface SourceFile {
-  rel: string;
-  code: string;
-}
-
-/**
- * A file as the scans read it. CSS has no line comments, and the `//` stripper would blank a
- * protocol-relative `url(//host/...)` (the `//` follows a "("), so style sheets lose block comments only.
- */
-function sourceFile(rel: string, src: string): SourceFile {
-  return { rel, code: rel.endsWith('.css') ? stripBlockComments(src) : stripComments(src) };
-}
 
 const FILES: SourceFile[] = walk(SRC).map((f) => sourceFile(path.relative(SRC, f).split(path.sep).join('/'), readFileSync(f, 'utf8')));
 
@@ -92,10 +73,11 @@ const SCRAPTF_REF =
   /scrap\.tf|SCRAPTF_\w*(URL|PAGES|BANKS?)|scraptfPageFor|scraptfOpenUrl|scraptfBankInfo|scraptfSeenOn|seenOn|bankPageUrl|STATIC_EXTERNAL_URLS|allItems/i;
 /**
  * Everything that loads a URL: fetch and its injected stand-in, the policy-checked HttpClient,
- * websocket and socket.io factories, and Electron windows and views.
+ * websocket and socket.io factories, and Electron windows and views. 0.7.3: and a download or a page save
+ * (a webContents' or a session's downloadURL, a webContents' savePage).
  */
 const LOADERS =
-  /(?<![\w$.])(?:fetch|fetchImpl|io|socketFactory|wsFactory|factory)\s*\(|\.(?:request|fetch|loadURL|loadFile|openDevTools|preconnect|resolveHost)\s*\(|\bnew\s+(?:WebSocket|EventSource|Worker|SharedWorker|BrowserWindow|BrowserView|WebContentsView)\s*\(/g;
+  /(?<![\w$.])(?:fetch|fetchImpl|io|socketFactory|wsFactory|factory)\s*\(|\.(?:request|fetch|loadURL|loadFile|openDevTools|preconnect|resolveHost|downloadURL|savePage)\s*\(|\bnew\s+(?:WebSocket|EventSource|Worker|SharedWorker|BrowserWindow|BrowserView|WebContentsView)\s*\(/g;
 /** An <img src> (or any src) built from a scrap.tf address. */
 const SCRAPTF_IMG_SRC = /\bsrc\s*=\s*\{?[^>}\n]*(scrap\.tf|SCRAPTF_|scraptfPageFor|scraptfBankInfo|seenOn|bankPageUrl)/i;
 
@@ -202,6 +184,12 @@ describe('static compliance scan of src/', () => {
   // browser opens the page (links.open -> shell.openExternal) and the user saves it into the watch folder.
   it('never passes a scrap.tf address to fetch, an HTTP client, a websocket or a window (R1)', () => {
     expect(scraptfLoads()).toEqual([]);
+    // 0.7.3: savePage saves whatever page a webContents shows and re-requests it (HTML only) or its resources
+    // (complete) from the cache or the network. It takes a path and a type, never an address, so the argument
+    // scan cannot see a scrap.tf target, and main sees the scrap.tf view ('web-contents-created'). The app saves
+    // no page; the user does, with Ctrl+S in their own browser (R1, R10). Nor does it download anything itself:
+    // downloadURL is a request outside src/service/net.
+    expect(offenders(/\.\s*(?:savePage|downloadURL)\s*\(/)).toEqual([]);
   });
 
   it('embeds no web content and loads no image from scrap.tf (no webview, iframe or view, F21 window aside; R3)', () => {
@@ -279,8 +267,11 @@ describe('the F15 scans catch what they claim to', () => {
       'await http.request({ url: scraptfBankInfo(bank)!.url, budget: "x" });',
       'win.loadURL(detail.seenOn.url);',
       'const w = new BrowserWindow({ url: SCRAPTF_BANK_PAGES[1].url });',
+      // 0.7.3: a download is a request too.
+      'contents.downloadURL(SCRAPTF_ITEMS_URL);',
+      'session.defaultSession.downloadURL(SCRAPTF_BANKS[0].url);',
     ].join('\n');
-    expect(scraptfLoads([sourceFile('service/Bad.ts', bad)]).map((h) => h.split(':')[1])).toEqual(['1', '2', '3', '4']);
+    expect(scraptfLoads([sourceFile('service/Bad.ts', bad)]).map((h) => h.split(':')[1])).toEqual(['1', '2', '3', '4', '5', '6']);
     const img = offenders(SCRAPTF_IMG_SRC, () => false, [sourceFile('renderer/Bad.tsx', 'const A = () => <img src={d.seenOn!.url} />;')]);
     expect(img).toHaveLength(1);
 
@@ -926,86 +917,12 @@ describe('scrap.tf history and re-save reminders send nothing and open only stat
   });
 });
 
-/** The text of a call's argument list from the "(" at `open` to its matching ")"; quotes are skipped. */
-function callArgs(code: string, open: number): string {
-  let depth = 0;
-  let quote: string | null = null;
-  const end = Math.min(code.length, open + 4000);
-  for (let i = open; i < end; i++) {
-    const c = code[i]!;
-    if (quote !== null) {
-      if (c === '\\') i++;
-      else if (c === quote) quote = null;
-      continue;
-    }
-    if (c === '"' || c === "'" || c === '`') quote = c;
-    else if (c === '(') depth++;
-    else if (c === ')' && --depth === 0) return code.slice(open + 1, i);
-  }
-  return code.slice(open + 1, end);
-}
-
 // ---------------------------------------------------------------------------
 // F21: the opt-in scrap.tf window. The user browses scrap.tf themselves; Flip Desk only reads the DOM their
 // browsing loaded, with one pinned script, and imports it. Never: an app-initiated load (timer, event or
 // promise callback), a cookie, a user agent, a header, a click, a keystroke, a DOM write or a preload in
 // the view. Synthetic sources prove each scan sees what it should.
 // ---------------------------------------------------------------------------
-
-/** Where the "{" at `open` is closed (quotes skipped), or the end of `code`. */
-function blockEnd(code: string, open: number): number {
-  let depth = 0;
-  let quote: string | null = null;
-  for (let i = open; i < code.length; i++) {
-    const c = code[i]!;
-    if (quote !== null) {
-      if (c === '\\') i++;
-      else if (c === quote) quote = null;
-      continue;
-    }
-    if (c === '"' || c === "'" || c === '`') quote = c;
-    else if (c === '{') depth++;
-    else if (c === '}' && --depth === 0) return i;
-  }
-  return code.length;
-}
-
-interface Span {
-  name: string;
-  start: number;
-  end: number;
-}
-
-/** Every `function name(…) {…}` body in `code`. */
-function functionSpans(code: string): Span[] {
-  const out: Span[] = [];
-  for (const m of code.matchAll(/\bfunction\s+([\w$]+)\s*(?:<[^>]*>)?\s*\(/g)) {
-    const open = m.index + m[0].length - 1;
-    const brace = code.indexOf('{', open + callArgs(code, open).length + 2);
-    if (brace < 0) continue;
-    out.push({ name: m[1]!, start: brace, end: blockEnd(code, brace) });
-  }
-  return out;
-}
-
-/** The innermost function body holding `at`, or null at the top level. */
-function enclosing(spans: readonly Span[], at: number): Span | null {
-  let best: Span | null = null;
-  for (const s of spans) if (at > s.start && at < s.end && (best === null || s.start > best.start)) best = s;
-  return best;
-}
-
-/** Calls whose arguments run later or on someone else's schedule: listeners, promise callbacks, timers, React effects. */
-const DEFERRED_CALL =
-  /(?:\.\s*(?:on|once|addListener|prependListener|prependOnceListener|then|catch|finally)|(?<![\w$.])(?:on|usePush|useEffect|useLayoutEffect|useInterval|useThrottled|useNow)|(?<![\w$])(?:[\w$]+\s*\.\s*)?(?:setTimeout|setInterval|setImmediate|queueMicrotask|requestIdleCallback|requestAnimationFrame))\s*\(/g;
-
-/** The argument spans of every deferred call in `code`. */
-function deferredSpans(code: string): Span[] {
-  return [...code.matchAll(DEFERRED_CALL)].map((m) => {
-    const open = m.index + m[0].length - 1;
-    return { name: m[0], start: open, end: open + callArgs(code, open).length + 1 };
-  });
-}
 
 /** The top-level comma-separated parts of an argument list. */
 function topLevelArgs(args: string): string[] {
@@ -1037,8 +954,6 @@ function isSignature(code: string, open: number): boolean {
   const close = open + callArgs(code, open).length + 1;
   return /^\s*:/.test(code.slice(close + 1, close + 12));
 }
-
-const lineAt = (code: string, at: number) => code.slice(0, at).split('\n').length;
 
 /** What moves the view: a load, a reload, a history step (BrowserWindow.restore() is un-minimising, not this). */
 const NAV_CALL = /\.\s*(?:loadURL|loadFile|reload|reloadIgnoringCache|goBack|goForward|goToIndex|goToOffset)\s*\(|navigationHistory\s*\.\s*restore\s*\(/g;
@@ -1180,9 +1095,15 @@ function windowTimerProblems(f: SourceFile): string[] {
 /** The read and the functions that import what it read: none may move the view or start a timer. */
 const READ_FUNCTIONS: readonly string[] = ['readPage', 'importRead', 'flushHeld', 'endCycle'];
 
-/** The only script run in the view: READ_SCRIPT in READ_WORLD_ID, from the window module; no main-world script, input or DOM write there. */
+/**
+ * The only script run in the view: READ_SCRIPT in READ_WORLD_ID, from the window module; no main-world script,
+ * input or DOM write there. 0.7.3: looked for in every src/ file, because hardenWebContents and main's
+ * 'web-contents-created' listener get every webContents, the scrap.tf view's included.
+ */
 const PAGE_WRITES =
   /\.\s*(?:executeJavaScript|insertCSS|removeInsertedCSS|sendInputEvent|insertText|pasteAndMatchStyle|replaceMisspelling|setIgnoreMenuShortcuts|startDrag)\s*\(|\.\s*(?:paste|selectAll|unselect|undo|redo|cut|delete|scrollToTop|scrollToBottom|replace)\s*\(\s*\)/g;
+/** Not a webContents: the settings store rolls back its hotkey change when settings.json cannot be written. */
+const NOT_A_PAGE_EDIT = { file: 'main/settingsStore.ts', call: '.undo()', receiver: /hotkeys/ } as const;
 
 function windowExecProblems(files: readonly SourceFile[]): string[] {
   const out: string[] = [];
@@ -1194,9 +1115,28 @@ function windowExecProblems(files: readonly SourceFile[]): string[] {
       if (f.rel !== SCRAPTF_WINDOW) out.push(`${where}: isolated-world script outside the window module`);
       else if (callArgs(f.code, open).replace(/\s+/g, '') !== 'READ_WORLD_ID,[{code:READ_SCRIPT}]') out.push(`${where}: runs something other than READ_SCRIPT in READ_WORLD_ID`);
     }
-    // The smoke test's bridge check on the dashboard is the one main-world script in the app.
-    for (const m of f.code.matchAll(/\.\s*executeJavaScript\s*\(/g)) if (f.rel !== 'main/main.ts') out.push(`${f.rel}:${lineAt(f.code, m.index)}: executeJavaScript`);
-    if (f.rel === SCRAPTF_WINDOW) for (const m of f.code.matchAll(PAGE_WRITES)) out.push(`${f.rel}:${lineAt(f.code, m.index)}: ${m[0]}`);
+    // 0.7.3: the smoke test's bridge check on the dashboard is the one main-world script in the app, pinned by
+    // its count, its function, its receiver and "not in a listener, a timer or a promise callback".
+    const execs = [...f.code.matchAll(/\.\s*executeJavaScript\s*\(/g)];
+    const fns = functionSpans(f.code);
+    const later = deferredSpans(f.code);
+    for (const m of execs) {
+      const bridge =
+        f.rel === 'main/main.ts' &&
+        execs.length === 1 &&
+        enclosing(fns, m.index)?.name === 'runSmokeTest' &&
+        enclosing(later, m.index) === null &&
+        calledOn(f.code, m.index, /contents/);
+      if (!bridge) out.push(`${f.rel}:${lineAt(f.code, m.index)}: executeJavaScript`);
+    }
+    for (const m of f.code.matchAll(PAGE_WRITES)) {
+      if (f.rel !== SCRAPTF_WINDOW) {
+        // Pinned above (executeJavaScript) and by smokeWindowProblems (sendInputEvent: the harness, to `wc` only).
+        if (/^\.\s*(?:executeJavaScript|sendInputEvent)\b/.test(m[0])) continue;
+        if (f.rel === NOT_A_PAGE_EDIT.file && m[0] === NOT_A_PAGE_EDIT.call && calledOn(f.code, m.index, NOT_A_PAGE_EDIT.receiver)) continue;
+      }
+      out.push(`${f.rel}:${lineAt(f.code, m.index)}: ${m[0]}`);
+    }
     for (const m of f.code.matchAll(/\bREAD_SCRIPT\s*=(?!=)/g)) if (f.rel !== 'shared/scraptfWindowPolicy.ts') out.push(`${f.rel}:${lineAt(f.code, m.index)}: READ_SCRIPT defined again`);
   }
   return out;
@@ -1238,38 +1178,8 @@ function windowViewProblems(f: SourceFile): string[] {
   return out;
 }
 
-/** Dashboard lines that move, read or clear the window outside a click: in an effect, a push listener or a timer. */
-function deferredWindowCalls(files: readonly SourceFile[]): string[] {
-  const out: string[] = [];
-  for (const f of files) {
-    const later = deferredSpans(f.code);
-    for (const m of f.code.matchAll(/'scraptfWindow\.(?:open|back|forward|reload|home|go|read|clear)'/g)) {
-      // A push name ('scraptfWindow.read' is a push too) only subscribes; it calls nothing.
-      if (/(?:usePush|(?<![\w$.])on)\s*\(\s*$/.test(f.code.slice(Math.max(0, m.index - 12), m.index))) continue;
-      if (later.some((s) => m.index > s.start && m.index < s.end)) out.push(`${f.rel}:${lineAt(f.code, m.index)}: ${m[0]}`);
-    }
-  }
-  return out;
-}
-
-/**
- * 0.7.1 (F21-8): what else opens the window or shows the dashboard from a page: an open worded for the window
- * (an `allowWindow` key, openOrCopy and openLink included), openOnScraptf (it always asks for the window) and
- * the toolbar's Show flips ('app.showBankStock'). Each sits in a click or key handler, never in an effect, a
- * push listener, a timer or a promise callback.
- */
-const DEFERRED_WINDOW_OPEN = /\ballowWindow\b|(?<![\w$.])openOnScraptf\s*\(|'app\.showBankStock'/g;
-
-function deferredWindowOpens(files: readonly SourceFile[]): string[] {
-  const out: string[] = [];
-  for (const f of files) {
-    const later = deferredSpans(f.code);
-    for (const m of f.code.matchAll(DEFERRED_WINDOW_OPEN)) {
-      if (later.some((s) => m.index > s.start && m.index < s.end)) out.push(`${f.rel}:${lineAt(f.code, m.index)}: ${m[0]}`);
-    }
-  }
-  return out;
-}
+// The dashboard's window scans (deferredWindowCalls, deferredWindowOpens and, 0.7.3, the wrappers that hold
+// such a call) are in ./windowWrapperScan.
 
 /**
  * A main-process call that moves or reads the window: the manager's methods by the names main uses for it
@@ -1280,7 +1190,63 @@ const MAIN_WINDOW_CALL =
 /** Deferred calls as DEFERRED_CALL, plus main's own subscriptions (settings.onChange, host.onStatus…). */
 const MAIN_DEFERRED_CALL = new RegExp(`${DEFERRED_CALL.source}|\\.\\s*on[A-Z][\\w$]*\\s*\\(`, 'g');
 
-/** main/*.ts lines (the window module aside) that move or read the window from a timer, a listener or a promise callback. */
+/** What the "{" at `brace` opens: a function's body, a control block (if, loop, switch, try, case or bare), or a literal. */
+function blockKind(code: string, brace: number): 'function' | 'control' | 'literal' {
+  const before = code.slice(Math.max(0, brace - 2000), brace).trimEnd();
+  if (/=>$|\)\s*:\s*[^(){};=]+$/.test(before)) return 'function';
+  if (/(?:\b(?:else|try|finally|do)|[:;{}])$/.test(before)) return 'control';
+  if (!before.endsWith(')')) return 'literal';
+  let depth = 0;
+  for (let i = before.length - 1; i >= 0; i--) {
+    if (before[i] === ')') depth++;
+    else if (before[i] === '(' && --depth === 0) return /\b(?:if|for|while|switch|catch|with)\s*$/.test(before.slice(0, i)) ? 'control' : 'function';
+  }
+  return 'literal';
+}
+
+/**
+ * 0.7.3: true when the call at `at` runs after an await: one earlier in its function (through the if, loop, try
+ * and case blocks around it), from its switch case on. Functions closed before it and strings do not count, nor
+ * the call's own `await deps.scraptfWindow.clear(`.
+ */
+function awaitedBefore(code: string, at: number): boolean {
+  const open: number[] = [];
+  const closed: [number, number][] = [];
+  let quote: string | null = null;
+  for (let i = 0; i < at; i++) {
+    const c = code[i]!;
+    if (quote !== null) {
+      if (c === '\\') i++;
+      else if (c === quote) quote = null;
+      continue;
+    }
+    if (c === '"' || c === "'" || c === '`') quote = c;
+    else if (c === '{') open.push(i);
+    else if (c === '}') {
+      const o = open.pop();
+      if (o !== undefined && blockKind(code, o) === 'function') closed.push([o, i]);
+    }
+  }
+  let from = 0;
+  for (let k = open.length - 1; k >= 0; k--) {
+    if (blockKind(code, open[k]!) === 'function') {
+      from = open[k]! + 1;
+      break;
+    }
+  }
+  let text = code.slice(from, at);
+  for (const [s, e] of closed) if (s >= from) text = `${text.slice(0, s - from)}${' '.repeat(e - s + 1)}${text.slice(e - from + 1)}`;
+  text = text.replace(/'(?:[^'\\\n]|\\.)*'|"(?:[^"\\\n]|\\.)*"|`(?:[^`\\]|\\.)*`/g, '""');
+  const label = [...text.matchAll(/\b(?:case\b[^:]*|default\s*):/g)].at(-1);
+  if (label) text = text.slice(label.index + label[0].length);
+  return /\bawait\b/.test(text.replace(/\bawait\s+(?:[\w$]+\s*\??\.\s*)*$/, ''));
+}
+
+/**
+ * main/*.ts lines (the window module aside) that move or read the window from a timer, a listener or a promise
+ * callback, or (0.7.3) after an await in its function or switch case (the harness, a scripted run on local
+ * pages, aside).
+ */
 function mainWindowCallProblems(files: readonly SourceFile[]): string[] {
   const out: string[] = [];
   for (const f of files) {
@@ -1291,7 +1257,9 @@ function mainWindowCallProblems(files: readonly SourceFile[]): string[] {
     });
     for (const m of f.code.matchAll(MAIN_WINDOW_CALL)) {
       if (isSignature(f.code, m.index + m[0].length - 1)) continue;
-      if (later.some((s) => m.index > s.start && m.index < s.end)) out.push(`${f.rel}:${lineAt(f.code, m.index)}: ${m[0].replace(/\s+/g, '')}`);
+      const where = `${f.rel}:${lineAt(f.code, m.index)}: ${m[0].replace(/\s+/g, '')}`;
+      if (later.some((s) => m.index > s.start && m.index < s.end)) out.push(where);
+      else if (f.rel !== SMOKE_WINDOW && awaitedBefore(f.code, m.index)) out.push(`${where} (after an await)`);
     }
   }
   return out;
@@ -1299,9 +1267,15 @@ function mainWindowCallProblems(files: readonly SourceFile[]): string[] {
 
 /** What sets the user agent: the setters and the writable webContents.userAgent (R6). */
 const UA_SETTERS = /\b(?:setUserAgent|userAgentFallback)\b|\.\s*userAgent\s*=(?!=)/;
-/** A request of the window module's own: fetch, a client, a socket, a download, a session preconnect or DNS lookup. */
+/** A request of the window module's own: fetch, a client, a socket, a download, a page save (0.7.3), a session preconnect or DNS lookup. */
 const WINDOW_REQUEST =
-  /(?<![\w$])fetch\s*\(|\.\s*(?:request|fetch|downloadURL|preconnect|resolveHost)\s*\(|\bnew\s+(?:WebSocket|EventSource|Worker)\s*\(|(?<![\w$.])io\s*\(/;
+  /(?<![\w$])fetch\s*\(|\.\s*(?:request|fetch|downloadURL|savePage|preconnect|resolveHost)\s*\(|\bnew\s+(?:WebSocket|EventSource|Worker)\s*\(|(?<![\w$.])io\s*\(/;
+/**
+ * 0.7.3: the Chrome DevTools Protocol on a webContents (`contents.debugger.attach()`/`.sendCommand(…)`): it can run
+ * a main-world script, send input, override the user agent and read every cookie (R3, R6, R9). A bare `debugger;`
+ * statement is not it.
+ */
+const PAGE_DEBUGGER = /\.\s*debugger\b|\bsendCommand\s*\(/;
 
 describe('the scrap.tf window loads only what the user asks for and reads only the pinned script (F21, R1, R3, R6, R9)', () => {
   const win = () => FILES.find((f) => f.rel === SCRAPTF_WINDOW)!;
@@ -1347,6 +1321,13 @@ describe('the scrap.tf window loads only what the user asks for and reads only t
     expect(readScriptProblems(READ_SCRIPT)).toEqual([]);
     expect(READ_WORLD_ID).toBe(1001);
     expect(windowExecProblems(FILES)).toEqual([]);
+    // 0.7.3: nor through the DevTools Protocol, anywhere in src/ (every webContents passes hardenWebContents).
+    expect(offenders(PAGE_DEBUGGER)).toEqual([]);
+    // 0.7.3: the one main-world script the scan lets through is there: the smoke test's bridge check.
+    const main = FILES.find((f) => f.rel === 'main/main.ts')!.code;
+    const execs = [...main.matchAll(/\.\s*executeJavaScript\s*\(/g)];
+    expect(execs).toHaveLength(1);
+    expect(enclosing(functionSpans(main), execs[0]!.index)?.name).toBe('runSmokeTest');
   });
 
   it('gives the view no preload and the locked-down webPreferences', () => {
@@ -1372,9 +1353,20 @@ describe('the scrap.tf window loads only what the user asks for and reads only t
     expect(deferredWindowCalls(dashboard)).toEqual([]);
     // 0.7.1 (F21-8): nor an open worded for the window, openOnScraptf or Show flips.
     expect(deferredWindowOpens(dashboard)).toEqual([]);
+    // 0.7.3: nor through a local wrapper that holds one (the toolbar's act, a page's openInWindow…).
+    expect(deferredWindowWrappers(dashboard)).toEqual([]);
     // The scans see the real calls they hold to that.
     expect(dashboard.some((f) => /\ballowWindow\b/.test(f.code))).toBe(true);
     expect(dashboard.some((f) => /'app\.showBankStock'/.test(f.code))).toBe(true);
+    const bar = 'renderer/pages/ScraptfWindowBar.tsx';
+    expect(windowWrappers(dashboard).holders).toEqual(
+      expect.arrayContaining([
+        ...['NAV_METHODS', 'act', 'go', 'readNow', 'clear', 'showFlips'].map((n) => `${bar}:${n}`),
+        'renderer/pages/BanksPage.tsx:openInWindow',
+        'renderer/App.tsx:open',
+        'renderer/pages/SettingsPage.tsx:openWindow',
+      ]),
+    );
   });
 
   it('catches what it claims to', () => {
@@ -1504,6 +1496,20 @@ describe('the scrap.tf window loads only what the user asks for and reads only t
       'main/ipc.ts:3: windowOn().reload(',
       'main/ipc.ts:4: w.go(',
     ]);
+    // 0.7.3: code after an await is a promise callback too: a loop, a case or an if block that waits and then
+    // moves the window is an auto-refresher. The call's own await, an await after it and the harness are not.
+    const awaited = (rel: string, code: string) => mainWindowCallProblems([sourceFile(rel, code)]);
+    expect(
+      awaited('main/ipc.ts', "case 'scraptfWindow.open': { const w = windowOn(); void (async () => { for (;;) { await new Promise((r) => setTimeout(r, 30_000)); windowOn().reload(); } })(); }"),
+    ).toEqual(['main/ipc.ts:1: windowOn().reload( (after an await)']);
+    expect(awaited('main/ipc.ts', "case 'scraptfWindow.home':\nawait sleep(30_000);\nwindowOn().home();")).toEqual(['main/ipc.ts:3: windowOn().home( (after an await)']);
+    expect(awaited('main/ipc.ts', "case 'scraptfWindow.go': {\nawait sleep(30_000);\nif (p.url) {\nw.go(p.url);\n}\n}")).toEqual(['main/ipc.ts:4: w.go( (after an await)']);
+    expect(awaited('main/main.ts', 'async function poll() { while (true) { await delay(30_000); rt.scraptfWindow?.reload(); } }')).toEqual(['main/main.ts:1: scraptfWindow?.reload( (after an await)']);
+    expect(awaited('main/ipc.ts', "case 'scraptfWindow.clear':\nif (!deps.scraptfWindow) throw new Error(X);\nawait deps.scraptfWindow.clear();\nreturn { ok: true };")).toEqual([]);
+    expect(awaited('main/ipc.ts', "case 'links.open': { if (ok) { deps.scraptfWindow.open(url); return x; } await deps.openExternal(url); }")).toEqual([]);
+    expect(awaited('main/ipc.ts', "case 'import.pickFile': { const f = await pick(); return f; }\ncase 'scraptfWindow.back':\nwindowOn().back();")).toEqual([]);
+    expect(awaited('main/main.ts', "const later = async () => { await x(); };\nlog('await');\nrt.scraptfWindow?.open();")).toEqual([]);
+    expect(awaited(SMOKE_WINDOW, 'await quiet(); rt.scraptfWindow.go(url);')).toEqual([]);
 
     const timers = w(
       [
@@ -1551,12 +1557,45 @@ describe('the scrap.tf window loads only what the user asks for and reads only t
       'main/windows.ts:1: isolated-world script outside the window module',
       'main/windows.ts:2: READ_SCRIPT defined again',
     ]);
+    // 0.7.3: the same outside the window module (hardenWebContents and main's 'web-contents-created' listener
+    // see the scrap.tf view too). main.ts keeps one executeJavaScript, in runSmokeTest, not deferred.
+    const pageWrites = [
+      sourceFile('main/windows.ts', "contents.on('dom-ready', () => void contents.insertCSS('#ad{display:none}'));\ncontents.selectAll(); contents.paste();\ncontents.insertText('x');\ncontents.replace();"),
+      sourceFile('main/settingsStore.ts', 'hotkeys.undo();\ncontents.undo();'),
+      sourceFile('main/smokeWindow.ts', 'wc.sendInputEvent(e);\nwc.paste();'),
+    ];
+    expect(windowExecProblems(pageWrites)).toEqual([
+      'main/windows.ts:1: .insertCSS(',
+      'main/windows.ts:2: .selectAll()',
+      'main/windows.ts:2: .paste()',
+      'main/windows.ts:3: .insertText(',
+      'main/windows.ts:4: .replace()',
+      'main/settingsStore.ts:2: .undo()',
+      'main/smokeWindow.ts:2: .paste()',
+    ]);
+    // 0.7.3: the DevTools Protocol does all of that and reads cookies; a `debugger;` statement is not it.
+    const cdp = sourceFile(
+      'main/windows.ts',
+      "contents.debugger.attach('1.3');\nvoid contents.debugger.sendCommand('Runtime.evaluate', { expression: 'document.title' });\nvoid c.webContents.debugger.sendCommand('Network.getAllCookies');\ndebugger;",
+    );
+    expect(offenders(PAGE_DEBUGGER, () => false, [cdp]).map((h) => h.split(':')[1])).toEqual(['1', '2', '2', '3', '3']);
+    const mainExec =(code: string) => windowExecProblems([sourceFile('main/main.ts', code)]).map((h) => h.split(': ').slice(0, 2).join(': '));
+    expect(
+      mainExec("app.on('web-contents-created', (_e, c) => c.on('dom-ready', () => void c.executeJavaScript('1')));\nasync function runSmokeTest() { const k = await contents.executeJavaScript('2'); }"),
+    ).toEqual(['main/main.ts:1: executeJavaScript', 'main/main.ts:2: executeJavaScript']);
+    expect(mainExec("async function runSmokeTest() { contents.on('dom-ready', () => contents.executeJavaScript('1')); }")).toEqual(['main/main.ts:1: executeJavaScript']);
+    expect(mainExec("async function runSmokeTest() { const k = await view.webContents.executeJavaScript('1'); }")).toEqual(['main/main.ts:1: executeJavaScript']);
+    expect(mainExec("async function runSmokeTest() { const k = await contents.executeJavaScript('1'); }")).toEqual([]);
     // The user agent through the webContents property, and a session's own connection or DNS lookup to scrap.tf.
     const sneaky = w(['v.webContents.userAgent = "Mozilla/5.0 Chrome/140";', 'ses.preconnect({ url: SCRAPTF_HOME_URL, numSockets: 1 });', 'void ses.resolveHost("scrap.tf");', 'if (navigator.userAgent === ua) log(ua);'].join('\n'));
     expect(offenders(UA_SETTERS, () => false, [sneaky]).map((h) => h.split(':')[1])).toEqual(['1']);
     expect(offenders(WINDOW_REQUEST, () => false, [sneaky]).map((h) => h.split(':')[1])).toEqual(['2', '3']);
     expect(scraptfLoads([sneaky]).map((h) => h.split(':')[1])).toEqual(['2', '3']);
     expect(scraptfLoads([sourceFile('main/windows.ts', 'ses.preconnect({ url: "https://scrap.tf/" });')])).toHaveLength(1);
+    // 0.7.3: a page save or a download of the window module's own, and a page save anywhere (it takes no address).
+    const save = w("await wc.savePage(tmpFile, 'HTMLOnly');\nwc.downloadURL(SCRAPTF_HOME_URL);");
+    expect(offenders(WINDOW_REQUEST, () => false, [save]).map((h) => h.split(':')[1])).toEqual(['1', '2']);
+    expect(offenders(/\.\s*(?:savePage|downloadURL)\s*\(/, () => false, [sourceFile('main/main.ts', "contents.savePage(tmp, 'HTMLComplete');")])).toHaveLength(1);
     expect(readScriptProblems('document.body.innerHTML = ""')).toEqual(['=', 'innerHTML']);
     expect(readScriptProblems("fetch('/ajax/')")).toEqual(['fetch']);
     expect(readScriptProblems('document.querySelector("a").click()')).toEqual(['click']);
@@ -1591,9 +1630,13 @@ describe('the scrap.tf window loads only what the user asks for and reads only t
         "usePush('scraptfWindow.read', (r) => setRead(r));",
         "const id = setTimeout(() => void rpc('scraptfWindow.clear'), 5000);",
         "onConfirm={() => rpc('scraptfWindow.clear').then(() => setRead(null))}",
+        // 0.7.3: useVisiblePush is a push listener and useRpcQuery calls its method in an effect.
+        "useVisiblePush('scraptf.changed', () => void rpc('scraptfWindow.reload'));",
+        "const q = useRpcQuery('scraptfWindow.reload', undefined);",
+        "useVisiblePush('scraptfWindow.read', () => setBusy(false));",
       ].join('\n'),
     );
-    expect(deferredWindowCalls([page]).map((h) => h.split(':')[1])).toEqual(['1', '2', '4', '5', '7']);
+    expect(deferredWindowCalls([page]).map((h) => h.split(':')[1])).toEqual(['1', '2', '4', '5', '7', '9', '10']);
     // 0.7.1 (F21-8): an open worded for the window, openOnScraptf and Show flips, from a click only.
     const opens = sourceFile(
       'renderer/pages/BanksPage.tsx',
@@ -1610,6 +1653,30 @@ describe('the scrap.tf window loads only what the user asks for and reads only t
       ].join('\n'),
     );
     expect(deferredWindowOpens([opens]).map((h) => h.split(':')[1])).toEqual(['1', '2', '3', '4']);
+    // 0.7.3: the same calls made through a wrapper, a map or a bare function reference; clicks, a key handler,
+    // a prop, a subscription and an effect's dependency list are not calls.
+    const wrapped = sourceFile(
+      'renderer/pages/ScraptfWindowBar.tsx',
+      [
+        "const NAV = { reload: 'scraptfWindow.reload' };",
+        'export function Bar() {',
+        '  const act = (a) => { rpc(NAV[a]); };',
+        "  const readNow = () => { rpc('scraptfWindow.read'); };",
+        "  useInterval(() => act('reload'), 30_000, true);",
+        "  usePush('scraptfWindow.nav', () => void rpc(NAV.reload));",
+        '  useEffect(() => { readNow(); }, []);',
+        "  rpc('scraptfWindow.state').then(() => act('home'));",
+        '  setTimeout(readNow, 1000);',
+        "  usePush('scraptfWindow.read', (r) => setRead(r));",
+        '  useEffect(() => { if (busy) setBusy(false); }, [act, readNow]);',
+        "  useVisiblePush('scraptf.changed', () => act('home'));",
+        "  const onKeyDown = (e) => { if (e.key === 'F5') act('reload'); };",
+        "  return <div onKeyDown={onKeyDown}><NavButton onAct={act} /><button onClick={() => act('reload')} /></div>;",
+        '}',
+      ].join('\n'),
+    );
+    expect(deferredWindowWrappers([wrapped]).map((h) => h.split(':').slice(1).join(':'))).toEqual(['5: act', '6: NAV', '7: readNow', '8: act', '9: readNow', '12: act']);
+    expect(deferredWindowCalls([wrapped])).toEqual([]);
   });
 });
 
@@ -1735,6 +1802,19 @@ describe('the window test (--smoke-window) is diagnostics-only and answers every
     const callers = new Set(offenders(MAIN_WINDOW_CALL, (r) => !r.startsWith('main/') || r === SCRAPTF_WINDOW).map((h) => h.split(':')[0]));
     expect([...callers].sort()).toEqual(['main/ipc.ts', 'main/main.ts', SMOKE_WINDOW, 'main/tray.ts']);
     expect(offenders(MAIN_WINDOW_CALL, () => false, [file('main/main.ts')]).map((h) => h.split(': ')[1])).toEqual(['scraptfWindow?.open(']);
+    // 0.7.3: the router's too: one call per 'scraptfWindow.*' case (open has two branches) and links.open's one.
+    expect(offenders(MAIN_WINDOW_CALL, () => false, [file('main/ipc.ts')]).map((h) => h.split(': ')[1])).toEqual([
+      'scraptfWindow.open(',
+      'w.open(',
+      'w.open(',
+      'windowOn().back(',
+      'windowOn().forward(',
+      'windowOn().reload(',
+      'windowOn().home(',
+      'w.go(',
+      'windowOn().readNow(',
+      'scraptfWindow.clear(',
+    ]);
     expect(mainWindowCallProblems([file(SMOKE_WINDOW)])).toEqual([]);
     expect(offenders(MAIN_WINDOW_CALL, () => false, [file(SMOKE_WINDOW)]).length).toBeGreaterThanOrEqual(4);
   });

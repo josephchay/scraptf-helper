@@ -21,7 +21,7 @@ const DERIVED: [string, string][] = [
   ['190;0', 'Normal Bat'],
   ['5021;6', 'Mann Co. Supply Crate Key'],
   ['5002;6', 'Refined Metal'],
-  ['15000;11;u701;w1;pk14', 'Strange Hot Night Owl Sniper Rifle (Factory New)'],
+  ['15000;15;u701;w1;pk14;strange', 'Strange Hot Night Owl Sniper Rifle (Factory New)'],
   ['1015;5;u3010', 'Mega Strike Taunt: The Shred Alert'],
   ['378;6;strange', 'Strange Unique Team Captain'],
   ['378;5', 'Unusual Team Captain'],

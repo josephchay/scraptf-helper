@@ -26,20 +26,47 @@ function hasCeiling(o: Opportunity): boolean {
   return finite(o.maxCostScrap) && o.maxCostScrap > 0 && o.status !== 'no-buyers' && finite(o.revenueScrap);
 }
 
-/** Highest confidence wins; ties go to the higher ceiling, then the key, so the pick is stable. */
+/**
+ * Highest confidence wins; ties go to the higher ceiling, then (typed or imported rows) as newerCopy, then
+ * the key, so the pick is stable.
+ */
 function betterInput(a: Opportunity, b: Opportunity): boolean {
   if (a.confidence !== b.confidence) return a.confidence > b.confidence;
   const ca = a.maxCostScrap ?? 0;
   const cb = b.maxCostScrap ?? 0;
   if (ca !== cb) return ca > cb;
+  const c = newerCopy(a, b);
+  if (c !== null) return c;
   return a.key < b.key;
 }
 
 /** Without a typed or imported chosen row, the newest such price wins (rules are estimates, not prices seen for the item). */
 function newerKnown(a: Opportunity, b: Opportunity): boolean {
-  if (a.inputObservedAt !== b.inputObservedAt) return a.inputObservedAt > b.inputObservedAt;
+  const c = newerCopy(a, b);
+  if (c !== null) return c;
   if (a.updatedAt !== b.updatedAt) return a.updatedAt > b.updatedAt;
   return a.key > b.key;
+}
+
+/** The ScrapPrice id behind a typed or imported row ('price:<id>'), or null. */
+function priceId(o: Opportunity): number | null {
+  const m = /^price:(\d+)$/.exec(o.inputRef);
+  return m ? Number(m[1]) : null;
+}
+
+/**
+ * 0.7.3: of two typed or imported rows, the one market.ts knownAt would show: the newer, of several seen at
+ * one time the cheaper (a look stores a kit once per sheen/killstreaker combo, each its own row), equal costs
+ * the higher price id. Before, the key broke a tie at one time, so 'price:1' at 37 keys showed as "Your
+ * price" over 'price:9' at 20. Newer first keeps the order transitive. null: no call (a rule row).
+ */
+function newerCopy(a: Opportunity, b: Opportunity): boolean | null {
+  if (!isKnown(a) || !isKnown(b)) return null;
+  if (a.inputObservedAt !== b.inputObservedAt) return a.inputObservedAt > b.inputObservedAt;
+  if (a.costScrap !== b.costScrap) return a.costScrap < b.costScrap;
+  const ia = priceId(a);
+  const ib = priceId(b);
+  return ia !== null && ib !== null && ia !== ib ? ia > ib : null;
 }
 
 function categoryIndex(c: Category): number {

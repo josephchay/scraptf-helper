@@ -88,6 +88,16 @@ export function lotCostAt(lot: Pick<JournalLot, 'costScrap'> & Partial<Pick<Jour
 }
 
 /**
+ * A position's total cost at today's key price `keyScrap` (lotCostAt per lot), as Holdings and the
+ * Journal page show it. qty === lots.length for every position journalSummary builds; anything else
+ * keeps the stored (buy-time) total.
+ */
+export function positionCostAt(pos: Pick<JournalPosition, 'qty' | 'costScrap' | 'lots'>, keyScrap: Scrap | null): Scrap {
+  const lots = Array.isArray(pos.lots) ? pos.lots : [];
+  return lots.length > 0 && lots.length === pos.qty ? lots.reduce((t, l) => t + lotCostAt(l, keyScrap), 0) : pos.costScrap;
+}
+
+/**
  * One row from an open journal position (journalSummary().open) and its buy side; `buy` null means
  * no eligible buy order. Lots are valued at `keyScrap`, today's key price (lotCostAt). A painted copy
  * is priced against its clean base, so it is flagged has-extras like a painted price on the Live market.
@@ -106,10 +116,8 @@ export function holdingRow(
   const lots = Array.isArray(pos.lots) ? pos.lots : [];
   const qty = pos.qty;
   const next = lots[0];
-  const costs = lots.map((l) => lotCostAt(l, keyScrap));
-  // qty === lots.length for every position journalSummary builds; anything else keeps the stored total.
-  const costScrap = lots.length > 0 && lots.length === qty ? costs.reduce((t, c) => t + c, 0) : pos.costScrap;
-  const nextLotCostScrap = next ? costs[0]! : qty > 0 ? Math.round(pos.costScrap / qty) : pos.costScrap;
+  const costScrap = positionCostAt(pos, keyScrap);
+  const nextLotCostScrap = next ? lotCostAt(next, keyScrap) : qty > 0 ? Math.round(pos.costScrap / qty) : pos.costScrap;
   const revenueScrap = buy?.revenueScrap ?? null;
   const flags = buy ? [...buy.flags] : [];
   if (/;p\d/.test(pos.sku) && !flags.includes('has-extras')) flags.push('has-extras');

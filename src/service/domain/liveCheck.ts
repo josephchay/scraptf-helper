@@ -30,7 +30,7 @@ import { categoryOfSkuOnly } from '../../shared/categories';
 import { frictionOf, profitStatus } from '../../shared/ceiling';
 import { parsePrice, valueScrap } from '../../shared/currency';
 import { scraptfListUsePrice } from '../../shared/scraptfList';
-import { fromObject, fromString, isValidSku } from '../../shared/sku';
+import { fromObject, fromString, isValidSku, looksLikeSku } from '../../shared/sku';
 import type {
   CheckHint,
   CheckPrice,
@@ -49,11 +49,12 @@ import type {
   UnixMs,
 } from '../../shared/types';
 import type { Logger, Repo, SchemaService } from '../contracts';
+import { importKeysNonCraftable, scraptfKitSteamName } from '../import/scraptfHtml';
 import { looksLikePageContent, parsePriceLine } from '../priceSheetIo';
 import { explicitInput } from './engine';
 import { DEFAULT_KEY_SCRAP } from './keyprice';
 import { evaluateMarketBase, type MarketIndex } from './market';
-import { anyEffectBaseOf, matchContext } from './matcher';
+import { anyEffectBaseOf, isSpecialEmpty, matchContext } from './matcher';
 import { lookupReferences, referencePrices } from './pricing';
 import type { ScraptfListCache } from './scraptfList';
 import { buildItemDetail } from './views';
@@ -237,6 +238,33 @@ export function looselySameName(text: string, name: string): boolean {
   return a.length > 0 && a === squashName(name);
 }
 
+/** 0.7.2: the kit tier Steam's name for a kit or fabricator spells (as scraptfKitSteamName writes it). */
+function kitTierOf(steamName: string): number {
+  return /\bProfessional Killstreak\b/i.test(steamName) ? 3 : /\bSpecialized Killstreak\b/i.test(steamName) ? 2 : 1;
+}
+
+/**
+ * 0.7.2: the resolver's reading of Steam's name for a scrap.tf kit title, only when it is the kit or
+ * fabricator the saved-page import keys that card as: an exact match, Unique, the title's tier, a target,
+ * and nothing else in the SKU. A word such as "Australium" or "Strange" read into it would make it
+ * another item (the import refuses those titles), and a guess would be a wrong flip.
+ */
+function kitItemOf(steamName: string, r: ResolvedItem | null): ResolvedItem | null {
+  if (!r || r.match === 'fuzzy') return null;
+  const o = attempt(() => fromString(r.sku), null);
+  if (!o || o.quality !== 6 || o.target === null || o.killstreak !== kitTierOf(steamName)) return null;
+  const keyed = attempt(
+    () => fromObject({ defindex: o.defindex, quality: 6, craftable: o.craftable, killstreak: o.killstreak, target: o.target, output: o.output, outputQuality: o.outputQuality }),
+    null,
+  );
+  return keyed === r.sku ? r : null;
+}
+
+/** 0.7.3: an item name as copied, not a SKU, an item link (parseItemUrl reads http(s) only) or a name saying its craftability. */
+function isPlainName(key: string): boolean {
+  return !looksLikeSku(key) && !/^https?:\/\//i.test(key) && !/^(?:Non-)?Craftable\b/i.test(key);
+}
+
 /**
  * Pure. Resolves `text` to one item with `resolve` (schema.resolve). A fuzzy match is accepted only
  * when it is unique and confident (the item's own name but for case and punctuation, or
@@ -245,6 +273,16 @@ export function looselySameName(text: string, name: string): boolean {
  * too long, empty) come first and use the fixed CHECK_REFUSALS texts; a scrap.tf link is not-item and
  * is never resolved or fetched. Never puts `text` into a reason. At most CHECK_MAX_RESOLVES resolver
  * calls per text, so the watcher cannot turn one copy into many database scans.
+ *
+ * 0.7.2: scrap.tf titles a killstreak kit "Professional Rocket Launcher Kit" (no "Killstreak"), which names
+ * no TF2 item. An item part in that form that resolves to nothing, or only to a closest-match guess, is
+ * resolved once more as Steam's name for it (scraptfKitSteamName: Non-Craftable, as the saved-page import
+ * keys the card), so the check meets the import's stored price, list row and buy orders. Steam's and
+ * backpack.tf's own form ("Professional Killstreak Rocket Launcher Kit", backpack.tf's Craftable kit) is
+ * resolved as written, never reinterpreted.
+ *
+ * 0.7.3: a plain name that resolves to a Craftable Taunt Unusualifier (scrap.tf titles the card with Steam's
+ * Craftable name) is read as the Non-Craftable one the import stores; a SKU or item link is kept as written.
  *
  * Forms, in this order:
  * 1. a copied /items row (tabs or runs of 2+ spaces: name, price to buy or "Sold out", price we pay,
@@ -265,17 +303,34 @@ export function parseCheckText(text: string, resolve: (text: string) => Resolved
   // One budget and one memo per text: repeated item parts cost one lookup.
   const memo = new Map<string, ResolvedItem | null>();
   let left = CHECK_MAX_RESOLVES;
+  const resolveOnce = (t: string): ResolvedItem | null => {
+    left--;
+    try {
+      return resolve(t);
+    } catch {
+      return null;
+    }
+  };
   const lookup = (t: string): ResolvedItem | null => {
     const key = t.replace(/\s+/g, ' ').trim();
     if (!key) return null;
     if (memo.has(key)) return memo.get(key)!;
     if (left <= 0) return null;
-    left--;
-    let r: ResolvedItem | null = null;
-    try {
-      r = resolve(key);
-    } catch {
-      r = null;
+    let r = resolveOnce(key);
+    // 0.7.2: a scrap.tf kit title, as Steam names that kit. Only text in scrap.tf's kit form has a
+    // Steam name, so other text costs no second call; this one draws on the same budget.
+    if ((r === null || r.match === 'fuzzy') && left > 0) {
+      const steamName = scraptfKitSteamName(key);
+      if (steamName !== null) r = kitItemOf(steamName, resolveOnce(steamName)) ?? r;
+    }
+    // 0.7.3: scrap.tf titles a Taunt Unusualifier with Steam's Craftable name, which the import keys
+    // Non-Craftable. A plain name is read the same way; a SKU, a link or a name saying its craftability is
+    // kept. Only such a name costs a second call, on the same budget.
+    if (r !== null && r.match === 'exact' && r.skuObject.craftable && importKeysNonCraftable(r.skuObject.defindex) && left > 0 && isPlainName(key)) {
+      const obj = r.skuObject;
+      const want = attempt(() => fromObject({ ...obj, craftable: false }), null);
+      const nc = resolveOnce(`Non-Craftable ${key}`);
+      if (nc !== null && nc.match === 'exact' && nc.sku === want) r = nc;
     }
     memo.set(key, r);
     return r;
@@ -488,26 +543,62 @@ function canonicalBase(sku: string): string | null {
   return attempt(() => fromObject({ ...fromString(sku), paint: null }), null);
 }
 
+type StoredInput = NonNullable<ReturnType<typeof explicitInput>>;
+
 /**
- * The user's newest typed or imported price usable as a cost (the engine's explicitInput), newest by
- * observedAt then id. For a plain SKU a copy without extras wins: a painted or spelled copy's price is
- * not what a plain one costs (the Live market flags those rows 'has-extras' instead).
+ * The engine's target.hasExtras, but for a sheen and killstreaker (0.7.2): paint, spells, parts or a
+ * custom name or description make a copy other than the plain item. Every specialized and professional
+ * kit (and killstreak weapon) carries a sheen, a professional one a killstreaker too, so there is no copy
+ * without them: counted, a kit's own price read as another copy's, with CHECK_EXTRAS_NOTE and no flip
+ * notification. The engine and matcher keep counting them (an order asking for a sheen is specific).
  */
-export function newestStoredPrice(prices: readonly ScrapPrice[], plain: boolean): ScrapPrice | null {
-  const usable = prices
-    .map((p) => ({ p, input: attempt(() => explicitInput(p), null) }))
-    .filter((x): x is { p: ScrapPrice; input: NonNullable<ReturnType<typeof explicitInput>> } => x.input !== null)
-    .sort((a, b) => b.p.observedAt - a.p.observedAt || b.p.id - a.p.id);
-  if (plain) {
-    const clean = usable.find((x) => !x.input.target.hasExtras);
-    if (clean) return clean.p;
-  }
-  return usable[0]?.p ?? null;
+function isOtherCopy(input: StoredInput): boolean {
+  const s = input.target.special;
+  // Extras with no special at all are the SKU's paint.
+  return input.target.hasExtras === true && (s === null || !isSpecialEmpty({ ...s, sheen: null, killstreaker: null }));
 }
 
-/** The stored price is for a copy with paint, spells or parts (the engine's target.hasExtras). */
+/**
+ * The user's newest typed or imported price usable as a cost (the engine's explicitInput), newest by
+ * observedAt. For a plain SKU a plain copy wins (isOtherCopy: a sheen or killstreaker alone is still
+ * plain): a painted or spelled copy's price is not what a plain one costs (the Live market flags those
+ * rows 'has-extras' instead). 0.7.2: of several seen at that one time, the cheapest at `keyScrap`, equal
+ * costs the higher id, as the Live market row picks (knownAt): a look stores a kit once per
+ * sheen/killstreaker combo, every copy at the page's time, and the one stored last is not the price.
+ */
+export function newestStoredPrice(prices: readonly ScrapPrice[], plain: boolean, keyScrap: Scrap = DEFAULT_KEY_SCRAP): ScrapPrice | null {
+  const usable = prices
+    .map((p) => ({ p, input: attempt(() => explicitInput(p), null) }))
+    .filter((x): x is { p: ScrapPrice; input: StoredInput } => x.input !== null)
+    .sort((a, b) => b.p.observedAt - a.p.observedAt || b.p.id - a.p.id);
+  const clean = plain ? usable.filter((x) => !isOtherCopy(x.input)) : [];
+  const pool = clean.length > 0 ? clean : usable;
+  const newest = pool[0];
+  if (!newest) return null;
+  const cost = (input: StoredInput): Scrap => valueScrap(input.costKeys, input.costScrapRaw, keyScrap);
+  // Newest first, then the higher id: only a strictly cheaper copy of the same time replaces the pick.
+  let best = newest;
+  let bestCost = cost(newest.input);
+  for (const x of pool) {
+    if (x.p.observedAt !== newest.p.observedAt) break;
+    const c = cost(x.input);
+    if (c < bestCost) {
+      best = x;
+      bestCost = c;
+    }
+  }
+  return best.p;
+}
+
+/**
+ * The stored price is for a copy with paint, spells, parts or a custom name or description (the engine's
+ * target.hasExtras without a sheen or killstreaker, 0.7.2: isOtherCopy). What CHECK_EXTRAS_NOTE says.
+ */
 export function storedPriceHasExtras(p: ScrapPrice): boolean {
-  return attempt(() => explicitInput(p)?.target.hasExtras === true, false);
+  return attempt(() => {
+    const input = explicitInput(p);
+    return input !== null && isOtherCopy(input);
+  }, false);
 }
 
 /** A copied row with nothing to buy: "Sold out", or stock 0 (as scraptfListUsePrice and the saved-page import read it). */
@@ -628,7 +719,7 @@ export function createLiveCheck(deps: LiveCheckDeps): LiveCheck {
     if (!detail) return blankCheckResult('not-item', CHECK_NOT_ITEM_REASON, source, now, id, keyScrapOf());
 
     const plain = typeof obj.paint !== 'number' || obj.paint <= 0;
-    const stored = newestStoredPrice(detail.scrapPrices, plain);
+    const stored = newestStoredPrice(detail.scrapPrices, plain, K);
     const price = chooseCheckPrice({ parsed, list, stored, keyScrap: K, now, plain });
     // No clean copy stored: the fallback is a painted or spelled copy's price. Said so, as the Live
     // market flags it 'has-extras', so it is not taken for what a plain one costs.

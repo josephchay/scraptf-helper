@@ -300,7 +300,9 @@ export function createBptfApi(deps: ServiceDeps & { schema: SchemaService }): Bp
   };
   const snapshotAvailable = (): boolean => {
     const u = readUnavailable();
-    return u === null || clock.now() - u.at >= SNAPSHOT_REPROBE_MS;
+    const now = clock.now();
+    // 0.7.3: a stamp in the future (the clock moved back) is due for a probe, like one a day old.
+    return u === null || u.at > now || now - u.at >= SNAPSHOT_REPROBE_MS;
   };
 
   // ----- health bookkeeping -----
@@ -321,6 +323,8 @@ export function createBptfApi(deps: ServiceDeps & { schema: SchemaService }): Bp
     const what = name === 'bptfApiKey' ? 'API key' : 'access token';
     const reason = `backpack.tf rejected the ${what} (HTTP ${status}${message ? `: ${clean(message)}` : ''}). Check it in Settings. ${credentialHint(name, value)}`;
     rejected[name] = { fp: fingerprint(value), reason };
+    // An earlier acceptance no longer vouches for the key in test().
+    if (name === 'bptfApiKey') keyAccepted = null;
     log.warn(reason);
     return new BptfCredentialError(name, status, reason);
   };
@@ -409,7 +413,6 @@ export function createBptfApi(deps: ServiceDeps & { schema: SchemaService }): Bp
     if (isAuthFailure(res)) throw rejectCredential('bptfApiKey', key, res.status, responseMessage(res));
     if (res.status === 429) throw new RateLimitedError(budget, http.nextAllowedAt(budget));
     if (!res.ok) throw new HttpStatusError(res.status, url, clean(responseMessage(res)) || null);
-    keyAccepted = { fp: fingerprint(key), at: clock.now() };
     const d = res.data;
     const inner = isRecord(d) && isRecord(d['response']) ? d['response'] : isRecord(d) ? d : null;
     if (inner && (inner['success'] === 0 || inner['success'] === '0' || inner['success'] === false)) {
@@ -420,6 +423,8 @@ export function createBptfApi(deps: ServiceDeps & { schema: SchemaService }): Bp
       }
       throw new Error(`backpack.tf: ${clean(msg)}`);
     }
+    // Only now: a 200 with success:0 is no acceptance a key test may repeat.
+    keyAccepted = { fp: fingerprint(key), at: clock.now() };
     return inner;
   };
 
@@ -541,7 +546,9 @@ export function createBptfApi(deps: ServiceDeps & { schema: SchemaService }): Bp
       }
       const { name, learned } = resolveName(sku);
       const hit = cache.get(name);
-      if (hit && clock.now() - hit.at < SNAPSHOT_CACHE_MS) return withStoredUserData(hit.result);
+      const now = clock.now();
+      // 0.7.3: an entry cached in the future (the clock moved back) has no known age: fetched again, not served.
+      if (hit && hit.at <= now && now - hit.at < SNAPSHOT_CACHE_MS) return withStoredUserData(hit.result);
       const running = inflight.get(name);
       if (running) return withStoredUserData(await running);
       const p = tracked('snapshot', () => snapshotUncached(sku, name, learned, priority)).finally(() => inflight.delete(name));
@@ -549,7 +556,8 @@ export function createBptfApi(deps: ServiceDeps & { schema: SchemaService }): Bp
       try {
         return withStoredUserData(await p);
       } catch (err) {
-        if (!(err instanceof RateLimitedError) && !(err instanceof NetworkPausedError)) {
+        // rejectCredential already warned once; a remembered rejection is not news.
+        if (!(err instanceof RateLimitedError) && !(err instanceof NetworkPausedError) && !(err instanceof BptfCredentialError)) {
           log.warn(`backpack.tf snapshot for "${name}" failed: ${describe(err)}`);
         }
         throw err;
@@ -639,72 +647,85 @@ export function createBptfApi(deps: ServiceDeps & { schema: SchemaService }): Bp
       if (!value) {
         return { ok: false, message: name === 'bptfApiKey' ? 'No backpack.tf API key is set.' : 'No backpack.tf access token is set.' };
       }
-      // A user-initiated test always gets a fresh chance.
+      // A user-initiated test gets a fresh request; only a passing test (or a new rejection) changes the verdict.
+      const prev = rejected[name];
       rejected[name] = null;
-      try {
-        if (name === 'bptfApiKey') {
-          // IGetCurrencies allows 3 calls per hour, 5 min apart; the scheduled key-price job may
-          // have used the slot moments ago. Do not queue behind it: answer from the last result.
-          const now = clock.now();
-          const nextAt = http.nextAllowedAt('bptf-currencies');
-          if (nextAt - now > TEST_MAX_WAIT_MS) {
-            if (keyAccepted && keyAccepted.fp === fingerprint(value) && now - keyAccepted.at < 2 * 3_600_000) {
-              return { ok: true, message: `API key works: backpack.tf accepted it ${formatAgo(now - keyAccepted.at)}.` };
+      const outcome = await (async (): Promise<{ ok: boolean; message: string }> => {
+        try {
+          if (name === 'bptfApiKey') {
+            // IGetCurrencies allows 3 calls per hour, 5 min apart; the scheduled key-price job may
+            // have used the slot moments ago. Do not queue behind it: answer from the last result.
+            const now = clock.now();
+            const nextAt = http.nextAllowedAt('bptf-currencies');
+            if (nextAt - now > TEST_MAX_WAIT_MS) {
+              if (keyAccepted && keyAccepted.fp === fingerprint(value) && now - keyAccepted.at < 2 * 3_600_000) {
+                return { ok: true, message: `API key works: backpack.tf accepted it ${formatAgo(now - keyAccepted.at)}.` };
+              }
+              return {
+                ok: false,
+                message: `The backpack.tf key-price endpoint was used recently (at most 1 call per 5 min). Test again after ${new Date(nextAt).toLocaleTimeString()}.`,
+              };
             }
+            const quote = await tracked('currencies', async () => {
+              const res = await http.request(CURRENCIES_URL, {
+                query: { key: value, raw: 1 },
+                secretQuery: ['key'],
+                budget: 'bptf-currencies',
+                priority: 'user',
+                maxWaitMs: TEST_MAX_WAIT_MS,
+              });
+              checkKeyResponse(res, value, 'bptf-currencies', CURRENCIES_URL);
+              return parseIGetCurrencies(res.data, clock.now());
+            });
             return {
-              ok: false,
-              message: `The backpack.tf key-price endpoint was used recently (at most 1 call per 5 min). Test again after ${new Date(nextAt).toLocaleTimeString()}.`,
+              ok: true,
+              message: quote
+                ? `API key works. Key price ${scrapToRef(quote.buyScrap ?? 0).toFixed(2)}-${scrapToRef(quote.sellScrap ?? 0).toFixed(2)} ref.`
+                : 'API key works.',
             };
           }
-          const quote = await tracked('currencies', async () => {
-            const res = await http.request(CURRENCIES_URL, {
-              query: { key: value, raw: 1 },
-              secretQuery: ['key'],
-              budget: 'bptf-currencies',
-              priority: 'user',
-              maxWaitMs: TEST_MAX_WAIT_MS,
-            });
-            checkKeyResponse(res, value, 'bptf-currencies', CURRENCIES_URL);
-            return parseIGetCurrencies(res.data, clock.now());
-          });
-          return {
-            ok: true,
-            message: quote
-              ? `API key works. Key price ${scrapToRef(quote.buyScrap ?? 0).toFixed(2)}-${scrapToRef(quote.sellScrap ?? 0).toFixed(2)} ref.`
-              : 'API key works.',
-          };
-        }
-        const result = await tracked('snapshot', async () => {
-          const { res, method } = await tokenRequest(
-            SNAPSHOT_URL,
-            { sku: TOKEN_TEST_ITEM, appid: 440 },
-            { budget: 'bptf-snapshot', priority: 'user', methods: ['header', 'query'], maxWaitMs: TEST_MAX_WAIT_MS },
-          );
-          if (res.status === 404 || res.status === 410) {
-            markUnavailable(res.status);
-            throw new BptfSnapshotUnavailableError(
-              `The snapshot endpoint answered HTTP ${res.status}, so the token could not be checked there.`,
+          const result = await tracked('snapshot', async () => {
+            const { res, method } = await tokenRequest(
+              SNAPSHOT_URL,
+              { sku: TOKEN_TEST_ITEM, appid: 440 },
+              { budget: 'bptf-snapshot', priority: 'user', methods: ['header', 'query'], maxWaitMs: TEST_MAX_WAIT_MS },
             );
+            if (res.status === 404 || res.status === 410) {
+              markUnavailable(res.status);
+              throw new BptfSnapshotUnavailableError(
+                `The snapshot endpoint answered HTTP ${res.status}, so the token could not be checked there.`,
+              );
+            }
+            if (res.status === 429) throw new RateLimitedError('bptf-snapshot', http.nextAllowedAt('bptf-snapshot'));
+            if (!res.ok) throw new HttpStatusError(res.status, SNAPSHOT_URL, clean(responseMessage(res)) || null);
+            clearUnavailable();
+            const parsed = snapshotResponseSchema.safeParse(res.data);
+            return { method, count: parsed.success ? (parsed.data.listings?.length ?? 0) : 0 };
+          });
+          const how = result.method === 'header' ? 'the X-Auth-Token header' : 'a token query parameter';
+          return { ok: true, message: `Access token works (sent as ${how}). ${result.count} listings for ${TOKEN_TEST_ITEM}.` };
+        } catch (err) {
+          if (err instanceof BptfCredentialError) return { ok: false, message: err.message };
+          if (err instanceof RateLimitedError) {
+            // 0.7.3: timed out behind another request on the host; retryAt is only the failure time.
+            if (err.busy) {
+              return { ok: false, message: 'backpack.tf is busy with another Flip Desk request (such as the price list download); test again in a moment.' };
+            }
+            return { ok: false, message: `Rate limited; try again after ${new Date(err.retryAt).toLocaleTimeString()}.` };
           }
-          if (res.status === 429) throw new RateLimitedError('bptf-snapshot', http.nextAllowedAt('bptf-snapshot'));
-          if (!res.ok) throw new HttpStatusError(res.status, SNAPSHOT_URL, clean(responseMessage(res)) || null);
-          clearUnavailable();
-          const parsed = snapshotResponseSchema.safeParse(res.data);
-          return { method, count: parsed.success ? (parsed.data.listings?.length ?? 0) : 0 };
-        });
-        const how = result.method === 'header' ? 'the X-Auth-Token header' : 'a token query parameter';
-        return { ok: true, message: `Access token works (sent as ${how}). ${result.count} listings for ${TOKEN_TEST_ITEM}.` };
-      } catch (err) {
-        if (err instanceof BptfCredentialError) return { ok: false, message: err.message };
-        if (err instanceof RateLimitedError) {
-          return { ok: false, message: `Rate limited; try again after ${new Date(err.retryAt).toLocaleTimeString()}.` };
+          if (err instanceof HttpStatusError) return { ok: false, message: `backpack.tf answered HTTP ${err.status}.` };
+          return { ok: false, message: describe(err) };
         }
-        if (err instanceof HttpStatusError) return { ok: false, message: `backpack.tf answered HTTP ${err.status}.` };
-        return { ok: false, message: describe(err) };
-      }
+      })();
+      // 0.7.3: a test that sent nothing ("used recently"), or ended busy, rate limited or failed, checked
+      // nothing, so the jobs parked on the rejection stay parked; a rejection it recorded itself is kept.
+      if (!outcome.ok && rejected[name] === null && prev && prev.fp === fingerprint(value)) rejected[name] = prev;
+      return outcome;
     },
 
     snapshotAvailable,
+
+    credentialRejected: rejectedReason,
 
     health(): ConnectorHealth[] {
       const now = clock.now();

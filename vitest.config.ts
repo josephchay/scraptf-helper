@@ -10,6 +10,7 @@ const TIMED = [
   'test/db/perf.test.ts',
   'test/db/bankStockThinPerf.test.ts',
   'test/import/scraptfHtml.slowInput.test.ts',
+  'test/import/audit-parser-depth.test.ts',
 ];
 
 export default defineConfig({

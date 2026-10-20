@@ -2,6 +2,7 @@
 // contacts scrap.tf.
 
 export {
+  ImportTooDeepError,
   ImportTooLargeError,
   MAX_IMPORT_BYTES,
   NO_CARDS_SAVED_WARNING,

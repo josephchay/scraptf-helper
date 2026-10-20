@@ -26,6 +26,7 @@ import {
   SKIP_NEWER_SAVE,
   SKIP_OUT_OF_STOCK,
   SKIP_SAME_OR_CHEAPER,
+  UNUSUALS_INDEX,
   importWarningCode,
 } from '../shared/importCodes';
 import { SCRAPTF_CHANGES_MAX_LIMIT, SCRAPTF_EVENTS_MAX_AGE_MS } from '../shared/scraptfHistory';
@@ -33,7 +34,8 @@ import { isScraptfPageUrl, SCRAPTF_WINDOW_OFF } from '../shared/scraptfWindowPol
 import { buildLinks } from '../shared/links';
 import type { PushContract, PushEvent } from '../shared/rpc';
 import { SERVICE_METHODS } from '../shared/rpc';
-import { MARKET_MAX_LIMIT, MARKET_MAX_SEARCH_CHARS, MARKET_SORTS, countCategories } from '../shared/market';
+import { MARKET_MAX_LIMIT, MARKET_MAX_SEARCH_CHARS, MARKET_SORTS, countCategories, marketSearchTokens } from '../shared/market';
+import { EVENTS_EXPORT_MAX, eventMatches } from '../shared/opportunityEvents';
 import { baseSku as toBaseSku, canonical, fromObject, fromString, isValidSku, looksLikeSku } from '../shared/sku';
 import {
   BANK_STOCK_FILTERS,
@@ -218,6 +220,15 @@ const eventQuery = z
     sku: z.string().max(300).optional(),
     kinds: z.array(z.enum(['appeared', 'changed', 'gone', 'notified'])).max(4).optional(),
     sinceTs: finite.optional(),
+  })
+  .optional();
+
+// 0.7.3: the Live log's filters for its events export (EventsExportQuery).
+const eventsExportQuery = z
+  .object({
+    kinds: z.array(z.enum(['appeared', 'changed', 'gone', 'notified'])).max(4).optional(),
+    category: categoryEnum.optional(),
+    search: z.string().max(MARKET_MAX_SEARCH_CHARS).optional(),
   })
   .optional();
 
@@ -695,7 +706,8 @@ function tryReport(ctx: HandlerContext, input: ImportReportInput): void {
  * 'import'. Per SKU and set of extras the cheapest card wins, and it replaces
  * the earlier imported price for that SKU instead of adding duplicates.
  * Items with none in stock are not stored. Prices from a page saved later than
- * this one are never replaced or removed.
+ * this one are never replaced or removed, and a card a later save of its bank
+ * showed gone is not brought back by an older page arriving late (0.7.3).
  * A saved /items list also refreshes the stored scrap.tf price list (F14), out-of-stock rows
  * included, at the file's time; rows from a list saved later are kept (repo guard).
  * `html` is the saved file as text: an .html page, or an .mhtml file whose web page parseSavedPage
@@ -708,7 +720,8 @@ function tryReport(ctx: HandlerContext, input: ImportReportInput): void {
  * 0.7.1: refused while the item schema loads (P3: cards keyed by guesses would change SKU once it loads).
  * A bank page's look is stored as a bank stock save only when it is a whole look (`stockSave`): a window
  * snapshot cut before its settle read (`settled: false`, ACT-4), a look with far fewer cards than a recent
- * save (DM-2) and an /items list whose stock cannot be read (P1) store their prices but no save. A save
+ * save (DM-2) and an /items list whose stock cannot be read (P1) store their prices but no save, and
+ * read no copy as gone: they replace only the copies they show (0.7.3). A save
  * that was stored removes the imported price of every card it shows gone from the bank (DM-1), so a
  * card scrap.tf sold stops reading as a flip everywhere. Each parse leaves a sanitized parser report (P4).
  * Refused unless the user enabled import and acknowledged the ToS note (R10); a window read also needs
@@ -767,9 +780,13 @@ export function importSavedPage(ctx: HandlerContext, p: ImportSavedPageParams): 
     // (the settle read gets them). Such a read stores nothing either way, so it records no batch and
     // pushes nothing: the Import page lists no row per page browsed, and no "saved without its cards"
     // notice tells the user to save a page they never saved. Nothing of the page is logged.
-    // P7: a page whose items are in a shape the parser does not know says so too (digits only).
-    const layout = parsed.warnings.find((w) => importWarningCode(w) === LAYOUT_CHANGED);
-    const warnings = layout !== undefined ? [WINDOW_NOTHING_TO_IMPORT, layout] : [WINDOW_NOTHING_TO_IMPORT];
+    // P7: a page whose items are in a shape the parser does not know says so too (digits only), and 0.7.3:
+    // so does scrap.tf's bare /unusuals index, which never shows items (fixed text).
+    const pageWarning = parsed.warnings.find((w) => {
+      const code = importWarningCode(w);
+      return code === LAYOUT_CHANGED || code === UNUSUALS_INDEX;
+    });
+    const warnings = pageWarning !== undefined ? [WINDOW_NOTHING_TO_IMPORT, pageWarning] : [WINDOW_NOTHING_TO_IMPORT];
     ctx.log.debug('scrap.tf window read: nothing to import on this page, nothing recorded');
     tryReport(ctx, reportOf({ ...reportBase, format }, parsed, warnings, 0, true));
     return {
@@ -794,6 +811,13 @@ export function importSavedPage(ctx: HandlerContext, p: ImportSavedPageParams): 
   const best = new Map<string, { sku: string; item: Item; costScrap: number }>();
   /** Base SKUs the page shows with none in stock: earlier imported copies of them are gone. */
   const soldOut = new Set<string>();
+  /** 0.7.3: per base SKU, the extras (specialKey) of every copy the page shows, on sale or sold out. */
+  const shownExtras = new Map<string, Set<string>>();
+  const show = (base: string, special: SpecialAttrs): void => {
+    let set = shownExtras.get(base);
+    if (!set) shownExtras.set(base, (set = new Set()));
+    set.add(specialKey(special));
+  };
   const keyScrap = ctx.engine.keyPrice().valueScrap;
   for (const item of parsed.items) {
     const title = item.title || item.name;
@@ -801,7 +825,9 @@ export function importSavedPage(ctx: HandlerContext, p: ImportSavedPageParams): 
     // "0/5" on the /items list (priced or "Sold out"): the price to buy cannot be paid right now.
     if (sku !== null && item.stock === 0) {
       skipped.push({ reason: SKIP_OUT_OF_STOCK, title });
-      soldOut.add(splitSku(sku).base);
+      const so = splitSku(sku);
+      soldOut.add(so.base);
+      show(so.base, { ...item.special, paint: item.special.paint ?? so.paint });
       continue;
     }
     if (sku === null || !isImportableItem(item)) {
@@ -810,6 +836,8 @@ export function importSavedPage(ctx: HandlerContext, p: ImportSavedPageParams): 
     }
     const { base, paint } = splitSku(sku);
     const special: SpecialAttrs = { ...item.special, paint: item.special.paint ?? paint };
+    // Before cheapest-wins: a dearer card of the same copy is shown too.
+    show(base, special);
     const key = `${base}|${specialKey(special)}`;
     const total = Math.round(item.costKeys * keyScrap) + item.costScrap;
     const prev = best.get(key);
@@ -852,6 +880,9 @@ export function importSavedPage(ctx: HandlerContext, p: ImportSavedPageParams): 
       }
     }
   }
+  // 0.7.3: a look known to be missing cards (ACT-4 unsettled, DM-2 or P1 partial) reads no copy as gone
+  // (F18 deviation 11): it replaces only the copies it shows, never another copy of the same item.
+  const noSaveLook = unsettled || stockSave === 'partial';
 
   const affected = new Set<string>();
   let batchId = 0;
@@ -866,6 +897,14 @@ export function importSavedPage(ctx: HandlerContext, p: ImportSavedPageParams): 
         if (!previous.has(sku)) previous.set(sku, ctx.repo.scrapPricesForSku(sku).filter(replaceable));
       }
       const kept = new Set<number>();
+      // 0.7.3: a later save of this bank showed a copy gone (DM-1 removed its price): an older page arriving
+      // late must not bring it back, as no later save would remove it again. Never the /items list (as DM-1).
+      const goneBank = parsed.bank !== null && parsed.bank !== 'list' ? parsed.bank : null;
+      const anyGoneAfter = goneBank !== null && ctx.repo.scraptfEvents({ bank: goneBank, kinds: ['gone'], sinceAt: mtime + 1, limit: 1 }).length > 0;
+      const goneAfterPage = (sku: string, special: SpecialAttrs): boolean =>
+        anyGoneAfter &&
+        goneBank !== null &&
+        ctx.repo.scraptfEvents({ bank: goneBank, kinds: ['gone'], sku, specialKey: bankStockSpecialKey(special), sinceAt: mtime + 1, limit: 1 }).length > 0;
       const writes: { id: number | null; sku: string; item: Item }[] = [];
       for (const { sku, item } of best.values()) {
         const key = specialKey(item.special);
@@ -874,6 +913,13 @@ export function importSavedPage(ctx: HandlerContext, p: ImportSavedPageParams): 
         const newer = same.find(newerThanPage);
         if (newer) {
           kept.add(newer.id);
+          skipped.push({ reason: SKIP_NEWER_SAVE, title: item.title || item.name });
+          continue;
+        }
+        // After `newer`: a copy restocked since has a newer price. Its other rows (another bank's, or a
+        // list-tagged one DM-1 kept) stay as they are: this page changes nothing for the copy.
+        if (goneAfterPage(sku, item.special)) {
+          for (const o of same) kept.add(o.id);
           skipped.push({ reason: SKIP_NEWER_SAVE, title: item.title || item.name });
           continue;
         }
@@ -918,9 +964,12 @@ export function importSavedPage(ctx: HandlerContext, p: ImportSavedPageParams): 
       }
       stored = writes.length;
       // Earlier imported prices for these SKUs that this page no longer lists, or shows sold out, are removed.
+      // 0.7.3: a partial or unsettled look removes only those of copies it shows (an older duplicate, or
+      // sold out): a copy it did not catch may still be on sale, and the next whole look decides.
       for (const [sku, olds] of previous) {
         for (const o of olds) {
           if (kept.has(o.id) || newerThanPage(o)) continue;
+          if (noSaveLook && !shownExtras.get(sku)?.has(extrasKey(o))) continue;
           ctx.repo.deleteScrapPrice(o.id);
           affected.add(sku);
         }
@@ -1019,7 +1068,8 @@ export function importSavedPage(ctx: HandlerContext, p: ImportSavedPageParams): 
     // The import's own page warnings first, so the cut at 100 never drops them.
     warnings: [...pageWarnings, ...parsed.warnings].slice(0, 100),
     // Out-of-stock rows are skipped as prices but kept on the list, so `stored` alone undersells the save.
-    ...(parsed.pageKind === 'items-list' ? { listRows: listWritten } : {}),
+    // 0.7.3: and how many the page gave, so 0 written can tell a newer save from a page with none.
+    ...(parsed.pageKind === 'items-list' ? { listRows: listWritten, listRowsRead: listRows.length } : {}),
     origin,
     ...(newFlips !== undefined ? { newFlips } : {}),
     skippedTotal: skipped.length,
@@ -1134,10 +1184,18 @@ export function createRpcHandlers(ctx: HandlerContext): RpcHandler {
       .catch(() => undefined);
   };
 
-  /** The repo write for a validated price ('prices.upsert', 'prices.bulkUpsert'): base SKU, paint moved into the extras. */
+  /**
+   * The repo write for a validated price ('prices.upsert', 'prices.bulkUpsert'): base SKU, paint moved into the extras.
+   * 0.7.3: a row moved to another item (the Prices page's form) keeps its id, but the old copy's extras, asset id,
+   * stock and page described the old item: omitted, they read null as on a new price (the repo keeps omitted fields).
+   * `previousBase` is the old item's base SKU then, for its opportunity.
+   */
   const priceRow = (p: z.infer<typeof priceInput>, now: UnixMs) => {
     const { full, base, paint } = splitSku(p.sku);
-    let special: SpecialAttrs | null | undefined = p.special;
+    const stored = p.id !== undefined ? repo.getScrapPrice(p.id) : null;
+    const previousBase = stored && looksLikeSku(stored.sku) && toBaseSku(stored.sku) !== base ? toBaseSku(stored.sku) : null;
+    const moved = <T,>(value: T | null | undefined): T | null | undefined => (value === undefined && previousBase !== null ? null : value);
+    let special: SpecialAttrs | null | undefined = moved(p.special);
     if (paint !== null) special = { ...(special ?? emptySpecial()), paint };
     const name = p.name?.trim() || schema.nameForSku(full);
     const observedAt = p.observedAt !== undefined ? Math.min(p.observedAt, now + 60_000) : now;
@@ -1150,12 +1208,12 @@ export function createRpcHandlers(ctx: HandlerContext): RpcHandler {
       source: p.source ?? 'user',
       observedAt,
       note: p.note === undefined ? undefined : p.note?.trim() || null,
-      importBatch: p.importBatch,
+      importBatch: moved(p.importBatch),
       special,
-      assetId: p.assetId,
-      stock: p.stock,
+      assetId: moved(p.assetId),
+      stock: moved(p.stock),
     });
-    return { input, base };
+    return { input, base, previousBase };
   };
 
   // In-memory 1 h cache lives inside the checker, one per service process.
@@ -1176,10 +1234,11 @@ export function createRpcHandlers(ctx: HandlerContext): RpcHandler {
     'opps.events': (params, m) => repo.listEvents(withoutUndefined(parse(eventQuery, params, m) ?? {})),
 
     'opps.exportCsv': (params, m) => {
-      const { kind, query, shopping, market, holdings, bankStock, scraptfChanges } = parse(
+      const { kind, query, events, shopping, market, holdings, bankStock, scraptfChanges } = parse(
         z.object({
           kind: z.enum(['opportunities', 'events', 'shopping', 'market', 'holdings', 'bankStock', 'scraptfChanges']),
           query: oppQuery,
+          events: eventsExportQuery,
           shopping: shoppingQuery,
           market: marketQuery,
           holdings: holdingsQuery,
@@ -1203,7 +1262,12 @@ export function createRpcHandlers(ctx: HandlerContext): RpcHandler {
         return { csv: bankStockCsv(rows, engine.keyPrice().valueScrap), suggestedName: `flipdesk-bank-stock-${bankStock.bank}-${stamp}.csv` };
       }
       if (kind === 'events') {
-        return { csv: eventsCsv(repo.listEvents({ limit: 5000 })), suggestedName: `flipdesk-events-${stamp}.csv` };
+        // 0.7.3: the Live log's filters: the newest EVENTS_EXPORT_MAX of its kinds (as the page reads them),
+        // then its category and search, so the file holds every row the page could show.
+        const { kinds, category, search } = events ?? {};
+        const tokens = marketSearchTokens(search);
+        const list = repo.listEvents(withoutUndefined({ limit: EVENTS_EXPORT_MAX, kinds })).filter((e) => eventMatches(e, category, tokens));
+        return { csv: eventsCsv(list), suggestedName: `flipdesk-events-${stamp}.csv` };
       }
       if (kind === 'shopping') {
         // Every matching row: paging does not apply to the file.
@@ -1284,7 +1348,8 @@ export function createRpcHandlers(ctx: HandlerContext): RpcHandler {
       const wait = Math.max(0, http.nextAllowedAt('bptf-snapshot') - clock.now());
       if (refreshing.has(base)) return { queued: true, reason: null, etaMs: wait + 2_500 };
       if (wait > USER_SNAPSHOT_MAX_WAIT_MS) {
-        return no(`The snapshot rate limit is reached; try again in ${Math.ceil(wait / 1000)} s.`, wait);
+        // 0.7.3: the wait goes back as etaMs only, which the drawer counts down live.
+        return no('The snapshot rate limit is reached.', wait);
       }
       refreshing.add(base);
       void ctx
@@ -1312,7 +1377,14 @@ export function createRpcHandlers(ctx: HandlerContext): RpcHandler {
       const marketHashName = schema.marketHashName(full);
       if (!marketHashName) return { lowest: null, median: null, volume: null, marketHashName: null };
       const r = await ctx.scm.priceOverview(marketHashName);
-      return { lowest: r?.lowest ?? null, median: r?.median ?? null, volume: r?.volume ?? null, marketHashName };
+      // 0.7.3: the connector answers null for every failure (a 429 and its lockout, an HTTP error, a pause, a
+      // blocked host); shown as a reading it read "0 sold in 24 h". Steam's "no listing" is a reading.
+      if (r === null) {
+        const h = ctx.scm.health();
+        if (h.state === 'off') return null; // turned off while the request was in flight
+        throw new Error(`Steam Market check failed (${h.disabledReason ?? h.lastError ?? 'no answer'}). Nothing was read; try again later.`);
+      }
+      return { lowest: r.lowest, median: r.median, volume: r.volume, marketHashName };
     },
 
     'links.forSku': (params, m) => {
@@ -1344,10 +1416,11 @@ export function createRpcHandlers(ctx: HandlerContext): RpcHandler {
     },
 
     'prices.upsert': (params, m) => {
-      const { input, base } = priceRow(parse(priceInput, params, m), clock.now());
+      const { input, base, previousBase } = priceRow(parse(priceInput, params, m), clock.now());
       const saved = repo.upsertScrapPrice(input);
       ctx.pricesChanged();
-      engine.markDirty([base]);
+      // 0.7.3: a row moved to another item leaves its old item's opportunity, as 'prices.delete' does.
+      engine.markDirty(previousBase !== null ? [base, previousBase] : [base]);
       if (ctx.secret('bptfAccessToken') && ctx.settings().connectors.bptfApi && ctx.snapshotStale(base)) ctx.queueSnapshot(base);
       refreshPricedb(base);
       return saved;
@@ -1371,7 +1444,7 @@ export function createRpcHandlers(ctx: HandlerContext): RpcHandler {
       });
       if (writes.length > 0) {
         ctx.pricesChanged();
-        engine.markDirty(new Set(writes.map((w) => w.base)));
+        engine.markDirty(new Set(writes.flatMap((w) => (w.previousBase !== null ? [w.base, w.previousBase] : [w.base]))));
       }
       return { added, updated };
     },

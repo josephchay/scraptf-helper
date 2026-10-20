@@ -1,4 +1,4 @@
-import { useRef, useState, type ReactNode } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { bankStockPagePath } from '../../shared/bankStock';
 import { CHECK_PRIVACY_SENTENCE, CHECK_SAMPLE_TEXT } from '../../shared/check';
 import { parsePrice } from '../../shared/currency';
@@ -39,6 +39,7 @@ import {
   windowRefusalText,
 } from '../scraptfWindowModel';
 import {
+  applyBlocklistEdit,
   CHECK_NOTIFY_LABEL,
   CHECK_POPUP_HINT,
   CHECK_POPUP_LABEL,
@@ -51,7 +52,9 @@ import {
   quickHotkeyProblem,
   HOLDINGS_NOTIFY_LABEL,
   holdingsNotifyHint,
+  INPUT_STALE_HINT,
   inputKindsHint,
+  keyPriceHint,
   MIN_MARGIN_PCT,
   MIN_PROFIT_PCT_OF_COST,
   msToDaysText,
@@ -63,11 +66,14 @@ import {
   ratioToPctText,
   REFERENCE_MAX_AGE_DAYS,
   referenceAgeHint,
+  REF_TEXT_ERROR,
   RESAVE_LAST_BANK_TITLE,
   resaveBanksHint,
   resaveBanksShown,
   resaveMinutesOf,
   resaveReminderHint,
+  sameIdList,
+  scraptfKeyBuyPatch,
   scraptfListKeyView,
   setResaveBank,
   setInputKind,
@@ -76,6 +82,7 @@ import {
   userAgentPreview,
   validateCheckHotkey,
   validateContactUrl,
+  validateKeyPriceRef,
   validateQuickEntryHotkey,
   validateResaveMinutes,
 } from '../settingsFields';
@@ -106,7 +113,7 @@ function parseRef(text: string): number | null {
   return p && !p.keys ? p.scrap : null;
 }
 
-const refValidator = (allowEmpty: boolean) => (v: string) => (allowEmpty && !v.trim() ? null : parseRef(v) === null ? 'Enter refined, e.g. 1.33 or 14 scrap.' : null);
+const refValidator = (allowEmpty: boolean) => (v: string) => (allowEmpty && !v.trim() ? null : parseRef(v) === null ? REF_TEXT_ERROR : null);
 
 export function SettingsPage() {
   const { settings } = useApp();
@@ -170,7 +177,7 @@ function AccessSection() {
       <SecretField
         name="bptfAccessToken"
         label="Access token"
-        help={'Click "Reveal" under "Access Token". Used for snapshots (refreshing one item on demand) and user info.'}
+        help={'Click "Reveal" under "Access Token". Used for snapshots (refreshing an item on demand and keeping the items you price or hold current) and user info.'}
       />
       <SecretField
         name="bptfApiKey"
@@ -312,34 +319,34 @@ function KeyPriceSection({ s }: { s: Settings }) {
         </p>
       ) : null}
       {s.keyPrice.mode === 'manual' ? (
-        <Field label="Manual key price (ref)" htmlFor="key-manual">
+        <Field label="Manual key price (ref)" htmlFor="key-manual" hint={keyPriceHint(s.keyPrice.manualScrap)}>
           <CommitInput
             id="key-manual"
             inputMode="decimal"
             value={refText(s.keyPrice.manualScrap)}
-            validate={refValidator(true)}
+            validate={validateKeyPriceRef}
             onCommit={(v) => updateSettings({ keyPrice: { manualScrap: v.trim() ? parseRef(v) : null } })}
             suffix="ref"
           />
         </Field>
       ) : null}
       <div className="form-grid two">
-        <Field label="scrap.tf key buy price (ref)" htmlFor="key-stf-buy" hint="What scrap.tf charges you for a key. Display only.">
+        <Field label="scrap.tf key buy price (ref)" htmlFor="key-stf-buy" hint={keyPriceHint(s.keyPrice.scraptfBuyScrap, 'What scrap.tf charges you for a key. Display only.')}>
           <CommitInput
             id="key-stf-buy"
             inputMode="decimal"
             value={refText(s.keyPrice.scraptfBuyScrap)}
-            validate={refValidator(true)}
-            onCommit={(v) => updateSettings({ keyPrice: { scraptfBuyScrap: v.trim() ? parseRef(v) : null, scraptfObservedAt: Date.now() } })}
+            validate={validateKeyPriceRef}
+            onCommit={(v) => updateSettings(scraptfKeyBuyPatch(v.trim() ? parseRef(v) : null, s.keyPrice, Date.now()))}
             suffix="ref"
           />
         </Field>
-        <Field label="scrap.tf key sell price (ref)" htmlFor="key-stf-sell" hint="What scrap.tf pays you for a key. Also caps the automatic value.">
+        <Field label="scrap.tf key sell price (ref)" htmlFor="key-stf-sell" hint={keyPriceHint(s.keyPrice.scraptfSellScrap, 'What scrap.tf pays you for a key. Also caps the automatic value.')}>
           <CommitInput
             id="key-stf-sell"
             inputMode="decimal"
             value={refText(s.keyPrice.scraptfSellScrap)}
-            validate={refValidator(true)}
+            validate={validateKeyPriceRef}
             onCommit={(v) => updateSettings({ keyPrice: { scraptfSellScrap: v.trim() ? parseRef(v) : null, scraptfObservedAt: Date.now() } })}
             suffix="ref"
           />
@@ -397,7 +404,7 @@ function ProfitSection({ s }: { s: Settings }) {
         <Field label="Unusual risk above" htmlFor="p-ur" hint="Warn about price manipulation.">
           <CommitInput id="p-ur" inputMode="numeric" value={String(p.unusualRiskKeys)} validate={numberValidator(0, 100000)} onCommit={(v) => set({ unusualRiskKeys: Number(v) })} suffix="keys" />
         </Field>
-        <Field label="Price is stale after" htmlFor="p-stale" hint="Older scrap.tf prices lose confidence.">
+        <Field label="Price is stale after" htmlFor="p-stale" hint={INPUT_STALE_HINT}>
           <CommitInput id="p-stale" inputMode="numeric" value={String(Math.round(p.inputStaleMs / 60_000))} validate={numberValidator(1, 60 * 24 * 30)} onCommit={(v) => set({ inputStaleMs: Math.round(Number(v)) * 60_000 })} suffix="min" />
         </Field>
       </div>
@@ -494,12 +501,19 @@ export function NotifySection({ s }: { s: Settings }) {
   );
 }
 
-function FeedSection({ s }: { s: Settings }) {
+/** Exported for the render tests. */
+export function FeedSection({ s }: { s: Settings }) {
   const { updateSettings } = useApp();
   const f = s.liveFeed;
   return (
     <Section id="set-feed" title="Live feed" intro="backpack.tf's public websocket streams every listing change, about 8 to 12 GB a day. It needs no key. One connection only.">
-      <Toggle checked={f.enabled} onChange={(enabled) => void updateSettings({ liveFeed: { enabled } })} label="Live buy-order feed" description="When off, buy orders only update when you refresh an item." />
+      {/* 0.7.3: the 'snapshot-watched' job does not depend on the feed (scheduler.ts). */}
+      <Toggle
+        checked={f.enabled}
+        onChange={(enabled) => void updateSettings({ liveFeed: { enabled } })}
+        label="Live buy-order feed"
+        description="When off, buy orders update only when you refresh an item and, with an access token, for the items you price or hold (one a minute at most, each at most every 30 minutes). To stop all backpack.tf requests, turn off backpack.tf API under Data sources or pause the network."
+      />
       <div className="form-grid two">
         <Field label="Daily data cap" htmlFor="f-cap" hint="The feed pauses for the day when it reaches this. Counts uncompressed data; lower it on a capped or metered connection.">
           <CommitInput
@@ -547,22 +561,44 @@ function ConnectorsSection({ s }: { s: Settings }) {
   );
 }
 
-function BlocklistSection({ s }: { s: Settings }) {
+/**
+ * 0.7.3: the drawer can block a buyer while this page stays open under it. `base` is the stored list
+ * the textarea was last seeded from: with no pending edit the textarea follows the stored list, and
+ * Save applies only the user's own edit to a fresh read. Exported for the render tests.
+ */
+export function BlocklistSection({ s }: { s: Settings }) {
   const { updateSettings, toast } = useApp();
-  const [text, setText] = useState(s.blocklist.join('\n'));
-  const parsed = parseSteamIdList(text);
-  const dirty = parsed.ids.join(',') !== s.blocklist.join(',');
+  const [draft, setDraft] = useState(() => ({ text: s.blocklist.join('\n'), base: s.blocklist }));
+  useEffect(
+    () =>
+      setDraft((d) => {
+        const p = parseSteamIdList(d.text);
+        return p.invalid.length === 0 && sameIdList(p.ids, d.base) && !sameIdList(d.base, s.blocklist) ? { text: s.blocklist.join('\n'), base: s.blocklist } : d;
+      }),
+    [s.blocklist],
+  );
+  const parsed = parseSteamIdList(draft.text);
+  const dirty = !sameIdList(parsed.ids, draft.base);
   const save = async () => {
-    const r = await updateSettings({ blocklist: parsed.ids });
+    const submitted = draft.text;
+    let fresh: Settings;
+    try {
+      fresh = await rpc('settings.get');
+    } catch (e) {
+      toast(`Could not save settings: ${errorMessage(e)}`, 'bad');
+      return;
+    }
+    const r = await updateSettings({ blocklist: applyBlocklistEdit(fresh.blocklist, draft.base, parsed.ids) });
     if (r) {
-      setText(r.blocklist.join('\n'));
+      // Typed again during the save: keep that text, only move the base.
+      setDraft((d) => (d.text === submitted ? { text: r.blocklist.join('\n'), base: r.blocklist } : { ...d, base: r.blocklist }));
       toast(`Blocklist saved (${r.blocklist.length}).`, 'good');
     }
   };
   return (
     <Section id="set-block" title="Blocklist" intro="Buy orders from these SteamID64s are never used, for example buyers who backed out on you.">
       <Field label="SteamID64s, one per line" htmlFor="blocklist" error={parsed.invalid.length ? `Not a SteamID64: ${parsed.invalid.slice(0, 3).join(', ')}${parsed.invalid.length > 3 ? '…' : ''}` : null}>
-        <textarea id="blocklist" className="input mono" rows={4} value={text} spellCheck={false} onChange={(e) => setText(e.target.value)} placeholder="7656119..." />
+        <textarea id="blocklist" className="input mono" rows={4} value={draft.text} spellCheck={false} onChange={(e) => setDraft((d) => ({ ...d, text: e.target.value }))} placeholder="7656119..." />
       </Field>
       <div className="form-actions">
         <button type="button" className="btn small primary" disabled={!dirty || parsed.invalid.length > 0} onClick={() => void save()}>
@@ -955,6 +991,13 @@ function AboutAppSection() {
         <dl className="kv">
           <dt>Version</dt>
           <dd>{i.version}</dd>
+          {/* 0.7.2: which copy this is, when more than one (an install and a copy of the code) share the data folder. */}
+          {i.appDir ? (
+            <>
+              <dt>Runs from</dt>
+              <dd className="mono small">{i.appDir}</dd>
+            </>
+          ) : null}
           <dt>Data folder</dt>
           <dd className="mono small">{i.dataDir}</dd>
           <dt>Logs</dt>

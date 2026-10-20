@@ -14,6 +14,7 @@ import { useApp } from '../hooks/appContext';
 import { usePersistentState } from '../hooks/usePersistentState';
 import { useRpcQuery, useThrottled, useVisiblePush } from '../hooks/useRpc';
 import { useDebounced, useNow } from '../hooks/useTimers';
+import { FEED_OFF_UPDATES } from '../marketModel';
 import { firstPriceText } from '../scraptfListModel';
 import { scraptfWindowOn } from '../scraptfWindowModel';
 import {
@@ -21,6 +22,7 @@ import {
   GROUP_BY_LABELS,
   GROUP_PAGE,
   INPUT_ORDER,
+  OPP_MAX_SEARCH_CHARS,
   STATUS_ORDER,
   TIER_ORDER,
   activeFilterCount,
@@ -264,6 +266,7 @@ export function OpportunitiesPage() {
             className="input"
             placeholder="Search items or SKUs  ( / )"
             aria-label="Search opportunities"
+            maxLength={OPP_MAX_SEARCH_CHARS}
             value={filters.search}
             onChange={(e) => set('search', e.target.value)}
             onKeyDown={(e) => {
@@ -318,7 +321,8 @@ export function OpportunitiesPage() {
           ) : (
             <span className="muted">Loading…</span>
           )}
-          {list.reloading && list.data ? <span className="muted small"> · updating</span> : null}
+          {/* 0.7.3: visual only; this is a live region and the live feed reloads it every 1.5 s. */}
+          {list.reloading && list.data ? <span className="muted small" aria-hidden="true"> · updating</span> : null}
         </div>
         <div className="summary-actions">
           <button type="button" className="btn ghost small" onClick={() => setAllCollapsed(false)} title="Expand all groups">
@@ -387,7 +391,7 @@ export function OpportunitiesPage() {
   );
 }
 
-function NoResults({
+export function NoResults({
   reason,
   hiddenCount,
   feedOff,
@@ -405,29 +409,15 @@ function NoResults({
   onReset: () => void;
   onAllStatuses: () => void;
 }) {
-  const { navigate, updateSettings, toast, dataVersion, settings } = useApp();
-  const [counts, setCounts] = useState<{ prices: number; rules: number } | null>(null);
-  const [tick, setTick] = useState(0);
-  const bump = useThrottled(() => setTick((t) => t + 1), 3000);
-  useVisiblePush('opps.changed', bump);
-
-  useEffect(() => {
-    let alive = true;
-    Promise.all([rpc('prices.list', {}), rpc('rules.list')])
-      .then(([p, r]) => {
-        if (alive) setCounts({ prices: p.length, rules: r.filter((x) => x.enabled).length });
-      })
-      .catch(() => {
-        if (alive) setCounts({ prices: 0, rules: 0 });
-      });
-    return () => {
-      alive = false;
-    };
-  }, [dataVersion, tick]);
+  const { navigate, updateSettings, toast, settings, status } = useApp();
+  // 0.7.3: the service's own "no stored price and no enabled rule" test (computeStatus), re-pushed with
+  // 'status.changed' after any price or rule write from any window; the setup checklist reads it too.
+  // No re-read of the whole price sheet on every opps.changed.
+  const firstPrice = status?.setupNeeded.includes('first-price') === true;
 
   const openQuick = () => rpc('app.showQuickEntry').catch(() => toast('Could not open quick entry.', 'bad'));
 
-  if (counts && counts.prices === 0 && counts.rules === 0) {
+  if (firstPrice) {
     // UX-4: one save of scrap.tf/items (the Import page's price-list card) first; typing stays secondary.
     return (
       <EmptyState
@@ -452,18 +442,20 @@ function NoResults({
       </EmptyState>
     );
   }
-  if (paused) {
+  // 0.7.3: the pause or the feed is blamed only when no opportunity exists; otherwise the filters hide
+  // them (as emptyMarketReason does on the Live market).
+  if (paused && hiddenCount === 0) {
     return (
       <EmptyState icon="pause" title="The network is paused" actions={<button type="button" className="btn primary" onClick={() => void updateSettings({ networkPaused: false })}>Resume network</button>}>
         No buy orders are arriving while the network is paused.
       </EmptyState>
     );
   }
-  if (feedOff) {
+  if (feedOff && hiddenCount === 0) {
     return (
       <EmptyState icon="feed" title="The live feed is off" actions={<button type="button" className="btn primary" onClick={() => void updateSettings({ liveFeed: { enabled: true } })}>Turn on live feed</button>}>
-        Buy orders come from backpack.tf&apos;s live feed. Without it, only items you refresh by hand get buy orders.
-        {noToken ? ' Refreshing by hand needs a backpack.tf access token (Settings).' : ''}
+        Buy orders come from backpack.tf&apos;s live feed. Without it, {FEED_OFF_UPDATES}.
+        {noToken ? ' Refreshing an item needs that token too (Settings).' : ''}
       </EmptyState>
     );
   }
@@ -485,6 +477,7 @@ function NoResults({
       >
         By default only profitable items are listed. {fmtInt(hiddenCount)} {hiddenCount === 1 ? 'opportunity is' : 'opportunities are'} below your thresholds,
         unprofitable or without buyers, and hidden.
+        {feedOff ? ` The live feed is off, so ${FEED_OFF_UPDATES}.` : ''}
       </EmptyState>
     );
   }

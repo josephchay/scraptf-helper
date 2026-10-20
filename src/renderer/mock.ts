@@ -36,6 +36,7 @@ import {
   countCategories,
   isEmptyBankSave,
   marketCsvCells,
+  marketSearchTokens,
   scraptfCoverage,
   wholeLookNewestSaves,
   type BankSave,
@@ -72,6 +73,7 @@ import type {
   HoldingsQuery,
   BuyerCheck,
   ConnectorHealth,
+  EventsExportQuery,
   HealthReport,
   ImportBatch,
   ImportResult,
@@ -112,12 +114,14 @@ import type {
   ShoppingQuery,
   UnixMs,
 } from '../shared/types';
-import { BANK_STOCK_FILTERS, BANK_STOCK_OPEN_FILTERS, BANK_STOCK_SORTS, KEY_SKU, SCRAPTF_BANK_IDS, SCRAPTF_CHANGE_KINDS, SECRET_NAMES } from '../shared/types';
+import { BANK_STOCK_FILTERS, BANK_STOCK_OPEN_FILTERS, BANK_STOCK_SORTS, CATEGORIES, KEY_SKU, SCRAPTF_BANK_IDS, SCRAPTF_CHANGE_KINDS, SECRET_NAMES } from '../shared/types';
+import { EVENTS_EXPORT_MAX, OPPORTUNITY_EVENT_KINDS, eventMatches } from '../shared/opportunityEvents';
 import {
   CATALOG,
   MARKET_ONLY,
   MOCK_KEY_SCRAP,
   MOCK_LIST_PAGES,
+  SEED_KIT,
   SEED_RULES,
   allSearchable,
   createRng,
@@ -156,6 +160,7 @@ import { gateScraptfWindow, IMPORT_HTML_ORIGIN_REFUSAL, SCRAPTF_BAR_HASH } from 
 import { IMPORT_REPORT_RING, SKIP_OUT_OF_STOCK } from '../shared/importCodes';
 import { createMockScraptfWindow } from './mockScraptfWindow';
 import { filterOpportunities, orderByGroup, sortOpportunities, summarizeGroups } from './oppModel';
+import pkg from '../../package.json';
 
 export interface MockOptions {
   seed?: number;
@@ -187,6 +192,9 @@ export interface MockBridge extends FlipdeskBridge {
 
 type Handler<M extends RpcMethod> = (params: RpcParams<M>) => RpcResult<M> | Promise<RpcResult<M>>;
 type Handlers = { [M in RpcMethod]: Handler<M> };
+
+/** The package's version, so the preview's Settings and User-Agent cannot drift from a release bump. */
+const MOCK_APP_VERSION: string = pkg.version;
 
 const MIN = 60_000;
 const HOUR = 3_600_000;
@@ -221,6 +229,16 @@ function mockRuleKey(r: { name: string; filter: object; costKeys?: number; costS
   return stableJson([r.name.trim(), r.filter, r.costKeys ?? 0, Math.round(r.costScrap)]);
 }
 
+/**
+ * 0.7.3: the service's priceRow rule (rpcHandlers.ts) for a price row edited to `sku`: a row moved to
+ * another item (another base SKU) keeps its id, but the old copy's extras, asset id, stock and batch
+ * described the old item, so an omitted one reads null as on a new price. Otherwise it keeps the stored one.
+ */
+function keepUnlessMoved(existing: ScrapPrice | undefined, sku: string): <T>(value: T | null | undefined, stored: T | null | undefined) => T | null {
+  const moved = !!existing && looksLikeSku(existing.sku) && baseSku(existing.sku) !== baseSku(sku);
+  return (value, stored) => (value !== undefined ? value : moved ? null : (stored ?? null));
+}
+
 export function createMockBridge(opts: MockOptions = {}): MockBridge {
   const now = opts.now ?? (() => Date.now());
   const rng = createRng(opts.seed ?? 20261014);
@@ -243,6 +261,9 @@ export function createMockBridge(opts: MockOptions = {}): MockBridge {
   const marketBuildMs = Math.max(0, opts.marketBuildMs ?? (tickMs > 0 ? 6000 : 0));
   const extraBooks = new Map<string, MockBook>();
   for (const item of MARKET_ONLY) extraBooks.set(item.sku, makeBook(marketRng, item, t0));
+  // 0.7.2: the seeded kit has no catalog book. Built here on its own RNG, so bookFor never draws from the main one
+  // and every other seeded event and opportunity time stays as it was.
+  books.set(SEED_KIT.sku, makeBook(createRng(0x6b17), { sku: SEED_KIT.sku, name: SEED_KIT.name, category: guessCategory(SEED_KIT.sku), value: 0 }, t0, true));
 
   let prices: ScrapPrice[] = seedPrices(rng, t0);
   let priceSeq = prices.reduce((m, p) => Math.max(m, p.id), 0) + 1;
@@ -888,7 +909,8 @@ export function createMockBridge(opts: MockOptions = {}): MockBridge {
     if (!secrets.bptfAccessToken) out.push('bptf-token');
     if (!secrets.bptfApiKey) out.push('bptf-key');
     if (!settings.contactUrl.trim()) out.push('contact-url');
-    if (prices.length === 0 && rules.length === 0) out.push('first-price');
+    // As the service's computeStatus: a disabled rule prices nothing.
+    if (prices.length === 0 && !rules.some((r) => r.enabled)) out.push('first-price');
     return out;
   }
 
@@ -896,7 +918,7 @@ export function createMockBridge(opts: MockOptions = {}): MockBridge {
     const all = [...opps.values()];
     const profitable = all.filter((o) => o.status === 'profitable');
     return {
-      version: '0.7.1',
+      version: MOCK_APP_VERSION,
       networkPaused: settings.networkPaused,
       feed: feedState(),
       keyPrice: keyPrice(),
@@ -1022,18 +1044,21 @@ export function createMockBridge(opts: MockOptions = {}): MockBridge {
     const seeded: OpportunityEvent[] = [];
     const ev = (o: Opportunity, kind: OpportunityEventKind, summary: string, ts: UnixMs) =>
       seeded.push({ id: 0, key: o.key, sku: o.sku, name: o.name, category: o.category, kind, profitScrap: o.profitScrap, costScrap: o.costScrap, revenueScrap: o.revenueScrap, confidence: o.confidence, summary, ts });
+    // 0.7.2: the seeded kit's opportunities draw from their own RNG, so every other seeded event keeps its values.
+    const kitRng = createRng(0x6b18);
     for (const o of list) {
-      const first = t0 - rng.int(10, 9 * 60) * MIN;
+      const r = o.sku === SEED_KIT.sku ? kitRng : rng;
+      const first = t0 - r.int(10, 9 * 60) * MIN;
       o.firstSeenAt = first;
       o.updatedAt = first;
       ev(o, 'appeared', o.profitScrap === null ? 'no buy orders yet' : `profit ${money(o.profitScrap)} at cost ${money(o.costScrap)}`, first);
-      if (o.profitScrap !== null && rng.chance(0.5)) {
-        const ts = first + rng.int(1, Math.max(2, Math.floor((t0 - first) / MIN) - 1)) * MIN;
-        const before = o.profitScrap - rng.int(-6, 12);
+      if (o.profitScrap !== null && r.chance(0.5)) {
+        const ts = first + r.int(1, Math.max(2, Math.floor((t0 - first) / MIN) - 1)) * MIN;
+        const before = o.profitScrap - r.int(-6, 12);
         ev(o, 'changed', `profit ${money(before)} -> ${money(o.profitScrap)}`, ts);
         o.updatedAt = ts;
       }
-      if (o.status === 'profitable' && o.confidenceLevel === 'high' && rng.chance(0.7)) {
+      if (o.status === 'profitable' && o.confidenceLevel === 'high' && r.chance(0.7)) {
         ev(o, 'notified', `desktop notification: +${money(o.profitScrap)}`, o.updatedAt + 1000);
         notifiedAt.set(o.key, o.updatedAt + 1000);
       }
@@ -1231,6 +1256,29 @@ export function createMockBridge(opts: MockOptions = {}): MockBridge {
       // F14: the saved list row is the held item's scrap.tf exit (bestExitOf).
       return holdingRow(pos, category, book ? mockHoldingBuySide(book, settings, kp, t) : null, settings.profit, kp, { list: listRowFor(base, kp), now: t });
     });
+  }
+
+  /** 0.7.3, as the service's eventsExportQuery: the Live log's kinds, category and search. */
+  function eventsExportFilter(q: EventsExportQuery | undefined, method: string): EventsExportQuery {
+    const bad = (why: string): never => {
+      throw new Error(`Invalid parameters for ${method}: ${why}`);
+    };
+    if (q === undefined || q === null) return {};
+    if (typeof q !== 'object') return bad('events: expected an object');
+    const out: EventsExportQuery = {};
+    if (q.kinds !== undefined) {
+      if (!Array.isArray(q.kinds) || q.kinds.length > OPPORTUNITY_EVENT_KINDS.length || !q.kinds.every((k) => OPPORTUNITY_EVENT_KINDS.includes(k))) bad('events.kinds: not an event kind');
+      out.kinds = [...q.kinds];
+    }
+    if (q.category !== undefined) {
+      if (!(CATEGORIES as readonly unknown[]).includes(q.category)) bad('events.category: not a category');
+      out.category = q.category;
+    }
+    if (q.search !== undefined) {
+      if (typeof q.search !== 'string' || q.search.length > MARKET_MAX_SEARCH_CHARS) bad(`events.search: at most ${MARKET_MAX_SEARCH_CHARS} characters`);
+      out.search = q.search;
+    }
+    return out;
   }
 
   function holdingsQuery(q: HoldingsQuery | undefined, method: string): HoldingsQuery {
@@ -1689,7 +1737,7 @@ export function createMockBridge(opts: MockOptions = {}): MockBridge {
       if (q?.beforeId !== undefined) list = list.filter((e) => e.id < q.beforeId!);
       return [...list].sort((a, b) => b.id - a.id).slice(0, Math.max(1, Math.min(2000, q?.limit ?? 200)));
     },
-    'opps.exportCsv': ({ kind, query, shopping, market, holdings, bankStock, scraptfChanges }) => {
+    'opps.exportCsv': ({ kind, query, events: eventsFilter, shopping, market, holdings, bankStock, scraptfChanges }) => {
       const t = now();
       const kp = keyPrice().valueScrap;
       if (kind === 'scraptfChanges') {
@@ -1729,8 +1777,16 @@ export function createMockBridge(opts: MockOptions = {}): MockBridge {
         return { csv: csv(rows), suggestedName: `flipdesk-shopping-${stamp(t)}.csv` };
       }
       if (kind === 'events') {
+        // 0.7.3, as the service: the newest EVENTS_EXPORT_MAX of the Live log's kinds, then its category and search.
+        const { kinds, category, search } = eventsExportFilter(eventsFilter, 'opps.exportCsv');
+        const tokens = marketSearchTokens(search);
+        const list = events
+          .filter((e) => !kinds?.length || kinds.includes(e.kind))
+          .sort((a, b) => b.id - a.id)
+          .slice(0, EVENTS_EXPORT_MAX)
+          .filter((e) => eventMatches(e, category, tokens));
         const rows: unknown[][] = [['id', 'time', 'kind', 'sku', 'name', 'category', 'profit_ref', 'confidence', 'summary']];
-        for (const e of [...events].sort((a, b) => b.id - a.id)) rows.push([e.id, new Date(e.ts).toISOString(), e.kind, e.sku, e.name, e.category, e.profitScrap === null ? '' : (e.profitScrap / 9).toFixed(2), e.confidence, e.summary]);
+        for (const e of list) rows.push([e.id, new Date(e.ts).toISOString(), e.kind, e.sku, e.name, e.category, e.profitScrap === null ? '' : (e.profitScrap / 9).toFixed(2), e.confidence, e.summary]);
         return { csv: csv(rows), suggestedName: `flipdesk-events-${stamp(t)}.csv` };
       }
       const rows: unknown[][] = [['sku', 'name', 'category', 'input', 'cost', 'revenue', 'profit', 'margin', 'confidence', 'buyers', 'status']];
@@ -1755,7 +1811,8 @@ export function createMockBridge(opts: MockOptions = {}): MockBridge {
       if (!secrets.bptfAccessToken) return { queued: false, reason: 'Snapshots need a backpack.tf access token (Settings).', etaMs: null };
       if (t - lastRefreshAt < 10_000) {
         const wait = 10_000 - (t - lastRefreshAt);
-        return { queued: false, reason: `Snapshot budget is 1 request per 10 s. Next slot in ${Math.ceil(wait / 1000)} s.`, etaMs: wait };
+        // The drawer counts etaMs down itself, as with the service's refusal.
+        return { queued: false, reason: 'Snapshot budget is 1 request per 10 s.', etaMs: wait };
       }
       lastRefreshAt = t;
       setTimeout(() => {
@@ -1791,6 +1848,7 @@ export function createMockBridge(opts: MockOptions = {}): MockBridge {
       const sku = canonical(input.sku.trim());
       const existing = input.id !== undefined ? prices.find((p) => p.id === input.id) : undefined;
       if (input.id !== undefined && !existing) throw new Error(`Price #${input.id} does not exist.`);
+      const keep = keepUnlessMoved(existing, sku);
       const row: ScrapPrice = {
         id: existing?.id ?? priceSeq++,
         sku,
@@ -1800,10 +1858,10 @@ export function createMockBridge(opts: MockOptions = {}): MockBridge {
         source: input.source ?? existing?.source ?? 'user',
         observedAt: input.observedAt ?? now(),
         note: input.note === undefined ? (existing?.note ?? null) : input.note,
-        importBatch: input.importBatch === undefined ? (existing?.importBatch ?? null) : input.importBatch,
-        special: input.special === undefined ? (existing?.special ?? null) : input.special,
-        assetId: input.assetId === undefined ? (existing?.assetId ?? null) : input.assetId,
-        stock: input.stock === undefined ? (existing?.stock ?? null) : input.stock,
+        importBatch: keep(input.importBatch, existing?.importBatch),
+        special: keep(input.special, existing?.special),
+        assetId: keep(input.assetId, existing?.assetId),
+        stock: keep(input.stock, existing?.stock),
       };
       prices = existing ? prices.map((p) => (p.id === row.id ? row : p)) : [...prices, row];
       pricesChanged();
@@ -1836,6 +1894,7 @@ export function createMockBridge(opts: MockOptions = {}): MockBridge {
       for (const r of rows) {
         const sku = canonical(r.sku.trim());
         const existing = r.id !== undefined ? prices.find((p) => p.id === r.id) : undefined;
+        const keep = keepUnlessMoved(existing, sku);
         const row: ScrapPrice = {
           id: existing?.id ?? priceSeq++,
           sku,
@@ -1845,10 +1904,10 @@ export function createMockBridge(opts: MockOptions = {}): MockBridge {
           source: 'user',
           observedAt: r.observedAt ?? t,
           note: r.note === undefined ? (existing?.note ?? null) : r.note,
-          importBatch: existing?.importBatch ?? null,
-          special: r.special === undefined ? (existing?.special ?? null) : r.special,
-          assetId: existing?.assetId ?? null,
-          stock: existing?.stock ?? null,
+          importBatch: keep(undefined, existing?.importBatch),
+          special: keep(r.special, existing?.special),
+          assetId: keep(undefined, existing?.assetId),
+          stock: keep(undefined, existing?.stock),
         };
         if (existing) {
           prices = prices.map((p) => (p.id === row.id ? row : p));
@@ -2002,7 +2061,8 @@ export function createMockBridge(opts: MockOptions = {}): MockBridge {
       return { evaluated: opps.size, ms: lastEngineMs ?? 1 };
     },
     'app.info': (): AppInfo => ({
-      version: '0.7.1',
+      version: MOCK_APP_VERSION,
+      appDir: 'C:\\Users\\you\\AppData\\Local\\Programs\\TF2 Flip Desk',
       dataDir: 'C:\\Users\\you\\AppData\\Roaming\\TF2 Flip Desk',
       logDir: 'C:\\Users\\you\\AppData\\Roaming\\TF2 Flip Desk\\logs',
       platform: 'browser (mock)',

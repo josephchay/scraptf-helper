@@ -23,10 +23,16 @@ export function Segmented<T extends string | number>({
   small?: boolean;
 }) {
   const refs = useRef<(HTMLButtonElement | null)[]>([]);
+  // 0.7.3: with no option checked (Opportunities passes -1 off a preset) the first option is the Tab
+  // stop, so the group stays reachable; the arrows move from the focused option, not from index -1.
+  const sel = options.findIndex((o) => o.value === value);
+  const stop = sel >= 0 ? sel : 0;
   const onKey = (e: KeyboardEvent<HTMLDivElement>) => {
     if (e.key !== 'ArrowRight' && e.key !== 'ArrowLeft') return;
+    if (!options.length) return;
     e.preventDefault();
-    const i = options.findIndex((o) => o.value === value);
+    const from = refs.current.indexOf(e.target as HTMLButtonElement);
+    const i = from >= 0 ? from : stop;
     const next = (i + (e.key === 'ArrowRight' ? 1 : -1) + options.length) % options.length;
     onChange(options[next]!.value);
     refs.current[next]?.focus();
@@ -42,7 +48,7 @@ export function Segmented<T extends string | number>({
           type="button"
           role="radio"
           aria-checked={o.value === value}
-          tabIndex={o.value === value ? 0 : -1}
+          tabIndex={i === stop ? 0 : -1}
           className={o.value === value ? 'active' : undefined}
           title={o.title}
           onClick={() => onChange(o.value)}

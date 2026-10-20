@@ -3,11 +3,11 @@
 // in it is ever resolved or fetched. Markup reference: DESIGN_BRIEF §3.3, checked
 // against web.archive.org copies of scrap.tf pages.
 
-import { parse, parseFragment } from 'parse5';
-import type { DefaultTreeAdapterTypes } from 'parse5';
+import { defaultTreeAdapter, parse, parseFragment } from 'parse5';
+import type { DefaultTreeAdapterMap, DefaultTreeAdapterTypes, TreeAdapter } from 'parse5';
 import { z } from 'zod';
 import { parsePrice } from '../../shared/currency';
-import { IMPORT_REFUSAL_CODES, IMPORT_REPORT_MAX_ITEMS, LAYOUT_CHANGED, NO_PRICE_COLUMN, NO_STOCK_LIMIT, importWarningCode } from '../../shared/importCodes';
+import { IMPORT_REFUSAL_CODES, IMPORT_REPORT_MAX_ITEMS, LAYOUT_CHANGED, NO_PRICE_COLUMN, NO_STOCK_LIMIT, UNUSUALS_INDEX, importWarningCode } from '../../shared/importCodes';
 import { fromObject, normalizeSkuObject } from '../../shared/sku';
 import { SCRAPTF_BANK_IDS } from '../../shared/types';
 import type { ImportPageKind, ImportReport, ImportReportItem, ParsedScrapItem, ScraptfBank, SkuObject, SpecialAttrs } from '../../shared/types';
@@ -17,11 +17,24 @@ import type { PaintkitRow, SchemaItemRow, SchemaService } from '../contracts';
 type Node = DefaultTreeAdapterTypes.Node;
 type Element = DefaultTreeAdapterTypes.Element;
 type TextNode = DefaultTreeAdapterTypes.TextNode;
+type ParentNode = DefaultTreeAdapterTypes.ParentNode;
+type DocumentFragment = DefaultTreeAdapterTypes.DocumentFragment;
+type Template = DefaultTreeAdapterTypes.Template;
 
 /** Largest saved page accepted (bytes of UTF-8). */
 export const MAX_IMPORT_BYTES = 20 * 1024 * 1024;
 /** data-title / data-content longer than this are truncated before fragment parsing. */
 const MAX_ATTR_HTML = 64 * 1024;
+/**
+ * 0.7.3: deepest nesting read, in a page (Chromium's parser nests no deeper than 512; a scrap.tf page is
+ * about a dozen deep) and in a data-title / data-content snippet (a few spans deep). parse5 builds a tree
+ * in time quadratic in its depth, so deeper markup is refused (ImportTooDeepError), not parsed for hours.
+ */
+const MAX_PAGE_DEPTH = 512;
+const MAX_ATTR_DEPTH = 64;
+/** 0.7.3: a header cell's text is read from at most this many nodes and characters ("Price to buy" is 12). */
+const MAX_HEADER_NODES = 256;
+const MAX_HEADER_CHARS = 1024;
 /**
  * Untrusted text is clipped to these lengths before any regex runs over it, so
  * a crafted page cannot make matching slow (real values are far shorter).
@@ -38,6 +51,14 @@ export class ImportTooLargeError extends Error {
   override readonly name = 'ImportTooLargeError';
   constructor(readonly bytes: number, readonly limit: number = MAX_IMPORT_BYTES) {
     super(`Saved page is too large (${Math.ceil(bytes / 1024 / 1024)} MB; limit ${Math.round(limit / 1024 / 1024)} MB)`);
+  }
+}
+
+/** 0.7.3: markup nested deeper than MAX_PAGE_DEPTH / MAX_ATTR_DEPTH. Never says "too large" (importModel's size advice). */
+export class ImportTooDeepError extends Error {
+  override readonly name = 'ImportTooDeepError';
+  constructor(readonly limit: number, what = 'markup') {
+    super(`${what} is nested more than ${limit} levels deep, so it was not read`);
   }
 }
 
@@ -84,7 +105,8 @@ export interface ParseDiagnostics {
  * page-kind-unknown, unknown-bank, schema-not-loaded, duplicate-cards, no-items,
  * no-cards-saved (F18: a bank page saved without its cards), no-sku, no-pays-column,
  * layout-changed (0.7.1: item-like elements in no shape the parser knows), no-price-column (0.7.1:
- * an /items table with headers but no "Price to buy"),
+ * an /items table with headers but no "Price to buy"), unusuals-index (0.7.3: scrap.tf's bare /unusuals
+ * index with no card, which lists the unusual pages rather than items),
  * and from an .mhtml file (savedPage.ts): mhtml-invalid, mhtml-too-many-parts,
  * mhtml-no-html, mhtml-truncated (the file ends inside its page: nothing imported),
  * mhtml-charset; and too-large for a file the folder watch would not read
@@ -199,6 +221,40 @@ const BASE_STRANGE_COUNTERS = new Set(['kills', 'kill assists', 'ubers', 'sentry
 
 // Items whose SKU needs a target / output (td-, od-, oq-) that the card does not carry.
 const NEEDS_TARGET_RE = /(?:Kit Fabricator|Strangifier|Unusualifier|Chemistry Set)$|\bKillstreak\b.*\bKit$/;
+/**
+ * 0.7.2: the same items by their schema item_name, which is all TF2's schema calls them: every killstreak
+ * kit is "Kit" and every fabricator "Fabricator" (the full name is built from their attributes).
+ */
+const NEEDS_TARGET_ITEM_NAME_RE = /^(?:Kit|Fabricator|Strangifier|Unusualifier|Chemistry Set)$/;
+
+/** 0.7.2: killstreak kits by defindex (6527 basic, 6523 specialized, 6526 professional) and their tier. */
+const KIT_TIER: ReadonlyMap<number, number> = new Map([
+  [6527, 1],
+  [6523, 2],
+  [6526, 3],
+]);
+/** 0.7.2: kit fabricators by defindex (20002 specialized, 20003 professional) and the tier of their kit. */
+const FABRICATOR_TIER: ReadonlyMap<number, number> = new Map([
+  [20002, 2],
+  [20003, 3],
+]);
+/**
+ * 0.7.2: tools other than kits that backpack.tf keys Non-Craftable although a scrap.tf card carries no
+ * mark of it: the Taunt Unusualifier (9258; 120 of the 125 names the user's backpack.tf feed learned for
+ * it, and every buy order seen, are Non-Craftable). Strangifiers, fabricators and chemistry sets trade
+ * Craftable and keep the card's own craftability.
+ */
+const NON_CRAFTABLE_TOOLS: ReadonlySet<number> = new Set([9258]);
+/**
+ * 0.7.3: a tool the import keys Non-Craftable although its card carries no mark of it (NON_CRAFTABLE_TOOLS),
+ * so the Live check reads a plain copied name of one the same way.
+ */
+export function importKeysNonCraftable(defindex: number): boolean {
+  return NON_CRAFTABLE_TOOLS.has(defindex);
+}
+/** How Steam (and the schema's name resolver) spells a kit's tier before the weapon. */
+const KIT_TIER_PREFIX: Readonly<Record<number, string>> = { 1: 'Killstreak ', 2: 'Specialized Killstreak ', 3: 'Professional Killstreak ' };
+const KIT_TIER_WORD: Readonly<Record<string, number>> = { basic: 1, specialized: 2, professional: 3 };
 
 // "Strange Part: X" and similar tools are items, not elevated-strange versions of something.
 const STRANGE_TOOL_RE = /^Strange (?:Part:|Cosmetic Part:|Filter:|Count Transfer Tool\b|Bacon Grease\b)/;
@@ -307,6 +363,30 @@ function textContent(root: Node): string {
   return out.replace(/\s+/g, ' ').trim();
 }
 
+/**
+ * 0.7.3: textContent of a header cell, from at most MAX_HEADER_NODES nodes and MAX_HEADER_CHARS characters.
+ * Header rows are tested until one says "Price to buy", and cells nested in each other made reading each
+ * whole cell quadratic.
+ */
+function headerText(cell: Element): string {
+  let out = '';
+  let budget = MAX_HEADER_NODES;
+  const stack: Node[] = [cell];
+  while (stack.length && budget > 0 && out.length < MAX_HEADER_CHARS) {
+    const n = stack.pop()!;
+    budget--;
+    if (n.nodeName === '#text') {
+      out += (n as TextNode).value.slice(0, MAX_HEADER_CHARS - out.length);
+      continue;
+    }
+    if (isElement(n) && n !== cell && SKIP_TEXT_TAGS.has(n.tagName)) continue;
+    // Never more children than could still be read: a cell of a million children costs no more.
+    const kids = childNodesOf(n);
+    for (let i = Math.min(kids.length, budget) - 1; i >= 0; i--) stack.push(kids[i]!);
+  }
+  return out.replace(/\s+/g, ' ').trim();
+}
+
 function descendants(root: Element): Element[] {
   const out: Element[] = [];
   const stack: Node[] = [...childNodesOf(root)].reverse();
@@ -323,10 +403,50 @@ function descendants(root: Element): Element[] {
 const BLOCK_TAGS = new Set(['div', 'p', 'li', 'ul', 'ol', 'tr', 'table', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'hr']);
 const LINE_BREAK = Symbol('br');
 
-/** Text lines of an HTML snippet stored in an attribute (data-title / data-content). */
+/**
+ * 0.7.3: parse5's tree adapter, refusing to nest deeper than `limit` (ImportTooDeepError). The time goes
+ * inside parse5's tree builder, so no check after the parse could stop it. Each insertion walks up from
+ * its parent (from a template's content to its template); nothing is stored per node.
+ */
+function depthCappedAdapter(limit: number): TreeAdapter<DefaultTreeAdapterMap> {
+  const hosts = new WeakMap<ParentNode, Template>();
+  const check = (parent: ParentNode): void => {
+    let depth = 0;
+    for (let n: ParentNode | null | undefined = parent; n; n = 'parentNode' in n ? n.parentNode : hosts.get(n)) {
+      if (++depth > limit) throw new ImportTooDeepError(limit);
+    }
+  };
+  // Foster parenting inserts before a table at the end of its parent: found from the end, as parse5's
+  // indexOf from the start made 300 000 such elements take ~17 s. A node is in its parent once, so the
+  // index is the same.
+  const insertBefore: TreeAdapter<DefaultTreeAdapterMap>['insertBefore'] = (parent, child, ref) => {
+    check(parent);
+    parent.childNodes.splice(parent.childNodes.lastIndexOf(ref), 0, child);
+    child.parentNode = parent;
+  };
+  return {
+    ...defaultTreeAdapter,
+    appendChild(parent, child) {
+      check(parent);
+      defaultTreeAdapter.appendChild(parent, child);
+    },
+    insertBefore,
+    insertTextBefore(parent, text, ref) {
+      const prev = parent.childNodes[parent.childNodes.lastIndexOf(ref) - 1];
+      if (prev && defaultTreeAdapter.isTextNode(prev)) prev.value += text;
+      else insertBefore(parent, defaultTreeAdapter.createTextNode(text), ref);
+    },
+    setTemplateContent(template, content: DocumentFragment) {
+      hosts.set(content, template);
+      defaultTreeAdapter.setTemplateContent(template, content);
+    },
+  };
+}
+
+/** Text lines of an HTML snippet stored in an attribute (data-title / data-content). Throws ImportTooDeepError past MAX_ATTR_DEPTH. */
 export function htmlAttrLines(src: string): string[] {
   if (!src || !src.trim()) return [];
-  const frag = parseFragment(src.length > MAX_ATTR_HTML ? src.slice(0, MAX_ATTR_HTML) : src);
+  const frag = parseFragment(src.length > MAX_ATTR_HTML ? src.slice(0, MAX_ATTR_HTML) : src, { treeAdapter: depthCappedAdapter(MAX_ATTR_DEPTH) });
   let buf = '';
   const stack: (Node | typeof LINE_BREAK)[] = [...childNodesOf(frag)].reverse();
   while (stack.length) {
@@ -602,7 +722,7 @@ function scanDocument(root: Node): DocScan {
       const cells = cellsOf(n);
       if (!headerOf.has(table) && cells.some((c) => c.tagName === 'th')) headerOf.set(table, cells);
       if (scan.priceColumn === null) {
-        const idx = cells.findIndex((c) => c.tagName === 'th' && /price to buy/i.test(textContent(c)));
+        const idx = cells.findIndex((c) => c.tagName === 'th' && /price to buy/i.test(headerText(c)));
         if (idx >= 0) {
           scan.priceColumn = idx;
           priceHeader = cells;
@@ -630,7 +750,7 @@ function scanDocument(root: Node): DocScan {
  */
 function headerColumnsOf(cells: readonly Element[]): { name: number | null; pays: number | null; limits: number | null } {
   const find = (re: RegExp): number | null => {
-    const i = cells.findIndex((c) => c.tagName === 'th' && re.test(textContent(c)));
+    const i = cells.findIndex((c) => c.tagName === 'th' && re.test(headerText(c)));
     return i >= 0 ? i : null;
   };
   return { name: find(/^items?$/i), pays: find(/price we pay/i), limits: find(/item limits?/i) };
@@ -996,6 +1116,8 @@ interface ContentInfo {
   wear: number | null;
   /** Steam's "Crate Series #N" description line (part of a crate's SKU). */
   crateSeries: number | null;
+  /** 0.7.2: the card's own price line ("Costs 37 keys, 40 refined"), without "Costs". */
+  costText: string | null;
   spells: string[];
   parts: string[];
   customDesc: boolean;
@@ -1048,6 +1170,7 @@ function parseContent(lines: string[]): ContentInfo {
     reserved: false,
     wear: null,
     crateSeries: null,
+    costText: null,
     spells: [],
     parts: [],
     customDesc: false,
@@ -1101,6 +1224,11 @@ function parseContent(lines: string[]): ContentInfo {
     }
     if ((m = /^(?:Crate )?Series\s*#(\d{1,6})$/i.exec(line))) {
       info.crateSeries = Number(m[1]);
+      continue;
+    }
+    // Real /buy/killstreaks tooltips end with the card's price: "Costs 37 keys, 40 refined".
+    if ((m = /^Costs\s+(\S.{0,60})$/i.exec(line))) {
+      info.costText ??= m[1]!.trim();
       continue;
     }
     if ((m = /^Halloween:\s*(.+?)(?:\s*\(spell only active during event\))?$/i.exec(line))) {
@@ -1158,12 +1286,133 @@ function displayName(ctx: Ctx, sku: string | null, fallback: string): string {
   return fallback;
 }
 
-/** Kits, fabricators and strangifiers carry target/output tokens the card does not show. */
+/**
+ * Kits, fabricators and strangifiers carry target/output tokens the card does not show. 0.7.2: only a
+ * name that resolves to one of them is taken: "Professional Killstreak Kit" or a bare "Strangifier"
+ * resolve to the item with no target, a SKU no one buys or sells (and every kit of a tier as one price).
+ */
 function resolveNeedsTarget(ctx: Ctx, name: string, defindex: number | null): SkuObject | null {
   const r = safe(() => ctx.schema.resolve(name), null);
   if (!r || r.match === 'fuzzy' || !r.skuObject) return null;
   if (defindex !== null && r.skuObject.defindex !== defindex) return null;
-  return normalizeSkuObject({ ...r.skuObject, paint: null });
+  const obj = normalizeSkuObject({ ...r.skuObject, paint: null });
+  // None of these tools carries a craft number: a trailing "Series #N" read as one keys no real item.
+  if (obj.craftnumber !== null) return null;
+  return obj.target !== null || obj.output !== null ? obj : null;
+}
+
+/** 0.7.2: an item name compared loosely: case, accents, apostrophes, spacing and a leading "The" aside. */
+function looseName(s: string): string {
+  return normWithMap(s.normalize('NFKD').replace(/\p{M}+/gu, ''))
+    .text.replace(/^the /, '');
+}
+
+/**
+ * 0.7.2: a card or row the parser keys by a target it must read from the title: a killstreak kit,
+ * fabricator, strangifier, unusualifier or chemistry set, by its defindex, its schema item_name (TF2's
+ * schema names every kit just "Kit") or its title.
+ */
+function needsTarget(defindex: number | null, item: SchemaItemRow | null, plain: string): boolean {
+  if (defindex !== null && (KIT_TIER.has(defindex) || FABRICATOR_TIER.has(defindex))) return true;
+  if (item && NEEDS_TARGET_ITEM_NAME_RE.test(collapse(item.itemName ?? ''))) return true;
+  return NEEDS_TARGET_RE.test(plain.replace(WEAR_SUFFIX_RE, '').trim());
+}
+
+/**
+ * 0.7.2: a kit or fabricator title as scrap.tf shows it, split up. Real /buy/killstreaks cards drop
+ * "Killstreak" ("Professional Rocket Launcher Kit"); Steam's own form keeps it ("Professional Killstreak
+ * Rocket Launcher Kit"). Either reads the same. `tier` is the title's (null when it names none); the
+ * weapon is whatever is left, never empty.
+ */
+function kitTitleOf(plain: string): { tier: number | null; weapon: string; fabricator: boolean } | null {
+  let t = collapse(plain).replace(/^Non-Craftable\s+/i, '');
+  let fabricator = false;
+  const fab = /\s+Kit\s+Fabricator$/i.exec(t);
+  if (fab) {
+    fabricator = true;
+    t = t.slice(0, fab.index);
+  } else {
+    const kit = /\s+Kit$/i.exec(t);
+    if (!kit) return null;
+    t = t.slice(0, kit.index);
+  }
+  let tier: number | null = null;
+  const word = /^(Professional|Specialized|Basic)(?:\s+|$)/i.exec(t);
+  if (word) {
+    tier = KIT_TIER_WORD[word[1]!.toLowerCase()] ?? null;
+    t = t.slice(word[0].length);
+  }
+  const ks = /^Killstreak(?:\s+|$)/i.exec(t);
+  if (ks) {
+    tier ??= 1;
+    t = t.slice(ks[0].length);
+  }
+  const weapon = t.trim();
+  return weapon ? { tier, weapon, fabricator } : null;
+}
+
+/**
+ * 0.7.2: Steam's name for a kit or fabricator title in scrap.tf's own form ("Professional Rocket Launcher
+ * Kit": a tier word, no "Killstreak"), keyed as the import keys the card: a kit Non-Craftable, a fabricator
+ * as its text says. null for any other text, Steam's and backpack.tf's own form included ("Professional
+ * Killstreak Rocket Launcher Kit" is backpack.tf's name for the Craftable kit). For the Live check, which
+ * reads names with the schema's resolver.
+ */
+export function scraptfKitSteamName(text: string): string | null {
+  const t = collapse(text.length > MAX_NAME_CHARS ? text.slice(0, MAX_NAME_CHARS) : text);
+  if (/\bKillstreak\b/i.test(t)) return null;
+  const kit = kitTitleOf(t);
+  if (!kit || kit.tier === null) return null;
+  const nonCraftable = !kit.fabricator || /^Non-Craftable\s/i.test(t);
+  return `${nonCraftable ? 'Non-Craftable ' : ''}${KIT_TIER_PREFIX[kit.tier]}${kit.weapon} Kit${kit.fabricator ? ' Fabricator' : ''}`;
+}
+
+/**
+ * 0.7.2: a kit or fabricator card keyed by its weapon. The title's weapon goes into Steam's own name for
+ * the item, which the schema resolves to the target backpack.tf keys it by ("Rocket Launcher" is the
+ * upgradeable 205, not the stock 18). Only that target is taken from the resolver, and only when it is the
+ * weapon the title names: the resolver also reads names learned from backpack.tf listings, one of which can
+ * carry another tier, and it would read words such as "Australium" or "Strange" into the SKU. The rest is
+ * the card's: the tier is the defindex's (a title naming another one is noted), a fabricator's output is
+ * its tier's kit. null with needs-target when the title names no weapon the schema knows. A kit is always
+ * keyed Non-Craftable: TF2 makes every fabricated kit "Not Usable in Crafting" and backpack.tf keys them
+ * so, but scrap.tf's card carries no mark of it (no uncraft class, no tooltip line).
+ */
+function kitSku(ctx: Ctx, s: SkuInput, defindex: number, kitTier: number | undefined, fabTier: number | undefined): { sku: string | null; obj: SkuObject | null } {
+  const w = s.warnings;
+  const title = s.name.plain || s.fallbackTitle;
+  const kit = kitTitleOf(title);
+  const tier = kitTier ?? fabTier!;
+  const what = fabTier !== undefined ? 'fabricator' : 'kit';
+  if (!kit) {
+    w.push(`needs-target: "${clip(title, 60)}" names no weapon for its ${what}`);
+    return { sku: null, obj: null };
+  }
+  if (kit.fabricator !== (fabTier !== undefined)) {
+    w.push(`needs-target: "${clip(title, 60)}" reads as a ${kit.fabricator ? 'fabricator' : 'kit'} but the item is a ${what}`);
+    return { sku: null, obj: null };
+  }
+  if (kit.tier !== null && kit.tier !== tier) w.push(`killstreak-mismatch: item is tier ${tier}, title says tier ${kit.tier}`);
+  const steamName = `${KIT_TIER_PREFIX[tier]}${kit.weapon} Kit${kit.fabricator ? ' Fabricator' : ''}`;
+  const resolved = resolveNeedsTarget(ctx, steamName, defindex);
+  const target = resolved?.target ?? null;
+  const targetName = target !== null ? (safe(() => ctx.schema.itemByDefindex(target), null)?.itemName ?? '') : '';
+  if (target === null || looseName(targetName) !== looseName(kit.weapon)) {
+    w.push(`needs-target: "${clip(title, 60)}" names a weapon the item schema does not know ("${clip(kit.weapon, 40)}")`);
+    return { sku: null, obj: null };
+  }
+  const obj = normalizeSkuObject({
+    defindex,
+    quality: 6,
+    craftable: kitTier === undefined && !s.uncraftable,
+    tradable: s.tradable,
+    killstreak: tier,
+    target,
+    output: fabTier !== undefined ? (tier === 3 ? 6526 : 6523) : null,
+    outputQuality: fabTier !== undefined ? 6 : null,
+    paint: null,
+  });
+  return { sku: fromObject(obj), obj };
 }
 
 function paintDecimalByName(ctx: Ctx, name: string): number | null {
@@ -1223,10 +1472,19 @@ function collectCard(el: Element, warnings: string[]): CardParts {
   return parts;
 }
 
-function cardPrice(rawValue: number | null, indicator: string | null, warnings: string[]): { keys: number; scrap: number } {
+function cardPrice(rawValue: number | null, indicator: string | null, warnings: string[], costText: string | null = null): { keys: number; scrap: number } {
   // A data-item-value of 0 is no price (as the reference helper reads it): the indicator text decides.
   const itemValue = rawValue !== null && rawValue > 0 ? rawValue : null;
-  const ind = indicator ? collapse(indicator) : '';
+  // 0.7.2: the tooltip's "Costs …" line says the same as the indicator; it stands in for a missing one.
+  // A line that does not read as a price is only noted, as before 0.7.2 (data-item-value still prices it).
+  const cost = costText ? collapse(costText) : '';
+  const costPrice = cost ? parsePrice(cost, 'ref') : null;
+  if (cost && !costPrice) warnings.push(`unparsed-modifier: "Costs ${clip(cost, 60)}"`);
+  let ind = indicator ? collapse(indicator) : '';
+  if (ind && costPrice) {
+    const a = parsePrice(ind, 'ref');
+    if (a && (a.keys !== costPrice.keys || a.scrap !== costPrice.scrap)) warnings.push(`price-mismatch: "${clip(ind, 40)}" but the tooltip says "Costs ${clip(cost, 40)}"`);
+  } else if (!ind && costPrice) ind = cost;
   const parsed = ind ? parsePrice(ind, 'ref') : null;
   if (ind && !parsed) warnings.push(`unparsed-price: "${clip(ind, 40)}"`);
   const mentionsKeys = ind !== '' && /\bkeys?\b|\d\s*k\b/i.test(ind);
@@ -1463,14 +1721,17 @@ function parseCard(el: Element, ctx: Ctx): ParsedEntry & { assetId: string | nul
   if (content.notTradable) warnings.push('not-tradable: tooltip says the item is not tradable');
   for (const u of content.unparsed.slice(0, 8)) warnings.push(`unparsed-modifier: "${clip(u, 100)}"`);
   if (content.unparsed.length > 8) warnings.push(`unparsed-modifier: ${content.unparsed.length - 8} more lines`);
-  for (const l of name.leftover) warnings.push(`unparsed-name: "${clip(l, 60)}" in "${clip(name.plain, 60)}"`);
+  // 0.7.2: the rest of a kit's or strangifier's title is its target, which buildSku reads (or refuses).
+  if (!needsTarget(defindex, item, name.plain)) {
+    for (const l of name.leftover) warnings.push(`unparsed-name: "${clip(l, 60)}" in "${clip(name.plain, 60)}"`);
+  }
 
   const uncraftable =
     parts.classes.includes('uncraft') || parts.classes.includes('uncraftable') || content.uncraftable || name.uncraftable;
   const festive = name.festive || content.festive;
 
   const assetId = a['data-id'] ?? null;
-  const price = cardPrice(a['data-item-value'] ?? null, parts.indicator, warnings);
+  const price = cardPrice(a['data-item-value'] ?? null, parts.indicator, warnings, content.costText);
   let stock: number | null = a['data-num-available'] ?? null;
   if (stock === null && parts.groupText) {
     const m = /(\d{1,6})\s*x?/i.exec(parts.groupText);
@@ -1628,10 +1889,24 @@ function buildSku(ctx: Ctx, s: SkuInput): { sku: string | null; obj: SkuObject |
   const w = s.warnings;
   const schemaLoaded = safe(() => ctx.schema.isLoaded(), false);
 
-  if (NEEDS_TARGET_RE.test(s.name.plain.replace(WEAR_SUFFIX_RE, '').trim())) {
+  // 0.7.2: real /buy/killstreaks titles drop "Killstreak" ("Professional Rocket Launcher Kit") and TF2's
+  // schema calls every kit "Kit", so neither the title nor the schema name marked a kit: each was stored
+  // as its bare defindex (every kit of a tier as one price). Kits and fabricators are found by defindex.
+  const kitTier = s.defindex !== null ? KIT_TIER.get(s.defindex) : undefined;
+  const fabTier = s.defindex !== null ? FABRICATOR_TIER.get(s.defindex) : undefined;
+  if (s.defindex !== null && (kitTier !== undefined || fabTier !== undefined)) return kitSku(ctx, s, s.defindex, kitTier, fabTier);
+  if (needsTarget(s.defindex, s.item, s.name.plain)) {
     const resolved = resolveNeedsTarget(ctx, s.name.plain || s.fallbackTitle, s.defindex);
     if (resolved) {
-      if (s.uncraftable) resolved.craftable = false;
+      // A card with no usable defindex whose title names a kit or fabricator is keyed as one with it.
+      const kt = KIT_TIER.get(resolved.defindex);
+      const ft = FABRICATOR_TIER.get(resolved.defindex);
+      if (kt !== undefined || ft !== undefined) {
+        const kit = kitSku(ctx, s, resolved.defindex, kt, ft);
+        if (kit.sku !== null) w.push(`no-defindex: identified by name as ${kit.sku}`);
+        return kit;
+      }
+      if (s.uncraftable || NON_CRAFTABLE_TOOLS.has(resolved.defindex)) resolved.craftable = false;
       return { sku: fromObject(resolved), obj: resolved };
     }
     w.push(`needs-target: "${clip(s.name.plain, 60)}" needs a target item that the page does not show`);
@@ -1816,7 +2091,9 @@ function parseRow(row: Element, cols: RowColumns, ctx: Ctx): ParsedEntry {
     quality = name.qualities[0] ?? (name.strange ? 11 : 6);
     warnings.push(`unknown-quality: row has no data-quality; using ${quality}`);
   }
-  for (const l of name.leftover) warnings.push(`unparsed-name: "${clip(l, 60)}" in "${clip(name.plain, 60)}"`);
+  if (!needsTarget(defindex, item, name.plain)) {
+    for (const l of name.leftover) warnings.push(`unparsed-name: "${clip(l, 60)}" in "${clip(name.plain, 60)}"`);
+  }
 
   const priceCell = priceColumn !== null ? cells[priceColumn] : undefined;
   const priceText = priceCell ? textContent(priceCell) : '';
@@ -1984,6 +2261,9 @@ export interface ParseOptions {
 export const NO_CARDS_SAVED_WARNING =
   "no-cards-saved: This page was saved without its items. 'HTML only' keeps the page as it first loaded, before scrap.tf added the cards. Save it again as 'Webpage, Complete'.";
 
+/** 0.7.3: scrap.tf's bare /unusuals index with no card (fixed text): it lists the unusual pages, not their items. */
+export const UNUSUALS_INDEX_WARNING = `${UNUSUALS_INDEX}: scrap.tf/unusuals is an index of the unusual pages and shows no items itself. Open one of the pages it links to (scrap.tf/unusuals/<n>), then save or read that page.`;
+
 /** The bank pages S3 warns about: every recognised bank but the /items list (a sold-out list still lists its rows). */
 function isCardBank(bank: ScraptfBank | null): boolean {
   return bank !== null && bank !== 'list';
@@ -2013,6 +2293,8 @@ const REPORT_GUESS_CODES: ReadonlySet<string> = new Set([
   'price-mismatch',
   'unparsed-modifier',
   'unparsed-name',
+  // 0.7.2: a kit title naming another tier than its item: how unseen kit title forms show up in a report.
+  'killstreak-mismatch',
   NO_STOCK_LIMIT,
   LAYOUT_CHANGED,
 ]);
@@ -2034,8 +2316,10 @@ function headerTexts(cells: readonly Element[] | null): string[] {
 
 /**
  * Parses a saved scrap.tf page into items with SKUs and prices. Throws
- * ImportTooLargeError above MAX_IMPORT_BYTES; everything else is reported as
- * warnings. Nothing in the page is executed or fetched.
+ * ImportTooLargeError above MAX_IMPORT_BYTES and ImportTooDeepError for a page
+ * nested deeper than MAX_PAGE_DEPTH (a card's too-deep tooltip is that card's
+ * parse-error); everything else is reported as warnings. Nothing in the page
+ * is executed or fetched.
  */
 export function parseScrapTfHtml(html: string, schema: SchemaService, opts: ParseOptions = {}): ScrapTfParseResult {
   if (typeof html !== 'string') throw new TypeError('parseScrapTfHtml expects the page as a string');
@@ -2046,7 +2330,12 @@ export function parseScrapTfHtml(html: string, schema: SchemaService, opts: Pars
   const ctx = makeCtx(schema, opts.diagnostics === true);
   const warnings: string[] = [];
 
-  const doc = parse(text);
+  let doc: DefaultTreeAdapterTypes.Document;
+  try {
+    doc = parse(text, { treeAdapter: depthCappedAdapter(MAX_PAGE_DEPTH) });
+  } catch (err) {
+    throw err instanceof ImportTooDeepError ? new ImportTooDeepError(MAX_PAGE_DEPTH, 'The saved page') : err;
+  }
   const scan = scanDocument(doc);
   // P4: what the parser saw, filled in below; only returned when asked for.
   const counts: ImportReport['counts'] = {
@@ -2174,10 +2463,13 @@ export function parseScrapTfHtml(html: string, schema: SchemaService, opts: Pars
     }
   }
 
+  // 0.7.3: the bare /unusuals index (an address, not a body id) lists the unusual pages and never shows a
+  // card, so its tiles are no new layout and no save of it was cut short.
+  const unusualsIndex = items.length === 0 && hint !== null && hint.scrapTf && page === '/unusuals';
   if (items.length === 0 && scan.lookalikes > 0) {
     // P7: item-like elements, none of them in a shape the parser knows: scrap.tf changed its page, so
     // neither "saved without its items" nor "no items" is true. Digits only: no page text.
-    warnings.push(`${LAYOUT_CHANGED}: ${scan.lookalikes} item elements not recognised`);
+    warnings.push(unusualsIndex ? UNUSUALS_INDEX_WARNING : `${LAYOUT_CHANGED}: ${scan.lookalikes} item elements not recognised`);
     if (ctx.diagnostics) {
       for (const el of scan.lookalikeEls.slice(0, IMPORT_REPORT_MAX_ITEMS)) {
         reports.push({ ...cardReportBase(el, classesOf(el)), warnings: [`${LAYOUT_CHANGED}: not an item card or price row`] });
@@ -2186,9 +2478,10 @@ export function parseScrapTfHtml(html: string, schema: SchemaService, opts: Pars
   } else if (items.length === 0) {
     // F18 S3: a bank page (/buy/<slug>, /unusuals) with no card. scrap.tf adds its cards after the page
     // has loaded, and "HTML only" writes the page as it first loaded. Coverage, the banks cards and bank
-    // stock ignore such a save of a bank page (it stores nothing); a list page keeps 'no-items'.
+    // stock ignore such a save of a bank page (it stores nothing); a list page keeps 'no-items'. The bare
+    // /unusuals index is no bank page saved without its cards: it says so instead.
     const bankPage = hint !== null ? hint.scrapTf && (pageKind === 'buy' || pageKind === 'unusuals') : isCardBank(bank) || bodyIdNamesCardBank(scan.bodyId);
-    warnings.push(bankPage ? NO_CARDS_SAVED_WARNING : 'no-items: no item cards or price rows found (save the page after the items have loaded)');
+    warnings.push(unusualsIndex ? UNUSUALS_INDEX_WARNING : bankPage ? NO_CARDS_SAVED_WARNING : 'no-items: no item cards or price rows found (save the page after the items have loaded)');
   } else {
     const noSku = items.filter((i) => i.sku === null).length;
     if (noSku > 0) warnings.push(`no-sku: ${noSku} of ${items.length} items could not be identified`);
@@ -2197,7 +2490,8 @@ export function parseScrapTfHtml(html: string, schema: SchemaService, opts: Pars
 }
 
 function failedItem(titleHtml: string, reason: string): ParsedScrapItem {
-  const title = safe(() => htmlAttrLines(titleHtml).join(' '), titleHtml) || titleHtml;
+  // 0.7.3: never the raw attribute (up to 64 KB of markup when its tooltip was too deep to read).
+  const title = safe(() => htmlAttrLines(titleHtml).join(' '), '') || clip(titleHtml, MAX_NAME_CHARS);
   return {
     title,
     sku: null,

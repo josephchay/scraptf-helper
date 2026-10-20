@@ -232,9 +232,11 @@ export function ScraptfWindowBar() {
   const readBtn = readButtonView(nav.url, reading, nav.importable);
   const status = readStatusView(read, now, readOnLoad);
   const flips = showFlipsView(read);
+  // 0.7.3: main's notice as the reading-on-load setting words it (a challenge says to press Read page now when off).
+  const noticeLine = notice === null ? null : windowNoticeText(notice, readOnLoad);
   // The line: a note (a refusal, Log out done) first, then main's notice, then the newest read.
-  const tone = note ? note.tone : notice ? 'warn' : status.tone;
-  const lineTitle = note ? note.text : (notice ?? status.title);
+  const tone = note ? note.tone : noticeLine ? 'warn' : status.tone;
+  const lineTitle = note ? note.text : (noticeLine ?? status.title);
   const active = activeBankOf(nav.url);
   const addressIcon: IconName = address.kind === 'scraptf' ? 'shield' : address.kind === 'steam' ? 'user' : 'info';
 
@@ -281,8 +283,8 @@ export function ScraptfWindowBar() {
             <span className="stfw-status" role="status">
               {note ? (
                 note.text
-              ) : notice ? (
-                notice
+              ) : noticeLine ? (
+                noticeLine
               ) : status.best ? (
                 <>
                   {status.lead} · best{' '}
@@ -296,7 +298,7 @@ export function ScraptfWindowBar() {
                 status.main
               )}
             </span>
-            {!note && !notice && status.age ? (
+            {!note && !noticeLine && status.age ? (
               <span className="stfw-age" aria-hidden="true">
                 {' '}
                 · {status.age}

@@ -378,7 +378,7 @@ describe('the price compared', () => {
     expect(storedPriceHasExtras({ ...base, sku: 'not a sku' })).toBe(false);
   });
 
-  it('newestStoredPrice: newest by time then id, valid costs only, plain first when asked', () => {
+  it('newestStoredPrice: newest by time (of one time the cheapest, then the higher id), valid costs only, plain first when asked', () => {
     const p = (id: number, observedAt: number, over: Partial<ScrapPrice> = {}): ScrapPrice => ({
       id,
       sku: '378;6',
@@ -394,7 +394,9 @@ describe('the price compared', () => {
       stock: null,
       ...over,
     });
-    expect(newestStoredPrice([p(1, 5), p(2, 9), p(3, 9)], true)?.id).toBe(3);
+    expect(newestStoredPrice([p(1, 5), p(2, 9, { costScrap: 30 }), p(3, 9)], true)?.id).toBe(3);
+    // 0.7.2: of prices seen at one time the cheapest, as the Live market row picks; never an older one.
+    expect(newestStoredPrice([p(1, 5), p(2, 9), p(3, 9)], true)?.id).toBe(2);
     expect(newestStoredPrice([p(1, 5), p(2, 9, { costScrap: -1 }), p(3, 9, { sku: '378;6;foo' })], true)?.id).toBe(1);
     expect(newestStoredPrice([p(1, 5), p(2, 9, { special: special({ spells: ['x'] }) })], true)?.id).toBe(1);
     expect(newestStoredPrice([p(1, 5), p(2, 9, { special: special({ spells: ['x'] }) })], false)?.id).toBe(2);

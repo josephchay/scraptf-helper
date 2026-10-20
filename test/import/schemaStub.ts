@@ -46,8 +46,11 @@ export const STUB_ITEMS: SchemaItemRow[] = [
   item(15000, 'Sniper Rifle', 'tf_weapon_sniperrifle', 'primary'),
   item(15063, 'Revolver', 'tf_weapon_revolver', 'secondary'),
   item(16105, 'War Paint', 'tool', null),
-  item(20002, 'Specialized Killstreak Kit Fabricator', 'tool', null),
-  item(20003, 'Professional Killstreak Kit Fabricator', 'tool', null),
+  // 0.7.2: TF2's item_name for both fabricators is just "Fabricator" (and "Kit" for every kit, below):
+  // the full name is built from their killstreak, target and output. Stub names such as "Professional
+  // Killstreak Kit" hid that the importer found kits by name (schemaStub.test.ts keeps them TF2's).
+  item(20002, 'Fabricator', 'tool', null),
+  item(20003, 'Fabricator', 'tool', null),
   item(5036, 'Ye Olde Rustic Colour', 'tool', null),
   item(6012, 'Strange Part: Airborne Enemies Killed', 'tool', null),
   item(725, 'Tour of Duty Ticket', 'tool', null),
@@ -79,7 +82,7 @@ export const STUB_ITEMS: SchemaItemRow[] = [
   item(5046, 'Team Spirit', 'tool', null),
   item(5051, 'Pink as Hell', 'tool', null),
   item(5734, 'Mann Co. Supply Munition', 'supply_crate', null),
-  item(6526, 'Professional Killstreak Kit', 'tool', null),
+  item(6526, 'Kit', 'tool', null),
   item(16070, 'War Paint', 'tool', null),
   item(16104, 'War Paint', 'tool', null),
   // Crates whose card shows no series (a single-series case, a multi-series crate) and an item that
@@ -87,10 +90,16 @@ export const STUB_ITEMS: SchemaItemRow[] = [
   item(5078, 'Scorched Crate', 'supply_crate', null),
   item(5022, 'Mann Co. Supply Crate', 'supply_crate', null),
   item(267, 'Haunted Metal Scrap', 'craft_item', null),
+  // buy_killstreaks.html K13/K14: the specialized and basic kits, named "Kit" as TF2 names 6526.
+  item(6523, 'Kit', 'tool', null),
+  item(6527, 'Kit', 'tool', null),
+  // 0.7.2: buy_items.html I23/I24, keyed by the target their title names.
+  item(6522, 'Strangifier', 'tool', null),
+  item(9258, 'Unusualifier', 'tool', null),
 ];
 
 /** item_quality where the schema gives one other than Unique (6). */
-export const STUB_ITEM_QUALITY: Record<number, number> = { 267: 5, 16070: 15, 16104: 15, 16105: 15 };
+export const STUB_ITEM_QUALITY: Record<number, number> = { 267: 5, 15000: 15, 16070: 15, 16104: 15, 16105: 15 };
 
 export const STUB_EFFECTS: EffectRow[] = [
   { id: 8, name: 'Haunted Ghosts', canonicalId: 8, type: 'cosmetic' },
@@ -144,6 +153,15 @@ export const STUB_RESOLVE: Record<string, string> = {
   'specialized killstreak ham shank kit fabricator': '20002;6;kt-2;td-1013;od-6523;oq-6',
   'professional killstreak rocket launcher kit': '6526;6;kt-3;td-205',
   'professional killstreak rocket launcher kit fabricator': '20003;6;kt-3;td-205;od-6526;oq-6',
+  // 0.7.2: the name the import stores a kit under (Non-Craftable), as the real resolver reads it back.
+  'non-craftable professional killstreak rocket launcher kit': '6526;6;uncraftable;kt-3;td-205',
+  // buy_killstreaks.html K13/K14, by the upgradeable weapon as the real resolver picks it.
+  'specialized killstreak scattergun kit': '6523;6;kt-2;td-200',
+  'killstreak shotgun kit': '6527;6;kt-1;td-199',
+  // 0.7.2: buy_items.html I23/I24 as the real resolver reads them (an unusualifier is quality 5); the
+  // import then keys 9258 Non-Craftable, as backpack.tf does.
+  'team captain strangifier': '6522;6;td-378',
+  'unusual taunt: conga unusualifier': '9258;5;td-1118',
   // As the real resolver: a single-series case gets its series, a multi-series crate none.
   'scorched crate': '5078;6;c46',
   'mann co. supply crate': '5022;6',
@@ -182,12 +200,6 @@ export function createStubSchema(opts: StubOptions = {}): SchemaService & { call
     const o = fromString(sku);
     const it = itemByDefindex(o.defindex);
     if (!it) return sku;
-    // Kits and fabricators are named after their target ("Professional Killstreak Rocket Launcher Kit").
-    const target = o.target !== null ? itemByDefindex(o.target) : null;
-    if (target && / Kit(?: Fabricator)?$/.test(it.itemName)) {
-      const tier = o.killstreak ? `${KILLSTREAK_NAMES[o.killstreak]} ` : '';
-      return `${tier}${target.itemName} Kit${it.itemName.endsWith('Fabricator') ? ' Fabricator' : ''}`;
-    }
     const parts: string[] = [];
     if (!o.craftable) parts.push('Non-Craftable');
     if (o.quality2 === 11) parts.push('Strange');
@@ -197,6 +209,11 @@ export function createStubSchema(opts: StubOptions = {}): SchemaService & { call
     // bp.tf's order: Festivized before the killstreak tier.
     if (o.festive) parts.push('Festivized');
     if (o.killstreak) parts.push(KILLSTREAK_NAMES[o.killstreak]!);
+    // 0.7.2: kits, fabricators, strangifiers and unusualifiers are named as the real resolver names them,
+    // from the SKU's target and output around their own item_name, never from a "… Kit" name ("Non-Craftable
+    // Professional Killstreak Rocket Launcher Kit", "… Rocket Launcher Kit Fabricator", "Team Captain Strangifier").
+    if (o.target !== null) parts.push(itemByDefindex(o.target)?.itemName ?? `Item #${o.target}`);
+    if (o.output !== null) parts.push(itemByDefindex(o.output)?.itemName ?? `Item #${o.output}`);
     if (o.australium) parts.push('Australium');
     if (o.paintkit !== null) parts.push(paintkitName(o.paintkit) ?? `Paintkit ${o.paintkit}`);
     parts.push(it.itemName);

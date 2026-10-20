@@ -55,13 +55,18 @@ export function Tip({
 
   useEffect(() => {
     if (!open) return;
+    // 0.7.3: an open tip claims Esc first (window capture, preventDefault): it closes the tip, never
+    // the drawer or quick entry behind it, whose bubble listeners skip a used Esc. No stopPropagation,
+    // so field-level Esc handlers still see the key.
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') hide();
+      if (e.key !== 'Escape') return;
+      e.preventDefault();
+      hide();
     };
-    window.addEventListener('keydown', onKey);
+    window.addEventListener('keydown', onKey, true);
     window.addEventListener('scroll', hide, true);
     return () => {
-      window.removeEventListener('keydown', onKey);
+      window.removeEventListener('keydown', onKey, true);
       window.removeEventListener('scroll', hide, true);
     };
   }, [open, hide]);

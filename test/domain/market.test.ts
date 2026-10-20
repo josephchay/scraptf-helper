@@ -63,6 +63,11 @@ function setup(
     schema?: StubSchemaOptions;
     schemaImpl?: SchemaService;
     timers?: (clock: FakeClock) => TimerApi & { advance(ms: number): void };
+    /**
+     * 0.7.3: the index's slice clock. Constant by default, so each slice runs its whole chunk and the fake
+     * clock alone decides the change pushes (MARKET_SLICE_MS is wall-clock time otherwise).
+     */
+    sliceNow?: () => number;
   } = {},
 ): Harness {
   const repo = opts.repo ?? newRepo();
@@ -80,6 +85,7 @@ function setup(
     keyPrice,
     onChanged: (p) => changes.push(p),
     folderWatchActive: () => watch.on,
+    sliceNow: opts.sliceNow ?? (() => 0),
   });
   return { repo, clock, timers, settings, watch, market, changes, K: () => keyPrice().valueScrap };
 }
@@ -345,8 +351,8 @@ describe('createMarketIndex: entries and the engine', () => {
     repo.upsertScrapPrice({ sku: '126;6', name: "Bill's Hat", costScrap: 30, source: 'import', observedAt: T0 - HOUR, stock: 7 });
     // A painted copy: still the row's price, but the ceiling is for a clean one.
     repo.upsertScrapPrice({ sku: '205;6', name: 'Rocket Launcher', costKeys: 1, costScrap: 9, source: 'user', observedAt: T0 - MIN, special: special({ paint: 3100495 }) });
-    // Same time: the higher id wins.
-    repo.upsertScrapPrice({ sku: '30920;6', name: 'Taunt', costScrap: 50, source: 'user', observedAt: T0 - 2 * MIN });
+    // Same time and cost: the higher id wins (0.7.2: at one time the lower cost wins first, marketKitCopies.test.ts).
+    repo.upsertScrapPrice({ sku: '30920;6', name: 'Taunt', costScrap: 55, source: 'user', observedAt: T0 - 2 * MIN });
     repo.upsertScrapPrice({ sku: '30920;6', name: 'Taunt', costScrap: 55, source: 'import', observedAt: T0 - 2 * MIN, stock: 1 });
     const h = setup({ repo });
     build(h);
@@ -651,57 +657,54 @@ describe('createMarketIndex: cadence', () => {
       ...effects.map((sku, i) => buy(sku, 0, { id: `e${i}`, steamid: `E${i}`, keys: 2 })),
       buy(generic, 0, { id: 'g1', steamid: 'G1', keys: 3 }),
     ]);
-    // A slice clock the test controls: evaluating an effect (its own book plus the generic one,
-    // which the engine also reads) costs 1 ms, a plain base 0.01 ms. Each evaluation reads its references once.
+    // A slice clock the test controls (0.7.3: the index's sliceNow): evaluating an effect (its own book
+    // plus the generic one, which the engine also reads) costs 1 ms, a plain base 0.01 ms. Each evaluation
+    // reads its references once.
     let t = 0;
     const slices: number[] = [];
-    const now = vi.spyOn(performance, 'now').mockImplementation(() => t);
     const getPricedb = repo.getPricedb.bind(repo);
     vi.spyOn(repo, 'getPricedb').mockImplementation((sku: string) => {
       t += sku.includes(';u') ? 1 : 0.01;
       return getPricedb(sku);
     });
-    try {
-      const h = setup({
-        repo,
-        schema: { items: [], categoryOf: () => 'hats' },
-        timers: (clock) => {
-          const inner = new FakeTimers(clock);
-          return {
-            setTimeout: (fn: () => void, ms: number) =>
-              inner.setTimeout(() => {
-                const s = t;
-                fn();
-                slices.push(t - s);
-              }, ms),
-            clearTimeout: (handle: unknown) => inner.clearTimeout(handle),
-            advance: (ms: number) => inner.advance(ms),
-          };
-        },
-      });
-      // The rebuild reads the cheap plain cluster first, then the costly effect cluster (base_sku order).
-      build(h);
-      expect(h.market.stats().entries).toBe(plain.length + effects.length + 1);
-      const limit = MARKET_SLICE_MS + 1; // the budget plus the one base that crossed it
-      expect(Math.max(...slices)).toBeLessThanOrEqual(limit);
+    const h = setup({
+      repo,
+      schema: { items: [], categoryOf: () => 'hats' },
+      timers: (clock) => {
+        const inner = new FakeTimers(clock);
+        return {
+          setTimeout: (fn: () => void, ms: number) =>
+            inner.setTimeout(() => {
+              const s = t;
+              fn();
+              slices.push(t - s);
+            }, ms),
+          clearTimeout: (handle: unknown) => inner.clearTimeout(handle),
+          advance: (ms: number) => inner.advance(ms),
+        };
+      },
+      sliceNow: () => t,
+    });
+    // The rebuild reads the cheap plain cluster first, then the costly effect cluster (base_sku order).
+    build(h);
+    expect(h.market.stats().entries).toBe(plain.length + effects.length + 1);
+    const limit = MARKET_SLICE_MS + 1; // the budget plus the one base that crossed it
+    expect(Math.max(...slices)).toBeLessThanOrEqual(limit);
 
-      for (let round = 0; round < 3; round++) {
-        slices.length = 0;
-        // A cheap batch grows the chunk size (it is sized from the last slice's cost per base)...
-        h.market.markDirty(plain.slice(round * 400, round * 400 + 400));
-        h.timers.advance(MARKET_DIRTY_BATCH_MS);
-        // ...then one generic change fans out to every effect that reads its book.
-        repo.upsertListings([buy(generic, 0, { id: `g${round + 2}`, steamid: `G${round + 2}`, keys: 4 + round })]);
-        h.market.markDirty([generic]);
-        h.timers.advance(MARKET_DIRTY_BATCH_MS);
-        expect(Math.max(...slices), `round ${round}`).toBeLessThanOrEqual(limit);
-        // Every base was still evaluated, over several slices.
-        expect(slices.length).toBeGreaterThan(2);
-        expect(h.market.stats().pendingDirty).toBe(0);
-        for (const sku of [effects[0]!, effects[599]!]) expect(rowOf(h, sku)!.bestScrap).toBe((4 + round) * h.K());
-      }
-    } finally {
-      now.mockRestore();
+    for (let round = 0; round < 3; round++) {
+      slices.length = 0;
+      // A cheap batch grows the chunk size (it is sized from the last slice's cost per base)...
+      h.market.markDirty(plain.slice(round * 400, round * 400 + 400));
+      h.timers.advance(MARKET_DIRTY_BATCH_MS);
+      // ...then one generic change fans out to every effect that reads its book.
+      repo.upsertListings([buy(generic, 0, { id: `g${round + 2}`, steamid: `G${round + 2}`, keys: 4 + round })]);
+      h.market.markDirty([generic]);
+      h.timers.advance(MARKET_DIRTY_BATCH_MS);
+      expect(Math.max(...slices), `round ${round}`).toBeLessThanOrEqual(limit);
+      // Every base was still evaluated, over several slices.
+      expect(slices.length).toBeGreaterThan(2);
+      expect(h.market.stats().pendingDirty).toBe(0);
+      for (const sku of [effects[0]!, effects[599]!]) expect(rowOf(h, sku)!.bestScrap).toBe((4 + round) * h.K());
     }
   });
 

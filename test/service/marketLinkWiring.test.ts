@@ -210,7 +210,7 @@ beforeAll(async () => {
     service: { callRaw: (method, params) => core.handle(method, params) },
     showQuickEntry: () => undefined,
     openItemInDashboard: () => undefined,
-    appInfo: () => ({ version: '0.6.0', dataDir, logDir: path.join(root, 'logs'), platform: process.platform, electron: '', node: process.versions.node }),
+    appInfo: () => ({ version: '0.6.0', appDir: root, dataDir, logDir: path.join(root, 'logs'), platform: process.platform, electron: '', node: process.versions.node }),
     serviceState: () => ({ state: 'ready', detail: null, nextAttemptAt: null }),
     hotkeys: () => ({
       quickEntry: { accelerator: mainSettings.app.quickEntryHotkey, registered: true, error: null },

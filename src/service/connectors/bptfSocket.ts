@@ -29,7 +29,7 @@ export const FLUSH_INTERVAL_MS = 1_000;
 export const BACKOFF_INITIAL_MS = 1_000;
 export const BACKOFF_MAX_MS = 60_000;
 export const SILENCE_TIMEOUT_MS = 120_000;
-/** A connection that stayed open this long resets the backoff. */
+/** A connection that stayed open this long resets the backoff, whichever side closes it. */
 export const STABLE_CONNECTION_MS = 30_000;
 /** A polite close that gets no answer is terminated after this long. */
 export const CLOSE_GRACE_MS = 5_000;
@@ -180,6 +180,9 @@ export function createBptfSocket(deps: BptfSocketDeps): BptfSocket & { detail():
 
   let state: ConnState = 'off';
   let detailText = 'Not started';
+  /** While state is 'backoff': when the next attempt is due and why; health() builds the countdown from them. */
+  let backoffUntil: UnixMs = 0;
+  let backoffWhy = '';
   let lastOkAt: UnixMs | null = null;
   let lastErrorAt: UnixMs | null = null;
   let lastError: string | null = null;
@@ -217,6 +220,14 @@ export function createBptfSocket(deps: BptfSocketDeps): BptfSocket & { detail():
   const setState = (s: ConnState, detail: string): void => {
     state = s;
     detailText = detail;
+  };
+
+  const backoffText = (now: UnixMs): string => `${backoffWhy}; reconnecting in ${formatDelay(Math.max(0, backoffUntil - now))}`;
+
+  const setBackoff = (why: string, until: UnixMs): void => {
+    backoffWhy = why;
+    backoffUntil = until;
+    setState('backoff', backoffText(clock.now()));
   };
 
   const noteError = (msg: string): void => {
@@ -348,6 +359,10 @@ export function createBptfSocket(deps: BptfSocketDeps): BptfSocket & { detail():
   const closeSocket = (hard: boolean, reason: string): void => {
     const s = ws;
     if (!s) return;
+    // 0.7.3: onClose skips sockets we close ourselves (the silence watchdog), so the
+    // stable-connection reset happens here too. Measured to the last frame or ping,
+    // so a connection that never delivered anything keeps backing off.
+    if (openedAt !== null && lastActivityAt !== null && lastActivityAt - openedAt >= STABLE_CONNECTION_MS) attempts = 0;
     ws = null;
     openedAt = null;
     if (hard) {
@@ -393,7 +408,7 @@ export function createBptfSocket(deps: BptfSocketDeps): BptfSocket & { detail():
     const delay = delayMs ?? Math.min(BACKOFF_MAX_MS, BACKOFF_INITIAL_MS * 2 ** Math.min(attempts, 16));
     attempts++;
     reconnects++;
-    setState('backoff', `${why}; reconnecting in ${formatDelay(delay)}`);
+    setBackoff(why, clock.now() + delay);
     reconnectTimer = timers.setTimeout(() => {
       reconnectTimer = null;
       connect();
@@ -573,7 +588,7 @@ export function createBptfSocket(deps: BptfSocketDeps): BptfSocket & { detail():
     // A pause / resume or stop() + start() clears the reconnect timer; the server's wait still holds.
     const waitMs = retryNotBefore - clock.now();
     if (waitMs > 0) {
-      setState('backoff', `${retryWhy}; reconnecting in ${formatDelay(waitMs)}`);
+      setBackoff(retryWhy, retryNotBefore);
       return;
     }
     if (closing > 0) {
@@ -738,6 +753,9 @@ export function createBptfSocket(deps: BptfSocketDeps): BptfSocket & { detail():
         d = detailText === 'Not started' ? d : 'Stopped';
       } else if (s === 'live') {
         d = `${eventsToday.toLocaleString('en-US')} events today, ${formatBytes(bytesToday)}`;
+      } else if (s === 'backoff') {
+        // 0.7.3: the reconnect timer leaves the stored text alone, so count down here.
+        d = backoffText(clock.now());
       }
       return {
         id: 'bptf-ws',

@@ -9,7 +9,7 @@ import { baseSku as toBaseSku } from '../shared/sku';
 import type { KeyPriceQuote, UnixMs } from '../shared/types';
 import type { BptfApi, Clock, Engine, HttpClient, Logger, PriceDb, Repo, SchemaService } from './contracts';
 import { BptfCredentialError, BptfNotConfiguredError, BptfSnapshotUnavailableError } from './connectors/bptfApi';
-import { META_LOAD_ALL_AT } from './connectors/pricedb';
+import { META_LOAD_ALL_AT, loadAllFresh } from './connectors/pricedb';
 import { runMaintenance, type MarketIndex } from './domain';
 import { HostBlockedError, NetworkPausedError, NetworkRequestError, RateLimitedError, type TimerApi } from './net';
 import type { Settings, SecretName } from '../shared/types';
@@ -34,8 +34,18 @@ export interface JobSpec {
   retryMs?: number;
   /** Network jobs are skipped while the network is paused (default true). */
   network?: boolean;
-  /** Why the job may not run right now (connector off, credential missing, host blocked), or null. */
+  /** Why the job may not run right now (connector off, credential missing or rejected, host blocked), or null. */
   blockedReason?(): string | null;
+  /**
+   * 0.7.3: the tick found the job due more than a cadence ahead (the wall clock moved back) and
+   * clamped it; the job clamps its own stamps the same way, so its next run is not skipped as too soon.
+   */
+  clockMovedBack?(now: UnixMs): void;
+  /**
+   * 0.7.3: how long a kick() still lets the job wait (default 0: due at once), for a job whose run would only
+   * skip until then. A kick never makes a job due later than it already was.
+   */
+  kickDelayMs?(): number;
   /** Resolves false (or throws) when the run failed. */
   run(): Promise<boolean | void>;
 }
@@ -55,7 +65,7 @@ export interface Scheduler {
   add(job: JobSpec): void;
   start(): void;
   stop(): void;
-  /** Makes a job due now (for example after a credential was added). */
+  /** Makes a job due now (for example after a credential was added), or after its kickDelayMs. */
   kick(id: string): void;
   states(): JobState[];
   /** Resolves when no job is running (tests, shutdown). */
@@ -66,6 +76,8 @@ interface Entry {
   spec: JobSpec;
   state: JobState;
   promise: Promise<void> | null;
+  /** The start delay until the first run (it may exceed everyMs), then 0. */
+  startDelayMs: number;
 }
 
 function errorText(err: unknown): string {
@@ -96,12 +108,28 @@ export function createScheduler(opts: {
     return Number.isFinite(ms) && ms > 0 ? ms : 0;
   };
 
+  const kickDelay = (spec: JobSpec): number => {
+    let ms = 0;
+    try {
+      ms = spec.kickDelayMs?.() ?? 0;
+    } catch (err) {
+      log.warn(`job ${spec.id}: kick delay could not be computed: ${errorText(err)}`);
+    }
+    return Number.isFinite(ms) && ms > 0 ? ms : 0;
+  };
+
+  const schedule = (e: Entry, now: UnixMs): void => {
+    e.startDelayMs = firstDelay(e.spec);
+    e.state.nextDueAt = now + e.startDelayMs;
+  };
+
   const runJob = (e: Entry, now: UnixMs): void => {
     const { spec, state } = e;
     state.running = true;
     state.lastRunAt = now;
     state.skipped = null;
     state.nextDueAt = now + spec.everyMs;
+    e.startDelayMs = 0;
     e.promise = (async () => {
       let ok = true;
       let pausedFail = false;
@@ -137,6 +165,17 @@ export function createScheduler(opts: {
     if (!started) return;
     const now = clock.now();
     for (const e of jobs.values()) {
+      // 0.7.3: a wall clock stepped back while running leaves nextDueAt far ahead. As in
+      // remainingCadence, a job never waits more than one cadence (or its start delay) from now.
+      const maxAhead = Math.max(e.spec.everyMs, e.startDelayMs);
+      if (e.state.nextDueAt - now > maxAhead) {
+        e.state.nextDueAt = now + maxAhead;
+        try {
+          e.spec.clockMovedBack?.(now);
+        } catch (err) {
+          log.warn(`job ${e.spec.id}: clamping its stamps failed: ${errorText(err)}`);
+        }
+      }
       if (e.state.running || now < e.state.nextDueAt) continue;
       let reason: string | null = null;
       if (e.spec.network !== false && opts.isPaused()) reason = 'network paused';
@@ -160,18 +199,20 @@ export function createScheduler(opts: {
   return {
     add(spec) {
       if (jobs.has(spec.id)) throw new Error(`duplicate job ${spec.id}`);
-      jobs.set(spec.id, {
+      const e: Entry = {
         spec,
         promise: null,
+        startDelayMs: 0,
         state: { id: spec.id, running: false, nextDueAt: Number.POSITIVE_INFINITY, lastRunAt: null, lastOkAt: null, lastError: null, skipped: null },
-      });
-      if (started) jobs.get(spec.id)!.state.nextDueAt = clock.now() + firstDelay(spec);
+      };
+      jobs.set(spec.id, e);
+      if (started) schedule(e, clock.now());
     },
     start() {
       if (started) return;
       started = true;
       const now = clock.now();
-      for (const e of jobs.values()) e.state.nextDueAt = now + firstDelay(e.spec);
+      for (const e of jobs.values()) schedule(e, now);
       tick();
     },
     stop() {
@@ -181,7 +222,7 @@ export function createScheduler(opts: {
     },
     kick(id) {
       const e = jobs.get(id);
-      if (e && !e.state.running) e.state.nextDueAt = Math.min(e.state.nextDueAt, clock.now());
+      if (e && !e.state.running) e.state.nextDueAt = Math.min(e.state.nextDueAt, clock.now() + kickDelay(e.spec));
     },
     states() {
       return [...jobs.values()].map((e) => ({ ...e.state }));
@@ -211,11 +252,25 @@ export const SNAPSHOT_FAIL_MAX_MS = 24 * HOUR;
 const KEY_BPTF_EVERY_MS = HOUR;
 const BPTF_PRICES_EVERY_MS = 2 * HOUR;
 const BPTF_PRICES_FIRST_DELAY_MS = 30 * SEC;
+const PRICEDB_ALL_EVERY_MS = 4 * HOUR;
 
 /** Time left until `lastAt + everyMs`, clamped to [min, everyMs] (a clock that moved back never stalls a job). */
 function remainingCadence(lastAt: number | null, everyMs: number, now: UnixMs, min = 0): number {
   if (lastAt === null || !Number.isFinite(lastAt)) return min;
   return Math.max(min, Math.min(everyMs, lastAt + everyMs - now));
+}
+
+/**
+ * A watched SKU's order book needs a snapshot: none yet, older than SNAPSHOT_STALE_MS, or (0.7.3)
+ * stamped in the future, which after the clock moved back has no known age: stale, not fresh.
+ */
+export function snapshotIsStale(at: UnixMs | null, now: UnixMs): boolean {
+  return at === null || at > now || now - at >= SNAPSHOT_STALE_MS;
+}
+
+/** How long a watched SKU waits after its n-th background snapshot failure in a row. */
+export function snapshotFailWait(n: number): number {
+  return Math.min(SNAPSHOT_FAIL_BASE_MS * 2 ** Math.min(n - 1, 16), SNAPSHOT_FAIL_MAX_MS);
 }
 
 /** Failures that are not the SKU's fault (pause, budget, credentials, endpoint or host down). */
@@ -267,14 +322,32 @@ function hostBlocked(http: HttpClient, host: string): string | null {
 
 export function buildJobs(ctx: JobContext): JobSpec[] {
   const { repo, http, schema, pricedb, bptfApi, engine, log, clock, market } = ctx;
+  // A rejected credential waits like a missing one: each run would only fail locally and warn again.
+  // It clears when the user saves another value (core kicks the jobs) or a Settings test passes.
   const bptfKeyBlocked = (): string | null => {
     if (!ctx.settings().connectors.bptfApi) return 'backpack.tf API turned off';
     if (!ctx.secret('bptfApiKey')) return 'no backpack.tf API key';
+    const rejected = bptfApi.credentialRejected('bptfApiKey');
+    if (rejected) return rejected;
     return hostBlocked(http, 'api.backpack.tf');
   };
   /** Base SKU -> background snapshot failures in a row and when it may be tried again (this process only). */
   const snapFail = new Map<string, { n: number; until: UnixMs }>();
-  const coolingDown = (base: string, now: UnixMs): boolean => (snapFail.get(base)?.until ?? 0) > now;
+  const coolingDown = (base: string, now: UnixMs): boolean => {
+    const f = snapFail.get(base);
+    if (!f) return false;
+    // 0.7.3: a wall clock stepped back leaves `until` further ahead than the wait itself. As in the
+    // scheduler's tick, it never waits more than its own length from now.
+    const wait = snapshotFailWait(f.n);
+    if (f.until - now > wait) f.until = now + wait;
+    return f.until > now;
+  };
+  /** Time until PriceDB's full list is due again: 0 unless a load stamped within the last 4 h is still fresh. */
+  const untilFullListDue = (): number => {
+    const raw = repo.getMeta(META_LOAD_ALL_AT);
+    const now = clock.now();
+    return loadAllFresh(raw, now) ? remainingCadence(Number(raw), PRICEDB_ALL_EVERY_MS, now) : 0;
+  };
 
   return [
     {
@@ -295,9 +368,23 @@ export function buildJobs(ctx: JobContext): JobSpec[] {
     },
     {
       // Cold-start full PriceDB list; pricedb.loadAll() itself skips when the last load is under 4 h old.
+      // 0.7.3: that stamp is the load's start, so each 4 h run loads; a failed load leaves the old stamp,
+      // so the run fails and is retried after retryMs instead of counting as OK.
       id: 'pricedb-all',
-      everyMs: 4 * HOUR,
+      everyMs: PRICEDB_ALL_EVERY_MS,
       retryMs: 15 * MIN,
+      // 0.7.3: a restart within 4 h of the last load waits out the rest of those 4 h. Run at start, it would
+      // only skip, and the next load would come a full cadence later (up to 8 h after the previous one).
+      firstDelayMs: untilFullListDue,
+      // 0.7.3: the same for core's kicks (a PriceDB or backpack.tf API toggle, pricedb.io re-enabled): within
+      // 4 h of a load the job keeps its due time; a load that is due (or a failed one) still runs at once.
+      kickDelayMs: untilFullListDue,
+      // 0.7.3: the tick moved this job to 4 h from now; a last-load stamp still in the future becomes now
+      // too. Left as is, the clock passes it before that run, which then skips the list as fresh.
+      clockMovedBack: (now) => {
+        const last = Number(repo.getMeta(META_LOAD_ALL_AT) ?? NaN);
+        if (Number.isFinite(last) && last > now) repo.setMeta(META_LOAD_ALL_AT, String(now));
+      },
       blockedReason: () => (ctx.settings().connectors.pricedb ? hostBlocked(http, 'pricedb.io') : 'PriceDB turned off'),
       async run() {
         const n = await pricedb.loadAll();
@@ -305,7 +392,8 @@ export function buildJobs(ctx: JobContext): JobSpec[] {
           engine.markAllDirty();
           market?.markAllDirty();
         }
-        return n > 0 || repo.getMeta(META_LOAD_ALL_AT) !== null;
+        // OK when this run loaded the list or skipped one that is still fresh (the same test loadAll skips on).
+        return n > 0 || loadAllFresh(repo.getMeta(META_LOAD_ALL_AT), clock.now());
       },
     },
     {
@@ -376,6 +464,8 @@ export function buildJobs(ctx: JobContext): JobSpec[] {
       blockedReason: () => {
         if (!ctx.settings().connectors.bptfApi) return 'backpack.tf API turned off';
         if (!ctx.secret('bptfAccessToken')) return 'no backpack.tf access token';
+        const rejected = bptfApi.credentialRejected('bptfAccessToken');
+        if (rejected) return rejected;
         if (!bptfApi.snapshotAvailable()) return 'snapshot endpoint unavailable';
         return hostBlocked(http, 'api.backpack.tf');
       },
@@ -390,7 +480,8 @@ export function buildJobs(ctx: JobContext): JobSpec[] {
             // A SKU whose snapshot keeps failing must not be picked every minute ahead of the rest.
             if (coolingDown(toBaseSku(sku), now)) continue;
             const at = repo.getSnapshotAt(sku) ?? 0;
-            if (now - at < SNAPSHOT_STALE_MS) continue;
+            // 0.7.3: one stamped in the future (clock moved back) has no known age: stale, not fresh.
+            if (!snapshotIsStale(at, now)) continue;
             if (!oldest || at < oldest.at) oldest = { sku, at };
           }
           target = oldest?.sku ?? null;
@@ -403,8 +494,7 @@ export function buildJobs(ctx: JobContext): JobSpec[] {
         } catch (err) {
           if (!globalSnapshotFailure(err)) {
             const n = (snapFail.get(base)?.n ?? 0) + 1;
-            const wait = Math.min(SNAPSHOT_FAIL_BASE_MS * 2 ** Math.min(n - 1, 16), SNAPSHOT_FAIL_MAX_MS);
-            snapFail.set(base, { n, until: clock.now() + wait });
+            snapFail.set(base, { n, until: clock.now() + snapshotFailWait(n) });
           }
           throw err;
         }

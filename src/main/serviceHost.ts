@@ -151,7 +151,8 @@ export interface ServiceProcessLike {
   on(event: 'spawn', listener: () => void): unknown;
   on(event: 'message', listener: (message: unknown) => void): unknown;
   on(event: 'exit', listener: (code: number) => void): unknown;
-  on(event: 'error', listener: (type: string, report: string) => void): unknown;
+  /** 0.7.3: Electron's order: the error type, its source location, then the Node diagnostic report (JSON). */
+  on(event: 'error', listener: (type: string, location: string, report: string) => void): unknown;
   postMessage(message: unknown): void;
   kill(): boolean;
   readonly pid: number | undefined;
@@ -170,6 +171,11 @@ export interface ServiceHostStatus {
   nextRestartAt: number | null;
   lastError: string | null;
   readyAt: number | null;
+  /**
+   * 0.7.3: why a service that sent 'ready' runs without its database (its ready message's `failure`); null
+   * otherwise. Not lastError: that is the restart banner's detail. The host always sets it.
+   */
+  failure?: string | null;
 }
 
 export type ServiceInit = Omit<Extract<ToService, { type: 'init' }>, 'type'>;
@@ -274,7 +280,8 @@ export function serviceStatePush(s: ServiceHostStatus, now: number): PushContrac
 }
 
 const fromServiceSchema = z.union([
-  z.looseObject({ type: z.literal('ready') }),
+  // 0.7.2: `failure` is optional (an older service sends none); a malformed one is dropped, not the ready.
+  z.looseObject({ type: z.literal('ready'), failure: z.string().optional().catch(undefined) }),
   z.looseObject({ type: z.literal('rpc-result'), id: z.number().int(), ok: z.literal(true), result: z.unknown() }),
   z.looseObject({ type: z.literal('rpc-result'), id: z.number().int(), ok: z.literal(false), error: z.unknown() }),
   z.looseObject({
@@ -303,6 +310,41 @@ function clip(s: string, max = 4000): string {
   return s.length > max ? `${s.slice(0, max)}...` : s;
 }
 
+/**
+ * 0.7.3: the few fields of a Node diagnostic report (a fatal error's) worth a log line: the event, the JS
+ * stack and the heap. Null when there are none. Never the rest: it holds the environment variables, the
+ * command line and the folders, and main.log cuts a long line anyway.
+ */
+export function summariseFatalReport(report: unknown): Record<string, unknown> | null {
+  if (typeof report !== 'string' || report === '') return null;
+  let raw: unknown;
+  try {
+    raw = JSON.parse(report);
+  } catch {
+    return null;
+  }
+  const obj = (v: unknown): Record<string, unknown> => (typeof v === 'object' && v !== null && !Array.isArray(v) ? (v as Record<string, unknown>) : {});
+  const r = obj(raw);
+  const header = obj(r['header']);
+  const js = obj(r['javascriptStack']);
+  const heap = obj(r['javascriptHeap']);
+  const out: Record<string, unknown> = {};
+  for (const k of ['event', 'trigger', 'nodejsVersion']) {
+    const v = header[k];
+    if (typeof v === 'string') out[k] = clip(v, 200);
+  }
+  const message = js['message'];
+  if (typeof message === 'string') out['message'] = clip(message, 500);
+  const frames: unknown = js['stack'];
+  const stack = Array.isArray(frames) ? frames.filter((f): f is string => typeof f === 'string').slice(0, 10) : [];
+  if (stack.length > 0) out['stack'] = stack.map((f) => clip(f, 200));
+  for (const k of ['totalMemory', 'usedMemory']) {
+    const v = heap[k];
+    if (typeof v === 'number') out[k] = v;
+  }
+  return Object.keys(out).length > 0 ? out : null;
+}
+
 export function createServiceHost(opts: ServiceHostOptions): ServiceHost {
   const log = opts.log;
   const now = opts.now ?? Date.now;
@@ -324,6 +366,7 @@ export function createServiceHost(opts: ServiceHostOptions): ServiceHost {
   let restarts = 0;
   let lastExitCode: number | null = null;
   let lastError: string | null = null;
+  let failure: string | null = null;
   let restartTimer: ReturnType<typeof setTimeout> | null = null;
   let nextRestartAt: number | null = null;
   let stopping = false;
@@ -337,7 +380,7 @@ export function createServiceHost(opts: ServiceHostOptions): ServiceHost {
   const readyWaiters = new Set<() => void>();
 
   function status(): ServiceHostStatus {
-    return { state, pid: child?.pid ?? null, restarts, lastExitCode, nextRestartAt, lastError, readyAt };
+    return { state, pid: child?.pid ?? null, restarts, lastExitCode, nextRestartAt, lastError, readyAt, failure };
   }
 
   function setState(next: ServiceState): void {
@@ -415,7 +458,12 @@ export function createServiceHost(opts: ServiceHostOptions): ServiceHost {
         ready = true;
         readyAt = now();
         lastError = null;
-        log.info('service ready');
+        // 0.7.2: a service without its database still answers (each call says why), so it counts as
+        // ready, but the log must not read as if all were fine.
+        if (m.failure) log.warn(`service started without its database: ${clip(m.failure, 500)}`);
+        else log.info('service ready');
+        // 0.7.3: kept for the tray, which would otherwise wait for a status that never comes.
+        failure = m.failure ? clip(m.failure, 500) : null;
         setState('ready');
         flushQueue();
         for (const w of [...readyWaiters]) w();
@@ -500,6 +548,7 @@ export function createServiceHost(opts: ServiceHostOptions): ServiceHost {
     nextRestartAt = null;
     initSent = false;
     ready = false;
+    failure = null;
     setState('starting');
     let proc: ServiceProcessLike;
     try {
@@ -529,9 +578,11 @@ export function createServiceHost(opts: ServiceHostOptions): ServiceHost {
       if (child === proc) handleMessage(msg);
     });
     proc.on('exit', (code: number) => onExit(proc, code));
-    proc.on('error', (type: string, report: string) => {
+    proc.on('error', (type: string, location: string, report: string) => {
       lastError = `fatal error: ${type}`;
-      log.error(`service process error: ${type}`, { report: clip(String(report)) });
+      // 0.7.3: the second argument is the location, not the report; of the report, only a summary.
+      const summary = summariseFatalReport(report);
+      log.error(`service process error: ${type}`, { location: clip(String(location ?? ''), 500), ...(summary ? { report: summary } : {}) });
     });
     pipeStream(proc.stdout, 'stdout');
     pipeStream(proc.stderr, 'stderr');

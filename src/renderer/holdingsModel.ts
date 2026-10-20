@@ -33,9 +33,34 @@ export const HOLDING_STATUS_TONES: Readonly<Record<HoldingStatus, Tone>> = {
 export const HOLDING_STATUS_HELP: Readonly<Record<HoldingStatus, string>> = {
   sell: 'Selling the oldest unit at the better exit now (this buyer, or scrap.tf when your saved price list pays more) clears your profit thresholds.',
   hold: 'A sale now makes a profit, but less than your thresholds ask for.',
-  loss: 'The best exit now (a backpack.tf buyer or scrap.tf) pays no more than the oldest unit cost you.',
+  // 0.7.3: Loss is profit after friction ≤ 0, so an exit a little over the cost can still be one.
+  loss: 'Selling the oldest unit at the best exit now (a backpack.tf buyer or scrap.tf) makes no profit: it pays no more than that unit cost you, plus your friction per trade if you set one.',
   'no-buyers': 'No eligible backpack.tf buy order for this item in the live book, and no usable scrap.tf price from your saved list.',
 };
+
+type NoSaleFields = Partial<Pick<HoldingRow, 'buyerCount' | 'flags'>>;
+
+/**
+ * Why a row has buyers but no revenue (0.7.3), from its own fields. Conservative is null only when
+ * every eligible order is an outlier, and the service then flags 'all-outliers'; Best is never null
+ * with buyers. So buyers, no revenue and no such flag is Instant without a realistic bot order.
+ */
+function noSaleReason(r: NoSaleFields): 'none' | 'all-outliers' | 'no-bot' {
+  if (!((r.buyerCount ?? 0) > 0)) return 'none';
+  return r.flags?.includes('all-outliers') ? 'all-outliers' : 'no-bot';
+}
+
+/** HOLDING_STATUS_HELP, except No buyers with eligible buyers none of which is usable says why. */
+export function holdingStatusHelp(r: Pick<HoldingRow, 'status'> & NoSaleFields): string {
+  if (r.status === 'no-buyers') {
+    const why = noSaleReason(r);
+    if (why === 'all-outliers') return 'Every eligible backpack.tf buy order looks unrealistic, and there is no usable scrap.tf price from your saved list.';
+    if (why === 'no-bot') {
+      return 'The eligible backpack.tf buyers include no realistic bot order, and Revenue used for profit is Instant (bot orders only). There is no usable scrap.tf price from your saved list either.';
+    }
+  }
+  return HOLDING_STATUS_HELP[r.status];
+}
 
 export function holdingsQuery(search: string): HoldingsQuery {
   const s = search.trim().slice(0, HOLDINGS_MAX_SEARCH_CHARS);
@@ -95,22 +120,30 @@ export function buyerName(o: Pick<OrderSummary, 'userName' | 'steamid' | 'isBot'
 }
 
 /** Tooltip for "Sells now for": the buyer you would sell to, and the other picks. */
-export function holdingSellsForTitle(r: Pick<HoldingRow, 'revenueScrap' | 'bestScrap' | 'instantScrap' | 'revenueOrder' | 'buyerCount'>, keyScrap: Scrap | null): string {
-  if (r.revenueScrap === null) return r.buyerCount > 0 ? 'Every eligible order looks unrealistic, so no sale price is assumed.' : 'No eligible backpack.tf buy orders in the live book.';
+export function holdingSellsForTitle(
+  r: Pick<HoldingRow, 'revenueScrap' | 'bestScrap' | 'instantScrap' | 'revenueOrder' | 'buyerCount'> & Partial<Pick<HoldingRow, 'flags'>>,
+  keyScrap: Scrap | null,
+): string {
+  const buyers = `${fmtInt(r.buyerCount)} ${r.buyerCount === 1 ? 'buyer' : 'buyers'} with eligible orders`;
+  if (r.revenueScrap === null) {
+    const why = noSaleReason(r);
+    if (why === 'none') return 'No eligible backpack.tf buy orders in the live book.';
+    if (why === 'all-outliers') return 'Every eligible order looks unrealistic, so no sale price is assumed.';
+    return `${buyers}, but no realistic bot order, and Revenue used for profit is Instant (bot orders only), so no sale price is assumed.`;
+  }
   const o = r.revenueOrder;
   const online = o ? (o.online === true ? 'online' : o.online === false ? 'offline' : 'online status unknown') : null;
   const who = o ? ` to ${o.userName || o.steamid} (${o.isBot ? 'bot' : 'human'}, ${online})` : '';
-  const buyers = `${fmtInt(r.buyerCount)} ${r.buyerCount === 1 ? 'buyer' : 'buyers'} with eligible orders.`;
-  return `Sells now for ${fmtMoney(r.revenueScrap, keyScrap)}${who}. Best ${fmtMoney(r.bestScrap, keyScrap)}, instant ${fmtMoney(r.instantScrap, keyScrap)}. ${buyers}`;
+  return `Sells now for ${fmtMoney(r.revenueScrap, keyScrap)}${who}. Best ${fmtMoney(r.bestScrap, keyScrap)}, instant ${fmtMoney(r.instantScrap, keyScrap)}. ${buyers}.`;
 }
 
 /** Tooltip for "Profit now": the next unit, every unit, the margin, and what the status means. */
 export function profitNowTitle(
-  r: Pick<HoldingRow, 'status' | 'profitNowScrap' | 'profitAllScrap' | 'margin' | 'qty'> & Partial<Pick<HoldingRow, 'bestExit'>>,
+  r: Pick<HoldingRow, 'status' | 'profitNowScrap' | 'profitAllScrap' | 'margin' | 'qty'> & Partial<Pick<HoldingRow, 'bestExit' | 'buyerCount' | 'flags'>>,
   keyScrap: Scrap | null,
   p: Pick<ProfitSettings, 'frictionScrap'> | null,
 ): string {
-  const help = HOLDING_STATUS_HELP[r.status];
+  const help = holdingStatusHelp(r);
   if (r.profitNowScrap === null) return help;
   const friction = p ? frictionOf(p) : 0;
   const to = r.bestExit === 'scraptf' ? ' to scrap.tf' : '';
@@ -125,7 +158,7 @@ export function profitNowTitle(
 // ---------------------------------------------------------------------------
 
 export type HoldingExitFields = Pick<HoldingRow, 'revenueScrap' | 'bestScrap' | 'instantScrap' | 'revenueOrder' | 'buyerCount'> &
-  Partial<Pick<HoldingRow, 'bestExit' | 'exitScrap' | 'scraptfPaysScrap' | 'scraptfFull' | 'scraptfListAt'>>;
+  Partial<Pick<HoldingRow, 'bestExit' | 'exitScrap' | 'scraptfPaysScrap' | 'scraptfFull' | 'scraptfListAt' | 'flags'>>;
 
 /**
  * The service judges a scrap.tf exit fresh when it builds the rows, and no push follows when the list
@@ -179,11 +212,21 @@ export function holdingExitView(r: HoldingExitFields, keyScrap: Scrap | null, no
   const listAt = finiteScrap(r.scraptfListAt) ? r.scraptfListAt : null;
   const saved = listAt !== null ? `price list saved ${fmtAgo(listAt, now)}` : null;
   if (scraptf) {
-    const bp = r.revenueScrap !== null ? `The best backpack.tf buyer pays ${fmtMoney(r.revenueScrap, keyScrap)}.` : 'No backpack.tf buyer right now.';
+    // 0.7.3: buyers without a revenue are there but unusable (noSaleReason), not absent.
+    const why = noSaleReason(r);
+    const bp =
+      r.revenueScrap !== null
+        ? `The best backpack.tf buyer pays ${fmtMoney(r.revenueScrap, keyScrap)}.`
+        : why === 'all-outliers'
+          ? 'Every eligible backpack.tf order looks unrealistic.'
+          : why === 'no-bot'
+            ? 'No realistic backpack.tf bot order, and Revenue used for profit is Instant (bot orders only).'
+            : 'No backpack.tf buyer right now.';
+    const noBuyer = why === 'none' ? 'no backpack.tf buyer' : 'no usable backpack.tf buyer';
     return {
       priceScrap,
       scraptf,
-      sub: { text: r.revenueScrap !== null ? `backpack.tf pays ${fmtMoney(r.revenueScrap, keyScrap)}` : 'no backpack.tf buyer', tone: 'muted' },
+      sub: { text: r.revenueScrap !== null ? `backpack.tf pays ${fmtMoney(r.revenueScrap, keyScrap)}` : noBuyer, tone: 'muted' },
       title: `Sells now for ${fmtMoney(priceScrap, keyScrap)} to scrap.tf's bank (your ${saved ?? 'saved price list'}). ${bp} scrap.tf pays more, so status and profit use it; its stock may have changed since the save.`,
     };
   }
@@ -207,8 +250,8 @@ export function holdingExitView(r: HoldingExitFields, keyScrap: Scrap | null, no
 }
 
 /** The status pill's hover: what the status means, naming scrap.tf when it is the exit. */
-export function holdingStatusTitle(r: Pick<HoldingRow, 'status'> & Partial<Pick<HoldingRow, 'bestExit'>>): string {
-  return r.status === 'sell' && r.bestExit === 'scraptf' ? `Sell now (scrap.tf). ${HOLDING_STATUS_HELP.sell}` : HOLDING_STATUS_HELP[r.status];
+export function holdingStatusTitle(r: Pick<HoldingRow, 'status'> & Partial<Pick<HoldingRow, 'bestExit' | 'buyerCount' | 'flags'>>): string {
+  return r.status === 'sell' && r.bestExit === 'scraptf' ? `Sell now (scrap.tf). ${HOLDING_STATUS_HELP.sell}` : holdingStatusHelp(r);
 }
 
 // ---------------------------------------------------------------------------

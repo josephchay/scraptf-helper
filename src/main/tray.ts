@@ -11,7 +11,7 @@ export interface TrayState {
   liveFeedEnabled: boolean;
   networkPaused: boolean;
   status: AppStatus | null;
-  service: Pick<ServiceHostStatus, 'state' | 'nextRestartAt'>;
+  service: Pick<ServiceHostStatus, 'state' | 'nextRestartAt' | 'failure'>;
   hotkey: HotkeyStatus;
   /** F16: settings.check.watchClipboard (the opt-in clipboard watcher). */
   checkWatch: boolean;
@@ -68,6 +68,10 @@ export function trayTooltip(state: TrayState): string {
     );
   } else if (svc.state === 'stopping' || svc.state === 'stopped') {
     lines.push('Stopping...');
+  } else if (svc.state === 'ready' && svc.failure) {
+    // 0.7.3: no status will ever come (a newer copy's data, say); the dashboard explains. Never the raw
+    // reason: it can be long or name a path.
+    lines.push('Cannot open its data: open the dashboard');
   } else if (state.networkPaused) {
     lines.push('Network paused');
   } else if (!state.status) {
@@ -77,7 +81,7 @@ export function trayTooltip(state: TrayState): string {
     lines.push(`${c.profitable} profitable, ${c.highConfidence} high confidence`);
   }
 
-  if (svc.state === 'ready' && !state.networkPaused) {
+  if (svc.state === 'ready' && !svc.failure && !state.networkPaused) {
     if (!state.liveFeedEnabled) lines.push('Live feed paused');
     else if (state.status) lines.push(`Live feed ${FEED_LABELS[state.status.feed] ?? state.status.feed}`);
     if (state.status && state.status.setupNeeded.length > 0) lines.push('Setup needed: open Settings');

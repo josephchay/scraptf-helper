@@ -11,7 +11,7 @@
 // items' true total and per-reason counts, refusals first (P5); the parser report the user copies (P4);
 // what turning import off also does to the scrap.tf window (UX-12).
 
-import { BENIGN_SKIP_REASONS } from '../shared/importCodes';
+import { BENIGN_SKIP_REASONS, UNUSUALS_INDEX } from '../shared/importCodes';
 import type { ImportReport, ImportResult } from '../shared/types';
 
 /** The save type every instruction recommends. */
@@ -91,6 +91,11 @@ function warningsOf(r: Pick<ImportResult, 'warnings'> | null | undefined): strin
 /** True when the import says the page was saved without its cards ('no-cards-saved'). */
 export function importSavedWithoutCards(r: Pick<ImportResult, 'warnings'> | null | undefined): boolean {
   return warningsOf(r).some((w) => importWarningCode(w) === NO_CARDS_SAVED);
+}
+
+/** 0.7.3: true when the page was scrap.tf's bare Unusuals index ('unusuals-index'), which lists no items. */
+export function importUnusualsIndex(r: Pick<ImportResult, 'warnings'> | null | undefined): boolean {
+  return warningsOf(r).some((w) => importWarningCode(w) === UNUSUALS_INDEX);
 }
 
 /** True when the folder watch passed over the save for its size ('too-large'). */

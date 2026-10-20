@@ -13,12 +13,15 @@ const NEVER: { rule: string; text: string }[] = [
   },
   { rule: 'R4', text: 'Never buys, sells, trades, lists, bumps, accepts or declines anything. You do every trade yourself, with Steam mobile confirmation.' },
   { rule: 'R5', text: 'No proxies and no multiple accounts. One account, one connection, your own keys.' },
-  { rule: 'R6', text: 'Identifies itself honestly in every request (TF2FlipDesk plus your contact address). Never pretends to be a browser.' },
+  {
+    rule: 'R6',
+    text: "Identifies itself honestly in every request (TF2FlipDesk plus your contact address). Never pretends to be a browser. The exception is the opt-in scrap.tf window: it is a browser you drive, and it keeps Electron's own user agent, which names Flip Desk and Electron but not your contact address.",
+  },
   { rule: 'R7', text: 'Stays below every published rate limit, waits when a site asks it to (429, Retry-After), and stops on any challenge page.' },
   { rule: 'R8', text: 'Your keys and tokens are encrypted on this computer, never logged, and sent only to the site that issued them.' },
   {
     rule: 'R9',
-    text: "Never asks for, reads or stores Steam passwords, session cookies or authenticator secrets. In the scrap.tf window you sign in on Steam's own page; the app never sees what you type there, and the session stays in that window's own browser storage (gone when the app quits, unless you choose to stay signed in).",
+    text: "Never asks for, reads or stores Steam passwords, session cookies or authenticator secrets. In the scrap.tf window you sign in on Steam's own page. The app keeps, logs and sends nothing you type there: it only checks each key press for the window's own Back, Forward, Reload and Home keys, and notes the time of your last click or key press (never the key) so that a link you open can go to your browser. The session stays in that window's own browser storage (gone when the app quits, unless you choose to stay signed in).",
   },
   {
     rule: 'R10',
@@ -106,8 +109,13 @@ export function AboutPage() {
             The idea comes from VeBeshka&apos;s <ExternalLink url="https://github.com/VeBeshka/tf2-scraptf-profit-helper">TF2 ScrapTF Profit Helper</ExternalLink>. This app
             runs nothing on scrap.tf beyond the opt-in scrap.tf window&apos;s read-only snapshot of a page you opened.
           </li>
-          <li>SKU handling is a port of @tf2autobot/tf2-sku (MIT).</li>
+          <li>SKU handling is a port of @tf2autobot/tf2-sku (node-tf2-sku), MIT License, Copyright (c) 2020 IdiNium/Nicklas Marc Pedersen.</li>
+          <li>Item names use a port of getName from node-tf2-schema, MIT License, Copyright (c) 2020 IdiNium/Nicklas Marc Pedersen.</li>
         </ul>
+        <p className="muted small">
+          The full licence texts (the MIT permission notice and the Apache License 2.0) are in NOTICE.txt and LICENSE.Apache-2.0.txt in the app&apos;s install
+          folder.
+        </p>
         <p className="muted small">
           Not affiliated with scrap.tf, backpack.tf, marketplace.tf, PriceDB or Valve. Team Fortress 2 is a trademark of Valve Corporation.
         </p>

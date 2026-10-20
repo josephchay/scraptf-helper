@@ -62,7 +62,7 @@ function setup(opts: { window?: boolean; settings?: Partial<Pick<Settings, 'scra
     service: { callRaw },
     showQuickEntry: vi.fn(),
     openItemInDashboard: vi.fn(),
-    appInfo: () => ({ version: '0.7.0', dataDir: 'd', logDir: 'l', platform: 'win32', electron: '44', node: '24' }),
+    appInfo: () => ({ version: '0.7.0', appDir: 'a', dataDir: 'd', logDir: 'l', platform: 'win32', electron: '44', node: '24' }),
     serviceState: () => null,
     hotkeys: () => ({ quickEntry: { accelerator: '', registered: false, error: null }, check: { accelerator: '', registered: false, error: null } }),
     armCheck: () => ({ armedUntil: null }),

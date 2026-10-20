@@ -167,7 +167,8 @@ describe('saved /buy/killstreaks page', () => {
 
   it('is the killstreaks bank (og:url only)', () => {
     expect([r.pageKind, r.bank]).toEqual(['buy', 'killstreaks']);
-    expect(r.warnings).toEqual([]);
+    // K15, the kit that names no weapon.
+    expect(r.warnings).toEqual(['no-sku: 1 of 15 items could not be identified']);
   });
 
   expectCards('buy_killstreaks.html', [
@@ -181,7 +182,19 @@ describe('saved /buy/killstreaks page', () => {
     ['9500000008', '197;6;uncraftable;kt-1', 'Non-Craftable Killstreak Wrench', 0, 9, 1, []],
     ['9500000009', '202;11;kt-3;festive', 'Strange Festivized Professional Killstreak Minigun', 3, 54, 1, []],
     ['9500000010', '793;11;kt-3', 'Strange Professional Killstreak Silver Botkiller Minigun Mk.I', 5, 0, 1, []],
+    // 0.7.2: kits as the real page shows them (2026-10-19): keyed by the weapon in the title, at the tier
+    // of their defindex, Non-Craftable as backpack.tf keys every fabricated kit.
+    ['9500000011', '6526;6;uncraftable;kt-3;td-205', 'Non-Craftable Professional Killstreak Rocket Launcher Kit', 37, 360, 1, []],
+    ['9500000012', '6526;6;uncraftable;kt-3;td-205', 'Non-Craftable Professional Killstreak Rocket Launcher Kit', 35, 0, 1, []],
+    ['9500000013', '6523;6;uncraftable;kt-2;td-200', 'Non-Craftable Specialized Killstreak Scattergun Kit', 2, 45, 1, []],
+    ['9500000014', '6527;6;uncraftable;kt-1;td-199', 'Non-Craftable Killstreak Shotgun Kit', 0, 27, 1, []],
+    ['9500000015', null, 'Professional Kit', 30, 0, 1, ['needs-target']],
   ]);
+
+  it('keys no kit as its bare defindex and skips the one that names no weapon, with the reason', () => {
+    for (const i of r.items) expect(i.sku ?? '').not.toMatch(/^65(?:23|26|27);6(?:;uncraftable)?$/);
+    expect(byAsset(r.items, '9500000015').warnings).toEqual(['needs-target: "Professional Kit" names no weapon for its kit']);
+  });
 
   it.each([
     // [card, fx sheen id, fx killstreaker id] stored raw as SpecialAttrs, never in the SKU
@@ -195,10 +208,16 @@ describe('saved /buy/killstreaks page', () => {
     ['9500000008', null, null],
     ['9500000009', 4, 2006],
     ['9500000010', 5, 2003],
+    // Kits: the fx classes alone (no sheen/eyes class), agreeing with the tooltip lines.
+    ['9500000011', 1, 2008],
+    ['9500000012', 4, 2003],
+    ['9500000013', 3, null],
+    ['9500000014', null, null],
+    ['9500000015', 7, 2005],
   ])('card %s: sheen %s, killstreaker %s', (id, sheen, killstreaker) => {
     const it = byAsset(r.items, id);
     expect([it.special.sheen, it.special.killstreaker]).toEqual([sheen, killstreaker]);
-    expect(it.sku).not.toMatch(/sheen|fx|u20\d\d/);
+    expect(it.sku ?? '').not.toMatch(/sheen|fx|u20\d\d/);
   });
 });
 
@@ -260,7 +279,8 @@ describe('saved /buy/items page', () => {
 
   it('is the items bank', () => {
     expect([r.pageKind, r.bank]).toEqual(['buy', 'items']);
-    expect(r.warnings).toEqual(['no-sku: 4 of 27 items could not be identified']);
+    // I19 (a weapon the stub schema does not know) and I26 (a crate of many series).
+    expect(r.warnings).toEqual(['no-sku: 2 of 27 items could not be identified']);
   });
 
   expectCards('buy_items.html', [
@@ -280,14 +300,17 @@ describe('saved /buy/items page', () => {
     ['9700000014', '5832;6;c100', 'Warbird Weapons Case #100', 0, 20, 1, []],
     ['9700000015', '5735;6;c83', 'Mann Co. Supply Munition Series #83', 0, 3, 1, ['unknown-item']],
     ['9700000016', '6012;6', 'Strange Part: Airborne Enemies Killed', 4, 90, 1, []],
-    ['9700000017', '6526;6;kt-3;td-205', 'Professional Killstreak Rocket Launcher Kit', 2, 0, 1, []],
+    // 0.7.2: a kit is keyed Non-Craftable, as backpack.tf keys every fabricated kit (the card does not say).
+    ['9700000017', '6526;6;uncraftable;kt-3;td-205', 'Non-Craftable Professional Killstreak Rocket Launcher Kit', 2, 0, 1, []],
     ['9700000018', '20003;6;kt-3;td-205;od-6526;oq-6', 'Professional Killstreak Rocket Launcher Kit Fabricator', 1, 180, 1, []],
     ['9700000019', null, 'Specialized Killstreak Bread Bite Kit Fabricator', 0, 9, 1, ['needs-target']],
     ['9700000020', '725;6', 'Tour of Duty Ticket', 0, 75, 1, []],
     ['9700000021', '725;6;uncraftable', 'Non-Craftable Tour of Duty Ticket', 0, 63, 1, []],
     ['9700000022', '206;11;australium', 'Strange Australium Grenade Launcher', 20, 0, 1, []],
-    ['9700000023', null, 'Team Captain Strangifier', 0, 22, 1, ['needs-target']],
-    ['9700000024', null, 'Unusual Taunt: Conga Unusualifier', 6, 0, 1, ['needs-target']],
+    // 0.7.2: a strangifier and an unusualifier keyed by the target their title names, as TF2's schema
+    // resolves them; the unusualifier Non-Craftable, as backpack.tf keys it.
+    ['9700000023', '6522;6;td-378', 'Team Captain Strangifier', 0, 22, 1, []],
+    ['9700000024', '9258;5;uncraftable;td-1118', 'Non-Craftable Unusual Taunt: Conga Unusualifier', 6, 0, 1, []],
     // Crates are priced per series: one with a single series takes it from the schema, any other is skipped.
     ['9700000025', '5078;6;c46', 'Scorched Crate #46', 0, 3, 1, ['series-inferred']],
     ['9700000026', null, 'Mann Co. Supply Crate', 0, 1, 1, ['series-unresolved']],
@@ -315,7 +338,7 @@ describe('saved /buy/items page', () => {
   it('keeps the strange part an item and resolves kits and fabricators only by exact name', () => {
     expect(byAsset(r.items, '9700000016').skuObject?.quality2).toBeNull();
     expect(byAsset(r.items, '9700000019').warnings).toEqual([
-      'needs-target: "Specialized Killstreak Bread Bite Kit Fabricator" needs a target item that the page does not show',
+      'needs-target: "Specialized Killstreak Bread Bite Kit Fabricator" names a weapon the item schema does not know ("Bread Bite")',
     ]);
   });
 });

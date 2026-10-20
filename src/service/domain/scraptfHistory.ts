@@ -14,9 +14,10 @@
 // since the page's previous save sharing that save's object. Per bank, scraptfRunsOf over its saves
 // (its pages read together) is the runs index, rebuilt only for a bank whose saves changed, plus a
 // per-base "listed since" map so the Live market joins scraptfListedSince with one Map lookup per row.
-// An item read bisects each cached save for the one copy it asks about.
+// An item read bisects each cached save for the one copy it asks about (0.7.3: with none named, for the
+// base's own copies, a sheen or killstreaker aside).
 
-import { BANK_STOCK_PLAIN_KEY, bankStockKey, bankStockTargetOf, type BankStockThinSave } from '../../shared/bankStock';
+import { BANK_STOCK_PLAIN_KEY, bankStockIsOwnCopy, bankStockKey, bankStockTargetOf, type BankStockThinSave } from '../../shared/bankStock';
 import { SCRAPTF_BANKS, scraptfBankInfo } from '../../shared/links';
 import type { PushContract } from '../../shared/rpc';
 import {
@@ -29,6 +30,7 @@ import {
   scraptfChangeEvent,
   scraptfChangesLimit,
   scraptfEventsOf,
+  scraptfItemCopyOf,
   scraptfItemHistoryOf,
   scraptfKeyStatesOf,
   scraptfListedPick,
@@ -173,6 +175,20 @@ function rowIn(rows: readonly BankStockStored[], target: Pick<BankStockStored, '
     else hi = mid - 1;
   }
   return null;
+}
+
+/** 0.7.3: every copy of `base` in a save (rows sorted byCopy): one bisection, then the copies side by side. */
+function rowsOfBase(rows: readonly BankStockStored[], base: string): BankStockStored[] {
+  let lo = 0;
+  let hi = rows.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (rows[mid]!.sku < base) lo = mid + 1;
+    else hi = mid;
+  }
+  const out: BankStockStored[] = [];
+  for (let i = lo; i < rows.length && rows[i]!.sku === base; i++) out.push(rows[i]!);
+  return out;
 }
 
 function sameRow(a: BankStockStored, b: BankStockStored): boolean {
@@ -562,27 +578,30 @@ export function createScraptfHistory(deps: ScraptfHistoryDeps): ScraptfHistory {
         // The copy as scraptfItemHistoryOf reads it: the SKU's base, and `special` or else the SKU's paint.
         const copy = { sku: base, specialKey: specialKey ?? bankStockTargetOf(text)?.specialKey ?? BANK_STOCK_PLAIN_KEY };
         // Each save narrowed to that copy's row (a bisection per save), so the shared rule reads no other row.
+        // 0.7.3: with no copy named, to the base's own copies (a sheen or killstreaker aside), one of which
+        // scraptfItemCopyOf picks: a specialized or professional item has no copy without them.
+        const target = { base, specialKey: copy.specialKey };
+        const narrow = (rows: readonly BankStockStored[]): BankStockStored[] => {
+          if (specialKey === null) return rowsOfBase(rows, base).filter((r) => bankStockIsOwnCopy(r, target));
+          const row = rowIn(rows, copy);
+          return row ? [row] : [];
+        };
         const list: { bank: ScraptfBank; saves: ScraptfSaveRows[] }[] = [];
         for (const info of SCRAPTF_BANKS) {
           const b = banks.get(info.bank);
           if (!b) continue;
-          list.push({
-            bank: info.bank,
-            saves: b.saves.map((s) => {
-              const row = rowIn(s.rows, copy);
-              return { batchId: s.batchId, savedAt: s.savedAt, page: s.page, rows: row ? [row] : [] };
-            }),
-          });
+          list.push({ bank: info.bank, saves: b.saves.map((s) => ({ batchId: s.batchId, savedAt: s.savedAt, page: s.page, rows: narrow(s.rows) })) });
         }
+        const chosen = scraptfItemCopyOf({ sku: text, specialKey, banks: list, keyPrice: kp });
         // Only this copy's newest events: a busy clean copy (a 'stock' event per save) must not push a
         // painted copy's few events out of a per-base read. DM-6: price events and stock moves are read
         // apart, so a page saved every few minutes cannot push its price drops out with stock moves.
-        const own = { sku: base, specialKey: copy.specialKey };
+        const own = { sku: base, specialKey: chosen };
         const stored = base
           ? [...repo.scraptfEvents({ ...own, kinds: SCRAPTF_PRICE_KINDS, limit: SCRAPTF_ITEM_EVENTS }), ...repo.scraptfEvents({ ...own, kinds: ['stock'], limit: SCRAPTF_ITEM_STOCK_EVENTS })].sort((x, y) => y.id - x.id)
           : [];
         const events = valued(stored, kp.valueScrap);
-        return scraptfItemHistoryOf({ sku: text, specialKey, ...(name ? { name } : {}), banks: list, events, keyPrice: kp, now: at });
+        return scraptfItemHistoryOf({ sku: text, specialKey: chosen, ...(name ? { name } : {}), banks: list, events, keyPrice: kp, now: at });
       } catch (err) {
         log.warn('scrap.tf history could not read an item', { error: errorText(err) });
         return scraptfItemHistoryOf({ sku: text, specialKey, ...(name ? { name } : {}), banks: [], events: [], keyPrice: kp, now: at });

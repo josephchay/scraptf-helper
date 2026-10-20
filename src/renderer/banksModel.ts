@@ -14,11 +14,12 @@
 import { SCRAPTF_BOUNDARY_SHORT } from '../shared/boundaryText';
 import { BANK_LOOK_FOR, BANK_TOP_FLIPS } from '../shared/banks';
 import { SCRAPTF_BANKS, scraptfBankInfo, type ScraptfBankInfo } from '../shared/links';
-import { isEmptyBankSave } from '../shared/market';
+import { cleanCategoryCounts, isEmptyBankSave } from '../shared/market';
 import { BANK_STOCK_OPEN_FILTERS } from '../shared/types';
 import type {
   BankStockOpenFilter,
   ConfidenceLevel,
+  ImportBatch,
   Scrap,
   ScraptfBank,
   ScraptfBankFlip,
@@ -466,13 +467,20 @@ export function seenOnText(seenOn: Pick<ScraptfSeenOn, 'bank' | 'at'> | null | u
  * (importSavedWithoutCards of the result; unknown for an ImportBatch, which keeps no warnings) decides
  * whether the save type is to blame: a page whose cards were all read but skipped (every price already
  * set by a newer save, say) was saved fine. F21 `fromWindow` (origin 'window'): a read of the scrap.tf
- * window was no save, so the remedy is to read it again there once the items show.
+ * window was no save, so the remedy is to read it again there once the items show. 0.7.3
+ * `removedByUpdate` (importBatchItemsRemoved of an ImportBatch): it did store items, which an update
+ * removed later, so neither timing nor the save type is to blame. 0.7.3 `unusualsIndex`
+ * (importUnusualsIndex of the result): the page was scrap.tf's bare Unusuals index, which lists no items,
+ * so the remedy is to open one of its pages; an ImportBatch keeps no warnings, so an empty Unusuals save
+ * in the history only adds that alternative to its hedge.
  */
 export function importBankText(
   bank: ScraptfBank | null | undefined,
   stored?: number | null,
   savedWithoutCards?: boolean,
   fromWindow = false,
+  removedByUpdate = false,
+  unusualsIndex = false,
 ): { text: string; title: string } | null {
   if (bank === undefined) return null;
   const info = scraptfBankInfo(bank);
@@ -484,20 +492,38 @@ export function importBankText(
   }
   const path = bankPath(info.url);
   if (typeof stored === 'number' && isEmptyBankSave({ itemCount: stored }, info.bank)) {
+    if (removedByUpdate) {
+      return {
+        text: `${info.label} · ${path} · not counted`,
+        title: `Not counted as a save of ${path}: an update removed the items it stored (0.7.2 removed killstreak kits stored without their weapon), so the scrap.tf banks page and the Live market strip pass over it. It was not saved or read too early: the next save or read of ${path} counts as usual.`,
+      };
+    }
+    const unusuals = info.bank === 'unusuals';
     const what =
-      savedWithoutCards === false
-        ? 'The skipped items say why.'
-        : fromWindow
-          ? 'If it was read before its items showed, press Read page now in the window once they show.'
-          : savedWithoutCards === true
-            ? `Save it again as '${SAVE_MODE}'.`
-            : `If it was saved before its items showed, save it again as '${SAVE_MODE}'.`;
+      unusualsIndex && unusuals
+        ? `This is the Unusuals index, which lists no items: open one of its pages (${path}/<n>), then save or read that page.`
+        : savedWithoutCards === false
+          ? 'The skipped items say why.'
+          : fromWindow
+            ? 'If it was read before its items showed, press Read page now in the window once they show.'
+            : savedWithoutCards === true
+              ? `Save it again as '${SAVE_MODE}'.`
+              : `If it was saved before its items showed, save it again as '${SAVE_MODE}'.${unusuals ? ` If it was the Unusuals index itself (${path}), which lists no items, save one of its pages instead.` : ''}`;
     return {
       text: `${info.label} · ${path} · not counted`,
       title: `Not counted as a save of ${path}: it stored no items, so the scrap.tf banks page and the Live market strip pass over it. ${what}`,
     };
   }
   return { text: `${info.label} · ${path}`, title: `Counted as a save of ${path} on the scrap.tf banks page and the Live market strip.` };
+}
+
+/**
+ * 0.7.3: a batch whose stored items an update removed afterwards. The bare-kit cleanup (schema V12) zeroes
+ * item_count but keeps the categories counted at import, so a 0 count beside stored categories means such
+ * a batch; a page saved or read before its cards showed stored categories {} (null here).
+ */
+export function importBatchItemsRemoved(b: Pick<ImportBatch, 'itemCount' | 'categories'>): boolean {
+  return typeof b.itemCount === 'number' && Number.isFinite(b.itemCount) && b.itemCount <= 0 && cleanCategoryCounts(b.categories) !== null;
 }
 
 // ---------------------------------------------------------------------------

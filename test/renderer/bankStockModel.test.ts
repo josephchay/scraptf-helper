@@ -353,7 +353,8 @@ describe('the cells', () => {
     expect(bankStockPriceTitle(row({ costKeys: 1, costScrapRaw: K + 9, costScrap: 2 * K + 9 }), K)).toBe(
       "scrap.tf sells it for this, as of your newest save. Listed as 1 key 64.11 ref: 2 keys 1.00 ref at today's key price.",
     );
-    expect(bankStockPriceTitle(row({ change: 'gone', hasExtras: true }), K)).toBe('Last price on scrap.tf, from your previous save. This copy has extras.');
+    // 0.7.3: without a last sighting, the price of the save it is compared with (CQ-2's baseline).
+    expect(bankStockPriceTitle(row({ change: 'gone', hasExtras: true }), K)).toBe('Price on scrap.tf in your save from before your latest run of saves. This copy has extras.');
   });
 
   it("names a copy's extras from its key, so a plain and a painted copy can be told apart", () => {
@@ -373,7 +374,7 @@ describe('the cells', () => {
   it('who buys it, and how many buyers there are', () => {
     expect(bankStockSellsTitle(row(), K)).toBe('Sells for 5.00 ref to Keybot (bot, online) on backpack.tf. 4 buyers with eligible orders.');
     expect(bankStockSellsTitle(row({ revenueScrap: null, revenueOrder: null, buyerCount: 0 }), K)).toBe('No eligible backpack.tf buy orders for this item in the live book.');
-    expect(bankStockSellsTitle(row({ revenueScrap: null, revenueOrder: null, buyerCount: 2 }), K)).toMatch(/^Every eligible order looks unrealistic/);
+    expect(bankStockSellsTitle(row({ revenueScrap: null, revenueOrder: null, buyerCount: 2 }), K, 'conservative')).toMatch(/^Every eligible order looks unrealistic/);
     expect(bankStockBuyer(row())).toBe('Keybot');
     expect(bankStockBuyer(row({ revenueOrder: { ...ORDER, userName: '', isBot: false } }))).toBe('Human');
     expect(bankStockBuyer(row({ revenueOrder: null }))).toBeNull();
@@ -383,7 +384,7 @@ describe('the cells', () => {
     expect(bankStockPayTitle(row({ maxCostScrap: 36, costScrap: 27 }), K)).toBe("Pay up to 4.00 ref on scrap.tf: the highest price that still clears your thresholds. scrap.tf's price is 1.00 ref under it.");
     expect(bankStockPayTitle(row({ maxCostScrap: 18, costScrap: 27 }), K)).toContain('1.00 ref over it.');
     expect(bankStockPayTitle(row({ maxCostScrap: 27, costScrap: 27 }), K)).toContain('exactly at it.');
-    expect(bankStockPayTitle(row({ maxCostScrap: null, revenueScrap: null }), K)).toBe('No eligible buy orders, so there is no ceiling.');
+    expect(bankStockPayTitle(row({ maxCostScrap: null, revenueScrap: null, buyerCount: 0 }), K)).toBe('No eligible buy orders, so there is no ceiling.');
     expect(bankStockPayTitle(row({ maxCostScrap: null, hasExtras: true }), K)).toBe('No scrap.tf price clears your thresholds against these buyers. The ceiling is for a clean copy; this one has extras.');
   });
 
@@ -394,7 +395,7 @@ describe('the cells', () => {
     expect(over).toMatchObject({ tone: 'bad', text: 'Over by 2.00 ref' });
     expect(over.title).toContain('not a flip at that price');
     expect(bankStockVerdictPill(row({ verdict: 'over', maxCostScrap: null }), K).text).toBe('Over');
-    expect(bankStockVerdictPill(row({ verdict: 'no-buyers', revenueScrap: null, maxCostScrap: null, profitScrap: null }), K)).toMatchObject({ tone: 'muted', text: 'No buyers' });
+    expect(bankStockVerdictPill(row({ verdict: 'no-buyers', revenueScrap: null, maxCostScrap: null, profitScrap: null, buyerCount: 0 }), K)).toMatchObject({ tone: 'muted', text: 'No buyers' });
     // A gone row is judged at its last price; extras are judged as a clean copy.
     expect(bankStockVerdictPill(row({ change: 'gone' }), K).title).toMatch(/^At its last price: /);
     expect(bankStockVerdictPill(row({ hasExtras: true }), K).title).toContain('Judged as a clean copy');

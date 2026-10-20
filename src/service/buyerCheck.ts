@@ -12,6 +12,8 @@ export const BUYER_CHECK_CACHE_MS = 60 * 60_000;
 export const NO_TOKEN_MESSAGE = 'Add a backpack.tf access token in Settings';
 export const API_OFF_MESSAGE = 'The backpack.tf API is turned off in Settings.';
 export const PAUSED_MESSAGE = 'The network is paused. Resume it from the top bar first.';
+/** 0.7.3: the lookup timed out behind another backpack.tf request (RateLimitedError.busy), so there is no slot time to give. */
+export const BUSY_MESSAGE = 'backpack.tf is busy with another Flip Desk request (such as the price list download); try again in a moment.';
 /** Buyers remembered at once; the oldest answer goes first. A drawer session checks a handful. */
 export const BUYER_CHECK_CACHE_MAX = 500;
 
@@ -85,6 +87,7 @@ export function createBuyerChecker(deps: BuyerCheckDeps): BuyerChecker {
   const describe = (err: unknown): string => {
     const now = clock.now();
     if (err instanceof RateLimitedError) {
+      if (err.busy) return BUSY_MESSAGE;
       const s = Math.max(1, Math.ceil((err.retryAt - now) / 1000));
       return `backpack.tf user lookups are rate limited; try again in ${s} s.`;
     }

@@ -76,7 +76,8 @@ export function parseWindowBounds(text: unknown): SavedWindowBounds | null {
   if (typeof text !== 'string' || text.length > MAX_FILE_CHARS) return null;
   let raw: unknown;
   try {
-    raw = JSON.parse(text);
+    // 0.7.3: a copy saved as "UTF-8 with BOM" (Windows PowerShell 5.1) is the same file, not an unreadable one.
+    raw = JSON.parse(text.charCodeAt(0) === 0xfeff ? text.slice(1) : text);
   } catch {
     return null;
   }
@@ -101,8 +102,9 @@ export function visibleOn(r: Rect, area: Rect): boolean {
 
 /**
  * The remembered bounds when a display shows enough of them now (a monitor may have gone since), at least the
- * minimum size; otherwise the default size, fitted to and centred on the work area of the display nearest the
- * cursor. Without a usable screen, the default size alone.
+ * minimum size, moved down onto that display when its top edge would be on none; otherwise the default size,
+ * fitted to and centred on the work area of the display nearest the cursor. Without a usable screen, the default
+ * size alone.
  */
 export function placeWindow(saved: SavedWindowBounds | null, screen: BoundsScreen, size: WindowSize): WindowPlacement {
   let areas: Rect[] = [];
@@ -114,8 +116,13 @@ export function placeWindow(saved: SavedWindowBounds | null, screen: BoundsScree
   } catch {
     areas = [];
   }
-  if (saved !== null && areas.some((a) => visibleOn(saved, a))) {
-    return { bounds: { x: saved.x, y: saved.y, width: Math.max(size.minWidth, saved.width), height: Math.max(size.minHeight, saved.height) }, maximized: saved.maximized };
+  const shown = saved === null ? undefined : areas.find((a) => visibleOn(saved, a));
+  if (saved !== null && shown !== undefined) {
+    // 0.7.3: its top strip (title bar and toolbar, the only places the mouse can drag or use it) must be on a
+    // display too. When none shows it (a monitor above has gone), the top is above `shown`: moved down to it.
+    const strip = { x: saved.x, y: saved.y, width: saved.width, height: Math.min(MIN_VISIBLE.height, saved.height) };
+    const y = areas.some((a) => visibleOn(strip, a)) ? saved.y : shown.y;
+    return { bounds: { x: saved.x, y, width: Math.max(size.minWidth, saved.width), height: Math.max(size.minHeight, saved.height) }, maximized: saved.maximized };
   }
   let area: Rect | null = null;
   try {

@@ -824,6 +824,14 @@ export interface EventQuery {
   sinceTs?: UnixMs;
 }
 
+/** 0.7.3: the Live log's filters for its events export (opportunityEvents.ts); an omitted field does not filter. */
+export interface EventsExportQuery {
+  kinds?: OpportunityEventKind[];
+  category?: Category;
+  /** Every word must match the name, SKU or summary, ignoring case (marketSearchTokens). */
+  search?: string;
+}
+
 // ---------------------------------------------------------------------------
 // Item lookup and links
 // ---------------------------------------------------------------------------
@@ -1090,9 +1098,16 @@ export interface ImportResult {
   warnings: string[];
   /**
    * F14, saved scrap.tf/items pages only: price list rows this page wrote, out-of-stock rows included
-   * (they are skipped as prices but kept on the list). 0 when a newer saved list already had them all.
+   * (they are skipped as prices but kept on the list). 0 when a newer saved list already had them all,
+   * or when the page gave no list rows (listRowsRead 0).
    */
   listRows?: number;
+  /**
+   * 0.7.3, saved scrap.tf/items pages only: the list rows this page gave (rows with a SKU and a price, one
+   * per base SKU), written or not. 0 when it had none: saved before its rows loaded, a layout the parser
+   * does not know, or no row identified. Absent from older results.
+   */
+  listRowsRead?: number;
   /** F15: the scrap.tf page recognised (ImportBatch.bank of `batchId`); null when not recognised. Absent from 0.4 results. */
   bank?: ScraptfBank | null;
   /** F21: how the page reached the import (ImportBatch.origin of `batchId`). Absent: a file. */
@@ -1375,7 +1390,10 @@ export interface BankStockRow {
   category: Category;
   /** Paint, spells, parts, sheen, killstreaker or a name/description tag: the ceiling is for a clean copy. */
   hasExtras: boolean;
-  /** The price as saved (a gone row: its last price, from the previous save), then valued at the current key price. */
+  /**
+   * The price as saved, then valued at the current key price. A gone row: its last price, from the newest
+   * save that listed it on sale (0.7.3, the runs index), else from the previous save.
+   */
   costKeys: number;
   costScrapRaw: Scrap;
   costScrap: Scrap;
@@ -1412,7 +1430,8 @@ export interface BankStockRow {
   changeSinceListed: ScraptfPriceChange | null;
   /**
    * 0.7.1 (DM-5): the newest save that listed it on sale (the end of its current run), so an old sighting is
-   * not read as current. Absent or null: unknown (shown as before).
+   * not read as current. 0.7.3: a gone row's too (the Gone view's Last seen). Absent or null: unknown (shown
+   * as before).
    */
   lastSeenAt?: UnixMs | null;
 }
@@ -1562,7 +1581,10 @@ export interface ScraptfChangeEvent extends ScraptfEventStored {
   deltaScrap: Scrap | null;
   /** delta / from; null unless both sides have a price and from > 0. */
   pct: number | null;
-  /** Live backpack.tf revenue (Sells for) and Pay up to of the base SKU now; null without an eligible buyer. */
+  /**
+   * Live backpack.tf revenue (Sells for) and Pay up to of the base SKU now; null without an eligible buyer,
+   * or (0.7.3) with eligible buyers none of which the revenue pick can use (buyerCount > 0).
+   */
   revenueScrap: Scrap | null;
   maxCostScrap: Scrap | null;
   /** toValueScrap is at or under maxCostScrap now: the "Flip" pill. */
@@ -1572,6 +1594,12 @@ export interface ScraptfChangeEvent extends ScraptfEventStored {
    * copy is no longer on sale), so `flip` is false: the muted "was a flip" pill. Absent: false.
    */
   wasFlip?: boolean;
+  /**
+   * 0.7.3: the Live market entry's distinct buyers with eligible orders (0 without an entry) and its flags
+   * ('all-outliers'...), so a null revenue with buyers says why. Absent: not known (an older service).
+   */
+  buyerCount?: number;
+  flags?: string[];
 }
 
 /** 'scraptf.changes' params (zod in rpcHandlers): newest first, paged by id. */
@@ -1660,6 +1688,11 @@ export interface ScraptfKeyRun {
   runStart: { keys: number; scrap: Scrap } | null;
   /** The raw price on its newest observation, when on sale. */
   current: { keys: number; scrap: Scrap; stock: number | null } | null;
+  /**
+   * 0.7.3: the raw price on the save at lastSeenAt (null: never on sale). Unlike `current`, kept once it goes
+   * off sale: a gone bank stock row's last price. Optional so runs built before it still read.
+   */
+  lastOnSale?: { keys: number; scrap: Scrap } | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -2035,6 +2068,9 @@ export interface PermissionRecord {
   grantedAt: string;
   scope: string;
 }
+
+/** 0.7.3: each field's longest value, shared by the settings schema (main) and the Import page's inputs, so the page never accepts a value main refuses. */
+export const PERMISSION_FIELD_MAX: Readonly<Record<keyof PermissionRecord, number>> = { grantor: 200, contact: 200, grantedAt: 100, scope: 1000 };
 
 export interface Settings {
   /** Shown in the User-Agent so API operators can reach the user. */

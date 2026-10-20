@@ -9,7 +9,8 @@ Copyright NetroScript. Licensed under the Apache License, Version 2.0.
 The link menu (src/shared/links.ts) and parts of the saved-page parser
 (src/service/import/scraptfHtml.ts) follow its link templates and item-name
 handling. The full licence text is in
-reference/scrap.tf-item-information-master/LICENSE and at
+reference/scrap.tf-item-information-master/LICENSE (in an installed copy,
+LICENSE.Apache-2.0.txt next to this NOTICE.txt) and at
 http://www.apache.org/licenses/LICENSE-2.0
 
 ------------------------------------------------------------------------------
@@ -19,10 +20,16 @@ Ported in src/shared/sku.ts.
 
 ------------------------------------------------------------------------------
 node-tf2-schema — https://github.com/TF2Autobot/node-tf2-schema
-MIT License. Copyright (c) Nicklas Marc Pedersen and contributors.
+MIT License. Copyright (c) 2020 IdiNium/Nicklas Marc Pedersen.
 The getName item-naming logic is ported in src/service/connectors/schemaNames.ts.
 
-MIT License text (applies to the two MIT-licensed works above):
+------------------------------------------------------------------------------
+React, React DOM and Scheduler — https://github.com/facebook/react
+MIT License. Copyright (c) Meta Platforms, Inc. and affiliates.
+Bundled into the dashboard (dist/renderer/assets/index-*.js); the bundler
+drops their licence headers.
+
+MIT License text (applies to the MIT-licensed works above):
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal

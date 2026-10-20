@@ -113,7 +113,11 @@ describe('the empty Opportunities page (UX-4)', () => {
 
   it('leads with the same sentence and the Import page, Quick entry and the price sheet after it', () => {
     expect(page).toContain('{firstPriceText(scraptfWindowOn(settings))} Or type the prices you see (Quick entry)');
-    const empty = page.slice(page.indexOf('if (counts && counts.prices === 0 && counts.rules === 0) {'), page.indexOf('if (paused) {'));
+    const from = page.indexOf('if (firstPrice) {');
+    const to = page.indexOf('if (paused && hiddenCount === 0) {');
+    expect(from).toBeGreaterThan(0);
+    expect(to).toBeGreaterThan(from);
+    const empty = page.slice(from, to);
     const order = ["navigate('import')", 'openQuick()', "navigate('prices')"].map((s) => empty.indexOf(s));
     expect(order.every((i) => i > 0)).toBe(true);
     expect([...order].sort((a, b) => a - b)).toEqual(order);

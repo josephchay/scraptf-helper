@@ -262,9 +262,10 @@ describe('the copy', () => {
   });
 
   it('Import page: Recent batches dates a bank by what each batch stored, as the banks page does', () => {
-    // F21: a read of the scrap.tf window words its remedy for the window (origin 'window').
-    expect(imp).toContain("const bank = b.bank ? importBankText(b.bank, b.itemCount, undefined, b.origin === 'window') : null;");
-    expect(imp).toContain("importBankText(r.bank, r.stored, importSavedWithoutCards(r), r.origin === 'window')");
+    // F21: a read of the scrap.tf window words its remedy for the window (origin 'window'); 0.7.3: a batch an
+    // update emptied names the update, and a result from the bare Unusuals index says so.
+    expect(imp).toContain("const bank = b.bank ? importBankText(b.bank, b.itemCount, undefined, b.origin === 'window', importBatchItemsRemoved(b)) : null;");
+    expect(imp).toContain("importBankText(r.bank, r.stored, importSavedWithoutCards(r), r.origin === 'window', false, importUnusualsIndex(r))");
   });
 
   it("Import page: a manual import without cards leaves its toast to the dashboard's, so it shows once", () => {

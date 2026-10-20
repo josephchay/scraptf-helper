@@ -74,11 +74,11 @@ export const CHECK_FUZZY_NOTE = 'Closest match only: check that this is the item
 /** The resolver checked the general item (no effect, series or paint it could use). */
 export const CHECK_INCOMPLETE_NOTE = 'Part of the name (an effect, crate series or paint) was missing or not recognised, so the general item was checked.';
 /**
- * A plain check priced from the user's only stored copy, which has paint, spells or parts (the Live
- * market flags that row 'has-extras'): not what a plain one costs, so no flip notification and no
- * Bought it at that price.
+ * A plain check priced from the user's only stored copy, which has paint, spells, parts or a name or
+ * description tag (the Live market flags that row 'has-extras'): not what a plain one costs, so no flip
+ * notification and no Bought it at that price. 0.7.3: names every extra, not only paint and spells.
  */
-export const CHECK_EXTRAS_NOTE = 'Your price is for a painted or spelled copy, not a plain one.';
+export const CHECK_EXTRAS_NOTE = 'Your price is for a copy with extras (paint, spells, parts or a tag), not a plain one.';
 
 /** The fixed end of checkHintedNote, by which the popup and checkMatchedByHint recognise it. */
 export const CHECK_HINTED_NOTE_TAIL = 'the item you opened from the Live market.';

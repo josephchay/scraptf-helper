@@ -10,7 +10,7 @@ import { holdingStatusOf } from '../shared/holdings';
 import type { HoldingRow, HoldingStatus, ItemDetail, JournalEntry, JournalInput, JournalSide, OrderSummary, Scrap, UnixMs } from '../shared/types';
 import type { BareUnit } from './components/PriceInput';
 import { fmtAge, fmtMoney, fmtSignedMoney, fromDateTimeLocal, toDateTimeLocal } from './format';
-import { ceilingVerdict, previewRevenue, profitPreview, type PreviewSettings, type ProfitPreview } from './quickModel';
+import { ceilingVerdict, noRevenueText, previewRevenue, profitPreview, type PreviewSettings, type ProfitPreview } from './quickModel';
 
 /** What the dialog opens with; every field but side, sku and name is a prefill the user can change. */
 export interface RecordTradeInit {
@@ -185,7 +185,8 @@ export function buyComparison(
     buyerCount: rev?.eligibleCount ?? 0,
   };
   if (!rev || rev.revenueScrap === null) {
-    return { ...base, preview: null, tone: 'muted', text: 'No eligible backpack.tf buyer right now, so there is no Pay up to to compare with.' };
+    // 0.7.3: eligible orders none of which is usable (all outliers, or no bot for Instant) say so, with the count.
+    return { ...base, preview: null, tone: 'muted', text: `${noRevenueText(rev)}, so there is no Pay up to to compare with.` };
   }
   if (costScrap === null) return { ...base, preview: null, tone: 'muted', text: waitingText(typed, 'Type the price you paid to compare it with Pay up to.') };
   const pv = profitPreview(costScrap, rev, p);

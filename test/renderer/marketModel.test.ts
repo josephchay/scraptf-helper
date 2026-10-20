@@ -870,10 +870,10 @@ describe('cells', () => {
     expect(c.title).toContain('3 in stock');
   });
 
-  it('shows a typed price without stock, and says when it was for a painted copy', () => {
+  it('shows a typed price without stock, and says when it was for a copy with extras', () => {
     const c = yourPriceCell(row({ sku: 'a', verdict: 'over', knownCostScrap: 130, knownSource: 'typed', knownObservedAt: NOW - 2 * 3_600_000, stock: 5, flags: ['has-extras'] }), KEY, NOW);
     expect(c).toMatchObject({ badge: 'typed', age: '2 h', stock: null, tone: 'bad' });
-    expect(c.title).toContain('painted or spelled');
+    expect(c.title).toContain('a copy with extras (paint, spells, a sheen or killstreaker)');
     expect(yourPriceCell(row({ sku: 'a', verdict: 'no-buyers', knownCostScrap: 1, knownSource: 'typed', knownObservedAt: null }), KEY, NOW)).toMatchObject({ age: null, tone: null });
   });
 
@@ -890,7 +890,7 @@ describe('cells', () => {
     expect(t).toContain('best 14.44 ref (outlier)');
     expect(t).toContain('4 buyers');
     expect(marketSellsForTitle(row({ sku: 'a', revenueScrap: null, revenueOrder: null, buyerCount: 0 }), KEY)).toContain('No eligible');
-    expect(marketSellsForTitle(row({ sku: 'a', revenueScrap: null, revenueOrder: null, buyerCount: 3 }), KEY)).toContain('unrealistic');
+    expect(marketSellsForTitle(row({ sku: 'a', revenueScrap: null, revenueOrder: null, buyerCount: 3, flags: ['all-outliers'] }), KEY)).toContain('unrealistic');
     expect(marketPayTitle(row({ sku: 'a', maxCostScrap: 100 }), KEY)).toContain('11.11 ref');
     expect(marketPayTitle(row({ sku: 'a', maxCostScrap: null, buyerCount: 2 }), KEY)).toContain('No scrap.tf price clears');
     expect(marketPayTitle(row({ sku: 'a', maxCostScrap: null, buyerCount: 0 }), KEY)).toContain('no ceiling');

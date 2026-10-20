@@ -183,6 +183,12 @@ export interface MarketIndexDeps extends ServiceDeps {
   history?: Pick<ScraptfHistory, 'listedSinceFor' | 'version'> & Partial<Pick<ScraptfHistory, 'listedFor'>>;
   /** Injected in tests; defaults to unref'd real timers (realTimers). */
   timers?: TimerApi;
+  /**
+   * 0.7.3: the clock (ms, any origin) that ends a chunk once it has used MARKET_SLICE_MS and sizes the next.
+   * Defaults to performance.now(). Injected in tests whose fake timers count change pushes, so a loaded CPU
+   * cannot split a build into more slices (and pushes) than the test expects.
+   */
+  sliceNow?: () => number;
 }
 
 // ---------------------------------------------------------------------------
@@ -314,7 +320,13 @@ interface Known {
 }
 
 interface KnownState {
+  /** Per base, its newest price (of several seen at that time, the highest id: rows read knownAt). */
   byBase: Map<string, Known>;
+  /**
+   * 0.7.2: a base's newest prices when there are several seen at that one time. A look stores a kit once
+   * per sheen/killstreaker combo, every one at the page's time; the row's price is the cheapest of them.
+   */
+  tied: Map<string, Known[]>;
   /** Distinct base SKUs with a typed price / with an imported one. */
   typed: number;
   pages: number;
@@ -385,14 +397,52 @@ interface Cand {
   r: number;
 }
 
-function newerKnown(a: Known, b: Known): boolean {
-  return a.observedAt > b.observedAt || (a.observedAt === b.observedAt && a.id > b.id);
+/**
+ * Folds one price into its base's newest, typed and imported alike. 0.7.2: prices seen at the newest
+ * time are also kept together in `tied`; a newer one replaces them all, as a newer look replaces a page.
+ */
+function foldKnown(byBase: Map<string, Known>, tied: Map<string, Known[]>, base: string, k: Known): void {
+  const cur = byBase.get(base);
+  if (cur === undefined || k.observedAt > cur.observedAt) {
+    byBase.set(base, k);
+    if (cur !== undefined) tied.delete(base);
+  } else if (k.observedAt === cur.observedAt) {
+    const group = tied.get(base);
+    if (group) group.push(k);
+    else tied.set(base, [cur, k]);
+    if (k.id > cur.id) byBase.set(base, k);
+  }
 }
 
-/** Per base: the newest typed and the newest imported price; the newer of the two is the row's. */
+/**
+ * The price a base's row shows at the key price K: its newest, and of several seen at that time the
+ * cheapest, equal costs keeping the higher id. 0.7.2: before, the highest id won such a tie, which is the
+ * copy stored last, so a 20-key kit under the ceiling could hide behind a 37-key one of the same look.
+ * Valued at the read's K (as the row's cost is) rather than keys before metal, since a card priced by
+ * its data-item-value alone is all metal.
+ */
+function knownAt(kn: KnownState, base: string, K: Scrap): Known | null {
+  const group = kn.tied.get(base);
+  if (group === undefined) return kn.byBase.get(base) ?? null;
+  let best = group[0]!;
+  let bestCost = valueScrap(best.costKeys, best.costScrapRaw, K);
+  for (let i = 1; i < group.length; i++) {
+    const k = group[i]!;
+    const cost = valueScrap(k.costKeys, k.costScrapRaw, K);
+    if (cost < bestCost || (cost === bestCost && k.id > best.id)) {
+      best = k;
+      bestCost = cost;
+    }
+  }
+  return best;
+}
+
+/** Per base: the newest typed or imported price (knownAt picks among several seen at one time). */
 function buildKnown(prices: readonly ScrapPrice[]): KnownState {
-  const typed = new Map<string, Known>();
-  const page = new Map<string, Known>();
+  const byBase = new Map<string, Known>();
+  const tied = new Map<string, Known[]>();
+  const typed = new Set<string>();
+  const page = new Set<string>();
   let newestPageAt: UnixMs | null = null;
   const batchBases = new Map<number, string[]>();
   const seen = new Map<string, SeenPrice>();
@@ -418,15 +468,9 @@ function buildKnown(prices: readonly ScrapPrice[]): KnownState {
       stock: isPage && typeof sp.stock === 'number' && Number.isFinite(sp.stock) ? sp.stock : null,
       hasExtras: inp.target.hasExtras === true,
     };
-    const side = isPage ? page : typed;
-    const cur = side.get(inp.baseSku);
-    if (!cur || newerKnown(k, cur)) side.set(inp.baseSku, k);
+    (isPage ? page : typed).add(inp.baseSku);
+    foldKnown(byBase, tied, inp.baseSku, k);
     if (isPage && (newestPageAt === null || k.observedAt > newestPageAt)) newestPageAt = k.observedAt;
-  }
-  const byBase = new Map<string, Known>(typed);
-  for (const [b, k] of page) {
-    const t = byBase.get(b);
-    if (!t || newerKnown(k, t)) byBase.set(b, k);
   }
   const byGeneric = new Map<string, string[]>();
   for (const b of byBase.keys()) {
@@ -436,7 +480,7 @@ function buildKnown(prices: readonly ScrapPrice[]): KnownState {
     if (list) list.push(b);
     else byGeneric.set(any, [b]);
   }
-  return { byBase, typed: typed.size, pages: page.size, newestPageAt, byGeneric, batchBases, seen };
+  return { byBase, tied, typed: typed.size, pages: page.size, newestPageAt, byGeneric, batchBases, seen };
 }
 
 /**
@@ -517,6 +561,7 @@ function finiteOrNull(v: number | null | undefined): number | null {
 export function createMarketIndex(deps: MarketIndexDeps): MarketIndex {
   const { repo, log, clock, schema } = deps;
   const timers = deps.timers ?? realTimers;
+  const sliceNow = deps.sliceNow ?? (() => performance.now());
 
   let started = false;
   const entries = new Map<string, Entry>();
@@ -823,7 +868,7 @@ export function createMarketIndex(deps: MarketIndexDeps): MarketIndex {
    * time is checked while evaluating instead of trusted in advance.
    */
   function runChunk(w: Work): void {
-    const t0 = performance.now();
+    const t0 = sliceNow();
     const start = w.pos;
     const end = Math.min(w.bases.length, start + chunkSize);
     const chunk = w.bases.slice(start, end);
@@ -844,7 +889,7 @@ export function createMarketIndex(deps: MarketIndexDeps): MarketIndex {
     let done = 0;
     for (const base of chunk) {
       // At least one base per slice, so the work always moves; the rest is re-read next slice.
-      if (done > 0 && performance.now() - t0 >= MARKET_SLICE_MS) break;
+      if (done > 0 && sliceNow() - t0 >= MARKET_SLICE_MS) break;
       // Counted before evaluating: a base that throws is skipped, not retried.
       done++;
       try {
@@ -854,7 +899,7 @@ export function createMarketIndex(deps: MarketIndexDeps): MarketIndex {
       }
     }
     w.pos = start + done;
-    const ms = performance.now() - t0;
+    const ms = sliceNow() - t0;
     if (done > 0) {
       const target = ms > 0 ? Math.floor((MARKET_SLICE_MS * done) / ms) : MAX_CHUNK;
       chunkSize = Math.max(MIN_CHUNK, Math.min(MAX_CHUNK, target, chunkSize * 2));
@@ -1303,7 +1348,7 @@ export function createMarketIndex(deps: MarketIndexDeps): MarketIndex {
         const listed = listedOf(row.sku, link);
         if (!marketListedSideMatches({ scraptfListedSince: listed.since, scraptfLastSeenAt: listed.lastSeenAt }, q, now)) return;
       }
-      const k = kn.byBase.get(row.sku) ?? null;
+      const k = knownAt(kn, row.sku, K);
       const knownCost = k ? valueScrap(k.costKeys, k.costScrapRaw, K) : null;
       // The rule estimate decides the verdict only without a known cost, with buyers and a ceiling.
       const ruleCost = knownCost === null && row.buyerCount > 0 && row.maxCostScrap !== null ? ruleCostOf(row.sku, subject) : undefined;

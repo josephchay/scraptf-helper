@@ -7,7 +7,7 @@
 
 import { z } from 'zod';
 import { DEFAULT_SETTINGS, mergeSettings } from './defaults';
-import { SCRAPTF_BANK_IDS, type DeepPartial, type ScraptfBank, type Settings } from './types';
+import { PERMISSION_FIELD_MAX, SCRAPTF_BANK_IDS, type DeepPartial, type ScraptfBank, type Settings } from './types';
 import { isValidAccelerator, sameAccelerator } from './accelerator';
 import { CHECK_HOTKEY_CONFLICT } from './check';
 import { CONTACT_MAX, CONTACT_RE } from './contact';
@@ -87,11 +87,12 @@ const connectorsSchema = z.object({
   scm: bool,
 });
 
+// 0.7.3: the Import page's inputs read the same limits.
 const permissionSchema = z.object({
-  grantor: shortText(200),
-  contact: shortText(200),
-  grantedAt: shortText(100),
-  scope: shortText(1000),
+  grantor: shortText(PERMISSION_FIELD_MAX.grantor),
+  contact: shortText(PERMISSION_FIELD_MAX.contact),
+  grantedAt: shortText(PERMISSION_FIELD_MAX.grantedAt),
+  scope: shortText(PERMISSION_FIELD_MAX.scope),
 });
 
 // F20: the banks a re-save reminder may name.

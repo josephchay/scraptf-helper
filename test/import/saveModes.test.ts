@@ -278,9 +278,12 @@ describe('a bank page saved without its cards (no-cards-saved)', () => {
     const unusuals = fixture('unusuals.html');
     const start = unusuals.indexOf('<!-- U1');
     const end = unusuals.indexOf('\t\t\t</div>\n\t\t</div>\n\t</body>');
-    const u = h.run(unusuals.slice(0, start) + unusuals.slice(end), NOW - MIN, 'unusuals.html');
+    const emptyUnusuals = unusuals.slice(0, start) + unusuals.slice(end);
+    // 0.7.3: an unusuals sub-page (one effect's page); the bare /unusuals index never shows cards, so it says so.
+    const u = h.run(emptyUnusuals.replaceAll('https://scrap.tf/unusuals"', 'https://scrap.tf/unusuals/378"'), NOW - MIN, 'unusuals.html');
     expect(u).toMatchObject({ bank: 'unusuals', stored: 0 });
     expect(codes(u)).toEqual(['no-cards-saved']);
+    expect(codes(h.run(emptyUnusuals, NOW - MIN, 'unusuals index.html'))).toEqual(['unusuals-index']);
     const list = fixture('items_list.html');
     const l = h.run(list.slice(0, list.indexOf('<tbody>') + 7) + list.slice(list.indexOf('</tbody>')), NOW - MIN, 'items.html');
     expect(l).toMatchObject({ bank: 'list' satisfies ScraptfBank });

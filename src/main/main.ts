@@ -694,6 +694,9 @@ function start(): void {
 
   const appInfo = (): AppInfo => ({
     version: VERSION,
+    // 0.7.2: which copy is running. Installed, getAppPath() is resources\app.asar inside the install
+    // folder; the folder holding the .exe is the one the user recognises. From source it is the project.
+    appDir: app.isPackaged ? path.dirname(process.execPath) : paths.appPath,
     dataDir: paths.dataDir,
     logDir: paths.logDir,
     platform: process.platform,

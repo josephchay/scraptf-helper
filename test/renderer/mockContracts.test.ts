@@ -73,3 +73,21 @@ describe('mock contracts', () => {
     expect((await b.rpc('status.get', undefined)).keyPrice!.valueScrap).toBe(auto + 20);
   });
 });
+
+// Audit xcontract-2 (0.7.3): as the service, the events export writes the Live log's kinds, category and search.
+describe('mock events export', () => {
+  const ids = (csv: string) => csv.trim().split('\r\n').slice(1).map((l) => Number(l.split(',')[0]));
+
+  it("honours the Live log's filters like the service, and refuses what the service refuses", async () => {
+    const b = make();
+    const all = await b.rpc('opps.events', { limit: 2000 });
+    expect(ids((await b.rpc('opps.exportCsv', { kind: 'events' })).csv)).toEqual(all.map((e) => e.id));
+    const want = all.filter((e) => e.kind === 'appeared' && e.category === 'hats' && `${e.name} ${e.sku} ${e.summary}`.toLowerCase().includes('profit'));
+    expect(want.length).toBeGreaterThan(0);
+    const filtered = await b.rpc('opps.exportCsv', { kind: 'events', events: { kinds: ['appeared'], category: 'hats', search: 'PROFIT' } });
+    expect(ids(filtered.csv)).toEqual(want.map((e) => e.id));
+    for (const events of [{ kinds: ['vanished'] }, { category: 'boats' }, { search: 'x'.repeat(201) }]) {
+      await expect(b.rpc('opps.exportCsv', { kind: 'events', events } as never)).rejects.toThrow(/Invalid parameters for opps\.exportCsv/);
+    }
+  });
+});

@@ -7,6 +7,8 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { Category, OpportunityEvent, OpportunityEventKind, Scrap, ScraptfChangeEvent, UnixMs } from '../../shared/types';
 import { CATEGORIES, CATEGORY_LABELS } from '../../shared/types';
+import { marketSearchTokens } from '../../shared/market';
+import { EVENTS_EXPORT_MAX, eventMatches } from '../../shared/opportunityEvents';
 import { SCRAPTF_CHANGES_EXPORT_MAX } from '../../shared/scraptfHistory';
 import { rpc, saveCsv } from '../api';
 import {
@@ -44,7 +46,7 @@ import { useApp } from '../hooks/appContext';
 import { readPref, usePersistentState } from '../hooks/usePersistentState';
 import { useThrottled, useVisiblePush } from '../hooks/useRpc';
 import { useNow } from '../hooks/useTimers';
-import { MAX_KEPT_EVENTS, fetchEventsAfter, mergeEvents, olderPageLimit } from '../eventFeed';
+import { MAX_KEPT_EVENTS, eventsExportQuery, fetchEventsAfter, mergeEvents, olderPageLimit } from '../eventFeed';
 
 const PAGE = 300;
 const KINDS: readonly OpportunityEventKind[] = ['appeared', 'changed', 'gone', 'notified'];
@@ -80,8 +82,12 @@ function OppEventsView() {
   const [error, setError] = useState<string | null>(null);
   const [hasMore, setHasMore] = useState(true);
   const [visible, setVisible] = useState(200);
+  // 0.7.3: Retry on a failed load reads the view again.
+  const [reloadKey, setReloadKey] = useState(0);
   const scroller = useRef<HTMLDivElement>(null);
   const newest = useRef<OpportunityEvent | null>(null);
+  // 0.7.3: bumped per load of the view; a read started under earlier kinds is dropped when it answers.
+  const gen = useRef(0);
   const holding = paused || !atTop;
   const holdingRef = useRef(holding);
   holdingRef.current = holding;
@@ -91,6 +97,7 @@ function OppEventsView() {
   const kindsKey = kinds.join(',');
 
   useEffect(() => {
+    gen.current++;
     let alive = true;
     setLoading(true);
     setPending([]);
@@ -103,15 +110,22 @@ function OppEventsView() {
         setHasMore(list.length >= PAGE);
         setError(null);
       })
-      .catch((e: unknown) => alive && setError(errorMessage(e)))
+      .catch((e: unknown) => {
+        if (!alive) return;
+        // 0.7.3: no rows of another filter under the error, and the next push reads this view from the start.
+        setEvents([]);
+        newest.current = null;
+        setError(errorMessage(e));
+      })
       .finally(() => alive && setLoading(false));
     return () => {
       alive = false;
     };
     // kindsKey captures the filter; kindsParam is derived from it.
-  }, [kindsKey]);
+  }, [kindsKey, reloadKey]);
 
   const fetchNew = useCallback(async () => {
+    const g = gen.current;
     const known = newest.current?.id ?? 0;
     try {
       // Pages back by id until it reaches what is already shown: one engine run
@@ -121,6 +135,10 @@ function OppEventsView() {
         known,
         PAGE,
       );
+      if (g !== gen.current) return;
+      // 0.7.3: the service answered and the list is current (this also recovers a failed first load).
+      setError(null);
+      if (known === 0 && complete) setHasMore(false);
       const top = fresh[0];
       if (!top) return;
       if (!newest.current || top.id > newest.current.id) newest.current = top;
@@ -162,29 +180,30 @@ function OppEventsView() {
     const oldest = events[events.length - 1];
     if (!oldest || olderLimit === 0) return;
     setLoadingOlder(true);
+    const g = gen.current;
     try {
       const list = await rpc('opps.events', { limit: olderLimit, kinds: kindsParam, beforeId: oldest.id });
+      if (g !== gen.current) return;
       setEvents((ev) => mergeEvents(ev, list));
       setHasMore(list.length >= olderLimit);
       setVisible((v) => v + PAGE);
     } catch (e) {
-      toast(`Could not load older events: ${errorMessage(e)}`, 'bad');
+      if (g === gen.current) toast(`Could not load older events: ${errorMessage(e)}`, 'bad');
     } finally {
       setLoadingOlder(false);
     }
   };
 
   const filtered = useMemo(() => {
-    const tokens = search.toLowerCase().split(/\s+/).filter(Boolean);
-    return events.filter(
-      (e) => (!category || e.category === category) && tokens.every((t) => `${e.name} ${e.sku} ${e.summary}`.toLowerCase().includes(t)),
-    );
+    // 0.7.3: the events export applies the same predicate.
+    const tokens = marketSearchTokens(search);
+    return events.filter((e) => eventMatches(e, category, tokens));
   }, [events, search, category]);
   const shown = filtered.slice(0, visible);
 
   const exportCsv = async () => {
     try {
-      const r = await saveCsv(() => rpc('opps.exportCsv', { kind: 'events' }));
+      const r = await saveCsv(() => rpc('opps.exportCsv', { kind: 'events', events: eventsExportQuery(kinds, category, search) }));
       if (r.saved) toast(`Saved ${r.path ?? 'CSV'}`, 'good');
     } catch (e) {
       toast(`Export failed: ${errorMessage(e)}`, 'bad');
@@ -211,7 +230,7 @@ function OppEventsView() {
         <button type="button" className={`btn small${paused ? ' active' : ''}`} aria-pressed={paused} onClick={() => setPaused((p) => !p)} title="Hold new events so the list stops moving">
           <Icon name={paused ? 'play' : 'pause'} size={14} /> {paused ? 'Resume' : 'Pause'}
         </button>
-        <button type="button" className="btn small" onClick={() => void exportCsv()}>
+        <button type="button" className="btn small" title={`Saves the events matching these filters among the newest ${fmtInt(EVENTS_EXPORT_MAX)} of the chosen kinds (as many as this log keeps), newest first`} onClick={() => void exportCsv()}>
           <Icon name="download" size={14} /> Export CSV
         </button>
       </div>
@@ -222,7 +241,7 @@ function OppEventsView() {
         </button>
       ) : null}
 
-      {error ? <ErrorBanner message={`Could not load the log: ${error}`} /> : null}
+      {error ? <ErrorBanner message={`Could not load the log: ${error}`} onRetry={() => setReloadKey((k) => k + 1)} /> : null}
 
       <div
         className="log-scroll"
@@ -235,11 +254,13 @@ function OppEventsView() {
         {loading ? (
           <LoadingBlock label="Loading events…" />
         ) : shown.length === 0 ? (
-          <EmptyState icon="log" title={events.length ? 'No events match these filters' : 'No events yet'}>
-            {events.length
-              ? 'Clear the filters to see everything.'
-              : 'Events appear when an opportunity appears, changes, goes away or triggers a notification. They stream in as buy orders change.'}
-          </EmptyState>
+          error && events.length === 0 ? null : (
+            <EmptyState icon="log" title={events.length ? 'No events match these filters' : 'No events yet'}>
+              {events.length
+                ? 'Clear the filters to see everything.'
+                : 'Events appear when an opportunity appears, changes, goes away or triggers a notification. They stream in as buy orders change.'}
+            </EmptyState>
+          )
         ) : (
           <table className="table log-table">
             <thead>
@@ -289,7 +310,7 @@ function OppEventsView() {
             </tbody>
           </table>
         )}
-        {!loading && (filtered.length > visible || hasMore) ? (
+        {!loading && events.length > 0 && (filtered.length > visible || hasMore) ? (
           <div className="load-more">
             {filtered.length > visible ? (
               <button type="button" className="btn small" onClick={() => setVisible((v) => v + 200)}>

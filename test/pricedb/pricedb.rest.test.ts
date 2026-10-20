@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   BULK_CHUNK,
   LOAD_ALL_MIN_INTERVAL_MS,
+  LOAD_ALL_SLACK_MS,
   META_LOAD_ALL_AT,
   createPriceDb,
   pricedbRecordSchema,
@@ -333,7 +334,8 @@ describe('PriceDb.loadAll', () => {
     const [a, b] = await Promise.all([pdb.loadAll(), pdb.loadAll()]);
     expect(a).toBe(b);
     expect(deps.http.calls).toHaveLength(1);
-    clock.advance(LOAD_ALL_MIN_INTERVAL_MS - 1);
+    // 0.7.3: the skip ends LOAD_ALL_SLACK_MS before 4 h, so a 4 h job run always loads.
+    clock.advance(LOAD_ALL_MIN_INTERVAL_MS - LOAD_ALL_SLACK_MS - 1);
     expect(await pdb.loadAll()).toBe(0);
     expect(deps.http.calls).toHaveLength(1);
     clock.advance(1);

@@ -51,7 +51,8 @@ describe('csvCell', () => {
     expect(csvCell('-1+2')).toBe("'-1+2");
     expect(csvCell('@SUM(A1)')).toBe("'@SUM(A1)");
     expect(csvCell('\tcmd')).toBe("'\tcmd");
-    expect(csvCell('\r=1')).toBe(`"'\r=1"`);
+    // 0.7.3: the '=' after the CR starts a new record in Excel's ';' mode, so it is guarded too.
+    expect(csvCell('\r=1')).toBe(`"'\r'=1"`);
     expect(csvCell('a=1')).toBe('a=1');
   });
 

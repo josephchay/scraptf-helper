@@ -393,6 +393,24 @@ function isPlainItem(ix: SchemaIndex, o: SkuObject): boolean {
   );
 }
 
+/** 0.7.3: the strangifier, the three kit tiers, the unusualifier and the two kit fabricators. */
+const TARGETED_TOOL_DEFINDEXES: ReadonlySet<number> = new Set([6522, 6523, 6526, 6527, 9258, 20002, 20003]);
+/** 0.7.3: TF2's item_name for every such tool (scraptfHtml's NEEDS_TARGET_ITEM_NAME_RE). */
+const TARGETED_TOOL_NAME_KEYS: ReadonlySet<string> = new Set(['kit', 'fabricator', 'strangifier', 'unusualifier', 'chemistry set']);
+
+/**
+ * 0.7.3: a kit, fabricator, strangifier, unusualifier or chemistry set is keyed by its target (td-), or a
+ * Collector's Chemistry Set by its output (od-, oq-14). Without one the SKU names no real item: no listing,
+ * PriceDB row or import has it (0.7.2's needs-target).
+ */
+function isTargetedTool(ix: SchemaIndex, defindex: number): boolean {
+  return TARGETED_TOOL_DEFINDEXES.has(defindex) || TARGETED_TOOL_NAME_KEYS.has(normKey(ix.item(defindex)?.itemName ?? ''));
+}
+
+function isTargetlessTool(ix: SchemaIndex, o: SkuObject): boolean {
+  return o.target === null && !(o.output !== null && o.outputQuality === 14) && isTargetedTool(ix, o.defindex);
+}
+
 /** 0 prefix, 1 word prefix, 2 substring, null no match. */
 export function searchRank(name: string, query: string): number | null {
   const key = normKey(name);
@@ -673,6 +691,8 @@ export function createSchemaService(deps: ServiceDeps): SchemaService {
         o = { ...o, effect: canon };
       }
     }
+    // 0.7.3: kept as read (the import needs the object), but flagged so a picker, paste or check does not store it.
+    if (index && isTargetlessTool(index, o)) w.push(`${index.item(o.defindex)?.itemName ?? 'This tool'}: the item it applies to (its target) is missing`);
     const sku = fromObject(o);
     return { sku, name: nameForSku(sku), skuObject: fromString(sku), category: categoryForSku(sku), match, warnings: w };
   };
@@ -741,7 +761,8 @@ export function createSchemaService(deps: ServiceDeps): SchemaService {
       if (!key || key.startsWith('#') || seen.has(key)) continue;
       seen.add(key);
       const d = ix.pickDefindex(ix.findByName(it.itemName), null, null);
-      if (d === null || ix.isSkinSpecific(d) || ix.isWarPaint(d)) continue;
+      // 0.7.3: a plain entry carries no target, so a bare "Kit" or "Fabricator" would key no real item.
+      if (d === null || ix.isSkinSpecific(d) || ix.isWarPaint(d) || isTargetedTool(ix, d)) continue;
       const q = ix.itemQuality(d);
       if (q === 255) continue;
       const quality = q === 0 || q === 15 ? 6 : q;
@@ -770,6 +791,8 @@ export function createSchemaService(deps: ServiceDeps): SchemaService {
     }
     const hits = new Map<string, Hit>();
     const offer = (h: Hit): void => {
+      // 0.7.3: a tier name alone ("killstreak kit") or a learned row without a target is no item to pick.
+      if (index && looksLikeSku(h.sku) && isTargetlessTool(index, fromString(h.sku))) return;
       const prev = hits.get(h.sku);
       if (!prev || h.rank < prev.rank || (h.rank === prev.rank && h.source === 'bptf' && prev.source !== 'bptf')) hits.set(h.sku, h);
     };

@@ -15,6 +15,14 @@ files:
   - package.json
   - "!dist/**/*.map"
 
+# 0.7.3: the licence notices go in the install folder, next to LICENSE.electron.txt. MIT needs its notice in
+# every copy (the bundler drops the ported files' header comments) and Apache-2.0 4(a) a copy of the licence.
+extraFiles:
+  - from: NOTICE
+    to: NOTICE.txt
+  - from: reference/scrap.tf-item-information-master/LICENSE
+    to: LICENSE.Apache-2.0.txt
+
 asar: true
 # No native modules: node:sqlite is built into Electron.
 npmRebuild: false

@@ -46,6 +46,15 @@ export function envProxyEnabled(env: NodeJS.ProcessEnv = process.env, execArgv: 
   return /(^|\s)--use-env-proxy(\s|=|$)/.test(env['NODE_OPTIONS'] ?? '');
 }
 
+/**
+ * 0.7.2: the 'ready' message for a core. A core that could not open its database (a newer app's data,
+ * say) still answers, but main should log why, not a plain "service ready". The reason is cleaned the
+ * same way the RPC rejections that carry it are.
+ */
+export function readyMessage(core: Pick<ServiceCore, 'failure'>): Extract<FromService, { type: 'ready' }> {
+  return core.failure === undefined ? { type: 'ready' } : { type: 'ready', failure: cleanErrorMessage(core.failure) };
+}
+
 /** R5 (no proxies): with an environment proxy the service stays offline, whatever the user's pause switch says. */
 export function effectiveSettings(settings: Settings, envProxy: boolean): Settings {
   return envProxy && !settings.networkPaused ? { ...settings, networkPaused: true } : settings;
@@ -134,7 +143,7 @@ function main(): void {
         }
         core.onPush((event, payload) => post({ type: 'push', event, payload }));
         // Ready before the slow work, so RPC calls do not queue behind downloads.
-        post({ type: 'ready' });
+        post(readyMessage(core));
         core.start().catch((err: unknown) => report('service start failed', err));
         return;
       }

@@ -58,6 +58,9 @@ export const DEFAULT_FILTERS: Readonly<OppFilters> = Object.freeze<OppFilters>({
   status: ['profitable'],
 });
 
+/** 0.7.3: same cap as 'opps.list' and 'opps.exportCsv' (zod: search ≤ 200), which refuse a longer search. */
+export const OPP_MAX_SEARCH_CHARS = 200;
+
 /** Defensive restore of persisted filters (older or hand-edited values). */
 export function sanitizeFilters(v: unknown): OppFilters {
   const o = (typeof v === 'object' && v !== null ? v : {}) as Record<string, unknown>;
@@ -65,7 +68,7 @@ export function sanitizeFilters(v: unknown): OppFilters {
     Array.isArray(arr) ? (arr.filter((x) => (allowed as readonly unknown[]).includes(x)) as T[]) : [];
   const minC = typeof o['minConfidence'] === 'number' && Number.isFinite(o['minConfidence']) ? o['minConfidence'] : 0;
   return {
-    search: typeof o['search'] === 'string' ? o['search'] : '',
+    search: typeof o['search'] === 'string' ? o['search'].slice(0, OPP_MAX_SEARCH_CHARS) : '',
     categories: pick(o['categories'], CATEGORIES),
     tiers: pick(o['tiers'], TIER_ORDER),
     minConfidence: Math.max(0, Math.min(100, Math.round(minC))),
@@ -107,7 +110,7 @@ export function filtersToQuery(
   extra: { sort: SortKey; dir: SortDir; groupBy: GroupBy; limit: number; offset?: number },
 ): OppQuery {
   const q: OppQuery = { sort: extra.sort, dir: extra.dir, groupBy: extra.groupBy, limit: extra.limit, offset: extra.offset ?? 0 };
-  const s = f.search.trim();
+  const s = f.search.trim().slice(0, OPP_MAX_SEARCH_CHARS);
   if (s) q.search = s;
   if (f.categories.length) q.categories = [...f.categories];
   if (f.tiers.length) q.tiers = [...f.tiers];
@@ -433,10 +436,22 @@ export function moveCursor(rows: readonly unknown[], current: number, delta: num
 // "Pay up to" cell and the row context menu (F1, F9)
 // ---------------------------------------------------------------------------
 
-/** Tooltip for an opportunity's Pay up to cell: the ceiling, and where this row's own price sits against it. */
-export function payUpToTitle(o: Pick<Opportunity, 'maxCostScrap' | 'costScrap' | 'revenueScrap' | 'inputKind'>, keyScrap: Scrap | null): string {
+/**
+ * Tooltip for an opportunity's Pay up to cell: the ceiling, and where this row's own price sits against it.
+ * 0.7.3: no revenue with buyers says why none is usable, from the row's flags as the Live market's Pay up to
+ * hover does (Conservative is null only when every eligible order is an outlier, flagged 'all-outliers'; Best
+ * never is with buyers, so the rest is Instant without a realistic bot order).
+ */
+export function payUpToTitle(
+  o: Pick<Opportunity, 'maxCostScrap' | 'costScrap' | 'revenueScrap' | 'inputKind'> & Partial<Pick<Opportunity, 'buyerCount' | 'flags'>>,
+  keyScrap: Scrap | null,
+): string {
   if (o.maxCostScrap === null) {
-    return o.revenueScrap === null ? 'No eligible buy orders, so there is no ceiling.' : 'No scrap.tf price clears your thresholds against this revenue.';
+    if (o.revenueScrap !== null) return 'No scrap.tf price clears your thresholds against this revenue.';
+    if (!((o.buyerCount ?? 0) > 0)) return 'No eligible buy orders, so there is no ceiling.';
+    return o.flags?.includes('all-outliers')
+      ? 'Every eligible order looks unrealistic, so there is no ceiling.'
+      : 'No realistic bot order, and Revenue used for profit is Instant (bot orders only), so there is no ceiling.';
   }
   const head = `Pay up to ${fmtMoney(o.maxCostScrap, keyScrap)} on scrap.tf: the highest price that still clears your thresholds.`;
   if (o.inputKind === 'rule') return `${head} This cost is a rule estimate; check the real price on scrap.tf.`;

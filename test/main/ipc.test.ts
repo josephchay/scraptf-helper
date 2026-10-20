@@ -42,7 +42,7 @@ function makeDeps(overrides: Partial<MainRpcDeps> = {}) {
     showQuickEntry: vi.fn(),
     openItemInDashboard: vi.fn(),
     showBankStock: vi.fn(),
-    appInfo: vi.fn(() => ({ version: '0.1.0', dataDir: 'd', logDir: 'l', platform: 'win32', electron: '44', node: '24' })),
+    appInfo: vi.fn(() => ({ version: '0.1.0', appDir: 'a', dataDir: 'd', logDir: 'l', platform: 'win32', electron: '44', node: '24' })),
     serviceState: vi.fn((): ReturnType<MainRpcDeps['serviceState']> => null),
     hotkeys: vi.fn(
       (): ReturnType<MainRpcDeps['hotkeys']> => ({

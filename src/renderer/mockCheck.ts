@@ -12,8 +12,9 @@ import {
   checkTextRefusal,
 } from '../shared/check';
 import { frictionOf, maxCostFor, profitStatus } from '../shared/ceiling';
-import { parsePrice, refToScrap, type ParsedPrice } from '../shared/currency';
-import { fromString } from '../shared/sku';
+import { parsePrice, refToScrap, valueScrap, type ParsedPrice } from '../shared/currency';
+import { baseSku, fromString, isValidSku } from '../shared/sku';
+import { CURRENCY_SKUS } from '../shared/types';
 import type {
   CheckPrice,
   CheckResult,
@@ -46,6 +47,7 @@ export type MockParseCheck = { ok: true; parsed: MockParsedCheck } | { ok: false
 const SEPARATORS = '\t,;=@';
 const SOLD_OUT = /^(?:sold\s*out|out\s+of\s+stock)$/i;
 const STOCK_PAIR = /^(\d{1,6})\s*(?:\/|of)\s*(\d{1,6})$/i;
+const CURRENCY: ReadonlySet<string> = new Set(CURRENCY_SKUS);
 
 /** A zero price is no price, as the service reads it. */
 function nonZero(p: ParsedPrice | null): ParsedPrice | null {
@@ -141,11 +143,53 @@ export function mockHintedParse(text: string, item: ResolvedItem, source: CheckS
   return price ? { item, price, pays: null, paysCopied: false, stock: null, stockLimit: null, soldOut: false } : null;
 }
 
-/** A price row with paint or other extras (mockData's rule): not what a plain copy costs. */
-function hasExtras(p: ScrapPrice): boolean {
-  if (fromString(p.sku).paint) return true;
+/** A stored price the engine can use as a cost (its explicitInput): a strict SKU, not a currency, finite costs of 0 or more. */
+function usableCost(p: ScrapPrice): boolean {
+  if (typeof p.sku !== 'string' || !isValidSku(p.sku) || CURRENCY.has(baseSku(p.sku.trim()))) return false;
+  const keys = p.costKeys ?? 0;
+  return Number.isFinite(p.costScrap) && p.costScrap >= 0 && Number.isFinite(keys) && keys >= 0;
+}
+
+/** A spell or part list with an entry, as the engine counts one (matcher.ts hasItems): a non-blank string or number. */
+const listed = (v: readonly unknown[] | undefined): boolean => Array.isArray(v) && v.some((x) => (typeof x === 'string' || typeof x === 'number') && String(x).trim() !== '');
+
+/**
+ * A copy other than the plain item (the service's isOtherCopy, liveCheck.ts): paint (in the SKU or the
+ * special), spells, parts, or a custom name or description. 0.7.2: a sheen or killstreaker alone is not
+ * one: every specialized and professional kit carries them, so counted, a kit's own price would read as
+ * another copy's. The mock Live market (mockData's hasExtras) still counts them, as the service's does.
+ */
+function isOtherCopy(p: ScrapPrice): boolean {
+  if ((fromString(p.sku.trim()).paint ?? 0) > 0) return true;
   const s = p.special;
-  return s !== null && (s.paint !== null || s.spells.length > 0 || s.parts.length > 0 || s.sheen !== null || s.killstreaker !== null || s.customName || s.customDesc);
+  return s !== null && ((s.paint ?? 0) > 0 || listed(s.spells) || listed(s.parts) || s.customName === true || s.customDesc === true);
+}
+
+/**
+ * The newest stored price usable as a cost, as the service's newestStoredPrice picks it: for a plain SKU a
+ * plain copy wins (isOtherCopy), else any. 0.7.2: of several seen at that one time, the cheapest valued at
+ * `keyScrap`, equal costs to the higher id: a look stores a kit once per sheen and killstreaker, every copy
+ * at the page's time, and the one stored last is not the price. A newer look still beats a cheaper older one.
+ */
+export function mockNewestStoredPrice(prices: readonly ScrapPrice[], plain: boolean, keyScrap: Scrap): ScrapPrice | null {
+  const usable = prices.filter(usableCost).sort((a, b) => b.observedAt - a.observedAt || b.id - a.id);
+  const clean = plain ? usable.filter((p) => !isOtherCopy(p)) : [];
+  const pool = clean.length > 0 ? clean : usable;
+  const newest = pool[0];
+  if (!newest) return null;
+  const cost = (p: ScrapPrice): Scrap => valueScrap(p.costKeys ?? 0, p.costScrap, keyScrap);
+  // Newest first, then the higher id: only a strictly cheaper copy of the same time replaces the pick.
+  let best = newest;
+  let bestCost = cost(newest);
+  for (const p of pool) {
+    if (p.observedAt !== newest.observedAt) break;
+    const c = cost(p);
+    if (c < bestCost) {
+      best = p;
+      bestCost = c;
+    }
+  }
+  return best;
 }
 
 const valueOf = (p: { keys: number; scrap: Scrap }, keyScrap: Scrap): Scrap => Math.round(p.keys * keyScrap) + Math.round(p.scrap);
@@ -154,9 +198,9 @@ const valueOf = (p: { keys: number; scrap: Scrap }, keyScrap: Scrap): Scrap => M
  * A parsed check judged like the service (chooseCheckPrice in src/service/domain/liveCheck.ts): a copied
  * "Sold out" or stock-0 row has no price at all (it is newer than anything stored); else the copied
  * price, else the saved list's price to buy (not sold out, not stock 0, and only for a plain copy: the
- * list prices plain copies), else the newest stored price (a clean copy first for a plain SKU, and
- * CHECK_EXTRAS_NOTE when only a painted or spelled copy is stored). Profit
- * and verdict by profitStatus; a copied pays cell, even a dash, beats the list's.
+ * list prices plain copies), else the newest stored price (mockNewestStoredPrice: a clean copy first for
+ * a plain SKU, the cheapest of one look's copies, and CHECK_EXTRAS_NOTE when only a painted or spelled
+ * copy is stored). Profit and verdict by profitStatus; a copied pays cell, even a dash, beats the list's.
  */
 export function mockCheckResult(a: {
   id: number;
@@ -187,10 +231,13 @@ export function mockCheckResult(a: {
   } else if (plain && list && list.sellsScrap !== null && list.stock !== 0) {
     price = { keys: list.sellsKeys ?? 0, scrapRaw: list.sellsScrapRaw ?? 0, valueScrap: list.sellsScrap, source: 'list', observedAt: list.observedAt };
   } else {
-    const stored = detail?.scrapPrices ?? [];
-    const p = (plain ? stored.find((s) => !hasExtras(s)) : undefined) ?? stored[0];
-    if (p) price = { keys: p.costKeys, scrapRaw: p.costScrap, valueScrap: valueOf({ keys: p.costKeys, scrap: p.costScrap }, keyScrap), source: p.source === 'import' ? 'import' : 'typed', observedAt: p.observedAt };
-    otherCopy = plain && !!p && hasExtras(p);
+    const p = mockNewestStoredPrice(detail?.scrapPrices ?? [], plain, keyScrap);
+    if (p) {
+      // As chooseCheckPrice: keys valued at the key price, metal as stored.
+      const keys = Number.isFinite(p.costKeys) ? p.costKeys : 0;
+      price = { keys, scrapRaw: p.costScrap, valueScrap: valueScrap(keys, p.costScrap, keyScrap), source: p.source === 'import' ? 'import' : 'typed', observedAt: p.observedAt };
+    }
+    otherCopy = plain && p !== null && isOtherCopy(p);
   }
   const listPays = list?.paysScrap ?? null;
   const pays = parsed.paysCopied ? (parsed.pays ? valueOf(parsed.pays, keyScrap) : null) : listPays;

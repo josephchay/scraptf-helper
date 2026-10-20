@@ -339,12 +339,15 @@ export function listStockCell(r: ListFields, now: UnixMs): ListStockCell {
 /**
  * The "Price list" line of an import result: how many list rows a saved scrap.tf/items page wrote.
  * Null for any other page. Out-of-stock rows count here though they are skipped as prices, which is
- * why "Stored" alone undersells a list save.
+ * why "Stored" alone undersells a list save. None written: 0.7.3, a page that gave no rows says so
+ * (listRowsRead 0, or `parsed` 0 from an older service; its warning says why), else a newer save had them.
  */
-export function importListRowsText(r: Pick<ImportResult, 'pageKind' | 'listRows'>): string | null {
+export function importListRowsText(r: Pick<ImportResult, 'pageKind' | 'listRows' | 'listRowsRead'> & Partial<Pick<ImportResult, 'parsed'>>): string | null {
   if (r.pageKind !== 'items-list' || !finite(r.listRows)) return null;
-  if (r.listRows <= 0) return 'No list rows changed: a newer save of scrap.tf/items is already stored.';
-  return `${fmtInt(r.listRows)} scrap.tf ${r.listRows === 1 ? 'item' : 'items'} updated on your price list, out-of-stock ones included.`;
+  if (r.listRows > 0) return `${fmtInt(r.listRows)} scrap.tf ${r.listRows === 1 ? 'item' : 'items'} updated on your price list, out-of-stock ones included.`;
+  const read = finite(r.listRowsRead) ? r.listRowsRead : finite(r.parsed) ? r.parsed : null;
+  if (read === 0) return 'No list rows changed: this page gave no rows your price list can use.';
+  return 'No list rows changed: a newer save of scrap.tf/items is already stored.';
 }
 
 /** The toast after a manual import ("Import saved page…"). */

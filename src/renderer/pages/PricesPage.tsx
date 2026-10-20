@@ -13,7 +13,7 @@ import { PriceInput, readPrice, type BareUnit } from '../components/PriceInput';
 import { DASH, errorMessage, fmtAge, fmtDateTime, fmtKeysMetal, fmtMoney } from '../format';
 import { useApp } from '../hooks/appContext';
 import { usePersistentState } from '../hooks/usePersistentState';
-import { usePush, useRpcQuery, useThrottled } from '../hooks/useRpc';
+import { useRpcQuery, useThrottled, useVisiblePush } from '../hooks/useRpc';
 import { useDebounced, useNow } from '../hooks/useTimers';
 import { RulesPanel } from './RulesPanel';
 
@@ -54,9 +54,10 @@ function PriceSheet() {
   const [q, setQ] = useState('');
   const dq = useDebounced(q, 200);
   const list = useRpcQuery('prices.list', dq.trim() ? { q: dq.trim() } : {});
-  // Saves from the quick-entry window and imports change the sheet behind this page.
+  // Saves from the quick-entry window and imports change the sheet behind this page. 0.7.3: only while
+  // visible (a read is the whole list); closed to the tray, it reloads once when shown again.
   const reloadSoon = useThrottled(() => void list.reload(), 1000);
-  usePush('prices.changed', reloadSoon);
+  useVisiblePush('prices.changed', reloadSoon);
   const [editing, setEditing] = useState<ScrapPrice | null>(null);
   const [sort, setSort] = useState<{ col: SortCol; asc: boolean }>({ col: 'age', asc: true });
   const [pasteOpen, setPasteOpen] = usePersistentState<boolean>('prices.pasteOpen', false, (v) => v === true);
@@ -196,7 +197,7 @@ function PriceSheet() {
         {list.error ? <ErrorBanner message={list.error} onRetry={() => void list.reload()} /> : null}
         {list.loading ? (
           <LoadingBlock />
-        ) : rows.length === 0 ? (
+        ) : list.error && !list.data ? null : rows.length === 0 ? (
           <EmptyState icon="tag" title={q ? 'No prices match' : 'No prices yet'} compact>
             {q ? 'Try a different filter.' : 'Add the first price with the form, the quick-entry window, or a price-sheet rule.'}
           </EmptyState>
@@ -573,7 +574,9 @@ export function PriceForm({
         name: it.name,
         costKeys: parsed.keys,
         costScrap: parsed.scrap,
-        source: editing?.source ?? 'user',
+        // 0.7.3: a hand edit is a typed price (as the drawer saves it), so the next save of an imported
+        // row's page never rewrites or deletes it; the row keeps its batch id. Seen now keeps the source.
+        source: 'user',
         observedAt: Date.now(),
         note: note.trim() || null,
       });

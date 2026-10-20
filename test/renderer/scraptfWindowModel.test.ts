@@ -108,7 +108,7 @@ describe('the risk, in scrap.tf\'s own words', () => {
   it("matches the build on the kept sign-in's encryption: the fuse is on, and code and docs say what it covers", () => {
     const root = (rel: string) => readFileSync(new URL(`../../${rel}`, import.meta.url), 'utf8');
     // One-way and on from the first release: packaged builds encrypt every on-disk cookie store, persist:scraptf too.
-    expect(root('electron-builder.yml')).toMatch(/^electronFuses:\n(?: {2}\w+: \w+\n)*? {2}enableCookieEncryption: true$/m);
+    expect(root('electron-builder.yml').replace(/\r\n/g, '\n')).toMatch(/^electronFuses:\n(?: {2}\w+: \w+\n)*? {2}enableCookieEncryption: true$/m);
     const arch = root('docs/ARCHITECTURE.md');
     expect(arch).not.toContain("Electron's cookie encryption is not turned on");
     expect(arch).toContain('encrypted with Windows DPAPI in packaged builds by the `enableCookieEncryption` fuse');

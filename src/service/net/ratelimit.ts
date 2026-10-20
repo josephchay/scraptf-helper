@@ -194,6 +194,8 @@ export class BudgetScheduler {
   private activeCount = 0;
   private queue: Waiter[] = [];
   private pausedUntilTs = 0;
+  /** Length of the current pause when it was set: a wall clock stepped back cannot stretch it. */
+  private pauseLenMs = 0;
   private pauseWhy: string | null = null;
   private n429 = 0;
   private nBackoff = 0;
@@ -244,6 +246,7 @@ export class BudgetScheduler {
 
   /** Earliest time a new request could start, ignoring concurrency. */
   nextAllowedAt(now: UnixMs = this.clock.now()): UnixMs {
+    this.clampFuture();
     this.prune(now);
     let at = now;
     if (this.pausedUntilTs > at) at = this.pausedUntilTs;
@@ -257,18 +260,22 @@ export class BudgetScheduler {
   }
 
   pausedUntil(now: UnixMs = this.clock.now()): UnixMs | null {
+    this.clampFuture();
     return this.pausedUntilTs > now ? this.pausedUntilTs : null;
   }
 
   pauseReason(now: UnixMs = this.clock.now()): string | null {
-    return this.pausedUntilTs > now ? this.pauseWhy : null;
+    return this.pausedUntil(now) !== null ? this.pauseWhy : null;
   }
 
   /** Pauses until `until`. A shorter pause never shortens an existing one. */
   pause(until: UnixMs, reason: string): void {
     if (!Number.isFinite(until)) return;
+    // 0.7.3: compared with the clamped pause, so one stretched by a clock step cannot hide a longer new one.
+    this.clampFuture();
     if (until > this.pausedUntilTs) {
       this.pausedUntilTs = until;
+      this.pauseLenMs = Math.max(0, until - this.clock.now());
       this.pauseWhy = reason;
     }
     this.pump();
@@ -334,6 +341,7 @@ export class BudgetScheduler {
 
   /** Pause and streaks to save, so a restart does not forget a server-requested wait. */
   persistedState(now: UnixMs = this.clock.now()): PersistedBudgetState {
+    this.clampFuture();
     const paused = this.pausedUntilTs > now;
     return {
       until: paused ? this.pausedUntilTs : 0,
@@ -438,7 +446,7 @@ export class BudgetScheduler {
     while (this.queue.length > 0) {
       const now = this.clock.now();
       const at = this.nextAllowedAt(now);
-      this.failUnreachable(at);
+      this.failUnreachable(at, now);
       if (this.queue.length === 0) return;
       if (at > now) {
         this.wakeTimer = this.timers.setTimeout(() => {
@@ -469,7 +477,9 @@ export class BudgetScheduler {
       budget: this.spec.id,
       grantedAt: now,
       countExtra: () => {
-        if (!released) this.history.push(this.clock.now());
+        if (released) return;
+        this.clampFuture(); // keeps history ascending after a clock step
+        this.history.push(this.clock.now());
       },
       release: () => {
         if (released) return;
@@ -483,13 +493,16 @@ export class BudgetScheduler {
   }
 
   /** Waiters whose deadline passes before `at` can never be served in time. */
-  private failUnreachable(at: UnixMs): void {
+  private failUnreachable(at: UnixMs, now: UnixMs): void {
     if (!this.queue.some((w) => w.deadline < at)) return;
+    // 0.7.3: at <= now means the deadline already passed (a timer fired late) while the
+    // budget itself was free: when the slots are taken, it was waiting behind a running request.
+    const busy = at <= now && this.slotsTaken();
     const keep: Waiter[] = [];
     for (const w of this.queue) {
       if (w.deadline < at) {
         this.cleanup(w);
-        w.reject(new RateLimitedError(this.spec.id, at));
+        w.reject(new RateLimitedError(this.spec.id, at, busy));
       } else {
         keep.push(w);
       }
@@ -506,8 +519,16 @@ export class BudgetScheduler {
     if (i < 0) return;
     this.queue.splice(i, 1);
     this.cleanup(w);
-    w.reject(new RateLimitedError(this.spec.id, this.nextAllowedAt()));
+    // 0.7.3: a slot that is free by time but still not granted is taken by a running request.
+    const now = this.clock.now();
+    const at = this.nextAllowedAt(now);
+    w.reject(new RateLimitedError(this.spec.id, at, at <= now && this.slotsTaken()));
     this.pump();
+  }
+
+  /** Every concurrency slot is taken: the budget's own, or the host's shared gate. */
+  private slotsTaken(): boolean {
+    return this.activeCount >= this.concurrency || (this.gate !== undefined && !this.gate.canEnter());
   }
 
   private drop(w: Waiter, err: unknown): void {
@@ -557,6 +578,21 @@ export class BudgetScheduler {
     if (inWindow < max) return now;
     // The (inWindow - max + 1) oldest entries must leave the window.
     return this.history[n - max]! + windowMs;
+  }
+
+  /**
+   * 0.7.3: the seed()/restore() rule at run time. After the wall clock steps back
+   * while running, grant times in the future count as now and a pause keeps at
+   * most its own length from now, so nothing waits for the size of the step but
+   * spacing, windows and pauses still hold in elapsed time (R7). Reads the clock
+   * itself, so a caller's stale `now` cannot pull values back.
+   */
+  private clampFuture(): void {
+    const now = this.clock.now();
+    if (this.lastStart !== null && this.lastStart > now) this.lastStart = now;
+    // Future entries are a suffix of the ascending history, so it stays ascending.
+    for (let i = this.history.length - 1; i >= 0 && this.history[i]! > now; i--) this.history[i] = now;
+    if (this.pausedUntilTs > now + this.pauseLenMs) this.pausedUntilTs = now + this.pauseLenMs;
   }
 
   private prune(now: UnixMs): void {

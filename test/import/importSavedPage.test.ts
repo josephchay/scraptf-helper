@@ -12,6 +12,7 @@ import { FakeClock, FakeTimers, makeDeps } from '../domain/helpers';
 import { openRepo } from '../../src/service/db';
 import { importSavedPage, type HandlerContext } from '../../src/service/rpcHandlers';
 import { DEFAULT_SETTINGS, mergeSettings } from '../../src/shared/defaults';
+import { SKIP_SAME_OR_CHEAPER } from '../../src/shared/importCodes';
 import { scraptfListKeyOf } from '../../src/shared/scraptfList';
 import { KEY_SKU, type ImportResult, type ScrapPrice } from '../../src/shared/types';
 import { createStubSchema } from './schemaStub';
@@ -212,6 +213,20 @@ describe('importSavedPage: an older page never overwrites a newer one', () => {
     const r = h.run(bankPage([plainCaptain(45)]), NOW - 60_000);
     expect(r.stored).toBe(1);
     expect(h.imported('378;6').map((p) => p.costScrap)).toEqual([45]);
+  });
+});
+
+describe('importSavedPage: two cards of one item on a page', () => {
+  // 0.7.2: the cheapest-wins rule, pinned for a plain item as importBank.test.ts pins it for a kit.
+  it.each([
+    ['the cheaper card first', [60, 100]],
+    ['the cheaper card last', [100, 60]],
+  ])('stores one price, the cheaper card (%s), and counts the other as skipped', (_, values) => {
+    const h = setup();
+    const r = h.run(bankPage(values.map((v) => plainCaptain(v))), NOW - 60_000);
+    expect([r.parsed, r.stored, r.skippedCounts]).toEqual([2, 1, { [SKIP_SAME_OR_CHEAPER]: 1 }]);
+    expect(r.skipped).toEqual([{ reason: SKIP_SAME_OR_CHEAPER, title: 'Team Captain' }]);
+    expect(h.imported('378;6').map((p) => [p.costScrap, p.observedAt])).toEqual([[60, NOW - 60_000]]);
   });
 });
 

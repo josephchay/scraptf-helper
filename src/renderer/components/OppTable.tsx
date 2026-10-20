@@ -15,6 +15,7 @@ import {
   type SortKey,
   type UseOrder,
 } from '../oppModel';
+import { noRevenueTextOf } from '../quickModel';
 import { Icon } from './Icon';
 import { isContextMenuKey, menuPointForRect } from './ItemMenu';
 import { ItemName, Money } from './ItemName';
@@ -248,7 +249,8 @@ export function OppTable({
         if (selectedIndex < 0 && rows.length) onSelect(rows[0]!.id);
       }}
     >
-      <div className="opp-row opp-head" role="row" ref={header}>
+      {/* 0.7.3: only a window of rows is in the DOM, so each says where it sits (as in the Live market). */}
+      <div className="opp-row opp-head" role="row" aria-rowindex={1} ref={header}>
         <SortHeader k="name" sort={sort} dir={dir} onSort={onSort} />
         <div role="columnheader" className="c-cost num">
           Cost
@@ -325,6 +327,7 @@ const GroupRow = memo(function GroupRow({
     <div
       id={`opprow-${index}`}
       role="row"
+      aria-rowindex={index + 2}
       aria-expanded={!row.collapsed}
       aria-selected={selected}
       className={`opp-row opp-group${selected ? ' selected' : ''}`}
@@ -368,7 +371,7 @@ const MoreRow = memo(function MoreRow({
   const g = row.group;
   const shown = `Showing ${fmtInt(g.rows.length)} of ${fmtInt(g.count)}`;
   return (
-    <div id={`opprow-${index}`} role="row" aria-selected={selected} className={`opp-row opp-more${selected ? ' selected' : ''}`} style={rowStyle(index, rowH)} onClick={() => onSelect(row.id)}>
+    <div id={`opprow-${index}`} role="row" aria-rowindex={index + 2} aria-selected={selected} className={`opp-row opp-more${selected ? ' selected' : ''}`} style={rowStyle(index, rowH)} onClick={() => onSelect(row.id)}>
       <div role="gridcell" className="more-cell">
         {row.capped ? (
           <span className="muted small">{shown}, the most one group shows. Narrow the filters, or Export CSV for every row.</span>
@@ -378,8 +381,11 @@ const MoreRow = memo(function MoreRow({
             <button
               type="button"
               className="btn ghost small"
+              // 0.7.3: out of the Tab order (Enter on the More row loads), and a click leaves the focus
+              // on the grid, so j/k and Enter go on working.
               tabIndex={-1}
               disabled={loading || !onLoadMore}
+              onMouseDown={(e) => e.preventDefault()}
               onClick={(e) => {
                 e.stopPropagation();
                 onSelect(row.id);
@@ -435,11 +441,14 @@ const OppRow = memo(function OppRow({
   const stale = o.inputKind !== 'rule' && inputAge > staleMs;
   // The buyer behind the revenue shown, not always the conservative one.
   const order = revenueOrderOf(o, useOrder);
+  // 0.7.3: no profit with buyers says why none is usable (noRevenueTextOf), not "No eligible buy orders".
+  const noProfitTitle = o.profitScrap !== null ? undefined : o.buyerCount > 0 ? noRevenueTextOf(o) : 'No eligible buy orders';
   const style = rowStyle(index, rowH);
   return (
     <div
       id={`opprow-${index}`}
       role="row"
+      aria-rowindex={index + 2}
       aria-selected={selected}
       className={`opp-row opp-item status-${o.status}${selected ? ' selected' : ''}`}
       style={style}
@@ -498,7 +507,7 @@ const OppRow = memo(function OppRow({
           keyScrap={keyScrap}
           tone="profit"
           signed
-          title={o.profitScrap !== null ? `${fmtRefOnly(o.profitScrap)} · ${fmtKeysDecimal(o.profitScrap, keyScrap)}` : 'No eligible buy orders'}
+          title={o.profitScrap !== null ? `${fmtRefOnly(o.profitScrap)} · ${fmtKeysDecimal(o.profitScrap, keyScrap)}` : noProfitTitle}
         />
       </div>
       <div role="gridcell" className={`c-margin num${o.margin !== null && o.margin < 0 ? ' tone-text-bad' : ''}`}>

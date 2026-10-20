@@ -46,6 +46,7 @@ import { useDebounced, useDocumentVisible, useInterval, useNow } from '../hooks/
 import {
   marketBoundaryNote,
   DEFAULT_MARKET_SORT,
+  FEED_OFF_UPDATES,
   FLASH_MS,
   LISTED_ON_SCRAPTF_HINT,
   LISTED_ON_SCRAPTF_LABEL,
@@ -624,7 +625,7 @@ export function MarketPage() {
         </Banner>
       ) : result && total > 0 && feedOff ? (
         <Banner tone="info" icon="feed">
-          The live feed is off, so the market only changes when you refresh items by hand.{' '}
+          The live feed is off, so {FEED_OFF_UPDATES}.{' '}
           <button type="button" className="link-btn" onClick={() => void updateSettings({ liveFeed: { enabled: true } })}>
             Turn on live feed
           </button>
@@ -1136,7 +1137,7 @@ function NoRows({ reason, stats, filtered, filtersText, onReset }: { reason: Emp
             </>
           }
         >
-          The market is built from backpack.tf&apos;s live buy-order feed. Without it, only items you refresh by hand get buyers.
+          The market is built from backpack.tf&apos;s live buy-order feed. Without it, {FEED_OFF_UPDATES}.
         </EmptyState>
       );
     case 'filters':
@@ -1551,8 +1552,11 @@ const MoreRow = memo(function MoreRow({
             <button
               type="button"
               className="btn ghost small"
+              // 0.7.3: out of the Tab order (Enter on the More row loads), and a click leaves the focus
+              // on the grid, so j/k and Enter go on working.
               tabIndex={-1}
               disabled={loading}
+              onMouseDown={(e) => e.preventDefault()}
               onClick={(e) => {
                 e.stopPropagation();
                 onSelect(row.id);

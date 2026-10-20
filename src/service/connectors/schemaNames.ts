@@ -649,6 +649,13 @@ export class SchemaIndex {
       else if (out.defindex === D_STRANGIFIER || out.defindex === D_UNUSUALIFIER || (out.target === null && isKitDefindex(out.defindex))) {
         out.target = n;
       }
+      else if (out.paintkit !== null && n > 0) {
+        // 0.7.3: a skin's priceindex is its effect, keyed as Decorated plus the effect, strange as quality2 (P2).
+        const strange = out.quality === Q_STRANGE || out.quality2 === Q_STRANGE;
+        out.effect = this.canonicalEffectId(n);
+        out.quality = Q_DECORATED;
+        out.quality2 = strange ? Q_STRANGE : null;
+      }
       else if (unusualHint || out.quality === Q_UNUSUAL || out.quality === Q_DECORATED) {
         out.effect = this.canonicalEffectId(n);
         if (out.quality !== Q_DECORATED && out.paintkit === null) out.quality = Q_UNUSUAL;
@@ -954,10 +961,9 @@ export class SchemaIndex {
     if (quality === null) {
       if (st.effect !== null) {
         if (isSkin) {
-          if (st.explicitElevated) {
-            quality = Q_DECORATED;
-            quality2 = Q_STRANGE;
-          } else quality = st.strange ? Q_STRANGE : Q_DECORATED;
+          // 0.7.3: an unusual skin is Decorated plus its effect, strange as quality2, as bp.tf and the import key it (P2).
+          quality = Q_DECORATED;
+          if (st.strange) quality2 = Q_STRANGE;
         } else if (st.effect === COMMUNITY_SPARKLE && st.quality !== null) {
           quality = st.quality;
           if (st.strange) quality2 = Q_STRANGE;

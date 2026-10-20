@@ -9,7 +9,9 @@
 // - Refused before that: more than CHECK_MAX_CHARS characters, more than CHECK_MAX_LINES lines,
 //   markup ("<"), no letter or digit, and anything that looks like a secret, a long link other than an
 //   item link included (shouldCheckClipboardText).
-// - "Same text as last time" compares a keyed hash, never a stored copy of the text.
+// - "Same text as last time" compares a keyed hash, never a stored copy of the text. A blank read
+//   past the priming one (an empty or non-text clipboard, or one another program holds open) is not
+//   recorded as seen.
 // - While paused (system locked or suspended, network paused) the watcher reads nothing.
 
 import { createHmac, randomBytes } from 'node:crypto';
@@ -222,8 +224,8 @@ export interface ClipboardWatch {
    */
   markChecked(text: string): void;
   /**
-   * F19: the text the watcher saw last (or the hotkey marked) has this keyed hash, so copying that
-   * text again changes nothing it can see. False while stopped or before the priming read.
+   * F19: the last non-blank text the watcher saw (or the hotkey marked) has this keyed hash, so copying
+   * that text again changes nothing it can see. False while stopped or before the priming read.
    */
   isLastSeen(hash: string): boolean;
 }
@@ -270,6 +272,9 @@ export function createClipboardWatch(opts: ClipboardWatchOptions): ClipboardWatc
       return;
     }
     const r = shouldCheckClipboardText(text, lastHash);
+    // 0.7.3: a blank read is not "seen": on Windows a clipboard another program holds open reads as ''
+    // (Chromium returns '' instead of throwing), so recording it made the unchanged text after it a new copy.
+    if (r.reason === 'empty') return;
     lastHash = r.hash;
     if (!r.ok) return;
     try {

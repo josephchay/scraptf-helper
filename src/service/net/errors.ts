@@ -26,8 +26,18 @@ export class HostBlockedError extends Error {
 
 export class RateLimitedError extends Error {
   override readonly name = 'RateLimitedError';
-  constructor(readonly budget: string, readonly retryAt: number) {
-    super(`Rate limit for ${budget}; next slot at ${new Date(retryAt).toISOString()}`);
+  /**
+   * `busy` (0.7.3): spacing, windows and pauses allowed a start, but every
+   * concurrency slot (the budget's own or the host's shared gate) stayed taken
+   * for the whole wait. `retryAt` is then only the time of the failure, not a
+   * promised slot.
+   */
+  constructor(readonly budget: string, readonly retryAt: number, readonly busy = false) {
+    super(
+      busy
+        ? `Rate limit for ${budget}: timed out behind another request to the same host`
+        : `Rate limit for ${budget}; next slot at ${new Date(retryAt).toISOString()}`,
+    );
   }
 }
 

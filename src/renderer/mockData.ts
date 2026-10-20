@@ -591,6 +591,8 @@ export function evaluateOpportunity(
 
   const costScrap = Math.round(input.costKeys * keyScrap) + input.costScrapRaw;
   if (best && cons && best.listingId !== cons.listingId) flags.push('outlier-best');
+  // 0.7.3: as the engine's bookFlags; Holdings tells "every order an outlier" from Instant's "no bot" by it.
+  if (eligible.length > 0 && cons === null) flags.push('all-outliers');
   if (refs.stale.length > 0) {
     flags.push('stale-reference');
     reasons.push(...refs.stale);
@@ -700,6 +702,16 @@ export function evaluateOpportunity(
 const INPUT_KINDS: readonly InputKind[] = ['user', 'import', 'rule'];
 
 /**
+ * 0.7.3: the service's newerCopy as a sort term. Of two typed or imported rows the newer, then (copies of one
+ * look, as a kit's sheen/killstreaker combos) the cheaper, then the higher price id; 0 when either is a rule.
+ */
+function newerCopyOrder(a: Opportunity, b: Opportunity): number {
+  if (a.inputKind === 'rule' || b.inputKind === 'rule') return 0;
+  const id = (o: Opportunity): number => (o.inputRef.startsWith('price:') ? Number(o.inputRef.slice('price:'.length)) : 0);
+  return b.inputObservedAt - a.inputObservedAt || a.costScrap - b.costScrap || id(b) - id(a);
+}
+
+/**
  * One row per SKU with a ceiling, highest-confidence input first; filtered, sorted by category then ceiling,
  * paged. 0.7.1 (ACT-9), with `fresh`: each row's known price carries when it was observed (the known
  * opportunity's inputObservedAt), its stock on that save (`fresh.stockOf`) and whether it is older than
@@ -723,10 +735,10 @@ export function mockShoppingList(
   for (const list of bySku.values()) {
     const top = list
       .filter((o) => o.maxCostScrap !== null && o.maxCostScrap > 0 && o.status !== 'no-buyers' && o.revenueScrap !== null)
-      .sort((a, b) => b.confidence - a.confidence || (b.maxCostScrap ?? 0) - (a.maxCostScrap ?? 0) || a.key.localeCompare(b.key))[0];
+      .sort((a, b) => b.confidence - a.confidence || (b.maxCostScrap ?? 0) - (a.maxCostScrap ?? 0) || newerCopyOrder(a, b) || a.key.localeCompare(b.key))[0];
     if (!top) continue;
     // Same pick as the service: a cost is only judged against its own row's ceiling.
-    const known = top.inputKind !== 'rule' ? top : (list.filter((o) => o.inputKind !== 'rule').sort((a, b) => b.inputObservedAt - a.inputObservedAt)[0] ?? null);
+    const known = top.inputKind !== 'rule' ? top : (list.filter((o) => o.inputKind !== 'rule').sort(newerCopyOrder)[0] ?? null);
     const maxCostScrap = top.maxCostScrap!;
     const knownCostScrap = known ? known.costScrap : null;
     const knownMaxCostScrap = known?.maxCostScrap ?? null;
@@ -784,6 +796,12 @@ const MARKET_CURRENCY: ReadonlySet<string> = new Set(CURRENCY_SKUS);
 export interface MockKnown {
   typed: ScrapPrice | null;
   page: ScrapPrice | null;
+  /**
+   * 0.7.2: every price of the base seen at its newest time, typed and imported alike (the service's
+   * byBase and tied): a look stores a kit once per sheen/killstreaker combo, every one at the page's time.
+   * mockKnownAt picks the row's price from them.
+   */
+  newest: ScrapPrice[];
 }
 
 export function mockKnownPrices(prices: readonly ScrapPrice[]): Map<string, MockKnown> {
@@ -796,19 +814,51 @@ export function mockKnownPrices(prices: readonly ScrapPrice[]): Map<string, Mock
       continue;
     }
     if (MARKET_CURRENCY.has(base)) continue;
-    const slot = out.get(base) ?? { typed: null, page: null };
+    const slot = out.get(base) ?? { typed: null, page: null, newest: [] };
     const side = p.source === 'import' ? 'page' : 'typed';
     const cur = slot[side];
     if (!cur || p.observedAt > cur.observedAt || (p.observedAt === cur.observedAt && p.id > cur.id)) slot[side] = p;
+    // As the service's foldKnown: a newer price replaces the whole group, one of the same time joins it.
+    const at = slot.newest[0]?.observedAt;
+    if (at === undefined || p.observedAt > at) slot.newest = [p];
+    else if (p.observedAt === at) slot.newest.push(p);
     out.set(base, slot);
   }
   return out;
 }
 
+/**
+ * The price a base's row shows at `keyScrap` (the service's knownAt, market.ts): its newest, and of several
+ * seen at that time the cheapest, equal costs keeping the higher id. 0.7.2: before, the highest id won such
+ * a tie, which is the copy stored last, so a cheap kit copy could hide behind a dear one of the same look.
+ */
+export function mockKnownAt(known: MockKnown | undefined, keyScrap: Scrap): ScrapPrice | null {
+  let best: ScrapPrice | null = null;
+  let bestCost = 0;
+  for (const p of known?.newest ?? []) {
+    const cost = costOf(p, keyScrap);
+    if (best === null || cost < bestCost || (cost === bestCost && p.id > best.id)) {
+      best = p;
+      bestCost = cost;
+    }
+  }
+  return best;
+}
+
+/**
+ * The price is for a copy with extras (the engine's target.hasExtras, which market.ts flags 'has-extras'):
+ * paint, spells, parts, a custom name or description, and (0.7.2, unlike the Live check's other copy) a
+ * sheen or killstreaker, so a kit row is flagged as the service's is.
+ */
 function hasExtras(p: ScrapPrice): boolean {
-  if (fromString(p.sku).paint) return true;
+  if ((fromString(p.sku).paint ?? 0) > 0) return true;
   const s = p.special;
-  return s !== null && (s.paint !== null || s.spells.length > 0 || s.parts.length > 0 || s.sheen !== null || s.killstreaker !== null || s.customName || s.customDesc);
+  return s !== null && ((s.paint ?? 0) > 0 || listed(s.spells) || listed(s.parts) || (s.sheen ?? 0) > 0 || (s.killstreaker ?? 0) > 0 || s.customName === true || s.customDesc === true);
+}
+
+/** A spell or part list with an entry, as the engine counts one (matcher.ts hasItems): a non-blank string or number. */
+function listed(v: readonly unknown[] | undefined): boolean {
+  return Array.isArray(v) && v.some((x) => (typeof x === 'string' || typeof x === 'number') && String(x).trim() !== '');
 }
 
 /** Keys valued with the current key price, metal as is (valueScrap in src/shared/currency.ts). */
@@ -845,9 +895,7 @@ export function mockMarketRow(args: {
   const priced = book ? mockPrices(book, settings, keyScrap, now) : null;
   const eligible = priced?.eligible ?? [];
   const buyerCount = new Set(eligible.map((o) => o.steamid)).size;
-  const knownPrice = [known?.typed ?? null, known?.page ?? null]
-    .filter((p): p is ScrapPrice => p !== null)
-    .sort((a, b) => b.observedAt - a.observedAt || b.id - a.id)[0] ?? null;
+  const knownPrice = mockKnownAt(known, keyScrap);
   if (buyerCount === 0 && knownPrice === null) return null;
 
   const useOrder = settings.profit.useOrder;
@@ -1486,8 +1534,37 @@ export function seedPrices(rng: Rng, now: UnixMs): ScrapPrice[] {
       stock: fromImport ? rng.int(1, 4) : null,
     });
   }
+  // 0.7.2: one killstreak kit as a page look stores it: a row per sheen/killstreaker combo, all at the
+  // page's time (the bridge dates every seeded import at its bank's save), the cheaper one stored first,
+  // so the preview shows the Live market and Live check taking the cheapest copy. Added after the loop and
+  // without the RNG, so every other seeded price is unchanged.
+  const lookAt = now - 90 * 60_000;
+  for (const [sheen, killstreaker, keys, scrap] of SEED_KIT_COPIES) {
+    out.push({
+      id: id++,
+      sku: SEED_KIT.sku,
+      name: SEED_KIT.name,
+      costKeys: keys,
+      costScrap: scrap,
+      source: 'import',
+      observedAt: lookAt,
+      note: null,
+      importBatch: null,
+      special: { paint: null, spells: [], parts: [], sheen, killstreaker, customName: false, customDesc: false },
+      assetId: null,
+      stock: 1,
+    });
+  }
   return out;
 }
+
+/** 0.7.2: the seeded kit, keyed as the saved-page import keys a kit card (by weapon, Non-Craftable). */
+export const SEED_KIT = { sku: '6526;6;uncraftable;kt-3;td-205', name: 'Non-Craftable Professional Killstreak Rocket Launcher Kit' } as const;
+/** Its copies of one look: [sheen, killstreaker, keys, metal scrap]. Hot Rod / Cerebral Discharge, then Team Shine / Fire Horns. */
+const SEED_KIT_COPIES: readonly [number, number, number, Scrap][] = [
+  [7, 2003, 20, 9],
+  [1, 2002, 37, 0],
+];
 
 export function seedJournal(now: UnixMs): JournalEntry[] {
   const day = 86_400_000;

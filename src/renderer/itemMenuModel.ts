@@ -5,6 +5,7 @@
 
 import { bankStockPagePath } from '../shared/bankStock';
 import { SCRAPTF_BOUNDARY_SHORT } from '../shared/boundaryText';
+import { valueScrap } from '../shared/currency';
 import { SCRAPTF_BANK_PAGES, SCRAPTF_ITEMS_URL, bankForCategory, scraptfBankInfo, scraptfPageFor } from '../shared/links';
 import { communityMaxAgeMs } from '../shared/referenceAge';
 import { bestExitOf, scraptfListFresh, scraptfListPriceSaved, scraptfListUsePrice } from '../shared/scraptfList';
@@ -589,11 +590,26 @@ export function reconfirmInput(p: ScrapPrice, now: UnixMs): ScrapPriceInput {
   return { id: p.id, sku: p.sku, name: p.name, costKeys: p.costKeys, costScrap: p.costScrap, source: p.source, observedAt: now };
 }
 
-/** The typed price the drawer form updates by default: the newest one the user typed (imports are left to re-imports). */
-export function defaultPriceTarget(prices: readonly ScrapPrice[]): number | null {
+/**
+ * The typed price the drawer form updates by default: the newest one the user typed (imports are left to re-imports).
+ * 0.7.3: with `sku`, only a price for that copy (drawerPriceTargets).
+ */
+export function defaultPriceTarget(prices: readonly ScrapPrice[], sku?: string): number | null {
   let best: ScrapPrice | null = null;
-  for (const p of prices) if (p.source === 'user' && (best === null || p.observedAt > best.observedAt)) best = p;
+  for (const p of prices) {
+    if (sku !== undefined && !priceIsForSku(p, sku)) continue;
+    if (p.source === 'user' && (best === null || p.observedAt > best.observedAt)) best = p;
+  }
   return best?.id ?? null;
+}
+
+/**
+ * 0.7.3: the typed prices the drawer form of `sku` may update, newest first. A plain SKU's drawer lists every
+ * copy stored under it, and updating a painted or spelled copy's row would give that copy the plain price
+ * (the stored extras are kept, Repo.upsertScrapPrice), so only this copy's prices, as Record buy reads them.
+ */
+export function drawerPriceTargets(prices: readonly ScrapPrice[], sku: string): ScrapPrice[] {
+  return prices.filter((p) => p.source === 'user' && priceIsForSku(p, sku)).sort((a, b) => b.observedAt - a.observedAt || b.id - a.id);
 }
 
 /** The drawer form's write: updates `target` (keeping its note unless one is typed) or adds a new typed price. */
@@ -699,10 +715,34 @@ export function saleNote(o: Pick<OrderSummary, 'userName' | 'steamid'>): string 
   return `Sold to ${buyerLabel(o)}`;
 }
 
-/** The newest scrap.tf price of yours, typed or from a saved page (ties to the higher id); null without one. */
-export function newestScrapPrice(prices: readonly ScrapPrice[]): ScrapPrice | null {
+/**
+ * 0.7.2: the key price a prefill values keys at when the caller has none: the service's DEFAULT_KEY_SCRAP
+ * (60 ref; the renderer does not import the service), which is also what the service values at then.
+ */
+export const RECORD_BUY_KEY_SCRAP: Scrap = 540;
+
+/**
+ * The newest scrap.tf price of yours, typed or from a saved page; null without one. 0.7.2: of several
+ * seen at that one time, the cheapest at `keyScrap`, equal costs the higher id, as the Live market row
+ * picks (the service's knownAt): a look stores a kit once per sheen/killstreaker combo, every copy at the
+ * page's time, so the one stored last is not the price. A newer look still beats a cheaper older one.
+ */
+export function newestScrapPrice(prices: readonly ScrapPrice[], keyScrap: Scrap | null = RECORD_BUY_KEY_SCRAP): ScrapPrice | null {
+  const K = typeof keyScrap === 'number' && Number.isFinite(keyScrap) && keyScrap > 0 ? keyScrap : RECORD_BUY_KEY_SCRAP;
+  // A cost that is not a number never undercuts a real one (valueScrap would read NaN as 0).
+  const cost = (p: ScrapPrice): number => {
+    const keys = p.costKeys ?? 0;
+    return Number.isFinite(keys) && Number.isFinite(p.costScrap) ? valueScrap(keys, p.costScrap, K) : Infinity;
+  };
   let best: ScrapPrice | null = null;
-  for (const p of prices) if (best === null || p.observedAt > best.observedAt || (p.observedAt === best.observedAt && p.id > best.id)) best = p;
+  let bestCost = Infinity;
+  for (const p of prices) {
+    const c = cost(p);
+    if (best === null || p.observedAt > best.observedAt || (p.observedAt === best.observedAt && (c < bestCost || (c === bestCost && p.id > best.id)))) {
+      best = p;
+      bestCost = c;
+    }
+  }
   return best;
 }
 
@@ -720,6 +760,8 @@ function paintOfSku(sku: string): number | null {
  * Whether a stored price is one for the copy `sku` names. Prices sit under the base SKU with the paint
  * and other extras in `special` (null: never recorded, read as a plain copy, as the saved-page import
  * does): a painted SKU takes prices of its paint, a plain SKU only prices with no extras at all.
+ * 0.7.2: a sheen or killstreaker is not an extra here (the service's isOtherCopy): every specialized and
+ * professional kit or weapon carries one, so counted, such an item had no price of its own to prefill.
  */
 export function priceIsForSku(p: Pick<ScrapPrice, 'sku' | 'special'>, sku: string): boolean {
   const s = p.special;
@@ -727,7 +769,7 @@ export function priceIsForSku(p: Pick<ScrapPrice, 'sku' | 'special'>, sku: strin
   const want = paintOfSku(sku);
   if (want !== null || paint !== null) return paint === want;
   if (!s) return true;
-  return s.spells.length === 0 && s.parts.length === 0 && s.sheen === null && s.killstreaker === null && !s.customName && !s.customDesc;
+  return s.spells.length === 0 && s.parts.length === 0 && !s.customName && !s.customDesc;
 }
 
 /**
@@ -748,8 +790,15 @@ export interface RecordBuyCopy {
  * typed). A painted or spelled copy's price is never borrowed: it would be recorded under this SKU
  * and give Holdings the wrong cost. Without one the dialog opens with the venue only. ACT-11 `copy`
  * (a bank stock row): that copy's SKU and listed price, and its note, in place of the price sheet's.
+ * 0.7.2: `keyScrap` (the read's key price) picks among copies seen at one time, as the Live market row
+ * does (newestScrapPrice); the price is still prefilled in keys and metal as stored.
  */
-export function recordBuyInit(item: { sku: string; name: string }, prices: readonly ScrapPrice[], copy: RecordBuyCopy | null = null): RecordTradeInit {
+export function recordBuyInit(
+  item: { sku: string; name: string },
+  prices: readonly ScrapPrice[],
+  copy: RecordBuyCopy | null = null,
+  keyScrap: Scrap | null = RECORD_BUY_KEY_SCRAP,
+): RecordTradeInit {
   if (copy && typeof copy.sku === 'string' && copy.sku.trim()) {
     const priced = typeof copy.keys === 'number' && Number.isFinite(copy.keys) && typeof copy.scrap === 'number' && Number.isFinite(copy.scrap);
     return {
@@ -761,7 +810,7 @@ export function recordBuyInit(item: { sku: string; name: string }, prices: reado
       ...(copy.note.trim() ? { note: copy.note.trim() } : {}),
     };
   }
-  const p = newestScrapPrice(prices.filter((x) => priceIsForSku(x, item.sku)));
+  const p = newestScrapPrice(prices.filter((x) => priceIsForSku(x, item.sku)), keyScrap);
   return { side: 'buy', sku: item.sku, name: item.name, venue: RECORD_BUY_VENUE, ...(p ? { keys: p.costKeys, scrap: p.costScrap } : {}) };
 }
 
@@ -809,17 +858,17 @@ export function recordInitTitle(init: RecordTradeInit): string {
  * The item menu's prefill, from 'item.detail' (local only, history off). The sale uses the
  * revenue order (Settings: revenue used for profit), as the drawer does, or scrap.tf when the
  * saved list makes it the better exit (recordSaleInit). `d` null (the read failed) opens the
- * dialog with the venue only; the user types the price.
+ * dialog with the venue only; the user types the price. 0.7.2: the buy picks at the read's key price.
  */
 export function recordTradeInit(
   side: 'buy' | 'sell',
   target: Pick<ItemMenuTarget, 'sku' | 'name'> & Partial<Pick<ItemMenuTarget, 'copy'>>,
-  d: (Pick<ItemDetail, 'name' | 'scrapPrices' | 'revenue' | 'buyOrders'> & Partial<Pick<ItemDetail, 'scraptfList'>>) | null,
+  d: (Pick<ItemDetail, 'name' | 'scrapPrices' | 'revenue' | 'buyOrders'> & Partial<Pick<ItemDetail, 'scraptfList' | 'keyPrice'>>) | null,
   p: PreviewSettings,
   now: UnixMs = Date.now(),
 ): RecordTradeInit {
   const item = { sku: target.sku, name: target.name.trim() || d?.name || target.sku };
-  if (side === 'buy') return recordBuyInit(item, d?.scrapPrices ?? [], target.copy ?? null);
+  if (side === 'buy') return recordBuyInit(item, d?.scrapPrices ?? [], target.copy ?? null, d?.keyPrice?.valueScrap ?? null);
   return recordSaleInit(item, d ? previewRevenue(d, p).order : null, d?.scraptfList ? { list: d.scraptfList, now } : null);
 }
 
@@ -882,9 +931,36 @@ export function unpaintedName(name: string): string {
   return name.replace(/\s*\(Paint: [^()]*\)\s*$/, '').trim();
 }
 
-/** What to paste into scrap.tf's search box: the unpainted item name (the SKU when there is none). */
+/** 0.7.2: killstreak kits by defindex (6527 basic, 6523 specialized, 6526 professional). */
+const KIT_DEFINDEXES: ReadonlySet<number> = new Set([6527, 6523, 6526]);
+
+/** A kit's name as the schema builds it (or backpack.tf names it): the weapon is what is left. */
+const KIT_NAME_RE = /^(?:Non-Tradable\s+)?(?:Non-Craftable\s+)?(?:(?:Basic|Specialized|Professional)\s+)?(?:Killstreak\s+)?(.+?)\s+Kit$/i;
+
+/**
+ * 0.7.2: a killstreak kit's name (with a weapon) cut down to "<weapon> Kit", else null. scrap.tf titles a
+ * kit "Professional Rocket Launcher Kit" (no "Killstreak"), so Steam's "Non-Craftable Professional
+ * Killstreak Rocket Launcher Kit" is not part of it, while "Rocket Launcher Kit" is part of every form of
+ * the title, without guessing which tier or craft words the page shows.
+ */
+function kitSearchName(sku: string, name: string): string | null {
+  const obj = fromString(String(sku).trim());
+  // A kit with no weapon (a bare "6526;6") is just "Professional Killstreak Kit": left as it is.
+  if (!KIT_DEFINDEXES.has(obj.defindex) || typeof obj.target !== 'number' || obj.target <= 0) return null;
+  const m = KIT_NAME_RE.exec(name.replace(/\s+/g, ' ').trim());
+  const weapon = m?.[1]?.trim() ?? '';
+  // A name the schema could not build (the SKU itself) or another shape keeps the usual search name.
+  if (!weapon || /\b(?:Killstreak|Kit)\b/i.test(weapon)) return null;
+  return `${weapon} Kit`;
+}
+
+/**
+ * What to paste into scrap.tf's search box: the unpainted item name (the SKU when there is none).
+ * 0.7.2: a killstreak kit's is "<weapon> Kit" (kitSearchName), which scrap.tf's kit titles contain.
+ */
 export function scraptfSearchName(item: { sku: string; name: string }): string {
-  return unpaintedName(item.name) || item.name.trim() || item.sku;
+  const plain = unpaintedName(item.name);
+  return kitSearchName(item.sku, plain) ?? (plain || item.name.trim() || item.sku);
 }
 
 /** F21 `inWindow` (scraptfLinksInWindow): main opens the page in the user's scrap.tf window, not the browser. */

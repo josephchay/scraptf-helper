@@ -251,7 +251,7 @@ export function yourPriceTitle(
   const at = typeof r.knownObservedAt === 'number' && Number.isFinite(r.knownObservedAt) ? r.knownObservedAt : null;
   const stock = typeof r.knownStock === 'number' && Number.isFinite(r.knownStock) ? ` ${fmtInt(r.knownStock)} in stock then.` : '';
   const seen = at === null ? '' : ` Seen ${fmtDateTime(at)}.${stock}`;
-  const stale = yourPriceStale(r) ? ' Older than your stale-input limit (Settings, Profit), so it is not counted as at or under the ceiling: check scrap.tf again.' : '';
+  const stale = yourPriceStale(r) ? ' Older than your "Price is stale after" time (Settings → Profit thresholds), so it is not counted as at or under the ceiling: check scrap.tf again.' : '';
   if (r.knownMaxCostScrap === null) return `No cost clears your thresholds for the copy you priced: not a flip at that price.${seen}${stale}`;
   const ceiling = r.knownMaxCostScrap === r.maxCostScrap ? 'the ceiling' : `that copy's own ceiling (${fmtMoney(r.knownMaxCostScrap, keyScrap)})`;
   const d = r.knownMaxCostScrap - r.knownCostScrap;

@@ -18,6 +18,7 @@ import type {
   CheckSource,
   DeepPartial,
   EventQuery,
+  EventsExportQuery,
   HealthReport,
   HoldingsQuery,
   HoldingsResult,
@@ -60,6 +61,11 @@ import type {
 
 export interface AppInfo {
   version: string;
+  /**
+   * 0.7.2: the folder this copy runs from (the project folder for `npm start`, the install folder when
+   * installed), so a user with two copies can tell which one is open.
+   */
+  appDir: string;
   dataDir: string;
   logDir: string;
   platform: string;
@@ -96,11 +102,15 @@ export interface RpcContract {
    * kind 'bankStock' (F17) exports one bank's rows matching `bankStock` (required for it), in its order (paging ignored).
    * kind 'scraptfChanges' (F20) exports the scrap.tf change feed matching `scraptfChanges` (bank, kinds, sku;
    * newest first, at most SCRAPTF_CHANGES_EXPORT_MAX rows, `beforeId` and `limit` ignored).
+   * kind 'events' (0.7.3: filtered) reads the newest EVENTS_EXPORT_MAX opportunity events of `events.kinds`
+   * and exports those matching its category and search (as the Live log), newest first; omitted, the newest
+   * EVENTS_EXPORT_MAX events of every kind.
    */
   'opps.exportCsv': {
     params: {
       kind: 'opportunities' | 'events' | 'shopping' | 'market' | 'holdings' | 'bankStock' | 'scraptfChanges';
       query?: OppQuery;
+      events?: EventsExportQuery;
       shopping?: ShoppingQuery;
       market?: MarketQuery;
       holdings?: HoldingsQuery;
@@ -488,7 +498,9 @@ export type ToService =
   | { type: 'shutdown' };
 
 export type FromService =
-  | { type: 'ready' }
+  // 0.7.2: `failure` says why the service runs without its database (every RPC then rejects with it);
+  // absent on a normal start, so an older service's bare { type: 'ready' } still reads as fine.
+  | { type: 'ready'; failure?: string }
   | { type: 'rpc-result'; id: number; ok: true; result: unknown }
   | { type: 'rpc-result'; id: number; ok: false; error: string }
   | { type: 'push'; event: PushEvent; payload: unknown }

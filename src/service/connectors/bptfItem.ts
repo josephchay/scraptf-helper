@@ -459,7 +459,8 @@ function wsSkuParts(item: Record<string, unknown>, schema: SchemaService, stats:
     wear = null;
   }
   const texture = soft(textureSchema, item['texture'], 'texture', stats);
-  const paintkit = texture && texture.id > 0 ? texture.id : null;
+  // 0.7.3: pk0 (Red Rock Roscoe) is a real paintkit id, so only negatives are dropped.
+  const paintkit = texture && texture.id >= 0 ? texture.id : null;
   const crate = soft(int, item['crateSeries'], 'crateSeries', stats);
   let crateseries = crate !== null && crate > 0 ? crate : null;
 
@@ -836,7 +837,7 @@ export function listingFromSnapshot(
     australium: attrPresentNonZero(attrs.get(2027)) || (hints.australium && quality === 11),
     effect,
     festive: attrPresentNonZero(attrs.get(2053)) || hints.festivized,
-    paintkit: paintkitAttr !== null && paintkitAttr > 0 ? paintkitAttr : null,
+    paintkit: paintkitAttr !== null && paintkitAttr >= 0 ? paintkitAttr : null, // 0.7.3: pk0 is Red Rock Roscoe
     wear,
     quality2: strange && quality !== 11 ? 11 : null,
     crateseries: crateAttr !== null && crateAttr > 0 ? Math.round(crateAttr) : hints.crateSeries,

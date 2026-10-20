@@ -1,6 +1,8 @@
 // CSV exports: RFC 4180 quoting, CRLF line ends and a UTF-8 BOM (so Excel
 // detects the encoding). Text cells that a spreadsheet could run as a formula
-// get a leading apostrophe; numbers we produce ourselves are written as plain
+// get a leading apostrophe, and so does a formula start after a ';' or a line
+// break inside a text cell (Excel set to a ';' list separator starts a new
+// cell or record there); numbers we produce ourselves are written as plain
 // numbers so they stay numeric.
 
 import { formatScrap, scrapToRef } from '../../shared/currency';
@@ -13,6 +15,13 @@ export type CsvCell = string | number | boolean | null | undefined;
 export const CSV_BOM = '﻿';
 const CRLF = '\r\n';
 const FORMULA_START = /^[=+\-@\t\r]/;
+// 0.7.3: Excel set to a ';' list separator starts a new cell at every ';', even inside a quoted cell,
+// so a ';' followed (after optional spaces or quotes) by a formula start gets the apostrophe too.
+// Quoting would not help: a quote mid-field is not honoured. SKUs never put = + - @ after a ';'.
+// For the same reason a CR, LF or CRLF inside the quoted cell ends the record there, so the text after
+// it starts a new row's first cell: a formula start after a line break gets the apostrophe as well,
+// placed after the break (CRLF is matched as one break).
+const FORMULA_AFTER_SEPARATOR = /(;|\r\n|\r|\n)(?=[\t\r]|[\s"]*[=+\-@])/g;
 const NEEDS_QUOTES = /[",\r\n]/;
 
 export function csvCell(v: CsvCell): string {
@@ -21,6 +30,7 @@ export function csvCell(v: CsvCell): string {
   if (typeof v === 'boolean') return v ? 'true' : 'false';
   let s = String(v);
   if (FORMULA_START.test(s)) s = `'${s}`;
+  s = s.replace(FORMULA_AFTER_SEPARATOR, "$1'");
   return NEEDS_QUOTES.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
 }
 

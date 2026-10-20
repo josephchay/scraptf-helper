@@ -41,7 +41,9 @@ export function createPageLog(log: Logger, now: () => number = Date.now, gapMs: 
     line(level, kind, message, meta) {
       const t = now();
       const k = kinds.get(kind);
-      if (k !== undefined && t - k.at < gapMs) {
+      // 0.7.3: a clock stepped back since the kind's last line (Windows time sync, a VM resume) counts as the
+      // gap passed, so the kind is not silenced for as long as the step (like scraptfWindow's sinceMs).
+      if (k !== undefined && t >= k.at && t - k.at < gapMs) {
         k.skipped++;
         return;
       }

@@ -4,7 +4,7 @@
 	<head>
 		<meta charset="utf-8" />
 		<title>Item Trading - TF2 - Scrap.TF</title>
-		<!-- SYNTHETIC FIXTURE (F15): card markup as buy_hats.html (DESIGN_BRIEF §3.3); defindexes and effects are TF2's (the stub schema knows all but I15's, I23's and I24's), all ids, prices and stock are made up. The items bank: tools, paints, taunts, crates, promos and australiums. -->
+		<!-- SYNTHETIC FIXTURE (F15): card markup as buy_hats.html (DESIGN_BRIEF §3.3); defindexes and effects are TF2's (the stub schema knows all but I15's), all ids, prices and stock are made up. The items bank: tools, paints, taunts, crates, promos and australiums. -->
 		<meta name="viewport" content="width=device-width" />
 		<meta property="og:type" content="website" />
 		<meta property="og:url" content="https://scrap.tf/buy/items" />
@@ -315,7 +315,7 @@
 	<div class="item-value-indicator">1 key, 20 ref</div>
 </div>
 
-<!-- I19: kit fabricator whose target the schema cannot resolve: skipped, never guessed -->
+<!-- I19: kit fabricator whose target the stub schema cannot resolve (it leaves out Bread Bite, 1100, which TF2's schema has): skipped, never guessed -->
 <div
 	data-id="9700000019"
 	data-slot="all"
@@ -379,7 +379,7 @@
 	<div class="item-value-indicator">20 keys</div>
 </div>
 
-<!-- I23: strangifier: its SKU needs the target item (td-), which the card does not carry: skipped, never guessed -->
+<!-- I23: strangifier: keyed by the target its title names (6522;6;td-378), as TF2's item schema resolves it -->
 <div
 	data-id="9700000023"
 	data-slot="all"
@@ -395,7 +395,7 @@
 	<div class="item-value-indicator">2.44 ref</div>
 </div>
 
-<!-- I24: unusualifier (Unusual class, no effect of its own): needs its target too: skipped, never guessed -->
+<!-- I24: unusualifier (Unusual class, no effect of its own): keyed by the target its title names, Non-Craftable as backpack.tf keys it (9258;5;uncraftable;td-1118) -->
 <div
 	data-id="9700000024"
 	data-slot="all"

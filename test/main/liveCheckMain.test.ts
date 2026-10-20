@@ -1234,7 +1234,8 @@ describe('privacy: the main logger never receives clipboard text', () => {
       .replace(/(^|[^:'"`\\])\/\/.*$/gm, '$1');
     const state = code.slice(code.indexOf('interface ArmState {'));
     const fields = state.slice(state.indexOf('{') + 1, state.indexOf('}'));
-    expect([...fields.matchAll(/(\w+)\s*:/g)].map((m) => m[1])).toEqual(['sku', 'nameHash', 'until', 'ownCopyDropped', 'ownCopyUntil']);
+    // 0.7.3: `at` is the arm's time (a clock stepped back past it ends the arm), not anything of the name.
+    expect([...fields.matchAll(/(\w+)\s*:/g)].map((m) => m[1])).toEqual(['sku', 'nameHash', 'at', 'until', 'ownCopyDropped', 'ownCopyUntil']);
     // The name is read once, straight into the keyed hash, and nowhere else.
     expect([...code.matchAll(/\ba\.name\b/g)]).toHaveLength(1);
     expect(code).toContain('nameHash: clipboardTextHash(a.name.trim())');

@@ -60,6 +60,9 @@ function setup(opts: { repo?: Repo; settings?: DeepPartial<Settings>; schema?: S
     onChanged: (p) => changes.push(p),
     folderWatchActive: () => false,
     ...(opts.listen === false ? {} : { onBasesChanged: (b: ReadonlySet<string>) => bases.push([...b].sort()) }),
+    // 0.7.3: a constant slice clock keeps each build one slice (MARKET_SLICE_MS is wall-clock time
+    // otherwise), so the fake clock alone decides the change pushes.
+    sliceNow: () => 0,
   });
   return { repo, clock, timers, settings, log, market, changes, bases, K: () => keyPrice().valueScrap };
 }
@@ -129,6 +132,7 @@ describe('onBasesChanged', () => {
       onBasesChanged: () => {
         throw new Error('listener broke');
       },
+      sliceNow: () => 0, // one slice, as in setup()
     });
     market.start();
     timers.advance(0);

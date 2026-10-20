@@ -180,7 +180,8 @@ describe('recording trades from the drawer and the item menu (F12)', () => {
     ];
     expect(newestScrapPrice(prices)?.id).toBe(2);
     expect(recordBuyInit(ITEM, prices)).toEqual({ side: 'buy', sku: '378;6', name: 'Team Captain', venue: 'scrap.tf', keys: 1, scrap: 12 });
-    // Same time: the later row wins, as the market's known-price pick does.
+    // Same time and cost: the later row wins, as the market's known-price pick does (0.7.2: else the
+    // cheaper one, test/renderer/recordBuyKits.test.ts).
     expect(newestScrapPrice([price({ id: 4, observedAt: 5 }), price({ id: 9, observedAt: 5 })])?.id).toBe(9);
     // No price yet: the venue only, the user types the price.
     expect(recordBuyInit(ITEM, [])).toEqual({ side: 'buy', sku: '378;6', name: 'Team Captain', venue: 'scrap.tf' });

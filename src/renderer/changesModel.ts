@@ -287,7 +287,10 @@ function sameValues(a: ScraptfChangeEvent, b: ScraptfChangeEvent): boolean {
     a.pct === b.pct &&
     a.revenueScrap === b.revenueScrap &&
     a.maxCostScrap === b.maxCostScrap &&
-    a.flip === b.flip
+    a.flip === b.flip &&
+    // 0.7.3: what the hovers say of a null revenue (noRevenueWhy).
+    noRevenueWhy(a) === noRevenueWhy(b) &&
+    a.buyerCount === b.buyerCount
   );
 }
 
@@ -602,17 +605,48 @@ export function changeRowView(e: ScraptfChangeEvent, keyScrap: Scrap | null, now
     stock: changeStockText(e),
     sellsScrap: sells,
     payScrap: pay,
-    sellsTitle: sells !== null ? `Sells for ${fmtMoney(sells, keyScrap)} on backpack.tf now (a clean copy).` : 'No eligible backpack.tf buy order for this item right now.',
+    sellsTitle: sells !== null ? `Sells for ${fmtMoney(sells, keyScrap)} on backpack.tf now (a clean copy).` : noSellsTitle(e),
     payTitle:
       pay !== null
         ? `Pay up to ${fmtMoney(pay, keyScrap)} on scrap.tf: the most that still clears your profit thresholds against today's buyers.`
         : sells !== null
           ? 'No scrap.tf price clears your thresholds against these buyers.'
-          : 'No eligible buy orders, so there is no ceiling.',
+          : noPayTitle(e),
     flip,
     wasFlip,
     extrasTitle: extras,
   };
+}
+
+/**
+ * 0.7.3: why an event's live revenue is null, as marketModel's noRevenueReason reads a market row: no
+ * eligible buyer, or buyers none of which is usable. Conservative is null only when every eligible order is
+ * an outlier, which the entry flags 'all-outliers'; Best never is with buyers, so the rest is Instant
+ * without a realistic bot order. null: there is a revenue, or the buyers are not known (an older service).
+ */
+function noRevenueWhy(e: Pick<ScraptfChangeEvent, 'revenueScrap' | 'buyerCount' | 'flags'>): 'none' | 'all-outliers' | 'no-bot' | null {
+  if (finite(e.revenueScrap) || !finite(e.buyerCount)) return null;
+  if (!(e.buyerCount > 0)) return 'none';
+  return e.flags?.includes('all-outliers') ? 'all-outliers' : 'no-bot';
+}
+
+/** Sells for without a revenue: no eligible buyer, or (0.7.3) why the buyers there are give none (as the bank stock page). */
+function noSellsTitle(e: ScraptfChangeEvent): string {
+  const why = noRevenueWhy(e);
+  if (why === 'all-outliers') return 'Every eligible order looks unrealistic, so no sale price is assumed.';
+  if (why === 'no-bot') {
+    const n = e.buyerCount ?? 0;
+    return `${fmtInt(n)} ${n === 1 ? 'buyer' : 'buyers'} with eligible orders, but no realistic bot order, and Revenue used for profit is Instant (bot orders only), so no sale price is assumed.`;
+  }
+  return 'No eligible backpack.tf buy order for this item right now.';
+}
+
+/** Pay up to without a revenue: no ceiling, and (0.7.3) why, as the Live market's Pay up to hover. */
+function noPayTitle(e: ScraptfChangeEvent): string {
+  const why = noRevenueWhy(e);
+  if (why === 'all-outliers') return 'Every eligible order looks unrealistic, so there is no ceiling.';
+  if (why === 'no-bot') return 'No realistic bot order, and Revenue used for profit is Instant (bot orders only), so there is no ceiling.';
+  return 'No eligible buy orders, so there is no ceiling.';
 }
 
 /** "/buy/hats" out of "scrap.tf/buy/hats", to tell a sub-page (/items/2) apart from the bank's own. */

@@ -18,6 +18,7 @@ import { app, session, shell, webContents, type BrowserWindow, type Session, typ
 import type { Logger } from '../service/contracts';
 import { BANK_STOCK_MAX_LIMIT } from '../shared/bankStock';
 import { PARTIAL_READ } from '../shared/importCodes';
+import { SCRAPTF_BANKS } from '../shared/links';
 import { SCRAPTF_CHANGES_MAX_LIMIT } from '../shared/scraptfHistory';
 import {
   READ_SCRIPT,
@@ -41,12 +42,16 @@ import {
   SMOKE_FIXTURE_FILES,
   SMOKE_HATS_URL,
   SMOKE_HOME_URL,
+  SMOKE_KILLSTREAKS_URL,
+  SMOKE_KIT_SKUS,
   SMOKE_PARTIAL_AT_HATS_URL,
   SMOKE_PARTIAL_HATS_URL,
   SMOKE_STEAM_LINK_POINT,
   SMOKE_STEAM_LOGIN_URL,
   SMOKE_STEAM_SENTINEL,
   SMOKE_UNUSUALS_URL,
+  SMOKE_WEAPONLESS_KIT_TITLE,
+  smokeKitProblems,
   smokeWindowSettings,
   type SmokeFixtureName,
 } from './smokeWindowFixtures';
@@ -67,6 +72,7 @@ const MAX_SCANNED_BYTES = 256 * 1024 * 1024;
 
 const HATS_PATH = new URL(SMOKE_HATS_URL).pathname;
 const UNUSUALS_PATH = new URL(SMOKE_UNUSUALS_URL).pathname;
+const KILLSTREAKS_PATH = new URL(SMOKE_KILLSTREAKS_URL).pathname;
 
 export interface SmokeWindowSetup {
   reportPath: string;
@@ -139,6 +145,8 @@ interface Push {
 interface Baseline {
   batchId: number;
   parsed: number;
+  /** 0.7.2: the prices it wrote (ImportResult.stored), so a card the read keys and the file skips (or the reverse) shows. */
+  stored: number;
   rows: Map<string, string>;
   cards: number | null;
 }
@@ -472,9 +480,9 @@ export function prepareSmokeWindow(setup: SmokeWindowSetup): SmokeWindowRun {
     };
 
     /**
-     * Step 1 and 2's check: a toolbar read of the page with items, an import batch with origin 'window' and the
-     * page's bank, and the bank's newest save holding exactly the on-sale rows the file save of the same fixture
-     * holds (the fixture's on-sale cards as the parser reads them), with no change event between the two.
+     * Steps 1, 2 and 2b's check: a toolbar read of the page with items, an import batch with origin 'window' and
+     * the page's bank, and the bank's newest save holding exactly the on-sale rows the file save of the same
+     * fixture holds (the fixture's on-sale cards as the parser reads them), with no change event between the two.
      */
     const checkWindowRead = async (bank: ScraptfBank, pagePath: string, pushFrom: number, waitMs: number): Promise<StepOutcome> => {
       const base = baselines.get(bank);
@@ -498,6 +506,7 @@ export function prepareSmokeWindow(setup: SmokeWindowSetup): SmokeWindowRun {
       if (diff !== null) problems.push(diff);
       if (events.length > 0) problems.push(`${events.length} change events against the file save (${[...new Set(events.map((e) => e.kind))].join(', ')})`);
       if (read.items !== base.parsed) problems.push(`the read parsed ${read.items} items, the file ${base.parsed}`);
+      if (typeof read.stored === 'number' && read.stored !== base.stored) problems.push(`the read stored ${read.stored} prices, the file ${base.stored}`);
       if (report !== null && base.cards !== null && report.counts.cards !== base.cards) problems.push(`the page's DOM held ${report.counts.cards} cards, the file ${base.cards}`);
       const facts = `batch ${batch.id} (origin window, bank ${bank}, ${batch.itemCount} items); ${now.rows.size} rows on sale, as in the file save; read ${describeRead(read)}`;
       return problems.length === 0 ? pass(facts) : fail(`${problems.join('; ')}; ${facts}`);
@@ -695,10 +704,10 @@ export function prepareSmokeWindow(setup: SmokeWindowSetup): SmokeWindowRun {
       });
       importWhy = service.status === 'fail' ? 'the service is not ready' : schema.status === 'fail' ? `the item schema did not load within ${SCHEMA_WAIT_MS / 1000} s` : '';
 
-      const saved = await step('setup: file saves of the hats and unusuals fixtures (each read is compared with one)', 30_000, async () => {
+      const saved = await step('setup: file saves of the hats, unusuals and killstreaks fixtures (each read is compared with one)', 30_000, async () => {
         if (importWhy !== '') return fail(`not done: ${importWhy}`);
         const facts: string[] = [];
-        for (const [bank, name] of [['hats', 'buy_hats.html'], ['unusuals', 'unusuals.html']] as const) {
+        for (const [bank, name] of [['hats', 'buy_hats.html'], ['unusuals', 'unusuals.html'], ['killstreaks', 'buy_killstreaks.html']] as const) {
           const html = fixture(name);
           if (html === null) return fail(`no ${name}`);
           // An hour old, so the window's read of the page is the newer save.
@@ -706,7 +715,7 @@ export function prepareSmokeWindow(setup: SmokeWindowSetup): SmokeWindowRun {
           const l = await look(bank);
           const report = (await rt.host.call('import.report', { limit: 20 })).find((x) => x.batchId === r.batchId) ?? null;
           if (r.batchId <= 0 || r.stockSave !== 'written' || l.rows.size === 0) return fail(`${name}: batch ${r.batchId}, stock ${r.stockSave ?? '?'}, ${l.rows.size} rows on sale`);
-          baselines.set(bank, { batchId: r.batchId, parsed: r.parsed, rows: l.rows, cards: report?.counts.cards ?? null });
+          baselines.set(bank, { batchId: r.batchId, parsed: r.parsed, stored: r.stored, rows: l.rows, cards: report?.counts.cards ?? null });
           facts.push(`${name}: ${r.parsed} items, ${l.rows.size} on sale`);
         }
         return pass(facts.join('; '));
@@ -742,6 +751,46 @@ export function prepareSmokeWindow(setup: SmokeWindowSetup): SmokeWindowRun {
           return fail(`not checked: ${importWhy}${nav ? '' : '; the page did not load either'}`);
         }
         return checkWindowRead('unusuals', UNUSUALS_PATH, pushFrom, 40_000);
+      });
+
+      // ----- 2b (0.7.2): killstreak kits, end to end -----
+
+      await step('2b go to /buy/killstreaks: kits stored by weapon, none bare, the weaponless kit skipped, the same on-sale items as the file', 50_000, async () => {
+        await quiet();
+        const pushFrom = pushes.length;
+        const from = events.length;
+        rt.scraptfWindow.go(SMOKE_KILLSTREAKS_URL);
+        if (!importReady) {
+          const nav = await until(() => navigatedTo(from, SMOKE_KILLSTREAKS_URL), 15_000);
+          return fail(`not checked: ${importWhy}${nav ? '' : '; the page did not load either'}`);
+        }
+        const same = await checkWindowRead('killstreaks', KILLSTREAKS_PATH, pushFrom, 40_000);
+        const base = baselines.get('killstreaks');
+        const batch = base === undefined ? null : ((await rt.host.call('import.batches', { limit: 50 })).find((b) => b.origin === 'window' && b.bank === 'killstreaks' && b.id > base.batchId) ?? null);
+        // No window batch: checkWindowRead has said why.
+        if (batch === null) return same;
+        // Every stored price and every bank's stock, so a bare kit stored by any page is caught.
+        const prices = await rt.host.call('prices.list', {});
+        const stock = await Promise.all(SCRAPTF_BANKS.map(async (b) => (await rt.host.call('scraptf.bankStock', { bank: b.bank, limit: BANK_STOCK_MAX_LIMIT })).rows.map((r) => r.sku)));
+        const report = (await rt.host.call('import.report', { limit: 20 })).find((r) => r.batchId === batch.id) ?? null;
+        const kits = smokeKitProblems(batch.id, prices, stock.flat(), report?.items ?? null);
+        if (kits.length > 0) return fail(`${kits.join('; ')}; ${same.detail}`);
+        if (same.status === 'fail') return fail(`${same.detail}; the kits as expected`);
+        return pass(`${SMOKE_KIT_SKUS.join(', ')} stored, two copies of the first by sheen and killstreaker; no kit without its weapon in the prices or bank stock; '${SMOKE_WEAPONLESS_KIT_TITLE}' skipped (needs-target); ${same.detail}`);
+      });
+
+      // Step 3's Alt+Left goes back to /buy/hats and its Alt+Right forward to /unusuals, as after step 2: the
+      // two pages are loaded again, in that order, after /buy/killstreaks.
+      await step("2b back to /buy/hats, then /unusuals: the history step 3's keys expect", 40_000, async () => {
+        const shown: string[] = [];
+        for (const url of [SMOKE_HATS_URL, SMOKE_UNUSUALS_URL]) {
+          await quiet();
+          const from = events.length;
+          rt.scraptfWindow.go(url);
+          if ((await until(() => navigatedTo(from, url), 10_000)) === null) return fail(`${windowDisplayUrl(url)} did not load${shown.length > 0 ? ` (after ${shown.join(', ')})` : ''}`);
+          shown.push(windowDisplayUrl(url) ?? url);
+        }
+        return pass(`loaded ${shown.join(', then ')}`);
       });
 
       // ----- 3: the F21-11 keys, through Electron's real input path -----

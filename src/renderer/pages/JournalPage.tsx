@@ -1,4 +1,5 @@
 import { useRef, useState } from 'react';
+import { positionCostAt } from '../../shared/holdings';
 import type { JournalEntry, JournalSide } from '../../shared/types';
 import { rpc, saveCsv } from '../api';
 import { ConfirmButton, Field, Segmented } from '../components/Controls';
@@ -10,7 +11,8 @@ import { PriceInput, readPrice, type BareUnit } from '../components/PriceInput';
 import { errorMessage, fmtDateTime, fmtInt, fmtKeysMetal, fmtMoney, fromDateTimeLocal, toDateTimeLocal } from '../format';
 import { useApp } from '../hooks/appContext';
 import { useRpcQuery, useThrottled, useVisiblePush } from '../hooks/useRpc';
-import { undoneText } from '../recordTradeModel';
+import { useInterval } from '../hooks/useTimers';
+import { FUTURE_SLACK_MS, undoneText } from '../recordTradeModel';
 
 const VENUES = ['scrap.tf', 'backpack.tf', 'marketplace.tf', 'Steam Community Market', 'Direct trade'];
 
@@ -46,8 +48,11 @@ export function JournalPage() {
   };
 
   const s = summary.data;
-  const openCost = s?.open.reduce((t, p) => t + p.costScrap, 0) ?? 0;
-  const openQty = s?.open.reduce((t, p) => t + p.qty, 0) ?? 0;
+  // Held lots at today's key price, as Holdings values them: the stored costScrap uses each buy's own
+  // key price, and split at today's it read "1 key 58.00 ref" for a lot bought for 2 keys.
+  const open = (s?.open ?? []).map((p) => ({ ...p, costNow: positionCostAt(p, keyScrap) })).sort((a, b) => b.costNow - a.costNow || a.sku.localeCompare(b.sku));
+  const openCost = open.reduce((t, p) => t + p.costNow, 0);
+  const openQty = open.reduce((t, p) => t + p.qty, 0);
 
   return (
     <div className="page journal-page">
@@ -93,7 +98,7 @@ export function JournalPage() {
           {list.error ? <ErrorBanner message={list.error} onRetry={() => void list.reload()} /> : null}
           {list.loading ? (
             <LoadingBlock />
-          ) : !list.data?.length ? (
+          ) : list.error && !list.data ? null : !list.data?.length ? (
             <EmptyState icon="journal" title="No trades logged" compact>
               Log a buy when you buy on scrap.tf and a sell when a buyer takes it. Profit is worked out first-in, first-out.
             </EmptyState>
@@ -197,7 +202,7 @@ export function JournalPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {s.open.map((p) => (
+                  {open.map((p) => (
                     <tr key={p.sku}>
                       <td>
                         <button type="button" className="row-link" onClick={() => openItem(p.sku)}>
@@ -206,7 +211,7 @@ export function JournalPage() {
                       </td>
                       <td className="num">{p.qty}</td>
                       <td className="num">
-                        <Money scrap={p.costScrap} keyScrap={keyScrap} />
+                        <Money scrap={p.costNow} keyScrap={keyScrap} />
                       </td>
                     </tr>
                   ))}
@@ -229,7 +234,14 @@ function JournalForm() {
   const [item, setItem] = useState<PickedItem | null>(null);
   const [text, setText] = useState('');
   const [unit, setUnit] = useState<BareUnit>('ref');
-  const [when, setWhen] = useState(() => toDateTimeLocal(Date.now()));
+  // When follows the clock until the user edits it (null = untouched): the page can stay mounted for
+  // hours, and a trade logged with When untouched is dated when it is logged, not when the page opened.
+  // The clock holds still while the field has focus, so a segment being typed is not reset under the user.
+  const [whenEdited, setWhenEdited] = useState<string | null>(null);
+  const [whenFocused, setWhenFocused] = useState(false);
+  const [clock, setClock] = useState(() => Date.now());
+  useInterval(() => setClock(Date.now()), 30_000, whenEdited === null && !whenFocused);
+  const when = whenEdited ?? toDateTimeLocal(clock);
   const [note, setNote] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
@@ -252,6 +264,15 @@ function JournalForm() {
       setError('Enter where the trade happened.');
       return;
     }
+    const now = Date.now();
+    // Untouched (or cleared) is the moment of logging, to the millisecond; a typed When is a backfill.
+    const ts = (whenEdited === null ? null : fromDateTimeLocal(whenEdited)) ?? now;
+    // As the Record trade dialog: further ahead is a typo (a year like 2062), and a scrap.tf buy dated
+    // then would mute the item's Profit toasts until that date.
+    if (ts > now + FUTURE_SLACK_MS) {
+      setError('That date is in the future.');
+      return;
+    }
     setSaving(true);
     try {
       const e = await rpc('journal.add', {
@@ -261,7 +282,7 @@ function JournalForm() {
         name: it.name,
         keys: parsed.keys,
         scrap: parsed.scrap,
-        ts: fromDateTimeLocal(when) ?? Date.now(),
+        ts,
         note: note.trim() || null,
       });
       // Undo deletes the row again; the 'journal.changed' push refreshes this page and Holdings.
@@ -274,7 +295,8 @@ function JournalForm() {
       setItem(null);
       setText('');
       setNote('');
-      setWhen(toDateTimeLocal(Date.now()));
+      setWhenEdited(null);
+      setClock(Date.now());
       picker.current?.focus();
     } catch (err) {
       setError(errorMessage(err));
@@ -286,6 +308,8 @@ function JournalForm() {
   return (
     <form
       className="form-grid journal-form"
+      // The future-date check is submit's own (with its slack and role=alert), not the browser's bubble on max.
+      noValidate
       onSubmit={(e) => {
         e.preventDefault();
         void submit();
@@ -321,7 +345,19 @@ function JournalForm() {
           </datalist>
         </Field>
         <Field label="When" htmlFor="jf-when">
-          <input id="jf-when" className="input" type="datetime-local" value={when} onChange={(e) => setWhen(e.target.value)} />
+          <input
+            id="jf-when"
+            className="input"
+            type="datetime-local"
+            value={when}
+            max={toDateTimeLocal(Date.now())}
+            onChange={(e) => setWhenEdited(e.target.value)}
+            onFocus={() => setWhenFocused(true)}
+            onBlur={() => {
+              setWhenFocused(false);
+              setClock(Date.now());
+            }}
+          />
         </Field>
       <Field label="Note (optional)" htmlFor="jf-note">
         <input id="jf-note" className="input" value={note} maxLength={200} onChange={(e) => setNote(e.target.value)} />

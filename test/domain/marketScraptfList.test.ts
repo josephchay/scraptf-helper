@@ -110,6 +110,9 @@ function setup(opts: { repo?: Repo; dep?: MarketIndexDeps['scraptfList'] | null 
     onChanged: (p) => changes.push(p.changed),
     folderWatchActive: () => false,
     ...(dep ? { scraptfList: dep } : {}),
+    // 0.7.3: a constant slice clock keeps each build one slice (MARKET_SLICE_MS is wall-clock time
+    // otherwise), so the fake clock alone decides the change pushes.
+    sliceNow: () => 0,
   });
   return {
     repo,

@@ -63,10 +63,14 @@ function isAcceleratorKey(token: string): boolean {
   return NAMED_KEYS.has(t) || PUNCTUATION_KEYS.has(token);
 }
 
-/** Modifier aliases folded to one canonical name; AltGr is Ctrl+Alt on Windows. */
+/**
+ * Modifier aliases folded to one canonical name; AltGr is Ctrl+Alt on Windows. 0.7.3: a bare
+ * Command/Cmd is the Win key, like Super/Meta (Electron registers it so, and accelLabel shows 'Win');
+ * only CommandOrControl/CmdOrCtrl mean Ctrl.
+ */
 const CANONICAL_MODIFIER: Record<string, readonly string[]> = {
-  command: ['ctrl'],
-  cmd: ['ctrl'],
+  command: ['super'],
+  cmd: ['super'],
   control: ['ctrl'],
   ctrl: ['ctrl'],
   commandorcontrol: ['ctrl'],

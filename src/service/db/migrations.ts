@@ -360,6 +360,65 @@ CREATE INDEX IF NOT EXISTS idx_import_batches_bank_saved
   ON import_batches(bank, (CASE WHEN file_mtime > 0 THEN file_mtime ELSE imported_at END));
 `;
 
+// Killstreak kits (6527 basic, 6523 specialized, 6526 professional) stored before 0.7.2 without their
+// target weapon: every kit of a tier shared one SKU and one price. Imported rows only; a typed price and
+// a kit with its target (td-) stay.
+const V11_BARE_KITS = `
+DELETE FROM scrap_prices
+ WHERE source = 'import'
+   AND (sku = '6527;6' OR sku = '6523;6' OR sku = '6526;6'
+        OR sku LIKE '6527;6;%' OR sku LIKE '6523;6;%' OR sku LIKE '6526;6;%')
+   AND sku NOT LIKE '%;td-%';
+DELETE FROM bank_stock
+ WHERE (sku = '6527;6' OR sku = '6523;6' OR sku = '6526;6'
+        OR sku LIKE '6527;6;%' OR sku LIKE '6523;6;%' OR sku LIKE '6526;6;%')
+   AND sku NOT LIKE '%;td-%';
+DELETE FROM scraptf_events
+ WHERE (sku = '6527;6' OR sku = '6523;6' OR sku = '6526;6'
+        OR sku LIKE '6527;6;%' OR sku LIKE '6523;6;%' OR sku LIKE '6526;6;%')
+   AND sku NOT LIKE '%;td-%';
+`;
+
+// 0.7.2: V11 shipped before the parser could read a real kit card ("Professional Rocket Launcher Kit", a
+// schema item named just "Kit"), so a /buy/killstreaks look made after it stored the bare kits again. V11's
+// cleanup runs once more; and since V11 left the bank stock saves it emptied listed (bank_stock_saves),
+// so the next look read every kit as new, saves with no rows left are dropped and the rest recounted. The
+// batches of those emptied saves count no items (import_batches.item_count 0): the Banks page and the
+// coverage strip would otherwise show the bank as saved with the bare kits' count. Only V11 and V12 can
+// leave a save with no rows (a save is written with its rows and pruned with them).
+const V12_BARE_KITS_AGAIN = `${V11_BARE_KITS}
+UPDATE import_batches SET item_count = 0
+ WHERE id IN (SELECT s.batch_id FROM bank_stock_saves s
+               WHERE NOT EXISTS (SELECT 1 FROM bank_stock b WHERE b.batch_id = s.batch_id));
+DELETE FROM bank_stock_saves
+ WHERE NOT EXISTS (SELECT 1 FROM bank_stock b WHERE b.batch_id = bank_stock_saves.batch_id);
+UPDATE bank_stock_saves
+   SET items = (SELECT COUNT(*) FROM bank_stock b WHERE b.batch_id = bank_stock_saves.batch_id);
+`;
+
+// 0.7.3: a killstreaks look that stored prices but wrote no bank stock save (a partial look DM-2, an
+// unsettled window snapshot ACT-4, a file import from before 0.6) kept its item_count after V11/V12 deleted
+// its bare kit prices, so Repo.bankNewestSaves still dated the bank with the deleted kits' count. Only
+// where a batch count can still date the bank: with any killstreaks stock save, the newest save dates it.
+// And only a batch newer than every killstreaks batch that still has a price: a later look re-tags the rows
+// it shares with an earlier one (importSavedPage updates them under its own batch id), thinning drops
+// older saves and a sale deletes prices, so an older look with no price tagged to it is still real.
+// Killstreaks only: an /items list takes over other banks' plain rows under its own batch id too.
+const V13_BARE_KIT_LOOKS = `
+UPDATE import_batches SET item_count = 0
+ WHERE bank = 'killstreaks' AND item_count > 0
+   AND NOT EXISTS (SELECT 1 FROM bank_stock_saves s WHERE s.bank = 'killstreaks')
+   AND NOT EXISTS (SELECT 1 FROM scrap_prices sp WHERE sp.import_batch = import_batches.id)
+   AND NOT EXISTS (SELECT 1 FROM import_batches k
+                    WHERE k.bank = 'killstreaks'
+                      AND EXISTS (SELECT 1 FROM scrap_prices sp2 WHERE sp2.import_batch = k.id)
+                      AND ((CASE WHEN k.file_mtime > 0 THEN k.file_mtime ELSE k.imported_at END)
+                             > (CASE WHEN import_batches.file_mtime > 0 THEN import_batches.file_mtime ELSE import_batches.imported_at END)
+                           OR ((CASE WHEN k.file_mtime > 0 THEN k.file_mtime ELSE k.imported_at END)
+                                 = (CASE WHEN import_batches.file_mtime > 0 THEN import_batches.file_mtime ELSE import_batches.imported_at END)
+                               AND k.id > import_batches.id)));
+`;
+
 export const MIGRATIONS: readonly Migration[] = Object.freeze([
   { version: 1, name: 'initial schema', sql: V1_INITIAL },
   { version: 2, name: 'opportunity pay-up-to ceiling', sql: V2_MAX_COST },
@@ -371,6 +430,9 @@ export const MIGRATIONS: readonly Migration[] = Object.freeze([
   { version: 8, name: 'scrap.tf feed by bank and kept saves', sql: V8_SCRAPTF_SAVES },
   { version: 9, name: 'saved-page batch origin', sql: V9_BATCH_ORIGIN },
   { version: 10, name: 'saved-page batch bank and save time', sql: V10_BATCH_BANK_SAVED },
+  { version: 11, name: 'remove killstreak kits stored without their target', sql: V11_BARE_KITS },
+  { version: 12, name: 'remove bare killstreak kits again and the bank stock saves they left empty', sql: V12_BARE_KITS_AGAIN },
+  { version: 13, name: 'killstreaks looks left with no prices and no bank stock save count no items', sql: V13_BARE_KIT_LOOKS },
 ]);
 
 export const SCHEMA_VERSION: number = MIGRATIONS.reduce((max, m) => Math.max(max, m.version), 0);

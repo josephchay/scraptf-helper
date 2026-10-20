@@ -58,6 +58,8 @@ beforeAll(async () => {
   }
   win()['location'] = { hash: '#/log/changes' };
   (doc.documentElement as unknown as { dataset: Record<string, string> }).dataset = {};
+  // Before react-dom loads: `oninput` makes the search box's onChange follow 'input' events.
+  if (!('oninput' in doc)) (doc as unknown as Record<string, unknown>)['oninput'] = null;
   ({ createRoot } = await import('react-dom/client'));
   ({ AppProvider, useApp } = await import('../../src/renderer/hooks/appContext'));
   ({ LogPage } = await import('../../src/renderer/pages/LogPage'));
@@ -274,18 +276,28 @@ describe('the scrap.tf changes tab against the mock', () => {
   });
 
   it("re-reads on 'scraptf.changed' (a new save), at most once per 2 s, and shows the new changes on top", async () => {
-    const t = await mountLog();
+    // Audit rv-tests-3 (0.7.3): the mock's clock is pinned, so a second import is no newer than the first,
+    // writes no change and pushes nothing: the pushes within the 2 s are fired by hand.
+    const pushes: (() => void)[] = [];
+    const t = await mountLog({
+      before: (b) => {
+        const on = b.on.bind(b);
+        b.on = ((event: string, listener: (p: unknown) => void) => {
+          if (event === 'scraptf.changed') pushes.push(() => listener({ at: T0 - 30_000, count: 1 }));
+          return on(event as never, listener as never);
+        }) as typeof b.on;
+      },
+    });
+    expect(pushes.length).toBeGreaterThan(0);
     // The page's own reads (this test's look-ups ask for one).
     const pageReads = () => t.queries().filter((q) => q.limit === 100);
     expect(pageReads()).toHaveLength(1);
     const top = (await t.b.rpc('scraptf.changes', { limit: 1 }))[0]!.id;
-    for (let i = 0; i < 3; i++) {
-      await act(async () => {
-        await t.b.rpc('import.pickFile', undefined);
-      });
-    }
+    await act(async () => {
+      await t.b.rpc('import.pickFile', undefined);
+    });
     await settle();
-    // The first push reads at once; the rest wait for one trailing read 2 s later.
+    // The first push reads at once.
     expect(pageReads()).toEqual([
       { kinds: KINDS, limit: 100 },
       { kinds: KINDS, limit: 100 },
@@ -295,6 +307,27 @@ describe('the scrap.tf changes tab against the mock', () => {
     expect(t.rows()[0]!.getAttribute('class')).toContain('stf-feed-row');
     const firstRowTime = t.rows()[0]!.descendants().find((c) => c.tagName === 'TD')!.getAttribute('title');
     expect(firstRowTime).toContain('Your save of scrap.tf/buy/hats');
+    // Pushes within 2 s collapse into one trailing read at +2 s. The mock answers after a setTimeout, so
+    // from here on the bridge is awaited only inside drain(), which moves the faked clock.
+    vi.useFakeTimers({ toFake: ['Date', 'setTimeout', 'clearTimeout'] });
+    vi.setSystemTime(T0);
+    const drain = async (ms = 0) =>
+      act(async () => {
+        for (let i = 0; i < 10; i++) await vi.advanceTimersByTimeAsync(0);
+        if (ms > 0) await vi.advanceTimersByTimeAsync(ms);
+        for (let i = 0; i < 10; i++) await vi.advanceTimersByTimeAsync(0);
+      });
+    for (let i = 0; i < 2; i++) act(() => pushes.forEach((p) => p()));
+    await drain();
+    expect(pageReads()).toHaveLength(2);
+    await drain(1_999);
+    expect(pageReads()).toHaveLength(2);
+    await drain(1);
+    expect(pageReads()).toEqual([
+      { kinds: KINDS, limit: 100 },
+      { kinds: KINDS, limit: 100 },
+      { kinds: KINDS, limit: 100 },
+    ]);
   });
 });
 
@@ -341,6 +374,25 @@ describe("the rows' live side (F20-UIPERF-4)", () => {
   });
 });
 
+// Audit xcontract-2 (0.7.3): the opportunity events tab's Export CSV sends the tab's filters.
+describe('the opportunity events export', () => {
+  it('sends the kind chips, the category and the search shown next to the button', async () => {
+    const t = await mountLog({ hash: '#/log' });
+    fire(t.button(/^Notified$/)!, 'click');
+    await settle();
+    const category = t.all().find((e) => e.tagName === 'SELECT' && e.getAttribute('aria-label') === 'Category')!;
+    (category as unknown as { value: string }).value = 'unusuals';
+    fire(category, 'change');
+    const search = t.all().find((e) => e.tagName === 'INPUT' && e.getAttribute('aria-label') === 'Filter events')!;
+    (search as unknown as { value: string }).value = '  Team Captain ';
+    fire(search, 'input');
+    fire(t.button(/Export CSV/)!, 'click');
+    await settle();
+    expect(t.calls('opps.exportCsv').map((c) => c[1])).toEqual([{ kind: 'events', events: { kinds: ['notified'], category: 'unusuals', search: 'Team Captain' } }]);
+    expect(t.calls('file.saveText')).toHaveLength(1);
+  });
+});
+
 describe('wiring (static)', () => {
   const page = read('pages/LogPage.tsx');
 
@@ -349,6 +401,7 @@ describe('wiring (static)', () => {
     expect([...methods].sort()).toEqual(['opps.events', 'opps.exportCsv', 'scraptf.changes']);
     for (const m of methods) expect([...SERVICE_METHODS, ...MAIN_METHODS]).toContain(m);
     expect(page).toContain("kind: 'scraptfChanges', scraptfChanges: changesExportQuery(view)");
+    expect(page).toContain("kind: 'events', events: eventsExportQuery(kinds, category, search)");
     expect(page).not.toMatch(/https?:\/\//);
     expect(page).not.toMatch(/openOrCopy|openLink|links\.open|openOnScraptf|\.page\b/);
     expect(page).not.toMatch(/\bfetch\(|XMLHttpRequest|WebSocket|<webview|<iframe|window\.open|location\.href|\bsrc=|\bhref=/);

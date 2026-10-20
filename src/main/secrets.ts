@@ -123,7 +123,9 @@ export function createSecretsStore(opts: SecretsStoreOptions): SecretsStore {
     }
     let json: unknown;
     try {
-      json = JSON.parse(raw);
+      // 0.7.3: a copy saved as "UTF-8 with BOM" (Windows PowerShell 5.1) is valid, not corrupt: its keys
+      // load, and the next save keeps them instead of moving the file aside.
+      json = JSON.parse(raw.charCodeAt(0) === 0xfeff ? raw.slice(1) : raw);
     } catch {
       loadProblem = 'corrupt';
       log.warn('secrets.json is not valid JSON; saved keys must be entered again');

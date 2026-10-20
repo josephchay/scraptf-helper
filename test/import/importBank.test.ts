@@ -11,6 +11,7 @@ import { openRepo } from '../../src/service/db';
 import { explicitInput } from '../../src/service/domain/engine';
 import { importSavedPage, type HandlerContext } from '../../src/service/rpcHandlers';
 import { DEFAULT_SETTINGS, mergeSettings } from '../../src/shared/defaults';
+import { SKIP_SAME_OR_CHEAPER } from '../../src/shared/importCodes';
 import type { ScraptfBank } from '../../src/shared/types';
 import { createStubSchema } from './schemaStub';
 
@@ -144,6 +145,50 @@ describe('every saved scrap.tf page reaches its batch with its bank (F15, real p
     expect(extras('200;11')).toEqual([['200;11', false], ['200;11', true]]); // a spell
     expect(extras('378;11')).toEqual([['378;11', false], ['378;11', true]]); // paint
     expect(h.repo.scrapPricesForSku('378;11').find((p) => p.special?.paint)?.special?.paint).toBe(16738740);
+  });
+
+  it('stores each killstreak kit by its weapon, two sheens of one kit as two copies, and never a bare kit (0.7.2)', () => {
+    const h = setup();
+    const r = h.run(fixture('buy_killstreaks.html'));
+    // K15 names no weapon: skipped, not stored as the bare 6526.
+    expect([r.parsed, r.stored, r.skippedCounts]).toEqual([15, 14, { 'needs-target': 1 }]);
+    expect(r.skipped.map((s) => s.title)).toEqual(['Professional Kit']);
+    const copies = (sku: string) =>
+      h.repo
+        .scrapPricesForSku(sku)
+        .map((p) => [p.costKeys, p.costScrap, p.special?.sheen ?? null, p.special?.killstreaker ?? null])
+        .sort((a, b) => a[0]! - b[0]!);
+    expect(copies('6526;6;uncraftable;kt-3;td-205')).toEqual([
+      [35, 0, 4, 2003],
+      [37, 360, 1, 2008],
+    ]);
+    expect(copies('6523;6;uncraftable;kt-2;td-200')).toEqual([[2, 45, 3, null]]);
+    expect(copies('6527;6;uncraftable;kt-1;td-199')).toEqual([[0, 27, null, null]]);
+    for (const bare of ['6526;6', '6523;6', '6527;6', '6526;6;uncraftable']) expect(h.repo.scrapPricesForSku(bare)).toEqual([]);
+  });
+
+  // 0.7.2: one kit base now carries a row per sheen and killstreaker, so the cheapest-wins key must hold the
+  // extras: two cards of the same combination are one copy, the cheaper, whichever comes first on the page.
+  it.each([
+    ['the cheaper card first', [35, 37]],
+    ['the cheaper card last', [37, 35]],
+  ])('stores one copy of a kit two cards show with the same sheen and killstreaker, the cheaper (%s) (0.7.2)', (_, keys) => {
+    const h = setup();
+    // As K11: the real /buy/killstreaks card shape.
+    const kitCard = (id: number, k: number) =>
+      `<div data-id="${id}" data-content="Sheen: Team Shine<br/>Killstreaker: Hypno-Beam<br/>Costs ${k} keys" data-appid="440" data-item-value="${k * 560}"` +
+      ` data-num-available="1" data-num-selected="0" class="item hoverable quality6 fx1 fx2008 app440" data-title="Professional Rocket Launcher Kit" data-defindex="6526">` +
+      `<div class="item-value-indicator">${k} keys</div></div>`;
+    const html =
+      '<!DOCTYPE html>\n<!-- saved from url=(0032)https://scrap.tf/buy/killstreaks -->\n<html><head><title>Killstreaks</title></head><body>' +
+      keys.map((k, i) => kitCard(9_500_000_101 + i, k)).join('') +
+      '</body></html>';
+    const r = h.run(html);
+    expect([r.bank, r.parsed, r.stored, r.skippedCounts]).toEqual(['killstreaks', 2, 1, { [SKIP_SAME_OR_CHEAPER]: 1 }]);
+    expect(r.skipped).toEqual([{ reason: SKIP_SAME_OR_CHEAPER, title: 'Professional Rocket Launcher Kit' }]);
+    expect(
+      h.repo.scrapPricesForSku('6526;6;uncraftable;kt-3;td-205').map((p) => [p.name, p.costKeys, p.costScrap, p.special?.sheen, p.special?.killstreaker]),
+    ).toEqual([['Non-Craftable Professional Killstreak Rocket Launcher Kit', 35, 0, 1, 2008]]);
   });
 
   it('stores an unrecognised /buy/<slug> page with no bank, its items and the warning', () => {

@@ -3,7 +3,7 @@
 // (P4, the clipboard only), and what turning import off does to the scrap.tf window (UX-12).
 
 import { useState } from 'react';
-import type { ImportResult, PermissionRecord } from '../../shared/types';
+import { PERMISSION_FIELD_MAX, type ImportResult, type PermissionRecord } from '../../shared/types';
 import { rpc } from '../api';
 import { ConfirmButton, Field } from '../components/Controls';
 import { Banner, EmptyState, LoadingBlock } from '../components/Feedback';
@@ -16,7 +16,7 @@ import { copyText } from '../clipboard';
 import { ExternalLink } from '../components/ExternalLink';
 import { SaveModeChoice, ScraptfListCard } from '../components/ScraptfListCard';
 import { chooseWatchFolder, importListRowsText, importToastText } from '../scraptfListModel';
-import { importBankText } from '../banksModel';
+import { importBankText, importBatchItemsRemoved } from '../banksModel';
 import { importOriginView } from '../scraptfWindowModel';
 import {
   IMPORT_FILE_HINT,
@@ -31,6 +31,7 @@ import {
   importReportToast,
   importSavedWithoutCards,
   importSkipSummary,
+  importUnusualsIndex,
   importWarningsView,
 } from '../importModel';
 
@@ -271,7 +272,8 @@ function ImportEnabled() {
                   // A batch from before 0.5 has no bank: nothing to say rather than "not recognised".
                   // F18: a bank page that stored nothing reads "not counted", as the banks page treats it; a batch
                   // keeps no warnings, so whether its save type was to blame is unknown and the remedy is hedged.
-                  const bank = b.bank ? importBankText(b.bank, b.itemCount, undefined, b.origin === 'window') : null;
+                  // 0.7.3: a batch the 0.7.2 bare-kit cleanup emptied (count 0, categories kept) names that cause instead.
+                  const bank = b.bank ? importBankText(b.bank, b.itemCount, undefined, b.origin === 'window', importBatchItemsRemoved(b)) : null;
                   // F21: a read of the scrap.tf window names the window and its page, not a file.
                   const from = importOriginView(b);
                   return (
@@ -324,8 +326,8 @@ function ImportEnabled() {
 export function ImportResultView({ r }: { r: ImportResult }) {
   const listText = importListRowsText(r);
   // F15: which banks card this save counts for (the parser's recognised page); F18: none when it stored nothing,
-  // blaming the save type only when the page came without its cards.
-  const bank = importBankText(r.bank, r.stored, importSavedWithoutCards(r), r.origin === 'window');
+  // blaming the save type only when the page came without its cards; 0.7.3: the bare Unusuals index has none to show.
+  const bank = importBankText(r.bank, r.stored, importSavedWithoutCards(r), r.origin === 'window', false, importUnusualsIndex(r));
   // F18: a bank page saved without its cards leads, with what to do; the other warnings follow.
   const warnings = importWarningsView(r);
   // F21: a read of the scrap.tf window names the window and its page, not a file.
@@ -429,7 +431,7 @@ function PermissionRecordCard() {
   };
   const field = (k: keyof PermissionRecord, label: string, placeholder: string) => (
     <Field label={label} htmlFor={`perm-${k}`}>
-      <input id={`perm-${k}`} className="input" value={draft[k]} placeholder={placeholder} maxLength={200} onChange={(e) => setDraft((d) => ({ ...d, [k]: e.target.value }))} />
+      <input id={`perm-${k}`} className="input" value={draft[k]} placeholder={placeholder} maxLength={PERMISSION_FIELD_MAX[k]} onChange={(e) => setDraft((d) => ({ ...d, [k]: e.target.value }))} />
     </Field>
   );
   return (

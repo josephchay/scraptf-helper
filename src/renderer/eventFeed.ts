@@ -1,6 +1,7 @@
 // Live-log paging helpers (pure, so they are testable without a DOM).
 
-import type { OpportunityEvent } from '../shared/types';
+import { MARKET_MAX_SEARCH_CHARS } from '../shared/market';
+import type { Category, EventsExportQuery, OpportunityEvent, OpportunityEventKind } from '../shared/types';
 
 /** Most events the live log keeps in memory. */
 export const MAX_KEPT_EVENTS = 5000;
@@ -56,4 +57,18 @@ export async function fetchEventsAfter(
     beforeId = list.reduce((m, e) => Math.min(m, e.id), Number.POSITIVE_INFINITY);
   }
   return { fresh: mergeEvents([], fresh, maxKept), complete: false };
+}
+
+/**
+ * 0.7.3: Export CSV's filters for the Live log's events view: its kinds (none: every kind), category and
+ * search, each left out when it does not filter. The search is cut at MARKET_MAX_SEARCH_CHARS (what the
+ * page matches on, so a long paste is not refused) before it is trimmed.
+ */
+export function eventsExportQuery(kinds: readonly OpportunityEventKind[], category: Category | '', search: string): EventsExportQuery {
+  const out: EventsExportQuery = {};
+  if (kinds.length) out.kinds = [...new Set(kinds)];
+  if (category) out.category = category;
+  const s = search.slice(0, MARKET_MAX_SEARCH_CHARS).trim();
+  if (s) out.search = s;
+  return out;
 }

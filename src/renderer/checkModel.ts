@@ -15,6 +15,7 @@ import {
   CHECK_POPUP_HIDE_MS,
   CHECK_PRICE_TEXT_MAX,
   CHECK_RECENT_MAX,
+  CHECK_SOLD_OUT_NOTE,
   checkHintedNote,
   checkMatchedByHint,
   checkPriceIsOtherCopy,
@@ -24,7 +25,7 @@ import type { HotkeyState } from '../shared/rpc';
 import { scraptfListFull } from '../shared/scraptfList';
 import type { CheckArm, CheckPrice, CheckPriceSource, CheckResult, CheckSettings, CheckSource, JournalInput, ScrapPriceInput, UnixMs } from '../shared/types';
 import { accelLabel, categoryLabel, fmtAgo, fmtDateTime, fmtInt, fmtMoney, fmtPct, fmtSignedMoney, type Tone } from './format';
-import { BUY_VENUE, buyerCountLabel, revenueBreakdown } from './quickModel';
+import { BUY_VENUE, buyerCountLabel, noRevenueText, revenueBreakdown } from './quickModel';
 
 /** The note on a price or journal row the popup writes (Save price, Bought it). */
 export const LIVE_CHECK_NOTE = 'live check';
@@ -106,6 +107,7 @@ export function checkPriceLine(r: CheckResult, now: UnixMs): CheckPriceLine {
   const parts: string[] = [];
   if (r.price && price) {
     const p = r.price;
+    // 0.7.3: an 'import' is a saved page or a read in the scrap.tf window (F21); the price cannot tell which.
     parts.push(
       matched
         ? `scrap.tf price ${price}, the price you copied, matched to the item you opened from the Live market.`
@@ -115,9 +117,13 @@ export function checkPriceLine(r: CheckResult, now: UnixMs): CheckPriceLine {
             ? `scrap.tf price ${price}, from the scrap.tf/items list you saved ${fmtDateTime(p.observedAt)}.`
             : p.source === 'typed'
               ? `Your own scrap.tf price ${price}, typed ${fmtDateTime(p.observedAt)}.`
-              : `scrap.tf price ${price}, from a page you saved ${fmtDateTime(p.observedAt)}.`,
+              : `scrap.tf price ${price}, from a scrap.tf page you imported (saved, or read in the Flip Desk window) ${fmtDateTime(p.observedAt)}.`,
     );
     if (checkPriceIsOtherCopy(r)) parts.push(CHECK_EXTRAS_NOTE);
+  } else if (typeof r.reason === 'string' && r.reason.includes(CHECK_SOLD_OUT_NOTE)) {
+    // 0.7.3: a copied sold-out row drops every price on purpose, stored ones too. By the note, not by
+    // outOfStock: a list-only stock 0 has nothing copied, and a copied "Sold out" row can show stock.
+    parts.push('No scrap.tf price: the row you copied was sold out, which is newer than any stored price, so there is nothing to buy now.');
   } else {
     parts.push('No scrap.tf price: none was copied, and neither your saved list nor your price sheet has one to buy.');
   }
@@ -212,14 +218,21 @@ export function scraptfBackHint(p: CheckReturnPath): string {
 // ---------------------------------------------------------------------------
 
 export interface CheckSellsLine {
-  /** The revenue used for profit (Settings: revenue used for profit); null without an eligible order. */
+  /** The revenue used for profit (Settings: revenue used for profit); null without a usable eligible order. */
   revenue: string | null;
   buyer: string | null;
   kind: 'bot' | 'human' | null;
   online: boolean | null;
   /** "6 buyers". */
   count: string;
+  /** In place of a missing revenue: "no eligible buy order", or (0.7.3) "no usable buy order"; null with one. */
+  none: string | null;
   title: string;
+}
+
+/** 0.7.3: eligible orders exist but none is usable (all outliers, or no bot order for Instant). */
+function noUsableOrder(r: CheckResult): boolean {
+  return !!r.revenue && !finite(r.revenue.revenueScrap) && finite(r.revenue.eligibleCount) && r.revenue.eligibleCount > 0;
 }
 
 /** Line 2: "Sells for <revenue> to <buyer> (bot, online) · 6 buyers". */
@@ -229,7 +242,9 @@ export function checkSellsLine(r: CheckResult): CheckSellsLine {
   const order = rev?.order ?? null;
   const count = buyerCountLabel(finite(rev?.eligibleCount) ? rev.eligibleCount : 0);
   if (!rev || !finite(rev.revenueScrap)) {
-    return { revenue: null, buyer: null, kind: null, online: null, count, title: 'No eligible backpack.tf buy order in the live book right now.' };
+    // 0.7.3: buyers none of which is usable say why (noRevenueText), not "no eligible buy order".
+    if (noUsableOrder(r)) return { revenue: null, buyer: null, kind: null, online: null, count, none: 'no usable buy order', title: `${noRevenueText(rev)}.` };
+    return { revenue: null, buyer: null, kind: null, online: null, count, none: 'no eligible buy order', title: 'No eligible backpack.tf buy order in the live book right now.' };
   }
   const buyer = order?.userName?.trim() ? order.userName.trim() : null;
   return {
@@ -238,6 +253,7 @@ export function checkSellsLine(r: CheckResult): CheckSellsLine {
     kind: order ? (order.isBot ? 'bot' : 'human') : null,
     online: order ? order.online : null,
     count,
+    none: null,
     title: `${revenueBreakdown(rev, k)}. From the live backpack.tf book on this computer.`,
   };
 }
@@ -253,8 +269,9 @@ export interface CheckVerdictView {
 }
 
 /**
- * The pill: "Flip +X (margin)", "Over by Y" (the price minus Pay up to), "No buyers", or "No scrap.tf
- * price" (the popup then leads with Pay up to). null for a result that is not an item.
+ * The pill: "Flip +X (margin)", "Over by Y" (the price minus Pay up to), "No buyers" ("No usable buyer"
+ * when there are some), or "No scrap.tf price" (the popup then leads with Pay up to). null for a result
+ * that is not an item.
  */
 export function checkVerdictView(r: CheckResult): CheckVerdictView | null {
   if (r.status !== 'item' || r.verdict === null) return null;
@@ -282,6 +299,8 @@ export function checkVerdictView(r: CheckResult): CheckVerdictView | null {
       };
     }
     case 'no-buyers':
+      // 0.7.3: as Quick entry's ceilingVerdict: buyers none of which is usable are not "No buyers".
+      if (noUsableOrder(r)) return { tone: 'muted', text: 'No usable buyer', title: `${noRevenueText(r.revenue)}, so nothing to sell it to.` };
       return { tone: 'muted', text: 'No buyers', title: 'No eligible backpack.tf buy order right now, so nothing to sell it to.' };
     case 'no-price':
       return { tone: 'info', text: 'No scrap.tf price', title: 'Copy its row from scrap.tf/items (or type the price in Quick entry) to see the profit. Pay up to is the most to pay.' };
@@ -303,7 +322,12 @@ export function checkPayUpTo(r: CheckResult): CheckPayUpTo {
     return {
       text: '—',
       prominent,
-      title: r.revenue && finite(r.revenue.revenueScrap) ? 'No scrap.tf price clears your profit thresholds against this buyer.' : 'No eligible buyer, so no price to pay.',
+      title:
+        r.revenue && finite(r.revenue.revenueScrap)
+          ? 'No scrap.tf price clears your profit thresholds against this buyer.'
+          : noUsableOrder(r)
+            ? `${noRevenueText(r.revenue)}, so no price to pay.`
+            : 'No eligible buyer, so no price to pay.',
     };
   }
   return { text: fmtMoney(ceiling, r.keyScrap ?? null), prominent, title: 'The most to pay on scrap.tf that still clears your profit thresholds (after friction).' };
@@ -368,17 +392,17 @@ export function checkActions(r: CheckResult | null | undefined): CheckActions {
   let save: CheckActionView;
   if (!r.price || !price) save = off(noPrice);
   else if (r.price.source === 'typed') save = off('This is already your saved price.');
-  else if (r.price.source === 'import') save = off('This price is already in your price sheet, from a page you saved.');
+  else if (r.price.source === 'import') save = off('This price is already in your price sheet, from a scrap.tf page you imported.');
   else
     save = {
       enabled: true,
       title: `Save ${price} as your scrap.tf price (note "${LIVE_CHECK_NOTE}")${r.price.source === 'list' ? ", dated when you saved the list" : ''} (Enter).`,
     };
-  // A painted or spelled copy's price is not what this plain one cost: Holdings would book it wrong.
+  // A price for a copy with extras is not what this plain one cost: Holdings would book it wrong.
   const bought: CheckActionView = !r.price || !price
     ? off(noPrice)
     : checkPriceIsOtherCopy(r)
-      ? off('This price is for a painted or spelled copy. Record the buy with Quick entry… or from the dashboard instead.')
+      ? off('This price is for a copy with extras (paint, spells, parts or a tag), not a plain one. Record the buy with Quick entry… or from the dashboard instead.')
       : { enabled: true, title: `Record that you bought it on scrap.tf at ${price}: a journal buy, shown in Holdings. Nothing is bought. (B)` };
   return {
     save,
@@ -420,7 +444,7 @@ export function checkBoughtInput(r: CheckResult | null | undefined): JournalInpu
 /** app.showQuickEntry for Quick entry…: the SKU, plus the price as text its price field reads (units included). */
 export function checkQuickEntryParams(r: CheckResult | null | undefined): { sku: string; price?: string } | null {
   if (!isItem(r)) return null;
-  // A painted or spelled copy's price would be saved as the plain item's: quick entry gets the item only.
+  // A price for a copy with extras would be saved as the plain item's: quick entry gets the item only.
   const price = checkPriceIsOtherCopy(r) ? null : checkPriceText(r.price);
   return price && price.length <= CHECK_PRICE_TEXT_MAX ? { sku: r.sku, price } : { sku: r.sku };
 }

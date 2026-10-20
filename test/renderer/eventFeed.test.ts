@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { MAX_KEPT_EVENTS, fetchEventsAfter, mergeEvents, olderPageLimit } from '../../src/renderer/eventFeed';
+import { MAX_KEPT_EVENTS, eventsExportQuery, fetchEventsAfter, mergeEvents, olderPageLimit } from '../../src/renderer/eventFeed';
+import { MARKET_MAX_SEARCH_CHARS, marketSearchTokens } from '../../src/shared/market';
+import { eventMatches } from '../../src/shared/opportunityEvents';
 import type { OpportunityEvent } from '../../src/shared/types';
 
 function ev(id: number, ts = 1_000): OpportunityEvent {
@@ -92,5 +94,28 @@ describe('fetchEventsAfter (live log)', () => {
     expect(complete).toBe(true);
     expect(fresh).toHaveLength(200);
     expect(s.calls).toEqual([undefined, 101, 1]);
+  });
+});
+
+// Audit xcontract-2 (0.7.3): Export CSV on the events view sends the view's filters, and the page and the
+// service match category and search with one predicate.
+describe('eventsExportQuery and eventMatches (events export)', () => {
+  it('leaves out what does not filter, dedupes the kinds, and cuts the search at 200 characters before trimming', () => {
+    expect(eventsExportQuery([], '', '')).toEqual({});
+    expect(eventsExportQuery([], '', '   ')).toEqual({});
+    expect(eventsExportQuery(['notified', 'gone', 'notified'], 'unusuals', '  burning  team ')).toEqual({ kinds: ['notified', 'gone'], category: 'unusuals', search: 'burning  team' });
+    const long = eventsExportQuery([], '', `${'x'.repeat(199)} tail`).search!;
+    expect(long).toBe('x'.repeat(199));
+    expect(long.length).toBeLessThanOrEqual(MARKET_MAX_SEARCH_CHARS);
+  });
+
+  it('matches the category and every search word, any case, across name, SKU and summary', () => {
+    const e = { ...ev(1), category: 'unusuals' as const, name: 'Burning Flames Team Captain', sku: '378;5;u13', summary: 'desktop notification: new buyer' };
+    expect(eventMatches(e, '', [])).toBe(true);
+    expect(eventMatches(e, undefined, [])).toBe(true);
+    expect(eventMatches(e, 'unusuals', marketSearchTokens('BURNING team'))).toBe(true);
+    expect(eventMatches(e, 'hats', [])).toBe(false);
+    expect(eventMatches(e, '', marketSearchTokens('u13 buyer'))).toBe(true);
+    expect(eventMatches(e, '', marketSearchTokens('burning sunbeams'))).toBe(false);
   });
 });

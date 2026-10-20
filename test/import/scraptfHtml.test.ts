@@ -613,14 +613,13 @@ describe('limits and untrusted input', () => {
     expect(codes(it)).toEqual(['invalid-attribute', 'invalid-attribute', 'invalid-attribute', 'no-price', 'no-defindex']);
   });
 
-  // No time bound is asserted. 20,000 nested elements take about 2 s alone, but over 30 s while every
-  // other test file runs in parallel, so the default 20 s timeout would fail it for the load alone.
+  // 0.7.3: parse5 takes time quadratic in depth (20,000 nested elements took seconds), so a page nested
+  // deeper than any real one is refused (test/import/audit-parser-depth.test.ts); up to that it is read.
   it('handles very deep nesting without recursion limits', () => {
-    const depth = 20000;
-    const html = page('<div>'.repeat(depth) + card({ 'data-defindex': '378', 'data-title': 'Team Captain', 'data-item-value': '9' }) + '</div>'.repeat(depth));
-    const r = parseScrapTfHtml(html, createStubSchema());
-    expect(r.items.map((i) => i.sku)).toEqual(['378;6']);
-  }, 90_000);
+    const html = (depth: number) => page('<div>'.repeat(depth) + card({ 'data-defindex': '378', 'data-title': 'Team Captain', 'data-item-value': '9' }) + '</div>'.repeat(depth));
+    expect(parseScrapTfHtml(html(500), createStubSchema()).items.map((i) => i.sku)).toEqual(['378;6']);
+    expect(() => parseScrapTfHtml(html(20000), createStubSchema())).toThrow(/nested more than 512 levels deep/);
+  });
 });
 
 describe('card details', () => {

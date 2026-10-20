@@ -20,6 +20,7 @@ import { z } from 'zod';
 import type { Logger } from '../service/contracts';
 import { blankCheckResult, CHECK_ARM_MS, CHECK_NOTIFY_DEDUP_MS, CHECK_POPUP_MIN_GAP_MS, CHECK_WATCH_INTERVAL_MS, checkPriceIsOtherCopy } from '../shared/check';
 import { formatKeysMetal, formatScrap } from '../shared/currency';
+import { DEFAULT_SETTINGS } from '../shared/defaults';
 import type { PushContract } from '../shared/rpc';
 import type { CheckArm, CheckHint, CheckPriceSource, CheckResult, Settings, UnixMs } from '../shared/types';
 import { clipboardSkipMessage, clipboardTextHash, createClipboardWatch, shouldCheckClipboardText, type ClipboardWatchTimers } from './clipboardWatch';
@@ -76,7 +77,7 @@ export interface LiveCheckMainDeps {
   showPopup(result: CheckResult, opts: { focus: boolean }): void;
   /** main's showNotification: notifications.enabled and silent apply there too; a click opens the drawer. */
   notify(payload: PushContract['notify']): void;
-  settings(): Pick<Settings, 'check' | 'notifications' | 'networkPaused'>;
+  settings(): Pick<Settings, 'check' | 'notifications' | 'networkPaused' | 'profit'>;
   /** Session locked or machine suspended (createSystemPause). */
   systemPaused(): boolean;
   log: Logger;
@@ -105,6 +106,8 @@ export interface LiveCheckMain {
 interface ArmState {
   sku: string;
   nameHash: string;
+  /** 0.7.3: when it was armed: a clock stepped back past this ends the arm (and its drop) instead of stretching it. */
+  at: UnixMs;
   until: UnixMs;
   /** The page's copy of the name already came through (dropped by the watcher, or checked by the hotkey), or never can: once per arm. */
   ownCopyDropped: boolean;
@@ -135,22 +138,36 @@ export function isCheckResult(value: unknown): value is CheckResult {
   return checkResultShape.safeParse(value).success;
 }
 
+// Must match the popup's CHECK_PRICE_SOURCE_LABELS (renderer/checkModel.ts), which main cannot import.
+// 0.7.3: 'imported page', not 'saved page': most imports are now scrap.tf window reads, not saved files.
 const PRICE_SOURCE_WORDS: Record<CheckPriceSource, string> = {
   clipboard: 'copied',
   list: 'saved list',
   typed: 'your price',
-  import: 'saved page',
+  import: 'imported page',
 };
+
+/**
+ * 0.7.3: the result's price, other than a copied one, is older than profit.inputStaleMs at the check (0 or
+ * a broken value means the 2 h default, as the engine reads it). An unknown age counts as too old.
+ */
+export function checkPriceTooOld(r: Pick<CheckResult, 'price' | 'checkedAt'>, inputStaleMs: number | null | undefined): boolean {
+  const ms = typeof inputStaleMs === 'number' && Number.isFinite(inputStaleMs) && inputStaleMs > 0 ? inputStaleMs : DEFAULT_SETTINGS.profit.inputStaleMs;
+  if (!r.price || r.price.source === 'clipboard') return false;
+  if (!Number.isFinite(r.price.observedAt) || !Number.isFinite(r.checkedAt)) return true;
+  return r.checkedAt - r.price.observedAt > ms;
+}
 
 /**
  * The desktop notification for a watcher flip while the watcher's popup is off (ACT-7), from the result
  * only (the schema's item name and the service's money), e.g. "Flip: Team Captain" / "scrap.tf 1 key
  * 5.33 ref (copied) → sells for 1 key 9.11 ref, +3.77 ref (6%)". null unless the result is an item with a
- * flip verdict and a price, and null when that price is a painted or spelled copy's (CHECK_EXTRAS_NOTE):
- * no flip for a plain one.
+ * flip verdict and a price, and null when that price is for a copy with extras (CHECK_EXTRAS_NOTE): no
+ * flip for a plain one. 0.7.3: null too when the price, other than a copied one, is older than
+ * `inputStaleMs` (profit.inputStaleMs; README "Notifications", the engine's ACT-2 rule).
  */
-export function flipNotification(r: CheckResult): PushContract['notify'] | null {
-  if (r.status !== 'item' || r.verdict !== 'flip' || !r.sku || !r.price || checkPriceIsOtherCopy(r)) return null;
+export function flipNotification(r: CheckResult, inputStaleMs?: number | null): PushContract['notify'] | null {
+  if (r.status !== 'item' || r.verdict !== 'flip' || !r.sku || !r.price || checkPriceTooOld(r, inputStaleMs) || checkPriceIsOtherCopy(r)) return null;
   const k = r.keyScrap;
   let body = `scrap.tf ${formatKeysMetal(r.price.keys, r.price.scrapRaw)} (${PRICE_SOURCE_WORDS[r.price.source] ?? 'price'})`;
   const revenue = r.revenue?.revenueScrap;
@@ -163,6 +180,15 @@ export function flipNotification(r: CheckResult): PushContract['notify'] | null 
 /** The error's class only: messages on this path are never logged, in case one ever quoted the text. */
 function errorName(err: unknown): string {
   return err instanceof Error ? err.name : typeof err;
+}
+
+/**
+ * 0.7.3: milliseconds from `at` to `t` on the wall clock. A clock stepped back since `at` (Windows time sync
+ * correcting a fast clock, a VM resume) counts as long ago, so the popup gap, the flip dedupe and the hotkey
+ * gap never hold for as long as the step (scraptfWindow's sinceMs; copied, since that module imports electron).
+ */
+function sinceMs(t: number, at: number): number {
+  return t < at ? Number.POSITIVE_INFINITY : t - at;
 }
 
 export function createLiveCheckMain(deps: LiveCheckMainDeps): LiveCheckMain {
@@ -189,7 +215,10 @@ export function createLiveCheckMain(deps: LiveCheckMainDeps): LiveCheckMain {
   let armed: ArmState | null = null;
 
   function armNow(): ArmState | null {
-    if (armed !== null && now() >= armed.until) armed = null;
+    const t = now();
+    // 0.7.3: a clock stepped back since the arm counts as expired (like buyerCheck's cache), so a price copied
+    // alone is never checked as an item opened longer than CHECK_ARM_MS ago, and no own-copy drop outlives it.
+    if (armed !== null && (t >= armed.until || t < armed.at)) armed = null;
     return armed;
   }
 
@@ -208,6 +237,7 @@ export function createLiveCheckMain(deps: LiveCheckMainDeps): LiveCheckMain {
     const a = armNow();
     if (a === null || a.ownCopyDropped) return false;
     // Bounded: a page copy that failed must not leave the drop waiting to swallow the user's own copy.
+    // (A clock stepped back since the arm already ended it in armNow.)
     if (now() >= a.ownCopyUntil) {
       a.ownCopyDropped = true;
       return false;
@@ -269,7 +299,8 @@ export function createLiveCheckMain(deps: LiveCheckMainDeps): LiveCheckMain {
   /** At most one watcher popup per CHECK_POPUP_MIN_GAP_MS; the newest waiting result is the one shown. */
   function queuePopup(result: CheckResult, s: number): void {
     if (s < shownSeq) return;
-    const wait = lastShowAt + CHECK_POPUP_MIN_GAP_MS - now();
+    // 0.7.3: never more than the gap, so the one timer cannot hold every watcher popup for a clock step.
+    const wait = CHECK_POPUP_MIN_GAP_MS - sinceMs(now(), lastShowAt);
     if (wait <= 0 && pendingTimer === null) {
       show(result, s, false);
       return;
@@ -278,18 +309,19 @@ export function createLiveCheckMain(deps: LiveCheckMainDeps): LiveCheckMain {
     if (pendingTimer === null) pendingTimer = timers.setTimeout(flushPending, Math.max(0, wait));
   }
 
-  function maybeNotify(result: CheckResult, settings: Pick<Settings, 'notifications'>): void {
+  function maybeNotify(result: CheckResult, settings: Pick<Settings, 'notifications' | 'profit'>): void {
     if (!settings.notifications.enabled || !result.sku) return;
     const t = now();
     const last = notified.get(result.sku);
-    if (last !== undefined && t - last < CHECK_NOTIFY_DEDUP_MS) return;
-    const payload = flipNotification(result);
+    if (last !== undefined && sinceMs(t, last) < CHECK_NOTIFY_DEDUP_MS) return;
+    // Before the dedupe entry: an old price that sends nothing must not hold back a fresh one for the minute.
+    const payload = flipNotification(result, settings.profit?.inputStaleMs);
     if (!payload) return;
     // Re-inserted so insertion order stays oldest-first for the trim below.
     notified.delete(result.sku);
     notified.set(result.sku, t);
     if (notified.size > NOTIFIED_MAX) {
-      for (const [sku, at] of notified) if (t - at >= CHECK_NOTIFY_DEDUP_MS) notified.delete(sku);
+      for (const [sku, at] of notified) if (sinceMs(t, at) >= CHECK_NOTIFY_DEDUP_MS) notified.delete(sku);
       // Still full of recent ones: drop the oldest (insertion order).
       while (notified.size > NOTIFIED_MAX) {
         const oldest = notified.keys().next().value;
@@ -396,7 +428,7 @@ export function createLiveCheckMain(deps: LiveCheckMainDeps): LiveCheckMain {
       const t = now();
       // Debounced on every event, not only accepted ones: a held key's repeats keep extending one press,
       // and the next press counts only after a quiet gap (the key was released).
-      const repeat = t - lastHotkeyAt < CHECK_HOTKEY_MIN_GAP_MS;
+      const repeat = sinceMs(t, lastHotkeyAt) < CHECK_HOTKEY_MIN_GAP_MS;
       lastHotkeyAt = t;
       if (repeat) return;
       const s = ++seq;
@@ -405,7 +437,8 @@ export function createLiveCheckMain(deps: LiveCheckMainDeps): LiveCheckMain {
         if (stopped || s < shownSeq) return;
         // A watcher result still waiting for its slot is older than this one.
         if (pending && pending.seq < s) cancelPending();
-        show(result, s, now() - t <= CHECK_HOTKEY_FOCUS_MS);
+        // 0.7.3: a clock stepped back during the check counts as a late answer: unfocused, so it never takes keys.
+        show(result, s, sinceMs(now(), t) <= CHECK_HOTKEY_FOCUS_MS);
       } catch (err) {
         // Never rejects: main's unhandled-rejection handler would log the whole error.
         log.warn('live check hotkey failed', { error: errorName(err) });
@@ -427,7 +460,7 @@ export function createLiveCheckMain(deps: LiveCheckMainDeps): LiveCheckMain {
         return { armedUntil: null };
       }
       const t = now();
-      const next: ArmState = { sku: a.sku, nameHash: clipboardTextHash(a.name.trim()), until: t + CHECK_ARM_MS, ownCopyDropped: false, ownCopyUntil: t + ownCopyMs };
+      const next: ArmState = { sku: a.sku, nameHash: clipboardTextHash(a.name.trim()), at: t, until: t + CHECK_ARM_MS, ownCopyDropped: false, ownCopyUntil: t + ownCopyMs };
       // Nothing to drop when the page's copy can never reach the watcher as new: it is off or paused
       // (it reads afresh when it resumes), or it saw the name last (the copy changes nothing, e.g. the
       // same row opened twice). Otherwise a later copy of the name, the user's own, would be dropped.

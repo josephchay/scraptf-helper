@@ -205,7 +205,7 @@ async function world(o: { seed?: Listing[]; networkPaused?: boolean } = {}) {
       dashboard.push(['show', null]);
       dashboard.push(['ui.openBankStock', { bank, filter }]);
     },
-    appInfo: () => ({ version: '0.7.1', dataDir: 'd', logDir: 'l', platform: 'win32', electron: '44', node: '24' }),
+    appInfo: () => ({ version: '0.7.1', appDir: 'a', dataDir: 'd', logDir: 'l', platform: 'win32', electron: '44', node: '24' }),
     serviceState: () => null,
     hotkeys: () => ({ quickEntry: { accelerator: '', registered: false, error: null }, check: { accelerator: '', registered: false, error: null } }),
     armCheck: () => ({ armedUntil: null }),

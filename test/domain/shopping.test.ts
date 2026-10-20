@@ -149,7 +149,7 @@ describe('buildShoppingList', () => {
     // The rule row has no ceiling, so it cannot win; the 80-confidence import does.
     expect(row).toMatchObject({ maxCostScrap: 200, confidence: 80, knownCostScrap: 250, underCeiling: false, inputKinds: ['user', 'import', 'rule'] });
 
-    // Equal confidence: the higher ceiling, then the key, so the pick never flips between calls.
+    // Equal confidence: the higher ceiling, then the newer, cheaper copy or higher id, then the key, so the pick never flips between calls.
     const tie = [opp('8;6', { inputRef: 'price:2', maxCostScrap: 90 }), opp('8;6', { inputRef: 'price:1', maxCostScrap: 90 }), opp('8;6', { inputRef: 'price:3', maxCostScrap: 80 })];
     expect(buildShoppingList(tie, {}, KP, T0).rows[0]!.maxCostScrap).toBe(90);
     expect(buildShoppingList([...tie].reverse(), {}, KP, T0).rows[0]).toEqual(buildShoppingList(tie, {}, KP, T0).rows[0]);

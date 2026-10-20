@@ -6,6 +6,7 @@ import { SCRAPTF_BOUNDARY_SHORT } from '../shared/boundaryText';
 import { isReservedAccelerator, isValidAccelerator, sameAccelerator } from '../shared/accelerator';
 import { BANK_STOCK_MAX_NOTIFICATIONS, BANK_STOCK_NOTIFY_DEDUP_MS } from '../shared/bankStock';
 import { CHECK_PRIVACY_SENTENCE } from '../shared/check';
+import { parsePrice } from '../shared/currency';
 import type { HotkeyState } from '../shared/rpc';
 import { SCRAPTF_RESAVE_MAX_MIN } from '../shared/scraptfHistory';
 import { SCRAPTF_BANK_IDS } from '../shared/types';
@@ -61,6 +62,14 @@ export function suspectMarginHint(ratio: number): string {
   return ratio > 0 ? `${base} 0 turns the check off.` : `Off. ${base}`;
 }
 
+/**
+ * 0.7.3: profit.inputStaleMs ("Price is stale after") does more than lower confidence since 0.7.1
+ * (confidence.ts, engine.ts, shopping.ts, bankStock.ts). Rule estimates are scored apart.
+ */
+export const INPUT_STALE_HINT =
+  'Typed and imported scrap.tf prices older than this (and over 15 min old) lose confidence, are never notified and are not counted as at or under Pay up to. ' +
+  "A bank save newer than this holds back Candidate toasts for items not on it; an older save's new flips come as one summary toast.";
+
 export function referenceAgeHint(ms: number): string {
   const base =
     'PriceDB prices older than this are left out of outlier checks and confidence (flag "Old reference"). Community prices are set by hand, so they always get at least a year.';
@@ -91,9 +100,11 @@ export function inputKindsHint(kinds: readonly InputKind[]): string {
 /** notifications.holdings (F11): the sell alert for what the journal says you hold. */
 export const HOLDINGS_NOTIFY_LABEL = 'Notify when something you hold can be sold at a profit';
 
+/** 0.7.3: F14's scrap.tf exit notifies too, and minConfidence gates only backpack.tf buyers (holdings.ts). */
 export function holdingsNotifyHint(notificationsOn: boolean): string {
   const base =
-    'For items in Holdings (journal buys not sold yet): a backpack.tf buyer pays enough over your cost to clear your profit thresholds. Uses the minimum confidence and repeat time above.';
+    "For items in Holdings (journal buys not sold yet): a backpack.tf buyer, or scrap.tf's bank on a price list you saved in the last day (while it is not full), pays enough over your cost to clear your profit thresholds. " +
+    'Uses the repeat time above, and the minimum confidence for backpack.tf buyers only (it does not hold back a scrap.tf sale).';
   return notificationsOn ? base : `Desktop notifications are off, so this shows nothing until they are on. ${base}`;
 }
 
@@ -311,14 +322,56 @@ export function userAgentPreview(version: string, contactUrl: string): string {
 }
 
 // ---------------------------------------------------------------------------
+// Blocklist
+// ---------------------------------------------------------------------------
+
+/** Same ids in the same order (the Save button's dirty check). */
+export function sameIdList(a: readonly string[], b: readonly string[]): boolean {
+  return a.join(',') === b.join(',');
+}
+
+/**
+ * 0.7.3: the list Settings saves. Arrays replace whole in mergeSettings, so only the user's own edit
+ * (`edited` against `base`, the list the textarea was seeded from) is applied to a fresh read, as
+ * blockBuyer and unblockBuyer do (itemMenuModel.ts): a buyer blocked in the drawer meanwhile stays blocked.
+ */
+export function applyBlocklistEdit(fresh: readonly string[], base: readonly string[], edited: readonly string[]): string[] {
+  const was = new Set(base);
+  const now = new Set(edited);
+  return [...new Set([...fresh.filter((x) => !was.has(x) || now.has(x)), ...edited.filter((x) => !was.has(x))])];
+}
+
+// ---------------------------------------------------------------------------
 // Key price: scrap.tf's key prices from the saved scrap.tf/items list (F14)
 // ---------------------------------------------------------------------------
 
 /** keyprice.ts's sanity range: a key outside 2..2000 ref is a broken value, not a key price. */
-const KEY_SANE_SCRAP = { min: 18, max: 18_000 } as const;
+export const KEY_SANE_SCRAP = { min: 18, max: 18_000 } as const;
 
 function saneKey(v: unknown): number | null {
   return typeof v === 'number' && Number.isFinite(v) && v >= KEY_SANE_SCRAP.min && v <= KEY_SANE_SCRAP.max ? Math.round(v) : null;
+}
+
+export const REF_TEXT_ERROR = 'Enter refined, e.g. 1.33 or 14 scrap.';
+export const KEY_PRICE_RANGE_ERROR = 'A key price is between 2 and 2000 ref.';
+
+/**
+ * 0.7.3: the key price fields. The schema takes any scrap, but the service ignores a key outside
+ * KEY_SANE_SCRAP (Manual mode then falls back to backpack.tf), so such a value is refused here.
+ * Compares the parsed scrap, as sane() does; empty clears the field.
+ */
+export function validateKeyPriceRef(v: string): string | null {
+  if (!v.trim()) return null;
+  const p = parsePrice(v, 'ref');
+  if (!p || p.keys) return REF_TEXT_ERROR;
+  return p.scrap >= KEY_SANE_SCRAP.min && p.scrap <= KEY_SANE_SCRAP.max ? null : KEY_PRICE_RANGE_ERROR;
+}
+
+/** A key field's hint, plus a note when its saved value (from before that check) is one the service ignores. */
+export function keyPriceHint(scrap: number | null, base?: string): string | undefined {
+  if (scrap === null || saneKey(scrap) !== null) return base;
+  const note = `${KEY_PRICE_RANGE_ERROR.slice(0, -1)}, so the saved value is ignored.`;
+  return base ? `${base} ${note}` : note;
 }
 
 type TypedScraptfKey = Pick<Settings['keyPrice'], 'scraptfBuyScrap' | 'scraptfSellScrap' | 'scraptfObservedAt'>;
@@ -358,6 +411,15 @@ export function scraptfListKeySources(list: ScraptfListKey | null | undefined, t
   if (scraptfListKeyInUse(list, typed)) return { pays: pick('list', listPays, typedPays), sells: pick('list', listSells, typedSells) };
   if (typedPays === null && typedSells === null) return { pays: null, sells: null };
   return { pays: pick('settings', typedPays, listPays), sells: pick('settings', typedSells, listSells) };
+}
+
+/**
+ * 0.7.3: the patch for the typed key buy price, which is display only. The typed pair shares one date,
+ * so it re-dates them only while no usable sell price is typed: saving it never lets an older typed
+ * sell price beat a newer saved list, and never changes the cap (effectiveScraptfKey's paysScrap).
+ */
+export function scraptfKeyBuyPatch(buyScrap: number | null, typed: TypedScraptfKey, now: UnixMs): { keyPrice: Partial<Settings['keyPrice']> } {
+  return { keyPrice: saneKey(typed.scraptfSellScrap) === null ? { scraptfBuyScrap: buyScrap, scraptfObservedAt: now } : { scraptfBuyScrap: buyScrap } };
 }
 
 /** One of Data health's key price rows for scrap.tf's own key prices (F14). */

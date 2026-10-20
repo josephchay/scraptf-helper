@@ -157,7 +157,7 @@ describe('cells', () => {
     expect(buyerName(order(1, { userName: null, isBot: false }))).toBe('Human');
     expect(holdingSellsForTitle(two, KEY)).toBe('Sells now for 7.77 ref to Flip Bot (bot, online). Best 8.77 ref, instant 7.77 ref. 4 buyers with eligible orders.');
     expect(holdingSellsForTitle(row('1;6', [9], null), KEY)).toBe('No eligible backpack.tf buy orders in the live book.');
-    expect(holdingSellsForTitle({ ...row('1;6', [9], null), buyerCount: 2 }, KEY)).toMatch(/unrealistic/);
+    expect(holdingSellsForTitle({ ...row('1;6', [9], null), buyerCount: 2, flags: ['all-outliers'] }, KEY)).toMatch(/unrealistic/);
   });
 
   it('explains profit now with the margin, every unit and the status', () => {

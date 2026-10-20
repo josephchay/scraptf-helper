@@ -68,14 +68,30 @@ export function createSteamMarket(deps: ServiceDeps): SteamMarket {
     log.warn(`Steam Market priceoverview failed: ${lastError}`);
   };
 
-  const lockOut = (): void => {
-    lockedUntil = clock.now() + SCM_LOCKOUT_MS;
+  const saveLockout = (): void => {
     try {
       repo.setMeta(META_SCM_LOCKED_UNTIL, String(lockedUntil));
     } catch {
       // the in-memory lockout still applies
     }
+  };
+
+  const lockOut = (): void => {
+    lockedUntil = clock.now() + SCM_LOCKOUT_MS;
+    saveLockout();
     markError(new Error(`HTTP 429: locked out until ${new Date(lockedUntil).toISOString()}`), 'backoff');
+  };
+
+  /**
+   * True while the 429 lockout holds. 0.7.3: one set (or stored) before the wall clock stepped back keeps at
+   * most its own 6 h from now, and is saved clamped so a restart does not restore the stretched one.
+   */
+  const lockedOut = (now: UnixMs): boolean => {
+    if (lockedUntil - now > SCM_LOCKOUT_MS) {
+      lockedUntil = now + SCM_LOCKOUT_MS;
+      saveLockout();
+    }
+    return lockedUntil > now;
   };
 
   const remember = (key: string, value: PriceOverview): void => {
@@ -125,9 +141,10 @@ export function createSteamMarket(deps: ServiceDeps): SteamMarket {
     const key = String(marketHashName ?? '').trim();
     if (!key || key.length > NAME_MAX) return null;
     const now = clock.now();
-    if (lockedUntil > now) return null;
+    if (lockedOut(now)) return null;
     const hit = cache.get(key);
-    if (hit && now - hit.at < SCM_CACHE_MS) return hit.value;
+    // 0.7.3: an entry cached in the future (the clock moved back) has no known age: fetched again, not served.
+    if (hit && hit.at <= now && now - hit.at < SCM_CACHE_MS) return hit.value;
     const pending = inflight.get(key);
     if (pending) return pending;
     const p = fetchOverview(key).finally(() => inflight.delete(key));
@@ -143,7 +160,7 @@ export function createSteamMarket(deps: ServiceDeps): SteamMarket {
     if (!enabled()) {
       state = 'off';
       detail = 'Off (enable in Settings; used on click only)';
-    } else if (lockedUntil > now) {
+    } else if (lockedOut(now)) {
       state = 'backoff';
       disabledReason = `Steam returned 429; paused until ${new Date(lockedUntil).toISOString()}`;
       detail = disabledReason;

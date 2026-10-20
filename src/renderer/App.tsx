@@ -4,13 +4,15 @@ import type { ScraptfBank } from '../shared/types';
 import { rpc, windowKind, type WindowKind } from './api';
 import { bankStockRouteBank } from './banksModel';
 import { logTabOf } from './changesModel';
+import { DataTooNewScreen } from './components/DataTooNewScreen';
 import { ErrorBanner, LoadingBlock, ToastStack } from './components/Feedback';
 import { Icon, type IconName } from './components/Icon';
 import { StatePill } from './components/Pills';
 import { Tip } from './components/Tip';
+import { parseDataTooNew } from './dataTooNewModel';
 import { CONN_STATE_LABELS, KEY_SOURCE_LABELS, accelLabel, errorMessage, fmtAge, fmtInt, fmtRefOnly, keyPriceSummary, serviceBannerDetail } from './format';
 import { AppProvider, useApp } from './hooks/appContext';
-import { usePush, useThrottled } from './hooks/useRpc';
+import { usePush, useThrottled, useVisiblePush } from './hooks/useRpc';
 import { useNow } from './hooks/useTimers';
 import { SCRAPTF_WINDOW_NAV_LABEL, SCRAPTF_WINDOW_NAV_TITLE, scraptfWindowOn, windowOpenFailedText } from './scraptfWindowModel';
 import { serviceNotReady } from './serviceStateModel';
@@ -149,20 +151,28 @@ function Dashboard() {
       alive = false;
     };
   }, [dataVersion]);
-  // Imports and quick-entry saves (a separate window) change the count too.
+  // Imports and quick-entry saves (a separate window) change the count too. 0.7.3: only while visible
+  // (a read is the whole list); closed to the tray, it recounts once when shown again.
   const recountPrices = useThrottled(() => {
     rpc('prices.list', {})
       .then((p) => setPriceCount(p.length))
       .catch(() => undefined);
   }, 1000);
-  usePush('prices.changed', recountPrices);
+  useVisiblePush('prices.changed', recountPrices);
 
   if (!status && bridgeError) {
+    // 0.7.2: the service answered but refused data a newer copy of the app already updated. It is
+    // reachable, so this gets its own screen: what happened, which copy is running, what to do.
+    const tooNew = parseDataTooNew(bridgeError);
     return (
       <div className="fatal">
         {/* During a known restart (status.get timed out waiting for it) the banner says why, with its countdown. */}
         <ServiceBanner />
-        <ErrorBanner message={`Can't reach the background service: ${bridgeError}`} onRetry={refreshStatus} />
+        {tooNew ? (
+          <DataTooNewScreen refusal={tooNew} onRetry={refreshStatus} />
+        ) : (
+          <ErrorBanner message={`Can't reach the background service: ${bridgeError}`} onRetry={refreshStatus} />
+        )}
       </div>
     );
   }
@@ -281,7 +291,9 @@ function TopBar({ title }: { title: string }) {
   const now = useNow(10_000);
   const kp = status?.keyPrice ?? null;
   const key = status ? keyPriceSummary(kp, now) : { value: '…', source: 'loading', age: '', stale: false };
-  const paused = status?.networkPaused ?? settings?.networkPaused ?? false;
+  // 0.7.3: the user's switch, the value the click flips (as the tray and Settings show it). Main
+  // broadcasts every settings change; status lags, e.g. while the service is restarting.
+  const paused = settings?.networkPaused ?? status?.networkPaused ?? false;
   const feed = status?.feed ?? 'connecting';
   // What scrap.tf pays for a key, from the source that caps the automatic value (a newer saved list replaces the typed price).
   const stfTip = kp && settings ? scraptfKeyTipText(kp.scraptfFromList, settings.keyPrice, now) : null;

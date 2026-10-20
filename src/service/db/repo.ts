@@ -1096,8 +1096,11 @@ export function createRepo(db: SqliteDb): Repo {
     upsertPricedb(rows) {
       if (rows.length === 0) return;
       db.transaction(() => {
+        // 0.7.3: newest wins. /autob/items is CDN-cached up to 4 h, so an older record never replaces a newer
+        // stored one (socket, /item, /items-bulk). An equal time rewrites; an undated record (0) writes as before.
         const stmt = db.prepare(
-          upsertSql('pricedb_prices', ['sku', 'name', 'buy_keys', 'buy_scrap', 'sell_keys', 'sell_scrap', 'time', 'fetched_at'], ['sku']),
+          upsertSql('pricedb_prices', ['sku', 'name', 'buy_keys', 'buy_scrap', 'sell_keys', 'sell_scrap', 'time', 'fetched_at'], ['sku']) +
+            ' WHERE excluded."time" <= 0 OR excluded."time" >= pricedb_prices."time"',
         );
         for (const p of rows) {
           stmt.run(

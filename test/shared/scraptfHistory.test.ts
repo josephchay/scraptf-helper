@@ -166,13 +166,25 @@ describe('scraptfRunsOf (S3 runs index)', () => {
 
   it('time listed per copy across the pages of a bank (a move to another page is no break)', () => {
     const runs = scraptfRunsOf(saves);
-    expect(runs.get('1;6|')).toEqual<ScraptfKeyRun>({ key: '1;6|', sku: '1;6', specialKey: '', seenAt: t(1), firstSeenAt: t(1), lastSeenAt: t(4), listedSince: t(1), runStart: { keys: 0, scrap: 10 }, current: { keys: 0, scrap: 9, stock: 3 } });
+    expect(runs.get('1;6|')).toEqual<ScraptfKeyRun>({
+      key: '1;6|',
+      sku: '1;6',
+      specialKey: '',
+      seenAt: t(1),
+      firstSeenAt: t(1),
+      lastSeenAt: t(4),
+      listedSince: t(1),
+      runStart: { keys: 0, scrap: 10 },
+      current: { keys: 0, scrap: 9, stock: 3 },
+      // 0.7.3: the price at lastSeenAt, kept once off sale (4;6 below).
+      lastOnSale: { keys: 0, scrap: 9 },
+    });
     // Absent from its home page at t(2): the run breaks there, and starts again on /items/2.
     expect(runs.get('2;6|')).toMatchObject({ seenAt: t(1), firstSeenAt: t(1), lastSeenAt: t(5), listedSince: t(3), runStart: { keys: 0, scrap: 18 } });
     // Listed sold out first: seen, but on sale only from t(2).
     expect(runs.get('3;6|')).toMatchObject({ seenAt: t(1), firstSeenAt: t(2), listedSince: t(2), current: { scrap: 30 } });
     // Sold out on its newest save: no current run.
-    expect(runs.get('4;6|')).toMatchObject({ firstSeenAt: t(1), lastSeenAt: t(2), listedSince: null, runStart: null, current: null });
+    expect(runs.get('4;6|')).toMatchObject({ firstSeenAt: t(1), lastSeenAt: t(2), listedSince: null, runStart: null, current: null, lastOnSale: { keys: 0, scrap: 5 } });
     // Order in does not matter.
     expect(scraptfRunsOf([...saves].reverse())).toEqual(runs);
   });

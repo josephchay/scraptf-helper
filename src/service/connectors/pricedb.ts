@@ -58,7 +58,25 @@ export const RECONNECT_SLOW_MS = 10 * 60 * 1000;
  * Longer than socket.io's ping interval plus its ping timeout (25 s + 20 s).
  */
 export const STABLE_CONNECTION_MS = 60_000;
+/**
+ * Repo meta: when the last successful full-list load started (UnixMs). 0.7.3: the start, not the end,
+ * so the next 4 h job run, timed from that run's start, is not skipped.
+ */
 export const META_LOAD_ALL_AT = 'pricedb.loadAllAt';
+/**
+ * loadAll's skip lets a load through this much before 4 h, so a job run whose load starts a few ms
+ * sooner after its tick than the previous run's did still loads.
+ */
+export const LOAD_ALL_SLACK_MS = 60_000;
+
+/**
+ * True while the full list loaded at `lastAt` (META_LOAD_ALL_AT) is too fresh to fetch again. A stamp in
+ * the future (the clock moved back) counts as stale, so the list never stalls.
+ */
+export function loadAllFresh(lastAt: string | null, now: UnixMs): boolean {
+  const last = Number(lastAt ?? NaN);
+  return Number.isFinite(last) && last <= now && now - last < LOAD_ALL_MIN_INTERVAL_MS - LOAD_ALL_SLACK_MS;
+}
 
 const NEGATIVE_CACHE_MS = 30 * 60 * 1000;
 const NEGATIVE_CACHE_MAX = 10_000;
@@ -285,6 +303,8 @@ export function createPriceDb(deps: ServiceDeps, options: PriceDbOptions = {}): 
   let restDisabledReason: string | null = null;
   let rlRemaining: number | null = null;
   let rlPausedUntil: UnixMs = 0;
+  /** Length of the rate-limit pause when it was set: a wall clock stepped back cannot stretch it. */
+  let rlPauseLenMs = 0;
   let parseFailures = 0;
   let loadAllInflight: Promise<number> | null = null;
   const negative = new Map<string, UnixMs>();
@@ -310,19 +330,35 @@ export function createPriceDb(deps: ServiceDeps, options: PriceDbOptions = {}): 
     log.warn(`PriceDB request failed: ${restLastError}`);
   };
 
+  /**
+   * 0.7.3: as the HTTP budgets' pauses, a pause set before the wall clock stepped back keeps at most its
+   * own length from now, so it never holds requests for the size of the step.
+   */
+  const clampRateLimitPause = (now: UnixMs): void => {
+    if (rlPausedUntil - now > rlPauseLenMs) rlPausedUntil = now + rlPauseLenMs;
+  };
+
   const noteRateLimit = (headers: Record<string, string>): void => {
     const now = clock.now();
     const rl = parseRateLimit(headers, now);
     if (rl.remaining === null) return;
     rlRemaining = rl.remaining;
     if (rl.remaining < RATE_LIMIT_MIN_REMAINING) {
-      rlPausedUntil = Math.max(rlPausedUntil, now + (rl.resetMs ?? RATE_LIMIT_FALLBACK_MS));
+      // Compared with the clamped pause, so one stretched by a clock step cannot hide a longer new one.
+      clampRateLimitPause(now);
+      const until = now + (rl.resetMs ?? RATE_LIMIT_FALLBACK_MS);
+      if (until > rlPausedUntil) {
+        rlPausedUntil = until;
+        rlPauseLenMs = until - now;
+      }
       log.info(`PriceDB RateLimit-Remaining ${rl.remaining}; pausing until ${new Date(rlPausedUntil).toISOString()}`);
     }
   };
 
   const waitForRateLimit = async (): Promise<void> => {
-    const wait = rlPausedUntil - clock.now();
+    const now = clock.now();
+    clampRateLimitPause(now);
+    const wait = rlPausedUntil - now;
     if (wait > 0) await sleep(Math.min(wait, RATE_LIMIT_MAX_SLEEP_MS));
   };
 
@@ -385,7 +421,12 @@ export function createPriceDb(deps: ServiceDeps, options: PriceDbOptions = {}): 
     const canon = safeCanonical(sku);
     if (!canon) return null;
     const now = clock.now();
-    const neg = negative.get(canon);
+    let neg = negative.get(canon);
+    // 0.7.3: one set before the wall clock stepped back keeps at most its own 30 min from now.
+    if (neg !== undefined && neg - now > NEGATIVE_CACHE_MS) {
+      neg = now + NEGATIVE_CACHE_MS;
+      negative.set(canon, neg);
+    }
     if (neg !== undefined && neg > now) return null;
 
     const alias = repo.getSkuAlias(canon);
@@ -464,8 +505,8 @@ export function createPriceDb(deps: ServiceDeps, options: PriceDbOptions = {}): 
   };
 
   const doLoadAll = async (): Promise<number> => {
-    const last = Number(repo.getMeta(META_LOAD_ALL_AT) ?? NaN);
-    if (Number.isFinite(last) && clock.now() - last < LOAD_ALL_MIN_INTERVAL_MS) return 0;
+    const startedAt = clock.now();
+    if (loadAllFresh(repo.getMeta(META_LOAD_ALL_AT), startedAt)) return 0;
     const res = await call<unknown>(`${PRICEDB_API}/autob/items`, { priority: 'background', timeoutMs: 120_000, maxWaitMs: 120_000 });
     if (res === null || !res.ok) return 0;
     const list = recordList(res.data);
@@ -490,9 +531,14 @@ export function createPriceDb(deps: ServiceDeps, options: PriceDbOptions = {}): 
     repo.transaction(() => {
       repo.upsertPricedb(rows.map((r) => r.row));
       for (const { row, pricedbSku } of rows) {
-        if (pricedbSku !== toLegacy(row.sku)) repo.setSkuAlias(row.sku, pricedbSku);
+        // 0.7.3: the alias follows the newest record's form, so a stale swapped (pk;w) or 404-era
+        // alias is reset, back to the legacy form too; plain legacy items still get no alias row.
+        if (pricedbSku !== toLegacy(row.sku) || (repo.getSkuAlias(row.sku) ?? pricedbSku) !== pricedbSku) {
+          repo.setSkuAlias(row.sku, pricedbSku);
+        }
       }
-      repo.setMeta(META_LOAD_ALL_AT, String(now));
+      // 0.7.3: a start the clock moved back past during the download counts as now (the scheduler's clamp).
+      repo.setMeta(META_LOAD_ALL_AT, String(Math.min(startedAt, now)));
     });
     negative.clear();
     log.info(`PriceDB full list: ${rows.length} prices stored`);
@@ -535,7 +581,9 @@ export function createPriceDb(deps: ServiceDeps, options: PriceDbOptions = {}): 
   const keyCurve = async (startSec?: UnixSec, endSec?: UnixSec): Promise<KeyPoint[]> => {
     const cacheKey = `${startSec ?? ''}|${endSec ?? ''}`;
     const hit = keyHistoryCache.get(cacheKey);
-    if (hit && clock.now() - hit.at < KEY_HISTORY_TTL_MS) return hit.points;
+    const now = clock.now();
+    // 0.7.3: one cached in the future (the clock moved back) has no known age: fetched again, not kept.
+    if (hit && hit.at <= now && now - hit.at < KEY_HISTORY_TTL_MS) return hit.points;
     const recs = (await fetchHistory(KEY_SKU, startSec, endSec)) ?? [];
     const points: KeyPoint[] = recs.map((r) => ({
       t: Math.floor(r.time ?? 0),
@@ -653,6 +701,8 @@ export function createPriceDb(deps: ServiceDeps, options: PriceDbOptions = {}): 
   let consecutive429 = 0;
   /** No connection attempt before this time (backoff after a refused upgrade; outlives stop/start and restarts). */
   let retryNotBefore: UnixMs = 0;
+  /** Length of that wait when it was set (or restored): a wall clock stepped back cannot stretch it. */
+  let retryLenMs = 0;
   let retryWhy = '';
   /** META_SOCKET_RETRY holds a wait or streak that a successful connection must clear. */
   let retrySaved = false;
@@ -688,6 +738,7 @@ export function createPriceDb(deps: ServiceDeps, options: PriceDbOptions = {}): 
       if (Number.isFinite(saved.data.until) && saved.data.until > now) {
         // Clamped like any server-requested pause, so a corrupt value cannot stop the socket for good.
         retryNotBefore = Math.min(saved.data.until, now + MAX_PAUSE_MS);
+        retryLenMs = retryNotBefore - now;
         retryWhy = saved.data.why.slice(0, 300) || 'PriceDB refused the live-updates connection';
         // Stored clamped, or each restart would clamp it again from its own start time.
         if (retryNotBefore < saved.data.until) saveRetry();
@@ -696,6 +747,19 @@ export function createPriceDb(deps: ServiceDeps, options: PriceDbOptions = {}): 
   } catch {
     // unreadable: nothing to restore
   }
+
+  /**
+   * Time left before the next connection attempt (<= 0: none). 0.7.3: as the HTTP budgets' pauses, a wait
+   * set before the wall clock stepped back keeps at most its own length from now, and is saved clamped so a
+   * restart does not restore the stretched one.
+   */
+  const retryWaitMs = (now: UnixMs): number => {
+    if (retryNotBefore - now > retryLenMs) {
+      retryNotBefore = now + retryLenMs;
+      saveRetry();
+    }
+    return retryNotBefore - now;
+  };
 
   /** Why the socket may not connect (a refusal or a challenge on either PriceDB host), or null. */
   const socketBlockReason = (): string | null => {
@@ -811,6 +875,7 @@ export function createPriceDb(deps: ServiceDeps, options: PriceDbOptions = {}): 
       let delay = Math.max(UPGRADE_REFUSED_MIN_DELAY_MS, backoffMs(rejections));
       if (consecutive429 >= CONSECUTIVE_429_LIMIT) delay = Math.max(delay, LONG_PAUSE_MS);
       retryNotBefore = clock.now() + delay;
+      retryLenMs = delay;
       retryWhy = why;
       saveRetry();
       sockState = 'backoff';
@@ -865,7 +930,7 @@ export function createPriceDb(deps: ServiceDeps, options: PriceDbOptions = {}): 
       return;
     }
     // A stop/start (network pause and resume) or a restart clears the timer; the server's wait still holds.
-    const waitMs = retryNotBefore - clock.now();
+    const waitMs = retryWaitMs(clock.now());
     if (waitMs > 0) {
       sockState = 'backoff';
       scheduleConnect(waitMs);
@@ -962,6 +1027,7 @@ export function createPriceDb(deps: ServiceDeps, options: PriceDbOptions = {}): 
     if (rlRemaining !== null) detail += `; RateLimit-Remaining ${rlRemaining}`;
     if (parseFailures > 0) detail += `; ${parseFailures} unreadable records`;
     const blocked = http.hostBlocked('pricedb.io') ?? restRefused;
+    clampRateLimitPause(now);
     if (!enabled()) {
       state = 'off';
       detail = 'Disabled in Settings';
@@ -1012,9 +1078,10 @@ export function createPriceDb(deps: ServiceDeps, options: PriceDbOptions = {}): 
           : `Connected since ${since}; ${events} price updates, last ${lastEventAt ? new Date(lastEventAt).toISOString() : 'never'}`;
     } else if (state === 'backoff') {
       const waitMs = nextRetryAt ? Math.max(0, nextRetryAt - now) : 0;
+      const refusedWaitMs = retryWaitMs(now);
       detail =
-        retryNotBefore > now
-          ? `${retryWhy}; reconnecting in ${formatDelay(retryNotBefore - now)}`
+        refusedWaitMs > 0
+          ? `${retryWhy}; reconnecting in ${formatDelay(refusedWaitMs)}`
           : `Reconnecting in ${Math.round(waitMs / 1000)} s (failure ${failures})`;
     } else if (state === 'paused') {
       detail = 'Network paused';

@@ -208,7 +208,7 @@ describe('actions', () => {
     expect(checkActions(item({ price: typed })).bought.enabled).toBe(true);
     for (const reason of [CHECK_EXTRAS_NOTE, `${CHECK_FUZZY_NOTE} ${CHECK_EXTRAS_NOTE}`]) {
       const r = item({ price: typed, reason });
-      expect(checkActions(r).bought).toMatchObject({ enabled: false, title: expect.stringMatching(/painted or spelled/) });
+      expect(checkActions(r).bought).toMatchObject({ enabled: false, title: expect.stringMatching(/copy with extras/) });
       expect(checkBoughtInput(r)).toBeNull();
       expect(checkQuickEntryParams(r)).toEqual({ sku: '378;6' });
       expect(checkActions(r).quick).toEqual({ enabled: true, title: 'Open Quick entry with this item' });

@@ -27,11 +27,12 @@ import { scraptfBankInfo } from '../shared/links';
 import { scraptfAgoText } from '../shared/scraptfHistory';
 import { fromObject, fromString } from '../shared/sku';
 import { BANK_STOCK_FILTERS, BANK_STOCK_SORTS } from '../shared/types';
-import type { BankStockCounts, BankStockFilter, BankStockQuery, BankStockResult, BankStockRow, BankStockSort, BankStockVerdict, Scrap, ScraptfBank, UnixMs } from '../shared/types';
+import type { BankStockCounts, BankStockFilter, BankStockQuery, BankStockResult, BankStockRow, BankStockSort, BankStockVerdict, ProfitSettings, Scrap, ScraptfBank, UnixMs } from '../shared/types';
 import { BANK_SAVE_TIP, LIST_SAVE_TIP, bankFreshness, bankPath, type BankFreshness } from './banksModel';
 import { changePctText } from './changesModel';
 import { SAVE_MODE } from './importModel';
 import type { RecordBuyCopy } from './itemMenuModel';
+import { buyerCountLabel, noRevenueText } from './quickModel';
 import { DASH, PAINT_NAMES, errorMessage, fmtAgo, fmtDateTime, fmtInt, fmtKeysMetal, fmtMoney, fmtPct, fmtSignedMoney, paintHex, type Tone } from './format';
 
 /** Rows per read; "Load more" adds as many, up to BANK_STOCK_MAX_LIMIT (a whole bank page). */
@@ -497,11 +498,23 @@ export function bankStockStockCell(r: Pick<BankStockRow, 'stock' | 'previousStoc
   return { text: fmtInt(r.stock), title: `${fmtInt(r.stock)} in stock in your newest save.`, muted: false };
 }
 
-/** The Gone view's "Last seen": when the previous save (the last one it was on sale in) was made. */
-export function bankStockLastSeen(r: Pick<BankStockRow, 'stock'>, previousSavedAt: UnixMs | null, now: UnixMs): { text: string; title: string } {
+/**
+ * The Gone view's "Last seen": 0.7.3, the newest save that listed it on sale (BankStockRow.lastSeenAt, from
+ * the history of your saves); without it, your save from before your latest run of saves (previousSavedAt,
+ * CQ-2), which a later save of the run may have followed with it still on sale.
+ */
+export function bankStockLastSeen(r: Pick<BankStockRow, 'stock'> & Partial<Pick<BankStockRow, 'lastSeenAt'>>, previousSavedAt: UnixMs | null, now: UnixMs): { text: string; title: string } {
   const still = r.stock === 0 ? 'Your newest save still lists it, sold out.' : 'Your newest save does not list it.';
+  if (finite(r.lastSeenAt)) {
+    // It was on sale in the save it is judged against, so a stale history never dates it before that.
+    const at = finite(previousSavedAt) ? Math.max(r.lastSeenAt, previousSavedAt) : r.lastSeenAt;
+    return { text: fmtAgo(Math.min(at, now), now), title: `Last on sale in your save of ${fmtDateTime(at)}. ${still}` };
+  }
   if (previousSavedAt === null || !finite(previousSavedAt)) return { text: DASH, title: still };
-  return { text: fmtAgo(Math.min(previousSavedAt, now), now), title: `Last on sale in your previous save (${fmtDateTime(previousSavedAt)}). ${still}` };
+  return {
+    text: fmtAgo(Math.min(previousSavedAt, now), now),
+    title: `On sale in your save from before your latest run of saves (${fmtDateTime(previousSavedAt)}); a later save may have listed it too. ${still}`,
+  };
 }
 
 export interface BankStockListedCell {
@@ -571,8 +584,15 @@ export function bankStockSinceListedCell(r: Pick<BankStockRow, 'changeSinceListe
 }
 
 /** The price cell's hover: the price as listed (keys and metal), and its value at today's key price. */
-export function bankStockPriceTitle(r: Pick<BankStockRow, 'costKeys' | 'costScrapRaw' | 'costScrap' | 'change' | 'hasExtras'>, keyScrap: Scrap | null): string {
-  const what = r.change === 'gone' ? 'Last price on scrap.tf, from your previous save' : 'scrap.tf sells it for this, as of your newest save';
+export function bankStockPriceTitle(
+  r: Pick<BankStockRow, 'costKeys' | 'costScrapRaw' | 'costScrap' | 'change' | 'hasExtras'> & Partial<Pick<BankStockRow, 'lastSeenAt'>>,
+  keyScrap: Scrap | null,
+): string {
+  // 0.7.3: a gone row's price is from the last save that listed it on sale, when the history knows it.
+  const gone = finite(r.lastSeenAt)
+    ? `Last price on scrap.tf, from your save of ${fmtDateTime(r.lastSeenAt)}, the last one that listed it on sale`
+    : 'Price on scrap.tf in your save from before your latest run of saves';
+  const what = r.change === 'gone' ? gone : 'scrap.tf sells it for this, as of your newest save';
   let listed = '';
   if (finite(r.costKeys) && r.costKeys > 0) {
     const raw = fmtKeysMetal(r.costKeys, r.costScrapRaw);
@@ -587,13 +607,28 @@ function buyerOf(o: NonNullable<BankStockRow['revenueOrder']>): string {
   return o.userName || (o.isBot ? 'Bot' : 'Human');
 }
 
-/** "Sells for": the buyer your settings sell to, bot or human, online, and how many buyers there are. */
-export function bankStockSellsTitle(r: Pick<BankStockRow, 'revenueScrap' | 'revenueOrder' | 'buyerCount'>, keyScrap: Scrap | null): string {
-  if (!finite(r.revenueScrap)) return r.buyerCount > 0 ? 'Every eligible order looks unrealistic, so no sale price is assumed.' : 'No eligible backpack.tf buy orders for this item in the live book.';
+/**
+ * "Sells for": the buyer your settings sell to, bot or human, online, and how many buyers there are.
+ * 0.7.3: the row carries no flags, so buyers without a revenue are told apart by Settings' Revenue used
+ * for profit (`useOrder`), as quickModel's noRevenueText: Conservative is null only when every eligible
+ * order is an outlier, Instant when none is a realistic bot order; unknown (or Best) says neither.
+ */
+export function bankStockSellsTitle(
+  r: Pick<BankStockRow, 'revenueScrap' | 'revenueOrder' | 'buyerCount'>,
+  keyScrap: Scrap | null,
+  useOrder?: ProfitSettings['useOrder'] | null,
+): string {
+  const buyers = `${fmtInt(r.buyerCount)} ${r.buyerCount === 1 ? 'buyer' : 'buyers'} with eligible orders`;
+  if (!finite(r.revenueScrap)) {
+    if (!(r.buyerCount > 0)) return 'No eligible backpack.tf buy orders for this item in the live book.';
+    if (useOrder === 'conservative') return 'Every eligible order looks unrealistic, so no sale price is assumed.';
+    if (useOrder === 'instant') return `${buyers}, but no realistic bot order, and Revenue used for profit is Instant (bot orders only), so no sale price is assumed.`;
+    return `${buyers}, but none is usable for Revenue used for profit, so no sale price is assumed.`;
+  }
   const o = r.revenueOrder;
   const online = o ? (o.online === true ? 'online' : o.online === false ? 'offline' : 'online status unknown') : null;
   const who = o ? ` to ${o.userName || o.steamid} (${o.isBot ? 'bot' : 'human'}, ${online})` : '';
-  return `Sells for ${fmtMoney(r.revenueScrap, keyScrap)}${who} on backpack.tf. ${fmtInt(r.buyerCount)} ${r.buyerCount === 1 ? 'buyer' : 'buyers'} with eligible orders.`;
+  return `Sells for ${fmtMoney(r.revenueScrap, keyScrap)}${who} on backpack.tf. ${buyers}.`;
 }
 
 /** The buyer's name for the Sells for cell, or null without an order. */
@@ -601,11 +636,23 @@ export function bankStockBuyer(r: Pick<BankStockRow, 'revenueOrder'>): string | 
   return r.revenueOrder ? buyerOf(r.revenueOrder) : null;
 }
 
-/** "Pay up to": the ceiling, where scrap.tf's price sits against it, and the clean-copy caveat. */
-export function bankStockPayTitle(r: Pick<BankStockRow, 'maxCostScrap' | 'revenueScrap' | 'costScrap' | 'hasExtras'>, keyScrap: Scrap | null): string {
+/**
+ * "Pay up to": the ceiling, where scrap.tf's price sits against it, and the clean-copy caveat. 0.7.3: buyers
+ * without a revenue give no ceiling for the reason bankStockSellsTitle names (by `useOrder`), as the Live
+ * market's Pay up to hover says, not "No eligible buy orders".
+ */
+export function bankStockPayTitle(
+  r: Pick<BankStockRow, 'maxCostScrap' | 'revenueScrap' | 'costScrap' | 'hasExtras' | 'buyerCount'>,
+  keyScrap: Scrap | null,
+  useOrder?: ProfitSettings['useOrder'] | null,
+): string {
   const extras = r.hasExtras ? ' The ceiling is for a clean copy; this one has extras.' : '';
   if (!finite(r.maxCostScrap)) {
-    return (finite(r.revenueScrap) ? 'No scrap.tf price clears your thresholds against these buyers.' : 'No eligible buy orders, so there is no ceiling.') + extras;
+    if (finite(r.revenueScrap)) return 'No scrap.tf price clears your thresholds against these buyers.' + extras;
+    if (!(r.buyerCount > 0)) return 'No eligible buy orders, so there is no ceiling.' + extras;
+    if (useOrder === 'conservative') return 'Every eligible order looks unrealistic, so there is no ceiling.' + extras;
+    if (useOrder === 'instant') return 'No realistic bot order, and Revenue used for profit is Instant (bot orders only), so there is no ceiling.' + extras;
+    return `${fmtInt(r.buyerCount)} ${r.buyerCount === 1 ? 'buyer' : 'buyers'} with eligible orders, but none is usable for Revenue used for profit, so there is no ceiling.${extras}`;
   }
   const head = `Pay up to ${fmtMoney(r.maxCostScrap, keyScrap)} on scrap.tf: the highest price that still clears your thresholds.`;
   const d = r.maxCostScrap - r.costScrap;
@@ -617,15 +664,20 @@ export const BANK_STOCK_VERDICT_TONES: Readonly<Record<BankStockVerdict, Tone>> 
 
 export interface BankStockVerdictPill {
   tone: Tone;
-  /** "Flip +1.33 ref (25%)", "Over by 2.00 ref", "No buyers". */
+  /** "Flip +1.33 ref (25%)", "Over by 2.00 ref", "No buyers", "No usable buyer" (0.7.3). */
   text: string;
   title: string;
 }
 
-/** The Verdict cell: Flip +X (m%), Over by Y, or No buyers (a gone row is judged at its last price). */
+/**
+ * The Verdict cell: Flip +X (m%), Over by Y, or No buyers (a gone row is judged at its last price). 0.7.3: as
+ * the check popup's pill, "No usable buyer" when there are buyers none of which is usable, saying why by
+ * `useOrder` (quickModel's noRevenueText) as bankStockSellsTitle does; unknown (or Best) names neither reason.
+ */
 export function bankStockVerdictPill(
-  r: Pick<BankStockRow, 'verdict' | 'profitScrap' | 'margin' | 'costScrap' | 'maxCostScrap' | 'hasExtras' | 'change'>,
+  r: Pick<BankStockRow, 'verdict' | 'profitScrap' | 'margin' | 'costScrap' | 'maxCostScrap' | 'hasExtras' | 'change' | 'buyerCount'>,
   keyScrap: Scrap | null,
+  useOrder?: ProfitSettings['useOrder'] | null,
 ): BankStockVerdictPill {
   const tone = BANK_STOCK_VERDICT_TONES[r.verdict] ?? 'muted';
   const at = r.change === 'gone' ? 'At its last price: ' : '';
@@ -648,8 +700,16 @@ export function bankStockVerdictPill(
       }
       return { tone, text: 'Over', title: `${at}buyers exist, but scrap.tf's price ${cost} does not clear your thresholds against them.${extras}` };
     }
-    default:
+    default: {
+      if (r.buyerCount > 0) {
+        const why =
+          useOrder === 'conservative' || useOrder === 'instant'
+            ? noRevenueText({ eligibleCount: r.buyerCount, useOrder })
+            : `${buyerCountLabel(r.buyerCount)}, but none is usable for Revenue used for profit`;
+        return { tone: 'muted', text: 'No usable buyer', title: `${at}${why}, so nothing to sell it to.${extras}` };
+      }
       return { tone: 'muted', text: 'No buyers', title: `${at}no eligible backpack.tf buy order for this item in the live book.${extras}` };
+    }
   }
 }
 

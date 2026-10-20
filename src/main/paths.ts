@@ -486,19 +486,38 @@ let tmpCounter = 0;
 /**
  * Writes `data` to a temp file in the same directory, fsyncs it and renames it
  * over `file`, so a crash never leaves a half-written file. Retries the rename
- * briefly because antivirus scanners on Windows hold new files open.
+ * briefly because antivirus scanners on Windows hold new files open. On any
+ * failure the temp file is removed and the error rethrown.
  */
 export function writeFileAtomicSync(file: string, data: string | Uint8Array, fsImpl: AtomicWriteFs = realFs): void {
   const bytes = typeof data === 'string' ? Buffer.from(data, 'utf8') : data;
   fsImpl.mkdirSync(path.dirname(file), { recursive: true });
   const tmp = `${file}.${process.pid}.${++tmpCounter}.tmp`;
   const fd = fsImpl.openSync(tmp, 'w', 0o600);
+  // 0.7.3: a failed write, fsync or close (disk full, I/O error) no longer leaves the temp file behind.
+  let closed = false;
   try {
     let off = 0;
     while (off < bytes.length) off += fsImpl.writeSync(fd, bytes.subarray(off));
     fsImpl.fsyncSync(fd);
-  } finally {
+    // Marked first: a failed close is never retried (the fd number may already be reused).
+    closed = true;
     fsImpl.closeSync(fd);
+  } catch (err) {
+    if (!closed) {
+      try {
+        fsImpl.closeSync(fd);
+      } catch {
+        // the write's error is the one to report
+      }
+    }
+    // Closed first so Windows can delete it.
+    try {
+      fsImpl.unlinkSync(tmp);
+    } catch {
+      // already gone
+    }
+    throw err;
   }
   for (let attempt = 0; ; attempt++) {
     try {

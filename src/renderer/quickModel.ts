@@ -128,9 +128,12 @@ export function previewTone(pv: Pick<ProfitPreview, 'status' | 'underCeiling'>):
   return 'warn';
 }
 
-/** Short comparison with the ceiling, e.g. "0.22 ref under" or "1 key over". */
-export function ceilingVerdict(pv: Pick<ProfitPreview, 'underCeiling' | 'headroomScrap'>, keyScrap: Scrap | null): string {
-  if (pv.underCeiling === null) return 'No buyer';
+/**
+ * Short comparison with the ceiling, e.g. "0.22 ref under" or "1 key over". `buyerCount` is the
+ * eligible orders: without revenue but with some (0.7.3), none of them is usable, not absent.
+ */
+export function ceilingVerdict(pv: Pick<ProfitPreview, 'underCeiling' | 'headroomScrap'>, keyScrap: Scrap | null, buyerCount = 0): string {
+  if (pv.underCeiling === null) return buyerCount > 0 ? 'No usable buyer' : 'No buyer';
   if (pv.headroomScrap === null) return 'No price clears your thresholds';
   if (pv.headroomScrap === 0) return 'At the ceiling';
   const amount = fmtMoney(Math.abs(pv.headroomScrap), keyScrap);
@@ -139,6 +142,29 @@ export function ceilingVerdict(pv: Pick<ProfitPreview, 'underCeiling' | 'headroo
 
 export function buyerCountLabel(n: number): string {
   return n === 1 ? '1 buyer' : `${n} buyers`;
+}
+
+/**
+ * Why a revenue is null (0.7.3): no eligible order at all, or eligible orders none of which the
+ * useOrder pick can use. Conservative is null only when every one is an outlier (the engine's
+ * 'all-outliers'); Instant when none is a realistic bot order; Best never is with orders.
+ */
+export function noRevenueText(rev: Pick<ItemRevenue, 'eligibleCount' | 'useOrder'> | null): string {
+  const n = rev?.eligibleCount ?? 0;
+  if (!rev || !(n > 0)) return 'No eligible backpack.tf buyer right now';
+  if (rev.useOrder === 'instant') return `${buyerCountLabel(n)}, but none is a realistic bot order, and Revenue used for profit is Instant (bot orders only)`;
+  return `${buyerCountLabel(n)}, but every eligible order looks unrealistically high`;
+}
+
+/**
+ * 0.7.3: noRevenueText for a row that carries the engine's flags instead of useOrder (an opportunity):
+ * with buyers but no revenue, 'all-outliers' is the Conservative case, and its absence is Instant
+ * without a realistic bot order (as holdingsModel's noSaleReason reads a holding).
+ */
+export function noRevenueTextOf(r: { buyerCount: number; flags: readonly string[] }): string {
+  const n = r.buyerCount;
+  if (!(n > 0)) return noRevenueText(null);
+  return noRevenueText({ eligibleCount: n, useOrder: r.flags.includes('all-outliers') ? 'conservative' : 'instant' });
 }
 
 /** Hover text for "Sells for": all three revenue picks, so the one Settings uses can be compared. */

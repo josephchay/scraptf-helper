@@ -1,6 +1,7 @@
 import { useEffect, useRef, type ReactNode } from 'react';
 
-const FOCUSABLE = 'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+/** 0.7.3: includes a details' summary (a native tab stop, e.g. "Why this confidence"), or Tab from it wrapped to the top. */
+export const FOCUSABLE = 'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), details > summary:first-of-type, [tabindex]:not([tabindex="-1"])';
 /**
  * Toast buttons sit outside the panel (the stack is above it), so the trap lets Tab reach them too:
  * otherwise a keyboard user could never press a toast's Undo (Block buyer, Record trade) while it is open.
@@ -42,6 +43,17 @@ export function trapFocusTargetIn<T>(groups: readonly (readonly T[])[], active: 
   return items[j] ?? null;
 }
 
+/**
+ * 0.7.3: `items` with the focused element at its document-order place when no selector matched it
+ * (e.g. a scroll box Chromium made keyboard-focusable), so a step inside the panel is left to the
+ * browser and only the real ends wrap. `before(a, b)`: a comes before b in the document.
+ */
+export function withFocused<T>(items: readonly T[], active: T, before: (a: T, b: T) => boolean): T[] {
+  if (items.includes(active)) return [...items];
+  const at = items.findIndex((it) => before(active, it));
+  return at === -1 ? [...items, active] : [...items.slice(0, at), active, ...items.slice(at)];
+}
+
 /** Right-hand panel over the page. Esc or the backdrop closes it; focus returns to the opener and stays inside (plus the toasts) while open. */
 export function Drawer({ open, onClose, labelledBy, children }: { open: boolean; onClose: () => void; labelledBy: string; children: ReactNode }) {
   const panel = useRef<HTMLDivElement>(null);
@@ -61,8 +73,8 @@ export function Drawer({ open, onClose, labelledBy, children }: { open: boolean;
       if (e.key === 'Tab' && !e.defaultPrevented && panel.current) {
         const root = panel.current;
         const shown = (el: HTMLElement) => el.getClientRects().length > 0;
-        const items = [...root.querySelectorAll<HTMLElement>(FOCUSABLE)].filter(shown);
-        if (!items.length) {
+        const found = [...root.querySelectorAll<HTMLElement>(FOCUSABLE)].filter(shown);
+        if (!found.length) {
           e.preventDefault();
           root.focus();
           return;
@@ -70,6 +82,7 @@ export function Drawer({ open, onClose, labelledBy, children }: { open: boolean;
         const toastItems = [...document.querySelectorAll<HTMLElement>(TOAST_FOCUSABLE)].filter(shown);
         const focused = document.activeElement;
         const active = focused instanceof HTMLElement && focused !== root && (root.contains(focused) || toastItems.includes(focused)) ? focused : null;
+        const items = active && root.contains(active) ? withFocused(found, active, (a, b) => (a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0) : found;
         const target = trapFocusTargetIn([items, toastItems], active, e.shiftKey);
         if (target) {
           e.preventDefault();

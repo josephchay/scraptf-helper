@@ -10,6 +10,11 @@ export const IMPORT_SCHEMA_LOADING_MESSAGE = `${IMPORT_SCHEMA_LOADING_CODE}: Ite
 
 /** Item-like elements were found, but none in a shape the parser knows (scrap.tf changed its page). */
 export const LAYOUT_CHANGED = 'layout-changed';
+/**
+ * 0.7.3: scrap.tf's bare /unusuals index (also /unusual, /buy/unusuals) with no card: it lists the unusual
+ * pages, never item cards itself, so neither "saved without its items" nor "layout changed" is true of it.
+ */
+export const UNUSUALS_INDEX = 'unusuals-index';
 /** The /items table has headers but no "Price to buy" column: no price is guessed from a position. */
 export const NO_PRICE_COLUMN = 'no-price-column';
 /** Far fewer cards than a recent save of the page: prices stored, no bank stock save. */

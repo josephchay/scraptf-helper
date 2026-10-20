@@ -6,7 +6,7 @@
 // user browses; Flip Desk itself never fetches scrap.tf (the HTTP layer still refuses it, R1).
 
 import { bankStockPagePath } from '../shared/bankStock';
-import { LAYOUT_CHANGED, NO_PRICE_COLUMN, NO_STOCK_LIMIT, PARTIAL_READ } from '../shared/importCodes';
+import { LAYOUT_CHANGED, NO_PRICE_COLUMN, NO_STOCK_LIMIT, PARTIAL_READ, UNUSUALS_INDEX } from '../shared/importCodes';
 import { SCRAPTF_BANKS } from '../shared/links';
 import {
   READ_AUTO_MIN_GAP_MS,
@@ -273,10 +273,12 @@ const WINDOW_WARNINGS: Readonly<Record<string, string | ((n: readonly number[]) 
   'unknown-bank': 'not a scrap.tf bank page Flip Desk knows',
   'no-pays-column': 'no "Price we pay" column found, so what scrap.tf pays was not read',
   [SCRAPTF_NOT_READ_AGAIN]: 'Read page now to read it again',
+  // 0.7.3: scrap.tf's bare /unusuals index (the Unusuals chip's page) never shows items itself.
+  [UNUSUALS_INDEX]: 'this is the Unusuals index, which lists no items: open one of its pages to read it',
 });
 
 /** Warnings that say how to read again, not that something is wrong: no warning tone. */
-const INFO_WARNINGS: ReadonlySet<string> = new Set([SCRAPTF_NOT_READ_AGAIN]);
+const INFO_WARNINGS: ReadonlySet<string> = new Set([SCRAPTF_NOT_READ_AGAIN, UNUSUALS_INDEX]);
 
 /** A read's warning (main sends the import's warning code, or a fixed SCRAPTF_READ_REASONS or notice text). */
 export function readWarningText(warning: string | null | undefined): string | null {
@@ -369,7 +371,9 @@ export function readStatusView(read: ScraptfWindowRead | null | undefined, now: 
     // Main's failed read (the script failed, the page gave nothing, the item data was loading, a challenge page
     // gave nothing): nothing was imported, so no "Read 0 items".
     const main = `Could not read ${path} · ${READ_FAILURE_LINES[sent]!}`;
-    return { main, age, tone: 'warn', title: `${at === null ? '' : `${fmtDateTime(at)}: `}${sent} Nothing was imported from scrap.tf${path}.`, lead: main, best: null, tail: '' };
+    // 0.7.3: a challenge read's tooltip follows the setting, as the notice does.
+    const said = windowNoticeText(sent, readOnLoad) ?? sent;
+    return { main, age, tone: 'warn', title: `${at === null ? '' : `${fmtDateTime(at)}: `}${said} Nothing was imported from scrap.tf${path}.`, lead: main, best: null, tail: '' };
   }
   // The line joins its parts with " · ", so a sentence's own full stop goes.
   const warn = readWarningText(read.warning)?.replace(/[.\s]+$/, '') || null;
@@ -436,9 +440,18 @@ export function bestFlipTitle(best: BestFlipView): string {
   return `Opens ${best.name} in the dashboard (${best.profit} profit at scrap.tf's price on this page).`;
 }
 
-/** main's notice about the page on screen (nav.notice, fixed text), for the status line; null when none. */
-export function windowNoticeText(notice: unknown): string | null {
-  return typeof notice === 'string' && notice.trim() !== '' ? truncate(notice.trim(), 200) : null;
+/** 0.7.3: main's challenge notice with reading on load off, when no automatic read follows the real page. */
+export const SCRAPTF_CHALLENGE_NOTICE_READ_OFF = 'Cloudflare check or error page on screen: solve it in the page, then press Read page now once the real page loads.';
+
+/**
+ * main's notice about the page on screen (nav.notice, fixed text), for the status line; null when none. With
+ * reading on load off the challenge notice says to press Read page now: nothing reads the real page by itself.
+ */
+export function windowNoticeText(notice: unknown, readOnLoad = true): string | null {
+  const text = typeof notice === 'string' ? notice.trim() : '';
+  if (text === '') return null;
+  if (!readOnLoad && text === SCRAPTF_WINDOW_NOTICES.challenge) return SCRAPTF_CHALLENGE_NOTICE_READ_OFF;
+  return truncate(text, 200);
 }
 
 /** The status line as one string: "Read 48 items from /buy/hats · 2 new flips · 3 s ago" (or "Could not read …"). */

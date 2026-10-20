@@ -150,6 +150,9 @@ function setup(
     folderWatchActive: () => false,
     onBasesChanged: (b) => holdings.onBasesChanged(b),
     scraptfList: list,
+    // 0.7.3: a constant slice clock keeps each build one slice (MARKET_SLICE_MS is wall-clock time
+    // otherwise), so the fake clock alone decides the change pushes.
+    sliceNow: () => 0,
   });
   const dep = opts.dep === undefined ? list : (opts.dep ?? undefined);
   holdings = createHoldings({

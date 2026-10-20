@@ -637,7 +637,8 @@ export const VERDICT_HELP: Record<MarketVerdict, string> = {
   flip: 'Your scrap.tf price is at or under Pay up to: buy it there, sell to the buyer here.',
   'rule-flip': 'No price of yours, but a price-sheet rule estimates one at or under Pay up to. Check scrap.tf.',
   unchecked: 'Buyers exist and you have no scrap.tf price for the item. Anything at or under Pay up to is a flip.',
-  over: 'Your scrap.tf price is above Pay up to, or no price clears your thresholds against these buyers.',
+  // 0.7.3: an Over row can also have buyers none of which is usable (verdictPill says which).
+  over: 'Your scrap.tf price is above Pay up to, or there is none: no price clears your thresholds against these buyers, or none of them is usable.',
   'no-buyers': 'You priced the item, but no eligible backpack.tf buy orders are in the live book.',
 };
 
@@ -669,13 +670,24 @@ export interface VerdictPill {
   title: string;
 }
 
-/** The Verdict cell: "Flip +1.33 ref", "Over by 2 ref", "Rule flip", "Not checked", "No buyers". */
+/**
+ * The Verdict cell: "Flip +1.33 ref", "Over by 2 ref", "Rule flip", "Not checked", "No buyers". 0.7.3: an Over
+ * or Not checked row whose buyers give no revenue says why there is no Pay up to (noRevenueReason, as the Pay
+ * up to hover), not that no price clears your thresholds.
+ */
 export function verdictPill(
-  r: Pick<MarketRow, 'verdict' | 'profitScrap' | 'knownCostScrap' | 'maxCostScrap' | 'ruleCostScrap'>,
+  r: Pick<MarketRow, 'verdict' | 'profitScrap' | 'knownCostScrap' | 'maxCostScrap' | 'ruleCostScrap' | 'revenueScrap' | 'buyerCount' | 'flags'>,
   keyScrap: Scrap | null,
 ): VerdictPill {
   const tone = VERDICT_TONES[r.verdict];
   const ceiling = r.maxCostScrap;
+  const why = noRevenueReason(r);
+  const noUsable =
+    why === 'all-outliers'
+      ? 'every eligible order looks unrealistic'
+      : why === 'no-bot'
+        ? 'no eligible order is a realistic bot order, and Revenue used for profit is Instant (bot orders only)'
+        : null;
   switch (r.verdict) {
     case 'flip':
       return {
@@ -694,6 +706,9 @@ export function verdictPill(
           title: `Your scrap.tf price ${fmtMoney(r.knownCostScrap, keyScrap)} is ${fmtMoney(by, keyScrap)} over Pay up to (${fmtMoney(ceiling, keyScrap)}): not a flip at that price.`,
         };
       }
+      if (noUsable !== null) {
+        return { tone, text: 'Over', title: `Buyers exist, but ${noUsable}, so no revenue is assumed and there is no Pay up to to judge your scrap.tf price against.` };
+      }
       return { tone, text: 'Over', title: 'Buyers exist, but no scrap.tf price clears your thresholds against them.' };
     case 'rule-flip':
       return {
@@ -708,7 +723,9 @@ export function verdictPill(
         title:
           ceiling !== null
             ? `No scrap.tf price of yours. On scrap.tf, anything at or under ${fmtMoney(ceiling, keyScrap)} is a flip.`
-            : 'No scrap.tf price of yours, and no price clears your thresholds against these buyers.',
+            : noUsable !== null
+              ? `No scrap.tf price of yours, and ${noUsable}, so no revenue is assumed and there is no Pay up to.`
+              : 'No scrap.tf price of yours, and no price clears your thresholds against these buyers.',
       };
     case 'no-buyers':
       return { tone, text: 'No buyers', title: VERDICT_HELP['no-buyers'] };
@@ -742,7 +759,8 @@ export function yourPriceCell(
     const parts = [
       `${page ? 'From a saved scrap.tf page' : 'Typed by you'}: ${fmtMoney(r.knownCostScrap, keyScrap)}${when}.`,
       stock ? `${fmtInt(r.stock)} in stock on that page.` : null,
-      r.flags.includes('has-extras') ? 'That price is for a painted or spelled copy; Pay up to is for a clean one.' : null,
+      // 0.7.2: every professional or specialized kit has a sheen, so a kit row is always flagged; say what extras can be.
+      r.flags.includes('has-extras') ? 'That price is for a copy with extras (paint, spells, a sheen or killstreaker); Pay up to is for a plain one.' : null,
     ];
     return {
       kind: 'known',
@@ -776,20 +794,38 @@ export function yourPriceCell(
   };
 }
 
+/**
+ * 0.7.3: why a row with buyers has no revenue, from its own flags (as holdingsModel's noSaleReason):
+ * Conservative is null only when every eligible order is an outlier, which the service flags
+ * 'all-outliers'; Best never is with buyers. So buyers, no revenue and no such flag is Instant
+ * without a realistic bot order.
+ */
+function noRevenueReason(r: Pick<MarketRow, 'revenueScrap' | 'buyerCount' | 'flags'>): 'none' | 'all-outliers' | 'no-bot' | null {
+  if (r.revenueScrap !== null) return null;
+  if (!(r.buyerCount > 0)) return 'none';
+  return r.flags.includes('all-outliers') ? 'all-outliers' : 'no-bot';
+}
+
 /** Tooltip for "Sells for": the buyer, the three prices and how many buyers there are. */
 export function marketSellsForTitle(r: Pick<MarketRow, 'revenueScrap' | 'bestScrap' | 'consScrap' | 'instantScrap' | 'revenueOrder' | 'buyerCount' | 'flags'>, keyScrap: Scrap | null): string {
-  if (r.revenueScrap === null) return r.buyerCount > 0 ? 'Every eligible order looks unrealistic, so no revenue is assumed.' : 'No eligible backpack.tf buy orders in the live book.';
+  const buyers = `${fmtInt(r.buyerCount)} ${r.buyerCount === 1 ? 'buyer' : 'buyers'} with eligible orders`;
+  const why = noRevenueReason(r);
+  if (why === 'none') return 'No eligible backpack.tf buy orders in the live book.';
+  if (why === 'all-outliers') return 'Every eligible order looks unrealistic, so no revenue is assumed.';
+  if (why === 'no-bot') return `${buyers}, but no realistic bot order, and Revenue used for profit is Instant (bot orders only), so no revenue is assumed.`;
   const o = r.revenueOrder;
   const online = o ? (o.online === true ? 'online' : o.online === false ? 'offline' : 'online status unknown') : null;
   const who = o ? ` to ${o.userName || o.steamid} (${o.isBot ? 'bot' : 'human'}, ${online})` : '';
   const best = `${fmtMoney(r.bestScrap, keyScrap)}${r.flags.includes('outlier-best') ? ' (outlier)' : ''}`;
-  const buyers = `${fmtInt(r.buyerCount)} ${r.buyerCount === 1 ? 'buyer' : 'buyers'} with eligible orders.`;
-  return `Sells for ${fmtMoney(r.revenueScrap, keyScrap)}${who}. Conservative ${fmtMoney(r.consScrap, keyScrap)}, best ${best}, instant ${fmtMoney(r.instantScrap, keyScrap)}. ${buyers}`;
+  return `Sells for ${fmtMoney(r.revenueScrap, keyScrap)}${who}. Conservative ${fmtMoney(r.consScrap, keyScrap)}, best ${best}, instant ${fmtMoney(r.instantScrap, keyScrap)}. ${buyers}.`;
 }
 
-/** Tooltip for "Pay up to". */
-export function marketPayTitle(r: Pick<MarketRow, 'maxCostScrap' | 'buyerCount'>, keyScrap: Scrap | null): string {
+/** Tooltip for "Pay up to". 0.7.3: buyers none of which is usable give no ceiling, not one nothing clears. */
+export function marketPayTitle(r: Pick<MarketRow, 'maxCostScrap' | 'buyerCount' | 'revenueScrap' | 'flags'>, keyScrap: Scrap | null): string {
   if (r.maxCostScrap !== null) return `Pay up to ${fmtMoney(r.maxCostScrap, keyScrap)} on scrap.tf: the highest price that still clears your thresholds.`;
+  const why = noRevenueReason(r);
+  if (why === 'all-outliers') return 'Every eligible order looks unrealistic, so there is no ceiling.';
+  if (why === 'no-bot') return 'No realistic bot order, and Revenue used for profit is Instant (bot orders only), so there is no ceiling.';
   return r.buyerCount > 0 ? 'No scrap.tf price clears your thresholds against these buyers.' : 'No eligible buy orders, so there is no ceiling.';
 }
 
@@ -803,10 +839,17 @@ export interface LiveState {
   title: string;
 }
 
+/**
+ * 0.7.3: what still moves buy orders with the live feed off, in the words of Settings' Live feed switch:
+ * a refresh, and the scheduler's 'snapshot-watched' job for the items you price or hold (it needs an
+ * access token, not the feed). Lower case, to follow "so" or "Without it,".
+ */
+export const FEED_OFF_UPDATES = 'buy orders update only when you refresh an item and, with an access token, for the items you price or hold';
+
 /** The live dot: the feed's state, with pause and the feed switch taking precedence. */
 export function marketLiveState(feed: ConnState | null | undefined, paused: boolean, feedOff: boolean): LiveState {
   if (paused) return { state: 'paused', label: 'Paused', title: 'The network is paused: no buy orders arrive and the market stays as it was.' };
-  if (feedOff) return { state: 'off', label: 'Feed off', title: 'The backpack.tf live feed is off (Settings): the market only changes when you refresh items by hand.' };
+  if (feedOff) return { state: 'off', label: 'Feed off', title: `The backpack.tf live feed is off (Settings): ${FEED_OFF_UPDATES}.` };
   const state = feed ?? 'connecting';
   return { state, label: CONN_STATE_LABELS[state] ?? state, title: 'backpack.tf live buy-order feed. Rows update as orders change; nothing is fetched for this page.' };
 }
