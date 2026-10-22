@@ -7,7 +7,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { createMockBridge, type MockBridge } from '../../src/renderer/mock';
 import { BANK_STOCK_MAX_LIMIT } from '../../src/shared/bankStock';
-import { IMPORT_REPORT_RING } from '../../src/shared/importCodes';
+import { IMPORT_REPORT_RING, SKIP_CRAFT_UNPROVEN, SKIP_OUT_OF_STOCK } from '../../src/shared/importCodes';
 import { SCRAPTF_CHANGES_MAX_LIMIT } from '../../src/shared/scraptfHistory';
 import { DEFAULT_SETTINGS } from '../../src/shared/defaults';
 
@@ -79,13 +79,25 @@ describe('mock parity for 0.7.1', () => {
     }
   });
 
+  it('0.7.4 (F22, F70): a shopping row is knownSuspect only when a priced opportunity of it is flagged Variant? or Below market', async () => {
+    const b = make();
+    const { rows: opps } = await b.rpc('opps.list', { limit: 5000 });
+    const flagged = new Set(opps.filter((o) => o.inputKind !== 'rule' && o.flags.some((f) => f === 'variant-suspect' || f === 'cost-below-market')).map((o) => o.sku));
+    const r = await b.rpc('shopping.list', {});
+    for (const x of r.rows) {
+      if (x.knownSuspect === true) expect(flagged.has(x.sku), x.sku).toBe(true);
+      if (!flagged.has(x.sku)) expect(x, x.sku).not.toHaveProperty('knownSuspect');
+    }
+  });
+
   it('answers a whitelisted import.report sample and checks its limit (P4)', async () => {
     const b = make();
     const reports = await b.rpc('import.report', undefined);
     expect(reports).toHaveLength(1);
     const [rep] = reports;
     expect(Object.keys(rep!).sort()).toEqual(['at', 'bank', 'batchId', 'counts', 'format', 'headerColumns', 'id', 'items', 'name', 'origin', 'page', 'pageKind', 'warningCodes']);
-    for (const item of rep!.items) expect(Object.keys(item).every((k) => ['defindex', 'classTokens', 'title', 'contentLines', 'indicator', 'itemValue', 'numAvailable', 'numSelected', 'particleId', 'warpaintId', 'cells', 'limitAttrs', 'sku', 'warnings'].includes(k))).toBe(true);
+    // 0.8 (LC-6): a card's data-bot attribute (dataBot) joins the whitelist.
+    for (const item of rep!.items) expect(Object.keys(item).every((k) => ['defindex', 'classTokens', 'title', 'contentLines', 'indicator', 'itemValue', 'numAvailable', 'numSelected', 'dataBot', 'particleId', 'warpaintId', 'cells', 'limitAttrs', 'sku', 'warnings'].includes(k))).toBe(true);
     expect(JSON.stringify(reports)).not.toMatch(/7656119\d{10}|Gifted by|avatar/i);
     expect(await b.rpc('import.report', { limit: 1 })).toHaveLength(1);
     await expect(b.rpc('import.report', { limit: IMPORT_REPORT_RING + 1 })).rejects.toThrow(/limit/);
@@ -99,6 +111,10 @@ describe('mock parity for 0.7.1', () => {
     expect(Object.values(page!.skippedCounts ?? {}).reduce((n, c) => n + c, 0)).toBe(page!.skippedTotal);
     const list = await b.rpc('import.html', { html: '<html></html>', fileName: 'scrap.tf - Items.html', mtimeMs: T0 });
     expect(list.skippedTotal).toBe(list.skipped.length);
-    if (list.skipped.length > 0) expect(list.skippedCounts).toEqual({ 'out of stock on scrap.tf': list.skippedTotal });
+    // 0.7.4: as the service, a family row is skipped as a price too (SKIP_CRAFT_UNPROVEN).
+    if (list.skipped.length > 0) {
+      expect(Object.keys(list.skippedCounts ?? {}).every((k) => k === SKIP_OUT_OF_STOCK || k === SKIP_CRAFT_UNPROVEN)).toBe(true);
+      expect(list.skippedCounts?.[SKIP_CRAFT_UNPROVEN]).toBeGreaterThan(0);
+    }
   });
 });

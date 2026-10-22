@@ -30,12 +30,28 @@ export type MhtmlRead =
       contentLocation: string | null;
       /** Page warnings ("code: detail"): mhtml-charset. */
       notes: string[];
+      /**
+       * 0.7.4 (F82): when the page was saved, from the file's own Date header (Chromium writes the save time
+       * there), as Unix ms; null without one, or one that is unreadable or before MHTML_DATE_MIN. Only a time:
+       * importSavedPage dates the page by it when it is clearly older than the file's modified time.
+       */
+      date: number | null;
     }
   | { ok: false; reason: MhtmlFailure; detail: string };
 
 export interface MhtmlLimits {
   maxBytes?: number;
   maxParts?: number;
+}
+
+/** 0.7.4 (F82): a Date header before this (2015-01-01 UTC) is no save time of a scrap.tf page. */
+export const MHTML_DATE_MIN = Date.UTC(2015, 0, 1);
+
+/** The top Date header as Unix ms (RFC 5322 dates, as Date.parse reads them), or null (MhtmlRead.date). */
+function headerDate(value: string | undefined): number | null {
+  if (typeof value !== 'string' || value.trim() === '' || value.length > 100) return null;
+  const ms = Date.parse(value.trim());
+  return Number.isFinite(ms) && ms >= MHTML_DATE_MIN ? ms : null;
 }
 
 /** True for a file name the folder watch and the file picker treat as MHTML (.mhtml, .mht). */
@@ -392,6 +408,7 @@ export function readMhtml(input: Uint8Array | string, limits: MhtmlLimits = {}):
   const top = readHeaders(text, 0, true)!;
   const ct = parseContentType(top.headers.get('content-type'));
   const snapshot = top.headers.get('snapshot-content-location') ?? null;
+  const date = headerDate(top.headers.get('date'));
 
   let part: HtmlPart | null = null;
   if (ct !== null && ct.type === 'text/html') {
@@ -447,7 +464,7 @@ export function readMhtml(input: Uint8Array | string, limits: MhtmlLimits = {}):
   // the cut as gone, then as new on the next save. A page that ends in </html> lost only the delimiter.
   if (part.unterminated && !endsWholePage(html)) return fail('mhtml-truncated', 'the file ends inside its web page, so the page is incomplete');
   const location = (part.headers.get('content-location') ?? snapshot ?? '').trim();
-  return { ok: true, html: withoutBom(html), contentLocation: location === '' ? null : location, notes };
+  return { ok: true, html: withoutBom(html), contentLocation: location === '' ? null : location, notes, date };
 }
 
 /** The spec's entry point: the page and its address hint, or null for anything readMhtml rejects. */

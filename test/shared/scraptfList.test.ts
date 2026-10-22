@@ -120,12 +120,18 @@ describe('bestExitOf', () => {
 
 describe('row fields, the chip and the filter', () => {
   it('fills the market and holdings fields from a row, or null/false without one', () => {
-    const row = valueScraptfListRow(stored({ stock: 6, stockLimit: 6 }), K);
+    // 0.7.4: a row proven to price its copy carries no family flag.
+    const row = valueScraptfListRow(stored({ stock: 6, stockLimit: 6, craft: 'craftable' }), K);
     expect(marketListFields(row)).toEqual({ scraptfPaysScrap: K + 9, scraptfStock: 6, scraptfStockLimit: 6, scraptfFull: true, scraptfListAt: T0 });
     expect(marketListFields(null)).toEqual({ scraptfPaysScrap: null, scraptfStock: null, scraptfStockLimit: null, scraptfFull: false, scraptfListAt: null });
     // Holdings also carries the pays price as listed (keys and metal apart) for its Record sale prefill.
     expect(holdingListFields(row)).toEqual({ scraptfPaysScrap: K + 9, scraptfPaysKeys: 1, scraptfPaysScrapRaw: 9, scraptfFull: true, scraptfListAt: T0 });
     expect(holdingListFields(null)).toEqual({ scraptfPaysScrap: null, scraptfPaysKeys: null, scraptfPaysScrapRaw: null, scraptfFull: false, scraptfListAt: null });
+    // A family row (unmarked, or read for a copy with no row of its own) says so: its stock counts every copy.
+    const family = valueScraptfListRow(stored({ stock: 6, stockLimit: 6, craft: 'any' }), K);
+    expect(marketListFields(family)).toMatchObject({ scraptfStock: 6, scraptfListFamily: true });
+    expect(holdingListFields(family)).toMatchObject({ scraptfPaysScrap: K + 9, scraptfListFamily: true });
+    expect(marketListFields({ ...row, match: 'family' }).scraptfListFamily).toBe(true);
   });
 
   it('builds the "All items" chip for the exact scrap.tf/items page', () => {

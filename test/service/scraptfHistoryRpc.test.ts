@@ -194,6 +194,20 @@ describe('the history and reminders core wires, with nothing saved', () => {
     expect(repo.scraptfEvents()).toEqual([]);
   });
 
+  it('0.8: with nothing saved, no verdict, no cycles, no turnover and no asset ids, and nothing throws', () => {
+    const h = createScraptfHistory({ clock: { now: () => NOW }, log: quiet, repo, market: { entryFor: () => null }, keyPrice: () => KEY, profit: () => DEFAULT_SETTINGS.profit });
+    const buy = { revenueScrap: 120, maxCostScrap: 111 };
+    expect(h.timingFor('hats', '378;6|', buy, NOW)).toBeNull();
+    expect(h.timingForBase('378;6', null, buy, NOW)).toBeNull();
+    expect(h.timingForBase('378;6', 'hats', buy, NOW)).toBeNull();
+    expect(h.timingForCopy('378;6', '', buy, NOW)).toBeNull();
+    expect(h.turnoverFor('hats')).toBeNull();
+    expect(h.assetStability()).toEqual([]);
+    const item = h.itemHistory('378;6', null, NOW);
+    expect(item).not.toHaveProperty('cycles');
+    expect(item).not.toHaveProperty('timing');
+  });
+
   it('the reminders (off by default) start, tick and stop without a notification', () => {
     const notify = vi.fn();
     const r = createResaveReminders({ clock: { now: () => NOW }, log: quiet, repo, settings: () => DEFAULT_SETTINGS, networkPaused: () => false, notify });

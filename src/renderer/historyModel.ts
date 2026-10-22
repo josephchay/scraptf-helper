@@ -4,21 +4,41 @@
 // all from 'scraptf.itemHistory'. Every value comes from pages the user saved (R10); a save is a
 // snapshot, so nothing is claimed about the time between two saves. Nothing here loads scrap.tf (R1).
 // 0.7.1: price changes and stock moves are listed apart (DM-6), and a sighting long past reads as one (DM-5).
+// 0.8 (T5, LC-3): the Cycles block: the buy-timing verdict with its n and its save (historyTimingView), each
+// listing run of the copy (historyRunLines) and the chart's down markers (stepChartGeom's `downs`).
 
 import { bankStockPagePath } from '../shared/bankStock';
 import { SCRAPTF_BOUNDARY_SHORT } from '../shared/boundaryText';
+import { valueScrap } from '../shared/currency';
 import { scraptfBankInfo } from '../shared/links';
-import { scraptfAgoText } from '../shared/scraptfHistory';
-import type { Scrap, ScraptfBank, ScraptfChangeEvent, ScraptfHistoryPoint, ScraptfItemHistory, ScraptfPriceChange, UnixMs } from '../shared/types';
+import { HISTORY_LAST_SEEN_STALE_MS, scraptfAgoText } from '../shared/scraptfHistory';
+import type {
+  Scrap,
+  ScraptfBank,
+  ScraptfBuyTiming,
+  ScraptfChangeEvent,
+  ScraptfHistoryPoint,
+  ScraptfItemCycles,
+  ScraptfItemHistory,
+  ScraptfListingRun,
+  ScraptfPriceChange,
+  UnixMs,
+} from '../shared/types';
 import { CHANGE_KIND_HELP, CHANGE_KIND_LABELS, CHANGE_KIND_TONES, changePctText, changePriceText, changeStockText, fmtSaveTime, fromToText } from './changesModel';
-import { DASH, fmtAgo, fmtDateTime, fmtInt, fmtMoney, type Tone } from './format';
+import { DASH, fmtAgo, fmtDateTime, fmtInt, fmtMoney, fmtSignedMoney, type Tone } from './format';
+import { TIMING_ESTIMATE_NOTE, timingBadge, timingDurText, timingWhyText } from './timingModel';
 
 /** The block re-reads at most this often on pushes ('scraptf.changed', 'prices.changed'). */
 export const HISTORY_REFRESH_MS = 2_000;
 /** Change events listed before "Show all" (price changes and stock moves each). */
 export const HISTORY_EVENTS_SHOWN = 5;
-/** DM-5: a newest sighting older than this reads "last on sale … ago", not as a listing still running. */
-export const HISTORY_LAST_SEEN_STALE_MS = 48 * 3_600_000;
+/**
+ * DM-5: a newest sighting older than this reads "last on sale … ago", not as a listing still running. 0.8: moved to
+ * shared/scraptfHistory.ts (T3's 'stale-save' reads it too) and re-exported here.
+ */
+export { HISTORY_LAST_SEEN_STALE_MS };
+/** 0.8 (LC-3): listing runs listed before "Show all". */
+export const HISTORY_RUNS_SHOWN = 5;
 
 function finite(v: unknown): v is number {
   return typeof v === 'number' && Number.isFinite(v);
@@ -79,11 +99,42 @@ export function historyListedLine(h: Pick<ScraptfItemHistory, 'bank' | 'listedSi
   return { text: 'Listed in your saves, but never on sale', title: `Your saves of ${path} list it only sold out or without a price.${gaps}`, tone: 'muted' };
 }
 
-/** "Now 1.22 ref · 3 in stock", or what the newest save said instead. */
-export function historyNowText(h: Pick<ScraptfItemHistory, 'bank' | 'current' | 'points'>, keyScrap: Scrap | null): HistoryLine | null {
+/**
+ * 0.7.4 (F65): a newer look of the history's page that stored no save (the drawer's unsavedLookOf), when it
+ * is newer than every save the history read: the newest save is then no "Now".
+ */
+export interface HistoryUnsavedLook {
+  bank: ScraptfBank;
+  at: UnixMs;
+  stock: number | null;
+  stockLimit: number | null;
+}
+
+/** The history's newest save time (0 without one). */
+function newestSaveAt(h: Pick<ScraptfItemHistory, 'points'>): UnixMs {
+  return h.points.reduce((m, p) => (finite(p.at) && p.at > m ? p.at : m), 0);
+}
+
+function unsavedAfter(h: Pick<ScraptfItemHistory, 'bank' | 'points'>, u: HistoryUnsavedLook | null | undefined): HistoryUnsavedLook | null {
+  if (!u || u.bank !== h.bank || !finite(u.at)) return null;
+  return u.at > newestSaveAt(h) ? u : null;
+}
+
+/** "Now 1.22 ref · 3 in stock", or what the newest save said instead (0.7.4: "In your save of …" when a newer look stored none). */
+export function historyNowText(h: Pick<ScraptfItemHistory, 'bank' | 'current' | 'points'>, keyScrap: Scrap | null, unsaved?: HistoryUnsavedLook | null): HistoryLine | null {
   const path = historyBankPath(h);
   if (!path) return null;
   const c = h.current;
+  const later = unsavedAfter(h, unsaved);
+  if (c && later) {
+    const stock = finite(c.stock) ? `${fmtInt(c.stock)} in stock` : 'that save showed no stock';
+    const read = finite(later.stock) ? `; your look of ${fmtSaveTime(later.at)} showed stock ${fmtInt(later.stock)}${finite(later.stockLimit) ? `/${fmtInt(later.stockLimit)}` : ''}` : '';
+    return {
+      text: `In your save of ${fmtSaveTime(newestSaveAt(h))}: ${fmtMoney(c.costScrap, keyScrap)} · ${stock}${read}`,
+      title: `scrap.tf's price and stock on ${path} in your newest save of its page, at today's key price. Your look of ${fmtDateTime(later.at)} showed it too but stored no save (cut short or partial), so this is not now: read the page again and let it finish.`,
+      tone: 'muted',
+    };
+  }
   if (c) {
     const stock = finite(c.stock) ? `${fmtInt(c.stock)} in stock` : 'stock not shown';
     return {
@@ -136,14 +187,23 @@ export function priceChangeText(c: ScraptfPriceChange, keyScrap: Scrap | null): 
  * save itself compares a save with itself: a dash, not "no change". For 1 h / 24 h / 7 d that is no save
  * since that long ago; for Since listed, a run that began in the newest save.
  */
-export function historyChips(h: Pick<ScraptfItemHistory, 'bank' | 'current' | 'change' | 'lastSeenAt'>, keyScrap: Scrap | null): HistoryChip[] {
+export function historyChips(
+  h: Pick<ScraptfItemHistory, 'bank' | 'current' | 'change' | 'lastSeenAt'> & Partial<Pick<ScraptfItemHistory, 'points'>>,
+  keyScrap: Scrap | null,
+  unsaved?: HistoryUnsavedLook | null,
+): HistoryChip[] {
+  // 0.7.4 (F65): a newer look that stored no save is why there is nothing newer to compare with.
+  const later = unsavedAfter({ bank: h.bank, points: h.points ?? [] }, unsaved);
+  const notSaved = later ? ` Your look of ${fmtDateTime(later.at)} stored no save (cut short or partial): read the page again and let it finish.` : '';
   return CHIPS.map(({ id, label, ago }) => {
     const c = h.change[id];
     if (c && finite(h.lastSeenAt) && c.since >= h.lastSeenAt) {
       const title =
         id === 'listed'
-          ? `On sale only since your newest save (${fmtDateTime(c.since)}): save the page again later to compare.`
-          : `Your newest save of it (${fmtDateTime(c.since)}) is already at least ${ago} old: save the page again to compare.`;
+          ? `On sale only since your newest save (${fmtDateTime(c.since)}): save the page again later to compare.${notSaved}`
+          : later
+            ? `Your newest save of it (${fmtDateTime(c.since)}) is already at least ${ago} old.${notSaved}`
+            : `Your newest save of it (${fmtDateTime(c.since)}) is already at least ${ago} old: save the page again to compare.`;
       return { id, label, text: DASH, tone: 'muted', title };
     }
     if (!c) {
@@ -164,6 +224,176 @@ export function historyChips(h: Pick<ScraptfItemHistory, 'bank' | 'current' | 'c
       title: `${then}: ${fmtMoney(c.fromScrap, keyScrap)}. Now: ${fmtMoney(c.toScrap, keyScrap)} (${fromToText(c.fromScrap, c.toScrap, keyScrap)}, both at today's key price).`,
     };
   });
+}
+
+// ---------------------------------------------------------------------------
+// 0.8 Cycles: buy timing and listing runs (T5, LC-3)
+// ---------------------------------------------------------------------------
+
+/** "Oct 24": a save's day (fmtSaveTime without the time). */
+function fmtSaveDay(ts: UnixMs): string {
+  return fmtSaveTime(ts).split(' ').slice(0, 2).join(' ');
+}
+
+/** "a", "a and b", "a, b and c". */
+function listText(xs: readonly string[]): string {
+  return xs.length <= 1 ? (xs[0] ?? '') : `${xs.slice(0, -1).join(', ')} and ${xs[xs.length - 1]}`;
+}
+
+const VERDICT_PILLS: Readonly<Record<Exclude<ScraptfBuyTiming['verdict'], 'wait' | 'buy-now'>, { text: string; tone: Tone }>> = {
+  over: { text: 'Over Pay up to', tone: 'bad' },
+  'no-buyers': { text: 'No buyers', tone: 'muted' },
+  'not-enough-data': { text: 'Not enough data', tone: 'muted' },
+};
+
+/** The drops line: the run's reprice-downs and the rhythm, a rhythm already seen and never a probability (E.1-3). */
+function dropsLine(t: ScraptfBuyTiming, path: string, now: UnixMs): string | null {
+  const steps = t.steps.map((s) => changePctText(s.pct)).filter((p): p is string => p !== null);
+  const head =
+    t.dropsThisRun > 0
+      ? `${fmtInt(t.dropsThisRun)} ${t.dropsThisRun === 1 ? 'drop' : 'drops'} in this run${steps.length ? ` (${t.dropsThisRun > steps.length ? '… ' : ''}${steps.join(', ')})` : ''}`
+      : 'No drop in this run yet';
+  if (t.cadenceSource === 'own' && finite(t.cadenceMs)) {
+    const due = finite(t.nextDropAt)
+      ? t.nextDropAt < now
+        ? `; by that rhythm a drop was due ${fmtSaveDay(t.nextDropAt)}: save the page again to see`
+        : `; by that rhythm the next drop would be due around ${fmtSaveDay(t.nextDropAt)}`
+      : '';
+    return `${head}, about every ${timingDurText(t.cadenceMs)} in your saves${due}`;
+  }
+  if (t.cadenceSource === 'bank' && finite(t.cadenceMs)) {
+    return `${head}; drops${t.scope === 'band' ? ' of prices of similar value' : ''} on ${path} in your saves came a median ${timingDurText(t.cadenceMs)} after the price was set (${fmtInt(t.n.drops)} ${t.n.drops === 1 ? 'drop' : 'drops'})`;
+  }
+  return t.dropsThisRun > 0 ? head : null;
+}
+
+/** The odds line: every percentage over its own denominator (n.atRisk), then the prices and items behind the table. */
+function oddsLine(t: ScraptfBuyTiming, path: string, now: UnixMs): string | null {
+  if (!finite(t.horizonMs) || !finite(t.pDrop)) return null;
+  const similar = t.scope === 'band' ? ' of similar value' : '';
+  const end = finite(t.n.atRiskEnd) ? `; ${fmtInt(t.n.atRiskEnd)} ${t.n.atRiskEnd === 1 ? 'was' : 'were'} still at their price at the end of that time` : '';
+  const pct = (p: number) => `${Math.round(Math.max(0, Math.min(1, p)) * 100)} %`;
+  return (
+    `On ${path} in your saves, of the ${fmtInt(t.n.atRisk)} prices${similar} still at their price at this age (${fmtInt(t.n.states)} prices of ${fmtInt(t.n.copies)} ${t.n.copies === 1 ? 'item' : 'items'}): ` +
+    `within ${timingDurText(t.horizonMs)} ${pct(t.pDrop)} dropped, ${pct((t.pGone ?? 0) + (t.pRise ?? 0))} went or rose first${end}. From your save ${fmtAgo(Math.min(t.lastSeenAt, now), now)}.`
+  );
+}
+
+/** The money line: the expected profit of waiting against buying now, both through flipProfit (scraptfTimingEv). */
+function moneyLine(t: ScraptfBuyTiming, keyScrap: Scrap | null): string | null {
+  if (!finite(t.horizonMs) || !finite(t.evWaitScrap) || !finite(t.evBuyScrap)) return null;
+  const sells = finite(t.revenueScrap) ? `Sells for ${fmtMoney(t.revenueScrap, keyScrap)}` : null;
+  const pay = finite(t.maxCostScrap) ? `Pay up to ${fmtMoney(t.maxCostScrap, keyScrap)}` : null;
+  const ctx = [sells, pay].filter(Boolean).join(', ');
+  return `Wait ${timingDurText(t.horizonMs)}: expected ${fmtSignedMoney(t.evWaitScrap, keyScrap)} vs ${fmtSignedMoney(t.evBuyScrap, keyScrap)} now${ctx ? ` (${ctx})` : ''}`;
+}
+
+/**
+ * 0.8 (T5): the drawer's buy-timing block: a pill ('Wait ~1 d' warn, 'Buy now' good, 'Over Pay up to' bad, 'No buyers'
+ * and 'Not enough data' muted), its lines (the run's drops and rhythm, the odds with n.atRisk as their denominator
+ * and n.states / n.copies / n.atRiskEnd behind it, the expected profits, the earlier runs' last prices, or why there
+ * is not enough data), each only when its data exists, and TIMING_ESTIMATE_NOTE. Null without a timing.
+ */
+export function historyTimingView(
+  t: ScraptfBuyTiming | null | undefined,
+  h: Pick<ScraptfItemHistory, 'bank'>,
+  keyScrap: Scrap | null,
+  now: UnixMs,
+): { pill: { text: string; tone: Tone; title: string }; lines: string[]; note: string } | null {
+  if (!t) return null;
+  const path = historyBankPath({ bank: t.bank ?? h.bank }) ?? 'scrap.tf';
+  const badge = timingBadge(t, now);
+  const why = timingWhyText(t.why, { path, n: t.n, lookGapMs: t.lookGapMs, lastSeenAt: t.lastSeenAt, now, scope: t.scope });
+  const fixed = t.verdict === 'wait' || t.verdict === 'buy-now' ? null : VERDICT_PILLS[t.verdict];
+  const pill = badge ?? { text: fixed!.text, tone: fixed!.tone, title: `${why}. From your save ${fmtAgo(Math.min(t.lastSeenAt, now), now)}; an estimate, not a forecast.` };
+  const lines: string[] = [];
+  // Without a verdict to explain, the reason comes first.
+  if (t.verdict === 'not-enough-data' || t.verdict === 'no-buyers') lines.push(why);
+  const drops = dropsLine(t, path, now);
+  if (drops) lines.push(drops);
+  const odds = oddsLine(t, path, now);
+  if (odds) lines.push(odds);
+  const money = moneyLine(t, keyScrap);
+  if (money) lines.push(money);
+  const ends = t.earlierRunEnds.filter((e) => finite(e.lastScrap)).map((e) => fmtMoney(e.lastScrap, keyScrap));
+  if (ends.length) lines.push(`Earlier ${ends.length === 1 ? 'run' : 'runs'} ended at ${listText(ends)} (the lowest seen so far is not a floor)`);
+  return { pill, lines, note: TIMING_ESTIMATE_NOTE };
+}
+
+const RUN_ENDS: Readonly<Record<NonNullable<ScraptfListingRun['endedAs']>, string>> = {
+  absent: 'then gone from the page',
+  'sold-out': 'then sold out',
+  untradable: 'then turned untradable (the same item showed as not tradable)',
+};
+
+/**
+ * 0.8 (LC-3): the drawer's listing runs, newest first: "Listed 3 times in your saves (back 2 times)" and one line per
+ * run with its days, how long it was listed (bracketed by your saves: [lastOnSaleAt - firstOnSaleAt, endedAt -
+ * startAfter]), its first and last price at today's key price (`h.keyPrice`, else `keyScrap`), its drops (a lower
+ * bound) and how it ended, plus its qualifiers: already listed at the first save of its page, a flap (back within the
+ * hour at the same price, not counted as gone), and, only while the bank's asset ids are stable, whether the same
+ * item came back. Null without runs.
+ */
+export function historyRunLines(
+  c: ScraptfItemCycles | null | undefined,
+  h: Pick<ScraptfItemHistory, 'bank' | 'keyPrice'>,
+  keyScrap: Scrap | null,
+  now: UnixMs,
+): { head: string; title: string; lines: { key: string; text: string; title: string; tone: Tone }[] } | null {
+  if (!c || !Array.isArray(c.runs) || c.runs.length === 0) return null;
+  const K = h.keyPrice?.valueScrap ?? keyScrap;
+  const value = (raw: { keys: number; scrap: Scrap }): Scrap => valueScrap(raw.keys, raw.scrap, finite(K) && K > 0 ? K : 0);
+  const path = historyBankPath(h) ?? 'scrap.tf';
+  const total = finite(c.runsTotal) ? c.runsTotal : c.runs.length;
+  const times = (n: number) => (n === 1 ? 'once' : `${fmtInt(n)} times`);
+  const back = c.returns > 0 ? ` (back ${times(c.returns)})` : '';
+  const lines = [...c.runs].reverse().map((r, idx) => {
+    const open = r.endedAt === null;
+    const stale = open && now - r.lastOnSaleAt > HISTORY_LAST_SEEN_STALE_MS;
+    const listedFor = Math.max(0, r.lastOnSaleAt - r.firstOnSaleAt);
+    let span: string;
+    let days: string;
+    if (open) {
+      span = `${scraptfAgoText(listedFor)} so far`;
+      days = `${fmtSaveDay(r.firstOnSaleAt)} → ${stale ? fmtSaveDay(r.lastOnSaleAt) : 'now'}`;
+    } else {
+      const upper = r.startAfter !== null ? Math.max(listedFor, r.endedAt! - r.startAfter) : null;
+      span = upper !== null ? `${scraptfAgoText(listedFor)}–${scraptfAgoText(upper)}` : `at least ${scraptfAgoText(listedFor)}`;
+      days = `${fmtSaveDay(r.firstOnSaleAt)} → ${fmtSaveDay(r.lastOnSaleAt)}`;
+    }
+    const from = value(r.startRaw);
+    const to = value(r.endRaw);
+    const prices = from === to ? `at ${fmtMoney(from, K)}` : `${fmtMoney(from, K)} → ${fmtMoney(to, K)}`;
+    const drops = r.drops > 0 ? `${fmtInt(r.drops)} ${r.drops === 1 ? 'drop' : 'drops'}` : 'no drop';
+    const ending = open
+      ? stale
+        ? 'listed in your newest save of its page'
+        : 'listed now'
+      : r.flap
+        ? 'then back at the same price within the hour (a partial look, not counted as gone)'
+        : r.endedAs
+          ? RUN_ENDS[r.endedAs]
+          : 'then off sale';
+    const quals: string[] = [];
+    if (r.startAfter === null) quals.push('already listed at your first save of its page');
+    if (c.assetIdsStable && r.sameAssetAsBefore === true) quals.push('the same item came back');
+    if (c.assetIdsStable && r.sameAssetAsBefore === false) quals.push('another copy (or the same one traded back)');
+    if (r.family) quals.push('one scrap.tf/items row for every copy');
+    const text = `${days} (${span}), ${prices}, ${drops}${open ? ' · ' : ', '}${ending}${quals.length ? ` · ${quals.join(' · ')}` : ''}`;
+    const before = r.startAfter !== null ? ` Your save of its page before it, without it on sale: ${fmtDateTime(r.startAfter)}.` : '';
+    const after = r.endedAt !== null ? ` The first save without it on sale: ${fmtDateTime(r.endedAt)}.` : '';
+    return {
+      key: `${r.firstOnSaleAt}-${idx}`,
+      text,
+      title: `On sale in ${fmtInt(r.saves)} of your saves of ${path}, from ${fmtDateTime(r.firstOnSaleAt)} to ${fmtDateTime(r.lastOnSaleAt)}.${before}${after} Prices at today's key price; drops are counted between saves (a lower bound).`,
+      tone: (open ? 'info' : r.endedAs === 'untradable' ? 'warn' : 'muted') as Tone,
+    };
+  });
+  return {
+    head: `Listed ${times(total)} in your saves${back}`,
+    title: `Each run is an unbroken stretch of your saves of ${path} listing it on sale; how long it lasted is bracketed by your saves (from its last save on sale to the first without it). A return at the same price within the hour is the same listing, and 'gone from the page' can be a sale, a reservation or a move.${total > c.runs.length ? ` The newest ${fmtInt(c.runs.length)} of ${fmtInt(total)} runs are listed.` : ''}`,
+    lines,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -199,6 +429,12 @@ export interface StepGeom {
   hi: Scrap;
   t0: UnixMs;
   t1: UnixMs;
+  /**
+   * 0.8 (T5): the dots of the saves that showed a lower price after a reprice-down (marks.downAts), each drawn with a
+   * tick under it. Present only when stepChartGeom was given `marks.downAts` ([] when none matches), so a chart without
+   * marks has exactly 0.7.4's geometry.
+   */
+  downs?: { x: number; y: number; i: number }[];
 }
 
 /** ScraptfItemHistory.points as the chart reads them: the cost only where listed (it is 0 otherwise). */
@@ -211,9 +447,10 @@ const r1 = (v: number): string => (Math.round(v * 10) / 10).toString();
 /**
  * Geometry of the step chart over `points` (oldest first): a horizontal step from each listed save to
  * the next one when that one is listed too, then a vertical to its price; nothing across a gap. Null
- * when no save listed it on sale.
+ * when no save listed it on sale. 0.8 (T5): `marks.downAts` (ScraptfItemCycles.dropAts) adds `downs`, the
+ * dots of those saves; without it the result has no `downs` key.
  */
-export function stepChartGeom(points: readonly StepPoint[], box: StepBox = STEP_BOX): StepGeom | null {
+export function stepChartGeom(points: readonly StepPoint[], box: StepBox = STEP_BOX, marks: { downAts?: readonly UnixMs[] } = {}): StepGeom | null {
   const pts = [...points].filter((p) => finite(p.at)).sort((a, b) => a.at - b.at);
   const vals = pts.map((p) => p.value).filter((v): v is number => finite(v));
   if (vals.length === 0) return null;
@@ -247,7 +484,10 @@ export function stepChartGeom(points: readonly StepPoint[], box: StepBox = STEP_
     const next = pts[i + 1];
     if (next && finite(next.value)) d += `H${r1(xs[i + 1]!)}`;
   });
-  return { path: d, dots, gaps, xs, lo, hi, t0, t1 };
+  if (!Array.isArray(marks.downAts)) return { path: d, dots, gaps, xs, lo, hi, t0, t1 };
+  const downAt = new Set(marks.downAts);
+  const downs = dots.filter((p) => downAt.has(pts[p.i]!.at));
+  return { path: d, dots, gaps, xs, lo, hi, t0, t1, downs };
 }
 
 /** The point nearest to `fx` (a viewBox x), for the hover. */

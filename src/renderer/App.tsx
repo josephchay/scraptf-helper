@@ -10,7 +10,7 @@ import { Icon, type IconName } from './components/Icon';
 import { StatePill } from './components/Pills';
 import { Tip } from './components/Tip';
 import { parseDataTooNew } from './dataTooNewModel';
-import { CONN_STATE_LABELS, KEY_SOURCE_LABELS, accelLabel, errorMessage, fmtAge, fmtInt, fmtRefOnly, keyPriceSummary, serviceBannerDetail } from './format';
+import { CONN_STATE_LABELS, KEY_SOURCE_LABELS, accelLabel, errorMessage, fmtAge, fmtInt, fmtRefOnly, keyPriceNotes, keyPriceSummary, serviceBannerDetail } from './format';
 import { AppProvider, useApp } from './hooks/appContext';
 import { usePush, useThrottled, useVisiblePush } from './hooks/useRpc';
 import { useNow } from './hooks/useTimers';
@@ -291,6 +291,8 @@ function TopBar({ title }: { title: string }) {
   const now = useNow(10_000);
   const kp = status?.keyPrice ?? null;
   const key = status ? keyPriceSummary(kp, now) : { value: '…', source: 'loading', age: '', stale: false };
+  // 0.7.4 (F71): when the source last changed the price, and a fresh source that disagrees.
+  const keyNotes = kp ? keyPriceNotes(kp, now) : null;
   // 0.7.3: the user's switch, the value the click flips (as the tray and Settings show it). Main
   // broadcasts every settings change; status lags, e.g. while the service is restarting.
   const paused = settings?.networkPaused ?? status?.networkPaused ?? false;
@@ -328,6 +330,8 @@ function TopBar({ title }: { title: string }) {
                     ))}
                   </tbody>
                 </table>
+                {keyNotes?.priceSetTitle ? <div className="muted small">{keyNotes.priceSetTitle}</div> : null}
+                {keyNotes?.divergence ? <div className="small tone-text-warn">{keyNotes.divergence}</div> : null}
                 {stfTip ? <div className="muted small">{stfTip}</div> : null}
               </div>
             ) : (
@@ -335,11 +339,18 @@ function TopBar({ title }: { title: string }) {
             )
           }
         >
-          <span className={`key-chip${key.stale ? ' stale' : ''}`} tabIndex={0} aria-label={`Key price ${key.value} from ${key.source}, ${key.age} old${key.stale ? ', stale' : ''}`}>
+          <span
+            className={`key-chip${key.stale ? ' stale' : ''}`}
+            tabIndex={0}
+            aria-label={`Key price ${key.value} from ${key.source}, ${key.age} old${keyNotes?.priceSet ? `, price ${keyNotes.priceSet}` : ''}${key.stale ? ', stale' : ''}${keyNotes?.divergence ? ', sources disagree' : ''}`}
+          >
             <Icon name="key" size={14} />
             <span className="money">{key.value}</span>
-            <span className="muted small">{key.age ? `${key.source} · ${key.age}` : key.source}</span>
-            {key.stale ? <Icon name="warning" size={12} className="tone-text-warn" /> : null}
+            <span className="muted small">
+              {key.age ? `${key.source} · ${key.age}` : key.source}
+              {keyNotes?.priceSet ? ` · ${keyNotes.priceSet}` : ''}
+            </span>
+            {key.stale || keyNotes?.divergence ? <Icon name="warning" size={12} className="tone-text-warn" /> : null}
           </span>
         </Tip>
         <StatePill state={feed} label={`Feed: ${CONN_STATE_LABELS[feed]}`} title="backpack.tf live buy-order feed" />

@@ -2,7 +2,7 @@
 // copy into a bug report. Whitelisted data only: counts, header texts, warning codes and the card fields the
 // parser read for refused cards and cards read by a guess. Never the nav, scripts, avatars, SteamIDs, asset
 // ids, custom names or gift and receipt text, and nothing is stored or sent. Synthetic pages; nothing is
-// fetched.
+// fetched. 0.8 (LC-6): reserved and not-tradable cards are kept and counted, with a scrubbed data-bot.
 
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -11,6 +11,7 @@ import type { Engine, Logger, Repo, SchemaService } from '../../src/service/cont
 import { openRepo } from '../../src/service/db';
 import { clearImportReports, importReports } from '../../src/service/import/reports';
 import { createRpcHandlers, importSavedPage, recordSkippedImport, type HandlerContext } from '../../src/service/rpcHandlers';
+import { importReportToast } from '../../src/renderer/importModel';
 import { DEFAULT_SETTINGS, mergeSettings } from '../../src/shared/defaults';
 import { IMPORT_REPORT_MAX_ITEMS, IMPORT_REPORT_RING, IMPORT_SCHEMA_LOADING_MESSAGE } from '../../src/shared/importCodes';
 import type { ImportReport } from '../../src/shared/types';
@@ -161,5 +162,71 @@ describe('the parser report (P4)', () => {
     // A copy: changing what was returned changes nothing kept.
     all[0]!.items.length = 0;
     expect(importReports()[0]!.items.length).toBeGreaterThan(0);
+  });
+});
+
+describe('0.8 (LC-6): lifecycle markers, report only', () => {
+  const page = (cards: string) => `<!-- saved from url=(0025)https://scrap.tf/buy/hats -->\n<html><body><div id="buy-container">${cards}</div></body></html>`;
+  const card = (attrs: Record<string, string>, price = '1.33 ref') =>
+    `<div ${Object.entries(attrs)
+      .map(([k, v]) => `${k}="${v.replace(/"/g, '&quot;')}"`)
+      .join(' ')}><div class="item-value-indicator">${price}</div></div>`;
+
+  it("keeps buy_hats.html's reserved card (C33) with its 'reserved' class token, and counts it", () => {
+    const h = setup();
+    importSavedPage(h.ctx, { html: fixture('buy_hats.html'), fileName: 'hats.html', mtimeMs: NOW - MIN });
+    const [rep] = importReports();
+    expect(rep!.counts.reserved).toBe(1);
+    expect(rep!.counts.notTradable).toBe(0);
+    const c33 = rep!.items.filter((i) => i.classTokens.includes('reserved'));
+    expect(c33).toHaveLength(1);
+    expect(c33[0]).toMatchObject({ defindex: 378, title: 'Team Captain', indicator: '1.33 ref', dataBot: null });
+    expect(c33[0]!.warnings.some((w) => w.startsWith('reserved:'))).toBe(true);
+  });
+
+  it('keeps an otherwise clean reserved card and an inline Not Tradable one, after the refused ones; a clean card stays out', () => {
+    const h = setup();
+    const html = page(
+      card({ 'data-id': '9100000801', 'data-appid': '440', class: 'item hoverable quality6 app440', 'data-defindex': '126', 'data-title': "Bill's Hat", 'data-item-value': '15' }, '1.66 ref') +
+        card({ 'data-id': '9100000802', 'data-appid': '440', class: 'item hoverable quality6 app440', 'data-defindex': '378', 'data-title': 'Team Captain', 'data-content': 'Not Tradable', 'data-bot': STEAMID }) +
+        card({ 'data-id': '9100000803', 'data-appid': '440', class: 'item hoverable quality6 reserved app440', 'data-defindex': '378', 'data-title': 'Team Captain', 'data-content': '<b>This item has been reserved.</b>', 'data-bot': '3' }) +
+        card({ 'data-id': '9100000804', 'data-appid': '440', class: 'item hoverable quality5 app440', 'data-defindex': '31540', 'data-title': 'Unusual Le Sapeur', 'data-item-value': '900' }, '5 keys'),
+    );
+    importSavedPage(h.ctx, { html, fileName: 'hats.html', mtimeMs: NOW - MIN });
+    const [rep] = importReports();
+    expect(rep!.counts).toMatchObject({ cards: 4, reserved: 1, notTradable: 1 });
+    // The refused Le Sapeur first, then the two lifecycle cards in page order; Bill's Hat is not reported.
+    expect(rep!.items.map((i) => [i.defindex, i.classTokens.includes('reserved')])).toEqual([
+      [31540, false],
+      [378, false],
+      [378, true],
+    ]);
+    const [sapeur, untradable, reserved] = rep!.items;
+    expect(untradable!.warnings.some((w) => w.startsWith('not-tradable:'))).toBe(true);
+    expect(untradable!.sku).toMatch(/;untradable$/);
+    // data-bot as read, scrubbed: a SteamID64-length value becomes '#'; absent reads null.
+    expect(untradable!.dataBot).toBe('#');
+    expect(reserved!.dataBot).toBe('3');
+    expect(sapeur!.dataBot).toBeNull();
+    expect(JSON.stringify(rep)).not.toContain(STEAMID);
+  });
+
+  it("the copy toast names the markers the copied reads showed (the Import page sums each report's counts)", () => {
+    expect(importReportToast(true, 2, { reserved: 1, notTradable: 2 }).text).toBe(
+      'Copied the parser report (2 reads). Nothing was sent. Your reads marked 1 card reserved and 2 not tradable; the report shows how.',
+    );
+    expect(importReportToast(true, 2, { reserved: 0, notTradable: 0 }).text).toBe('Copied the parser report (2 reads). Nothing was sent.');
+    expect(importReportToast(true, 1).text).toBe('Copied the parser report (1 read). Nothing was sent.');
+    // Nothing copied: no marker sentence.
+    expect(importReportToast(false, 2, { reserved: 3, notTradable: 0 })).toEqual({ text: 'Could not copy the parser report.', tone: 'bad' });
+    const pageSrc = readFileSync(fileURLToPath(new URL('../../src/renderer/pages/ImportPage.tsx', import.meta.url)), 'utf8');
+    expect(pageSrc).toContain('importReportToast(copied, text === null ? 0 : reports.length, markers)');
+  });
+
+  it('a page without markers counts none', () => {
+    const h = setup();
+    importSavedPage(h.ctx, { html: revealingPage(), fileName: 'hats.html', mtimeMs: NOW - MIN });
+    expect(importReports()[0]!.counts).toMatchObject({ reserved: 0, notTradable: 0 });
+    for (const it of importReports()[0]!.items) expect(it.dataBot).toBeNull();
   });
 });

@@ -3,10 +3,11 @@
 // stored opportunities. The bank page URLs are only handed to the user's
 // browser, never fetched (R1).
 
+import { costSuspectFlagged } from '../../shared/ceiling';
 import { formatScrap } from '../../shared/currency';
-import { scraptfPageFor } from '../../shared/links';
+import { scraptfBankInfo, scraptfPageFor } from '../../shared/links';
 import { CATEGORIES, CATEGORY_LABELS } from '../../shared/types';
-import type { Category, KeyPriceState, Opportunity, Scrap, ShoppingListResult, ShoppingQuery, ShoppingRow, UnixMs } from '../../shared/types';
+import type { Category, KeyPriceState, Opportunity, Scrap, ScraptfBank, ShoppingListResult, ShoppingQuery, ShoppingRow, UnixMs } from '../../shared/types';
 import type { CsvCell } from './csv';
 import { toCsv } from './csv';
 import { revenueOrderByValue } from './engine';
@@ -94,6 +95,26 @@ export interface ShoppingListOptions {
    * unknown (a typed price). Asked only for the rows returned. Omitted: knownStock is null.
    */
   stockOf?(inputRef: string): number | null;
+  /**
+   * 0.7.4 (F36): the scrap.tf bank page to look for a SKU on: the bank page a save last listed it on, else
+   * the bank an item of its kind is sold on (core: MarketIndex.bankFor; a strange cosmetic is on /buy/hats,
+   * a killstreak weapon on /buy/items). Asked for every matched row (in memory). Omitted, failing or not a
+   * bank id: the category's page (scraptfPageFor), as before.
+   */
+  bankOf?(sku: string, category: Category): ScraptfBank | null;
+}
+
+/** 0.7.4 (F36): a row's static bank page (SCRAPTF_BANKS URLs only, never item data, R1). */
+function bankPageFor(opts: ShoppingListOptions, sku: string, category: Category): string {
+  if (opts.bankOf) {
+    try {
+      const info = scraptfBankInfo(opts.bankOf(sku, category));
+      if (info && info.bank !== 'list') return info.url;
+    } catch {
+      // the category's page
+    }
+  }
+  return scraptfPageFor(category);
 }
 
 interface BuiltRow {
@@ -102,7 +123,7 @@ interface BuiltRow {
   knownRef: string | null;
 }
 
-function rowFor(top: Opportunity, all: readonly Opportunity[]): BuiltRow {
+function rowFor(top: Opportunity, all: readonly Opportunity[], opts: ShoppingListOptions): BuiltRow {
   // Painted, spelled and plain copies share the SKU, so a cost is judged only against
   // its own row's ceiling: one copy's price against another copy's ceiling says nothing.
   let known: Opportunity | null = isKnown(top) ? top : null;
@@ -114,7 +135,7 @@ function rowFor(top: Opportunity, all: readonly Opportunity[]): BuiltRow {
     sku: top.sku,
     name: top.name || top.sku,
     category: top.category,
-    bankPageUrl: scraptfPageFor(top.category),
+    bankPageUrl: bankPageFor(opts, top.sku, top.category),
     maxCostScrap,
     revenueScrap: top.revenueScrap as Scrap,
     revenueOrder: revenueOrderByValue(top),
@@ -132,6 +153,9 @@ function rowFor(top: Opportunity, all: readonly Opportunity[]): BuiltRow {
     knownObservedAt: known && finite(known.inputObservedAt) ? known.inputObservedAt : null,
     knownStock: null,
     knownStale: known !== null && known.flags.includes('stale-input'),
+    // 0.7.4 (F22, F70): a price far under the item's own PriceDB price is probably another copy's; it is not
+    // counted as at or under the ceiling (the page and its header), like a stale one.
+    ...(known !== null && costSuspectFlagged(known.flags) ? { knownSuspect: true } : {}),
   };
   return { row, knownRef: known ? known.inputRef : null };
 }
@@ -192,17 +216,27 @@ export function buildShoppingList(
     let top: Opportunity | null = null;
     for (const o of list) if (hasCeiling(o) && (top === null || betterInput(o, top))) top = o;
     if (top === null) continue;
-    const b = rowFor(top, list);
+    const b = rowFor(top, list, opts);
     if (keep(b.row)) built.push(b);
   }
   built.sort((a, b) => compareRows(a.row, b.row));
   const matched = built.map((b) => b.row);
 
-  const counts = new Map<Category, number>();
-  for (const r of matched) counts.set(r.category, (counts.get(r.category) ?? 0) + 1);
+  const counts = new Map<Category, { count: number; pages: Set<string> }>();
+  for (const r of matched) {
+    const c = counts.get(r.category) ?? { count: 0, pages: new Set<string>() };
+    c.count++;
+    c.pages.add(r.bankPageUrl);
+    counts.set(r.category, c);
+  }
+  // 0.7.4 (F36): a group links one bank page only when every row in it opens that page (strange cosmetics
+  // sit on /buy/hats beside strange weapons on /buy/stranges); otherwise its rows link their own pages.
   const groups = [...counts.entries()]
     .sort((a, b) => categoryIndex(a[0]) - categoryIndex(b[0]) || a[0].localeCompare(b[0]))
-    .map(([category, count]) => ({ category, label: CATEGORY_LABELS[category] ?? category, count, bankPageUrl: scraptfPageFor(category) }));
+    .map(([category, c]) => {
+      const one = c.pages.size === 1 ? [...c.pages][0]! : null;
+      return { category, label: CATEGORY_LABELS[category] ?? category, count: c.count, bankPageUrl: one ?? scraptfPageFor(category), ...(one === null ? { mixedBanks: true } : {}) };
+    });
 
   const offset = finite(query.offset) ? Math.max(0, Math.floor(query.offset)) : 0;
   const limit = finite(query.limit) ? Math.min(MAX_LIST_LIMIT, Math.max(1, Math.floor(query.limit))) : matched.length;

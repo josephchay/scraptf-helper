@@ -30,21 +30,23 @@
 
 /* ---------- table ---------- */
 
-/* Item / Qty / Your cost / Held for / Sells now for / Buyers / Profit now / Confidence / Updated / actions.
-   Each set of tracks (plus gaps and padding) fits the width its query starts at: full needs 1210px;
-   the queries drop Buyers and Confidence, then Held for, then Updated, down to ~840px (the 960px
-   minimum window). Your cost keeps room for a key-priced lot ("20 keys 58.66 ref") at every width. */
+/* Item / Qty / Your cost / Held for / Sells now for / Buyers / Profit now / Advice / Confidence / Updated /
+   actions: 11 tracks. Each set of tracks (plus gaps and padding) fits the width its query starts at: full
+   needs 1332px; the queries drop Buyers and Confidence, then Updated, then Held for, and last (0.8, H6) fold
+   the Advice pill into Profit now in place of the status pill, down to ~840px (the 960px minimum window).
+   Updated goes before Held for, so the default 1360px window (a ~1087px grid) keeps Held for and its hover
+   (the user's typical hold, H5). Your cost keeps room for a key-priced lot ("20 keys 58.66 ref") at every width. */
 .holdings-scroll {
-  --hold-cols: minmax(190px, 1fr) 40px 124px 60px 212px 54px 186px 66px 52px 112px;
+  --hold-cols: minmax(190px, 1fr) 40px 124px 60px 212px 54px 186px 112px 66px 52px 112px;
 }
 
 .holdings-scroll .opp-row {
   grid-template-columns: var(--hold-cols);
 }
 
-@container (max-width: 1210px) {
+@container (max-width: 1332px) {
   .holdings-scroll .opp-row {
-    --hold-cols: minmax(170px, 1fr) 40px 124px 60px 212px 186px 52px 112px;
+    --hold-cols: minmax(170px, 1fr) 40px 124px 60px 212px 186px 112px 52px 112px;
   }
   .holdings-scroll .opp-row > .h-buyers,
   .holdings-scroll .opp-row > .h-conf {
@@ -52,21 +54,34 @@
   }
 }
 
-@container (max-width: 1050px) {
+@container (max-width: 1172px) {
   .holdings-scroll .opp-row {
-    --hold-cols: minmax(160px, 1fr) 40px 124px 196px 180px 52px 112px;
+    --hold-cols: minmax(160px, 1fr) 40px 124px 60px 196px 180px 112px 112px;
+  }
+  .holdings-scroll .opp-row > .h-updated {
+    display: none;
+  }
+}
+
+@container (max-width: 1078px) {
+  .holdings-scroll .opp-row {
+    --hold-cols: minmax(150px, 1fr) 36px 120px 176px 172px 112px 108px;
   }
   .holdings-scroll .opp-row > .h-held {
     display: none;
   }
 }
 
-@container (max-width: 950px) {
+@container (max-width: 958px) {
   .holdings-scroll .opp-row {
     --hold-cols: minmax(150px, 1fr) 36px 120px 176px 172px 108px;
   }
-  .holdings-scroll .opp-row > .h-updated {
+  .holdings-scroll .opp-row > .h-advice,
+  .holdings-scroll .opp-row > .h-profit > .holding-pill {
     display: none;
+  }
+  .holdings-scroll .opp-row > .h-profit > .advice-inline {
+    display: inline-block;
   }
 }
 
@@ -185,6 +200,34 @@
   line-height: 20px;
 }
 
+/* 0.8 (H6): the Advice column; its pill gives way before the cell does, as the status pill. */
+.h-advice {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+
+.advice-pill {
+  display: inline-block;
+  flex-shrink: 1;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  line-height: 20px;
+}
+
+/* Shown only at the narrowest width, in Profit now (the container query above). */
+.advice-inline {
+  display: none;
+}
+
+.advice-refresh {
+  flex-shrink: 0;
+}
+
 .h-actions {
   display: flex;
   justify-content: flex-end;
@@ -239,6 +282,47 @@
 
 .holding-row.flash-down.flash-b {
   animation: holding-flash-down-b 1.6s ease-out;
+}
+
+/* ---------- the drawer's "Your holding & trades" (0.8, H7) ---------- */
+
+/* The chart reuses .spark and .stf-hist-chart (scraptf-history.css); only the text around it lives here. */
+.holding-section .holding-now {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 10px;
+  margin: 0 0 6px;
+  font-weight: 600;
+}
+
+.holding-reasons,
+.holding-lots,
+.holding-trades {
+  display: grid;
+  gap: 3px;
+  margin: 0 0 8px;
+}
+
+.holding-reasons > li {
+  padding-left: 10px;
+  border-left: 2px solid var(--border);
+  line-height: 1.45;
+}
+
+.holding-lots > li,
+.holding-trades > li {
+  font-variant-numeric: tabular-nums;
+}
+
+.holding-sub {
+  margin: 10px 0 4px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.ask-side-line {
+  margin: 0 0 6px;
 }
 
 /* ---------- Record trade dialog ---------- */

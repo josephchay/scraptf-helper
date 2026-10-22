@@ -417,7 +417,23 @@ describe('reading a page the user loaded (F21)', () => {
     expect(done.warnings.find((x) => x.startsWith('no-sku:'))).toMatch(/^no-sku: 3 of 38 items/);
     const best = done.topFlips?.[0];
     const flips = done.pageFlips === undefined ? {} : { pageFlips: done.pageFlips, bestFlip: best ? { sku: best.sku, name: best.name, profitScrap: best.profitScrap } : null };
-    expect(w.reads()).toEqual([{ at: T, path: '/buy/hats', items: done.parsed, bank: 'hats', newFlips: 0, warning: 'no-sku: 3 38', stored: done.stored, ...flips }]);
+    // 0.7.4 (F53): and what the import did with the page's bank stock, as the service reported it.
+    expect(done.stockSave).toBe('written');
+    expect(w.reads()).toEqual([
+      {
+        at: T,
+        path: '/buy/hats',
+        items: done.parsed,
+        bank: 'hats',
+        newFlips: 0,
+        warning: 'no-sku: 3 38',
+        stored: done.stored,
+        ...flips,
+        // 0.8 (G2): the flips this read dropped under Pay up to, as the service reported them.
+        ...(done.droppedFlips !== undefined ? { droppedFlips: done.droppedFlips } : {}),
+        stockSave: 'written',
+      },
+    ]);
 
     // The same page saved by the user as a file, imported through the router as the Import page does.
     const f = world();
@@ -428,8 +444,8 @@ describe('reading a page the user loaded (F21)', () => {
     expect(fileBatch!.origin).toBe('file');
     expect(sansBatch(batch!)).toEqual(sansBatch(fileBatch!));
     expect(storedOf(w.repo, batch!.id)).toEqual(storedOf(f.repo, fileBatch!.id));
-    // Window reads alone carry the flips for the toolbar (newFlips, 0.7.1 pageFlips and topFlips).
-    const { batchId: _a, fileName: _b, origin: _c, newFlips: _d, pageFlips: _h, topFlips: _i, ...windowResult } = done;
+    // Window reads alone carry the flips for the toolbar (newFlips, 0.7.1 pageFlips and topFlips, 0.8 droppedFlips).
+    const { batchId: _a, fileName: _b, origin: _c, newFlips: _d, pageFlips: _h, topFlips: _i, droppedFlips: _j, ...windowResult } = done;
     const { batchId: _e, fileName: _f, origin: _g, ...fileResult } = file;
     expect(windowResult).toEqual(fileResult);
 

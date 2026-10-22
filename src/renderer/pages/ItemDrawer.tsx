@@ -1,9 +1,10 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react';
 import { DEFAULT_SETTINGS } from '../../shared/defaults';
 import { SCRAPTF_ITEMS_URL } from '../../shared/links';
-import type { BuyerCheck, ItemDetail, LinkSpec, Opportunity, OrderSummary, PriceRule, Scrap, ScrapPrice, ScraptfListRow } from '../../shared/types';
+import type { BuyerCheck, HoldingAskSide, ItemDetail, LinkSpec, Opportunity, OrderSummary, PriceRule, ProfitSettings, Scrap, ScrapPrice, ScraptfListRow } from '../../shared/types';
+import { profitBreakdown } from '../../shared/ceiling';
 import { rpc } from '../api';
-import { seenOnText } from '../banksModel';
+import { seenOnText, unsavedLookOf, unsavedLookText } from '../banksModel';
 import { copyText } from '../clipboard';
 import { ConfirmButton, Field } from '../components/Controls';
 import { Drawer } from '../components/Drawer';
@@ -12,13 +13,16 @@ import { ErrorBanner, LoadingBlock, Spinner } from '../components/Feedback';
 import { Icon } from '../components/Icon';
 import { MenuPopover, menuPointFromEvent, openOnScraptf } from '../components/ItemMenu';
 import { ItemName, Money } from '../components/ItemName';
-import { ConfidenceBadge, FlagList, OnlineDot, TonePill } from '../components/Pills';
+import { ConfidenceBadge, FlagList, OnlineDot, TonePill, UnverifiedOrderMark } from '../components/Pills';
+import { NEXT_BUYER_HELP, inputCardLabel, nextBuyerLine, otherCopyName, profitBreakdownText, revenueOrderOf, type UseOrder } from '../oppModel';
 import { PriceInput, parsedValueScrap, readPrice, type BareUnit } from '../components/PriceInput';
 import { useRecordTrade, type RecordTradeInit } from '../components/RecordTradeDialog';
 import { ScraptfHistory } from '../components/ScraptfHistory';
+import { HoldingSection } from '../components/HoldingSection';
+import { WatchSection } from '../components/WatchSection';
+import { askSideText } from '../holdingsModel';
 import { Sparkline } from '../components/Sparkline';
 import {
-  INPUT_KIND_LABELS,
   STATUS_LABELS,
   categoryLabel,
   errorMessage,
@@ -82,10 +86,10 @@ import { listBoundaryNote } from '../scraptfListModel';
 import { scraptfLinksInWindow, scraptfWindowOn } from '../scraptfWindowModel';
 
 export function ItemDrawer() {
-  const { itemSku, closeItem } = useApp();
+  const { itemSku, itemCopy, closeItem } = useApp();
   return (
     <Drawer open={itemSku !== null} onClose={closeItem} labelledBy="item-title">
-      {itemSku ? <ItemDetailView key={itemSku} sku={itemSku} /> : null}
+      {itemSku ? <ItemDetailView key={`${itemSku}|${itemCopy ?? ''}`} sku={itemSku} copyKey={itemCopy} /> : null}
     </Drawer>
   );
 }
@@ -97,7 +101,8 @@ function sanitizeUnit(v: unknown): BareUnit {
   return v === 'scrap' || v === 'keys' ? v : 'ref';
 }
 
-function ItemDetailView({ sku }: { sku: string }) {
+/** `copyKey`: 0.7.4 (F66) the copy the drawer was opened on (Opportunity.copyKey); its scrap.tf history is that copy's. */
+function ItemDetailView({ sku, copyKey = null }: { sku: string; copyKey?: string | null }) {
   const { keyScrap: statusKey, toast, closeItem, navigate, secrets, settings, bumpData } = useApp();
   const detail = useRpcQuery('item.detail', { sku });
   const assetId = detail.data?.scrapPrices.find((p) => p.assetId)?.assetId ?? null;
@@ -199,12 +204,15 @@ function ItemDetailView({ sku }: { sku: string }) {
   // The specific, fixable reason (missing token, API off) rather than a vague "unavailable".
   const unavailable = d.snapshot.available ? null : snapshotUnavailableReason(secrets, settings);
   const ceiling = drawerCeiling(d);
-  // Never null without a links state: the bank page the item was last seen on (F15), else its
-  // category's, else the full scrap.tf/items list.
-  const stfUrl = scraptfOpenUrl(d.category, null, d.seenOn) ?? SCRAPTF_ITEMS_URL;
+  // Never null without a links state: the bank page the item was last seen on (F15), else (0.7.4, F36)
+  // the bank its kind is sold on, else its category's, else the full scrap.tf/items list.
+  const stfUrl = scraptfOpenUrl(d.category, null, d.seenOn, d.kindBank ?? null) ?? SCRAPTF_ITEMS_URL;
   const seen = seenOnText(d.seenOn, now);
   // F17: the newest bank page save that lists this copy, and its change since the previous save.
   const stockLine = drawerBankStockLine(d.bankStock, keyScrap, now);
+  // 0.7.4 (F65): a newer look of that page stored no save: the stock line and history say so, never "Now".
+  const unsaved = unsavedLookOf(d, now);
+  const unsavedNote = unsaved && stockLine ? unsavedLookText(unsaved, now) : null;
   const openStock = (route: string) => {
     closeItem();
     navigate(route);
@@ -238,6 +246,11 @@ function ItemDetailView({ sku }: { sku: string }) {
               <button type="button" className="link-btn small" title="Every item on this page in your newest save, and what changed since the previous one" onClick={() => openStock(stockLine.route)}>
                 View stock
               </button>
+            </p>
+          ) : null}
+          {unsavedNote ? (
+            <p className="drawer-bank-stock-unsaved muted small" title={unsavedNote.title}>
+              {unsavedNote.text}
             </p>
           ) : null}
           {/* Copying the name is how the user searches scrap.tf's own search box in their browser. */}
@@ -310,12 +323,25 @@ function ItemDetailView({ sku }: { sku: string }) {
         <span className="muted small">Bought it on scrap.tf or sold it? Write it to your journal; Holdings tracks what you hold.</span>
       </div>
 
+      {/* 0.8 (H7): what you hold of it, its advice, the recorded exits and your trades (one local read; text only). */}
+      <HoldingSection sku={d.sku} keyScrap={keyScrap} now={now} />
+
       <section className="drawer-section" aria-labelledby="sec-profit">
         <h3 id="sec-profit">Profit by input</h3>
         {d.opportunities.length ? (
           <div className="input-cards">
             {d.opportunities.map((o) => (
-              <InputCard key={o.key} o={o} keyScrap={keyScrap} now={now} ruleName={o.inputRef.startsWith('rule:') ? ruleNames.get(Number(o.inputRef.slice(5))) : undefined} />
+              <InputCard
+                key={o.key}
+                o={o}
+                keyScrap={keyScrap}
+                now={now}
+                useOrder={useOrder}
+                ruleName={o.inputRef.startsWith('rule:') ? ruleNames.get(Number(o.inputRef.slice(5))) : undefined}
+                price={o.inputRef.startsWith('price:') ? d.scrapPrices.find((p) => `price:${p.id}` === o.inputRef) : undefined}
+                buyOrders={d.buyOrders}
+                profit={profit}
+              />
             ))}
           </div>
         ) : (
@@ -334,7 +360,11 @@ function ItemDetailView({ sku }: { sku: string }) {
       <ScraptfListSection d={d} row={d.scraptfList} keyScrap={keyScrap} now={now} onChanged={afterChange} />
 
       {/* F20 (U1): the price on each of the user's saves of its bank, time listed and its change events. */}
-      <ScraptfHistory sku={d.sku} keyScrap={keyScrap} now={now} />
+      {/* 0.7.4 (F66): opened from a painted or kit copy's row, the history is that copy's. */}
+      <ScraptfHistory sku={d.sku} {...(copyKey !== null ? { special: copyKey } : {})} keyScrap={keyScrap} now={now} unsaved={unsaved} />
+
+      {/* 0.8 (G1, G3): the item's scrap.tf watches and the watch form (a local list; nothing is fetched or bought). */}
+      <WatchSection d={d} copyKey={copyKey} keyScrap={keyScrap} now={now} ceiling={ceiling} />
 
       <PriceSection d={d} keyScrap={keyScrap} now={now} ceiling={ceiling} onChanged={afterChange} onOpenQuick={openQuick} />
 
@@ -346,7 +376,7 @@ function ItemDetailView({ sku }: { sku: string }) {
         kind="buy"
         buyer={{ actions: buyers, highlight: checkListings, onOpenSettings: openSettings, onRecordSale: recordSaleTo }}
       />
-      <OrderBook title="Sell listings" orders={d.sellListings} keyScrap={keyScrap} now={now} kind="sell" />
+      <OrderBook title="Sell listings" orders={d.sellListings} keyScrap={keyScrap} now={now} kind="sell" ask={d.ask ?? null} />
 
       <section className="drawer-section" aria-labelledby="sec-refs">
         <h3 id="sec-refs">Reference prices</h3>
@@ -382,10 +412,33 @@ function DrawerHead({ title, onClose }: { title: string; onClose: () => void }) 
   );
 }
 
-function InputCard({ o, keyScrap, now, ruleName }: { o: Opportunity; keyScrap: Scrap | null; now: number; ruleName?: string | undefined }) {
-  const label =
-    o.inputKind === 'rule' ? `Rule: ${ruleName ?? o.inputRef.replace('rule:', '#')}` : `${INPUT_KIND_LABELS[o.inputKind]} ${o.inputRef.replace('price:', '#')}`;
+function InputCard({
+  o,
+  keyScrap,
+  now,
+  useOrder,
+  ruleName,
+  price,
+  buyOrders,
+  profit,
+}: {
+  o: Opportunity;
+  keyScrap: Scrap | null;
+  now: number;
+  useOrder: UseOrder;
+  ruleName?: string | undefined;
+  /** The input's own price row, when the drawer has it (its import batch for the title). */
+  price?: ScrapPrice | undefined;
+  /** 0.8 (PC-2): the drawer's own book (ItemDetail.buyOrders), for the Next buyer line. */
+  buyOrders: readonly OrderSummary[];
+  /** 0.8 (PC-1): the profit settings, for the Profit breakdown and the Next buyer line. */
+  profit: ProfitSettings;
+}) {
+  // 0.7.4 (F68): "Imported price #1554 · import #33", never "Imported page #1554" (a price id read as a page).
+  const label = inputCardLabel(o, price ?? null, ruleName);
   const verdict = ceilingVerdict(o.costScrap, o.maxCostScrap);
+  // 0.8 (PC-2): the best other buyer if the revenue order's buyer fills or withdraws; null claims nothing.
+  const next = nextBuyerLine(o, buyOrders, profit, keyScrap, now);
   return (
     <div className={`input-card status-${o.status}`}>
       <div className="input-card-head">
@@ -407,6 +460,11 @@ function InputCard({ o, keyScrap, now, ruleName }: { o: Opportunity; keyScrap: S
           <span className="muted small">
             {' '}
             best {fmtMoney(o.bestScrap, keyScrap)} · instant {fmtMoney(o.instantScrap, keyScrap)}
+          </span>
+          {/* 0.7.4 (F63): the order the profit rests on, nobody has confirmed for 24 h: say so and how old. */}
+          <span className="small">
+            {' '}
+            <UnverifiedOrderMark order={revenueOrderOf(o, useOrder)} now={now} label />
           </span>
         </dd>
         <dt title={PAY_UP_TO_HELP}>Pay up to</dt>
@@ -434,12 +492,20 @@ function InputCard({ o, keyScrap, now, ruleName }: { o: Opportunity; keyScrap: S
           )}
         </dd>
         <dt>Profit</dt>
-        <dd>
+        <dd title={profitBreakdownText(profitBreakdown(o.revenueScrap, o.costScrap, profit), keyScrap) ?? undefined}>
           <strong>
             <Money scrap={o.profitScrap} keyScrap={keyScrap} tone="profit" signed />
           </strong>
           <span className="muted small"> · margin {fmtPct(o.margin)}</span>
         </dd>
+        {next ? (
+          <>
+            <dt title={NEXT_BUYER_HELP}>Next buyer</dt>
+            <dd title={next.title} className={next.tone === 'warn' ? 'tone-text-warn' : undefined}>
+              {next.text}
+            </dd>
+          </>
+        ) : null}
         <dt>Confidence</dt>
         <dd>
           <ConfidenceBadge score={o.confidence} level={o.confidenceLevel} reasons={o.reasons} />
@@ -476,8 +542,9 @@ function ScraptfListSection({ d, row, keyScrap, now, onChanged }: { d: ItemDetai
   // A second click before the first save answers would add the price twice.
   const savingRef = useRef(false);
   const view = row ? scraptfListView(row, keyScrap, now) : null;
-  // The list prices the plain copy; a painted drawer shows that copy's row, and says so.
-  const otherCopy = row ? listRowIsOtherCopy(row, d.sku) : false;
+  // The list prices the plain copy; a painted drawer shows that copy's row, and says so. 0.7.4: a family
+  // row (every copy at its price) says that instead (view.familyText).
+  const otherCopy = row && view && !view.family ? listRowIsOtherCopy(row, d.sku) : false;
   // Each prices.upsert adds a row: once this list price is on the sheet, a second click would only duplicate it.
   // A painted drawer's own prices never hold the plain copy's row, so the service answers for it.
   const used = row ? d.scraptfListSaved || listPriceAlreadySaved(row, d.scrapPrices) : false;
@@ -538,8 +605,9 @@ function ScraptfListSection({ d, row, keyScrap, now, onChanged }: { d: ItemDetai
               <span className="stf-sep" aria-hidden="true">
                 ·
               </span>
-              <span>
+              <span title={view.family ? (view.familyTitle ?? undefined) : undefined}>
                 stock <span className="num">{view.stock}</span>
+                {view.family ? ' for every copy' : null}
                 {view.full ? (
                   <>
                     {' '}
@@ -556,7 +624,16 @@ function ScraptfListSection({ d, row, keyScrap, now, onChanged }: { d: ItemDetai
           </span>
           <span className={view.fresh ? 'muted' : 'tone-text-warn'}>{view.saved}</span>
         </p>
-      ) : (
+      ) : null}
+      {/* 0.7.4: which copy the row prices, as the list shows it: its own (Non-Craftable or Craftable), or every copy. */}
+      {view && view.family ? (
+        <p className="muted small stf-list-copy" title={view.familyTitle ?? undefined}>
+          {view.familyText}: its stock counts every copy, and its price is no cost of this one.
+        </p>
+      ) : view && view.copy ? (
+        <p className="muted small stf-list-copy">The list&apos;s {view.copy} row.</p>
+      ) : null}
+      {view ? null : (
         <p className="muted small">
           Not on your saved scrap.tf price list. Open scrap.tf/items, save it with Ctrl+S as <strong>{SAVE_MODE}</strong> into your watch folder (Import), and scrap.tf&apos;s prices for every item it
           trades show here.
@@ -575,7 +652,7 @@ function ScraptfListSection({ d, row, keyScrap, now, onChanged }: { d: ItemDetai
                   ? otherCopy
                     ? `${view.sells} from this saved list is already one of your prices, for a plain copy (Price sheet).`
                     : `${view.sells} from this saved list is already one of your prices (Your scrap.tf prices, below).`
-                  : `Save ${view.sells} (scrap.tf's price to buy, as listed) as your typed price for a plain copy, dated when you saved the list.`
+                  : `Save ${view.sells} (scrap.tf's price to buy, as listed) as your typed price for a plain ${view.copy ? `${view.copy} ` : ''}copy, dated when you saved the list.`
             }
             onClick={() => void saveAsMine()}
           >
@@ -661,7 +738,7 @@ function PriceSection({
                   {p.stock !== null ? ` · stock ${p.stock}` : ''}
                   {/* 0.7.3: a painted or spelled copy stored under this base SKU; the form below never updates it. */}
                   {priceIsForSku(p, d.sku) ? null : (
-                    <span title={`Stored for another copy of this item: ${p.name}. Seen now and Delete change that copy's price.`}> · other copy</span>
+                    <span title={`Stored for another copy of this item: ${otherCopyName(p)}. Seen now and Delete change that copy's price.`}> · other copy</span>
                   )}
                 </span>
                 {p.note ? <span className="muted">· {p.note}</span> : null}
@@ -906,6 +983,7 @@ function OrderBook({
   now,
   kind,
   buyer,
+  ask,
 }: {
   title: string;
   orders: OrderSummary[];
@@ -913,6 +991,8 @@ function OrderBook({
   now: number;
   kind: 'buy' | 'sell';
   buyer?: BuyerProps;
+  /** 0.8 (H3): the sell side's counted ask for this copy (ItemDetail.ask), worded under the section head. */
+  ask?: HoldingAskSide | null;
 }) {
   const { toast } = useApp();
   const [showExcluded, setShowExcluded] = useState(true);
@@ -983,6 +1063,12 @@ function OrderBook({
           </label>
         ) : null}
       </div>
+      {/* 0.8 (H3): what others ask for this copy; an ask is what a seller wants, never a price paid. */}
+      {kind === 'sell' && ask ? (
+        <p className="muted small ask-side-line">
+          {askSideText(ask, keyScrap, now)} A listing might sell for up to about this; slower, and no buyer is guaranteed.
+        </p>
+      ) : null}
       {shown.length ? (
         <div className="table-wrap">
           <table className="table compact-table">
@@ -1022,7 +1108,7 @@ function OrderBook({
                       </td>
                       <td>
                         <span className="buyer-type">
-                          <OnlineDot online={o.online} />
+                          <OnlineDot online={o.online} seenAt={o.lastEventAt} now={now} />
                           {o.isBot ? <Icon name="bolt" size={12} title="Bot (user agent)" /> : <Icon name="user" size={12} title="Human" />}
                           <span className="buyer-name" title={o.steamid}>
                             {o.userName ?? 'unknown'}

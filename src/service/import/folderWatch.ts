@@ -6,6 +6,7 @@
 import { watch as fsWatch, promises as fsp } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { decodeHtmlBuffer } from '../../shared/htmlDecode';
+import { FUTURE_MTIME_SLACK_MS } from '../../shared/importCodes';
 import type { UnixMs } from '../../shared/types';
 import type { Logger } from '../contracts';
 import { MAX_IMPORT_BYTES } from './scraptfHtml';
@@ -36,7 +37,10 @@ export interface FolderWatcherOptions {
    */
   onSkip?(path: string, reason: WatchSkipReason, detail: string, mtimeMs: number): void;
   now?: () => UnixMs;
-  /** The initial scan picks up files modified at or after this time (default: start time). */
+  /**
+   * The initial scan picks up files modified at or after this time (default: start time); 0.7.4 (F82): never
+   * one modified ahead of the clock (more than FUTURE_MTIME_SLACK_MS), which only a watch event delivers.
+   */
   since?: UnixMs | null;
   debounceMs?: number;
   maxBytes?: number;
@@ -193,6 +197,13 @@ export function createFolderWatcher(opts: FolderWatcherOptions): FolderWatcher {
       if (!e.isFile() || !isImportCandidate(e.name)) continue;
       try {
         const st = await fsp.stat(join(folder, e.name));
+        // 0.7.4 (F82): a file dated ahead of the clock stays at or after every threshold until the clock
+        // catches up, so each start would import it again (an old page re-dated now, FUTURE_MTIME). Only
+        // a change the watch sees delivers it; the import stores it as no bank stock save either way.
+        if (st.mtimeMs > now() + FUTURE_MTIME_SLACK_MS) {
+          log.warn(`Skipped ${join(folder, e.name)} in the catch-up scan: its modified time is ahead of this computer's clock; import it by hand if it is a new save`);
+          continue;
+        }
         if (st.mtimeMs >= threshold) due.push({ name: e.name, mtimeMs: st.mtimeMs });
       } catch (err) {
         if (errCode(err) !== 'ENOENT') log.warn(`Could not inspect ${join(folder, e.name)}: ${errText(err)}`);

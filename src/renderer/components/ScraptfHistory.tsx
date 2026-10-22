@@ -5,7 +5,10 @@
 // user saved (R10); nothing here loads scrap.tf (R1) or opens anything. Fetched lazily when the drawer opens and refetched on
 // 'scraptf.changed' and 'prices.changed' (every import pushes it: a first save or an unchanged one
 // writes no change event but still adds a point), throttled and only while the window is shown.
-// Pure helpers: historyModel.ts. Styles: styles/scraptf-history.css (classes stf-hist-*).
+// 0.8 (T5, LC-3): the Cycles block: the buy-timing verdict (Wait / Buy now / Over / No buyers / Not enough data,
+// with its n and the save it rests on), a tick under each save that showed a drop, and each listing run of the
+// copy. A history without `timing` / `cycles` (an older service) renders as before.
+// Pure helpers: historyModel.ts and timingModel.ts. Styles: styles/scraptf-history.css (classes stf-hist-*).
 
 import { useMemo, useState } from 'react';
 import { SCRAPTF_BOUNDARY_SHORT } from '../../shared/boundaryText';
@@ -15,6 +18,8 @@ import { fmtMoney } from '../format';
 import {
   HISTORY_EVENTS_SHOWN,
   HISTORY_REFRESH_MS,
+  HISTORY_RUNS_SHOWN,
+  STEP_BOX,
   historyBankPath,
   historyChartLabel,
   historyChips,
@@ -24,8 +29,11 @@ import {
   historyNote,
   historyNowText,
   historyReadout,
+  historyRunLines,
   historySeries,
+  historyTimingView,
   stepChartGeom,
+  type HistoryUnsavedLook,
 } from '../historyModel';
 import { useRpcQuery, useThrottled, useVisiblePush } from '../hooks/useRpc';
 import { Icon } from './Icon';
@@ -38,20 +46,25 @@ export interface ScraptfHistoryProps {
   special?: string | null;
   keyScrap: Scrap | null;
   now: UnixMs;
+  /** 0.7.4 (F65): a newer look of the page that stored no save (the drawer's unsavedLookOf): no "Now" from an older save. */
+  unsaved?: HistoryUnsavedLook | null;
 }
 
-export function ScraptfHistory({ sku, special, keyScrap, now }: ScraptfHistoryProps) {
+export function ScraptfHistory({ sku, special, keyScrap, now, unsaved }: ScraptfHistoryProps) {
   const q = useRpcQuery('scraptf.itemHistory', special !== undefined && special !== null ? { sku, special } : { sku });
   const reload = useThrottled(() => void q.reload(), HISTORY_REFRESH_MS);
   useVisiblePush('scraptf.changed', reload);
   useVisiblePush('prices.changed', reload);
   const [allEvents, setAllEvents] = useState(false);
   const [allStock, setAllStock] = useState(false);
+  const [allRuns, setAllRuns] = useState(false);
 
   const h = q.data;
   const key = h?.keyPrice?.valueScrap ?? keyScrap;
   const series = useMemo(() => (h ? historySeries(h.points) : []), [h]);
-  const geom = useMemo(() => stepChartGeom(series), [series]);
+  // 0.8 (T5): a tick under each save that showed a drop; without cycles, no marks (0.7.4's chart).
+  const dropAts = h?.cycles?.dropAts;
+  const geom = useMemo(() => stepChartGeom(series, STEP_BOX, dropAts ? { downAts: dropAts } : {}), [series, dropAts]);
   // historySeries sorts; the readout needs the point behind each index.
   const sorted = useMemo(() => (h ? [...h.points].filter((p) => Number.isFinite(p.at)).sort((a, b) => a.at - b.at) : []), [h]);
   const path = historyBankPath(h);
@@ -79,10 +92,13 @@ export function ScraptfHistory({ sku, special, keyScrap, now }: ScraptfHistoryPr
     );
   } else {
     const listed = historyListedLine(h, now);
-    const current = historyNowText(h, key);
-    const chips = historyChips(h, key);
+    const current = historyNowText(h, key, unsaved);
+    const chips = historyChips(h, key, unsaved);
     const lines = historyEventLines(groups.price, key, now, allEvents ? groups.price.length : HISTORY_EVENTS_SHOWN, h.bank);
     const stockLines = historyEventLines(groups.stock, key, now, allStock ? groups.stock.length : HISTORY_EVENTS_SHOWN, h.bank);
+    const timing = historyTimingView(h.timing, h, key, now);
+    const runs = historyRunLines(h.cycles, h, key, now);
+    const runLines = runs ? (allRuns ? runs.lines : runs.lines.slice(0, HISTORY_RUNS_SHOWN)) : [];
     body = (
       <>
         {listed ? (
@@ -104,6 +120,19 @@ export function ScraptfHistory({ sku, special, keyScrap, now }: ScraptfHistoryPr
             </span>
           ))}
         </div>
+        {timing ? (
+          <div className="stf-hist-timing" role="group" aria-label="Buy timing">
+            <span className={`pill tone-${timing.pill.tone} stf-hist-timing-pill`} title={timing.pill.title}>
+              {timing.pill.text}
+            </span>
+            {timing.lines.map((l, i) => (
+              <p key={i} className="small">
+                {l}
+              </p>
+            ))}
+            <p className="muted small">{timing.note}</p>
+          </div>
+        ) : null}
         {geom ? (
           <StepSparkline
             geom={geom}
@@ -117,6 +146,25 @@ export function ScraptfHistory({ sku, special, keyScrap, now }: ScraptfHistoryPr
               </>
             }
           />
+        ) : null}
+        {runs ? (
+          <>
+            <h4 className="stf-hist-sub" title={runs.title}>
+              {runs.head}
+            </h4>
+            <ul className="plain-list stf-hist-runs">
+              {runLines.map((l) => (
+                <li key={l.key} className={`stf-hist-run small${l.tone === 'muted' ? ' muted' : l.tone === 'warn' ? ' tone-text-warn' : ''}`} title={l.title}>
+                  {l.text}
+                </li>
+              ))}
+            </ul>
+            {runs.lines.length > HISTORY_RUNS_SHOWN ? (
+              <button type="button" className="link-btn small" onClick={() => setAllRuns((v) => !v)}>
+                {allRuns ? 'Show fewer' : `Show all ${runs.lines.length}`}
+              </button>
+            ) : null}
+          </>
         ) : null}
         {note ? <p className="muted small">{note.body}</p> : null}
         {lines.length ? (

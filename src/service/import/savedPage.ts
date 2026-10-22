@@ -9,6 +9,12 @@ import { ImportTooLargeError, MAX_IMPORT_BYTES, parseScrapTfHtml, type ScrapTfPa
 export interface SavedPageParse extends ScrapTfParseResult {
   /** How the file was read: a web page, or the web page inside an MHTML file. */
   format: 'html' | 'mhtml';
+  /**
+   * 0.7.4 (F82): an MHTML file's own save time (its Date header, MhtmlRead.date), null without one; absent
+   * for an .html save, which records none. importSavedPage dates the page by it when it is clearly older
+   * than the file's modified time (a copy, sync or edit that reset the mtime).
+   */
+  savedAt?: number | null;
 }
 
 function startsLikeHtml(text: string): boolean {
@@ -55,7 +61,7 @@ function unreadable(warning: string): SavedPageParse {
  * Parses a saved page. MHTML is told by its MIME headers, whatever the file is called; an .mhtml or
  * .mht name without them is still read as HTML when it starts like a web page. The web page inside is
  * parsed with its Content-Location as the address hint (F15 bank detection), a web page with
- * `opts.address` (F21) when given. Throws
+ * `opts.address` (F21) when given; an MHTML file's Date header comes back as `savedAt` (0.7.4, F82). Throws
  * ImportTooLargeError over MAX_IMPORT_BYTES (the file, then the page); a file that is malformed, has
  * too many parts, holds no web page or ends inside it (mhtml-truncated) imports nothing, with a
  * warning saying so.
@@ -78,5 +84,5 @@ export function parseSavedPage(text: string, fileName: string, schema: SchemaSer
     return unreadable(`${r.reason}: ${r.detail}; save the page again`);
   }
   const parsed = parseScrapTfHtml(r.html, schema, { address: r.contentLocation, ...diagnostics });
-  return { format: 'mhtml', ...parsed, warnings: [...r.notes, ...parsed.warnings] };
+  return { format: 'mhtml', ...parsed, warnings: [...r.notes, ...parsed.warnings], savedAt: r.date };
 }

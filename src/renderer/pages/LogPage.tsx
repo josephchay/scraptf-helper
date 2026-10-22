@@ -47,6 +47,7 @@ import { readPref, usePersistentState } from '../hooks/usePersistentState';
 import { useThrottled, useVisiblePush } from '../hooks/useRpc';
 import { useNow } from '../hooks/useTimers';
 import { MAX_KEPT_EVENTS, eventsExportQuery, fetchEventsAfter, mergeEvents, olderPageLimit } from '../eventFeed';
+import { changeMenuTarget } from '../watchesModel';
 
 const PAGE = 300;
 const KINDS: readonly OpportunityEventKind[] = ['appeared', 'changed', 'gone', 'notified'];
@@ -411,7 +412,8 @@ function ScraptfChangesView() {
   // Through a ref, so the memoised rows keep a stable handler.
   const menuRef = useRef(menu.open);
   menuRef.current = menu.open;
-  const onMenu = useCallback((e: ScraptfChangeEvent, at: MenuPoint) => menuRef.current({ sku: e.sku, name: e.name, bank: e.bank }, at), []);
+  // 0.8: on the event's own copy, so Watch on scrap.tf… watches that copy (changeMenuTarget).
+  const onMenu = useCallback((e: ScraptfChangeEvent, at: MenuPoint) => menuRef.current(changeMenuTarget(e), at), []);
   const empty = changesEmptyText(view);
 
   const exportCsv = async () => {

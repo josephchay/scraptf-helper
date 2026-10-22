@@ -7,7 +7,9 @@
 // (input age, order age, bot pulse) and rule matches stay current.
 
 import { z } from 'zod';
-import { categoryOfSkuOnly } from '../../shared/categories';
+import { buyerPresenceText, orderSeenRecently } from '../../shared/buyerSeen';
+import { categoryOfSkuOnly, scraptfBankForItem, type CategoryItemInfo } from '../../shared/categories';
+import { copyExtrasWords, markSharedBuyers, opportunityCopyKey } from '../../shared/copyExtras';
 import { formatScrap, valueScrap } from '../../shared/currency';
 import { DEFAULT_SETTINGS } from '../../shared/defaults';
 import { bankForCategory } from '../../shared/links';
@@ -39,9 +41,24 @@ import type { TimerApi } from '../net/ratelimit';
 import { scoreConfidence } from './confidence';
 import { selectKeyPrice } from './keyprice';
 import { anyEffectBaseOf, classifyOrder, dedupeOrders, isSpecialEmpty, matchContext, normalizeSpecial, ruleMatches } from './matcher';
+import { bookBasesOf, canonicalBookBase, mergedBook, twinBasesOf } from './bookTwins';
 import type { MatchContext, MatchTarget } from './matcher';
-import { computePrices, lookupReferences, outlierRefs, pickRevenueOrder, referencePrices, toOrderSummary, usableReferences, valueOrders } from './pricing';
+import {
+  computePrices,
+  isUnverifiedOrder,
+  lookupReferences,
+  lookupTwinReferences,
+  outlierRefs,
+  pickRevenueOrder,
+  referencePrices,
+  toOrderSummary,
+  usableReferences,
+  valueOrders,
+} from './pricing';
 import type { PriceResult, ValuedOrder } from './pricing';
+import { SINGLE_EXIT_TEXT, buyerDepthOf, flipProfit, flipProfitBound, singleExitOf, singleExitReason, type ExitOrder } from '../../shared/ceiling';
+import { boundRuleCost, ruleUnderScraptfReason, type ScraptfSeenPrice } from '../../shared/ruleEvidence';
+import { HOLDING_MARKS_MAX_AGE_MS } from '../../shared/holdingAdvice';
 import { INPUT_KIND_ORDER, maxCostFor, profitStatus, profitTier } from './tiers';
 
 export const DEBOUNCE_MS = 1000;
@@ -95,6 +112,8 @@ export interface EngineInput {
   costScrapRaw: Scrap;
   observedAt: UnixMs;
   target: MatchTarget;
+  /** 0.7.4 (F66): Opportunity.copyKey of a price input (opportunityCopyKey); absent for rules and plain copies. */
+  copyKey?: string;
 }
 
 export interface EvaluateArgs {
@@ -109,14 +128,37 @@ export interface EvaluateArgs {
   now: UnixMs;
   match: MatchContext;
   prev: Opportunity | null;
-}
-
-function nonNegative(n: number): number {
-  return Number.isFinite(n) && n > 0 ? n : 0;
+  /**
+   * 0.7.4 (F70): the input base's craftability twin for the cost check (scoreConfidence's `twin`); its
+   * references are read only when the cost is far under the item's own PriceDB band. Omitted: no twin check.
+   */
+  twin?: { craftable: boolean; references(): ReferencePrices | null } | null;
 }
 
 export function revenueOrderOf(o: Pick<Opportunity, 'bestOrder' | 'consOrder' | 'instantOrder'>, useOrder: ProfitSettings['useOrder']): OrderSummary | null {
   return pickRevenueOrder({ best: o.bestOrder, conservative: o.consOrder, instant: o.instantOrder }, useOrder);
+}
+
+/** Row flags that keep a row from ever being toasted (the engine's notification gates), so no snapshot is spent on its upside. */
+const UPSIDE_MUTED_FLAGS = ['stale-input', 'variant-suspect', 'cost-below-market', 'suspect-margin'] as const;
+
+/**
+ * 0.7.4 (F16, F24, F30): the profit a row would make on its best order when that order is unverified (no feed
+ * event or snapshot for 24 h), no outlier, and would clear the profit thresholds against the row's cost
+ * (profitStatus), while computePrices' preference for verified orders prices the row lower or not at all. A
+ * snapshot of the row's book may confirm such a flip (core.snapshotPriority ranks it after the unconfirmed
+ * profitable and below-threshold rows). Null otherwise: no best order, a verified or outlier one, an
+ * any-effect order (another base's book, which a name snapshot of this item never returns), or a row the
+ * notification gates mute anyway (stale input, a cost check, a suspect margin).
+ */
+export function unverifiedUpside(o: Pick<Opportunity, 'bestOrder' | 'costScrap' | 'flags'>, p: ProfitSettings): Scrap | null {
+  const best = o.bestOrder;
+  if (!best || !best.flags.includes('unverified') || best.flags.includes('outlier') || best.flags.includes('any-effect')) return null;
+  if (typeof o.costScrap !== 'number' || !Number.isFinite(o.costScrap) || !Number.isFinite(best.valueScrap)) return null;
+  if (UPSIDE_MUTED_FLAGS.some((f) => o.flags.includes(f))) return null;
+  // 0.8 (PC-1): judged with the price-move reserve, as every buy decision is.
+  const profit = flipProfit(best.valueScrap, o.costScrap, p);
+  return profit !== null && profitStatus(profit, o.costScrap, p) === 'profitable' ? profit : null;
 }
 
 /** A clean copy of `base` (no paint, spells or parts), with the any-effect base for an unusual: what rules and the Live market price. */
@@ -160,6 +202,22 @@ export function buyerCountOf(eligible: readonly { listing: Listing }[]): number 
   return new Set(eligible.map((o) => o.listing.steamid || o.listing.id)).size;
 }
 
+/** 0.8 (PC-2, H2): a priced book's eligible orders as buyerDepthOf reads them (buyerCountOf's buyer rule). */
+export function exitOrdersOfBook(book: PricedBook): ExitOrder[] {
+  return book.eligible.map((o) => ({
+    id: o.listing.id,
+    buyer: o.listing.steamid || o.listing.id,
+    valueScrap: o.valueScrap,
+    keys: Number.isFinite(o.listing.keys) ? o.listing.keys : 0,
+    metalScrap: Number.isFinite(o.listing.metalScrap) ? o.listing.metalScrap : 0,
+    isBot: o.listing.isBot === true,
+    online: o.listing.userOnline ?? null,
+    lastEventAt: o.listing.lastEventAt,
+    outlier: book.prices.outlierIds.has(o.listing.id),
+    unverified: isUnverifiedOrder(o),
+  }));
+}
+
 /** The row flags derived from a priced book plus the confidence flags, in the engine's order. */
 export function bookFlags(book: PricedBook, confFlags: readonly string[], revenueScrap: Scrap | null, keyScrap: Scrap): string[] {
   const { prices, eligible } = book;
@@ -174,8 +232,10 @@ export function bookFlags(book: PricedBook, confFlags: readonly string[], revenu
 
 /**
  * A stored row's revenue order when useOrder is not at hand (CSV, shopping list).
- * Exact: computePrices sorts ties bots first and its outlier test depends only on
- * the value, so two of best/conservative/instant with the same value are the same order.
+ * computePrices sorts ties bots first and its outlier test depends only on the value, so
+ * conservative and instant with the same value are the same order. 0.7.4: best may be an
+ * unverified order worth exactly the verified conservative one; the conservative order is
+ * checked first, so such a tie names the verified buyer (the value is the same either way).
  */
 export function revenueOrderByValue(o: Pick<Opportunity, 'revenueScrap' | 'bestOrder' | 'consOrder' | 'instantOrder'>): OrderSummary | null {
   if (o.revenueScrap === null) return null;
@@ -194,7 +254,7 @@ export function evaluateOpportunity(a: EvaluateArgs): Opportunity {
 
   const revenueOrder = pickRevenueOrder(prices, p.useOrder);
   const revenueScrap = revenueOrder?.valueScrap ?? null;
-  const profitScrap = revenueScrap === null ? null : revenueScrap - costScrap - nonNegative(p.frictionScrap);
+  const profitScrap = flipProfit(revenueScrap, costScrap, p);
   const margin = profitScrap === null || costScrap <= 0 ? null : profitScrap / costScrap;
   // The suspect-margin guard treats a free item with a profit like profitStatus does: an unbounded margin.
   const guardMargin = margin ?? (profitScrap !== null && profitScrap > 0 ? Number.POSITIVE_INFINITY : null);
@@ -208,12 +268,24 @@ export function evaluateOpportunity(a: EvaluateArgs): Opportunity {
     isUnusual: a.isUnusual,
     revenueScrap,
     margin: guardMargin,
+    // 0.7.4 (F22, F70): the cost against PriceDB for this item and its craftability twin.
+    costScrap,
+    twin: a.twin ?? null,
     keyScrap,
     now,
     profit: p,
   });
 
   const flags = bookFlags(book, conf.flags, revenueScrap, keyScrap);
+  const status = profitStatus(profitScrap, costScrap, p);
+  // 0.8 (PC-2): the flip rests on the revenue order's buyer alone: a warning and a 0-delta reason, the score unchanged.
+  // Only a profitable row can be one (singleExitOf), so the book is read for its next buyer only then.
+  const single =
+    status === 'profitable' ? singleExitOf(revenueScrap, costScrap, buyerDepthOf(exitOrdersOfBook(book), revenueOrder?.listing.id ?? null, p.useOrder).nextBuyer, p) : null;
+  if (single) {
+    flags.push('single-exit');
+    conf.reasons.push(singleExitReason(single, (v) => formatScrap(v, keyScrap > 0 ? keyScrap : null)));
+  }
 
   return {
     key: input.key,
@@ -222,6 +294,7 @@ export function evaluateOpportunity(a: EvaluateArgs): Opportunity {
     category: a.category,
     inputRef: input.inputRef,
     inputKind: input.inputKind,
+    ...(input.copyKey ? { copyKey: input.copyKey } : {}),
     costKeys: input.costKeys,
     costScrapRaw: input.costScrapRaw,
     costScrap,
@@ -243,7 +316,7 @@ export function evaluateOpportunity(a: EvaluateArgs): Opportunity {
     instantOrder: summary(prices.instant),
     references: a.references,
     profitTier: profitTier(profitScrap, keyScrap),
-    status: profitStatus(profitScrap, costScrap, p),
+    status,
     inputObservedAt: input.observedAt,
     firstSeenAt: a.prev?.firstSeenAt ?? now,
     updatedAt: now,
@@ -267,11 +340,14 @@ export function explicitInput(sp: ScrapPrice): EngineInput | null {
   let special = sp.special ? normalizeSpecial(sp.special) : null;
   if (special && special.paint === null && paint !== null) special = { ...special, paint };
   const inputRef = `price:${sp.id}`;
+  // 0.7.4 (F66): the copy this price is for, as the repo derives it on read.
+  const copyKey = opportunityCopyKey(sp.sku, sp.special);
   return {
     key: `${sku}|${inputRef}`,
     sku,
     baseSku: base,
     inputRef,
+    ...(copyKey !== '' ? { copyKey } : {}),
     inputKind: sp.source === 'import' ? 'import' : 'user',
     name: typeof sp.name === 'string' ? sp.name.trim() : '',
     costKeys,
@@ -303,6 +379,15 @@ export function ruleInput(rule: PriceRule, base: string, name = ''): EngineInput
   };
 }
 
+/**
+ * 0.7.4 (F27, F33): copies of one item (one base's typed and imported prices) whose revenue comes from the same
+ * buy order: every copy but the most profitable is flagged 'shared-buyer' (markSharedBuyers in
+ * src/shared/copyExtras.ts, which the mock applies too), so totals count that order once.
+ */
+export function markSharedCopies(rows: readonly Opportunity[], useOrder: ProfitSettings['useOrder']): void {
+  markSharedBuyers(rows, (o) => revenueOrderOf(o, useOrder));
+}
+
 /** An enabled rule with a usable cost and filter (the engine and the Live market skip the rest). */
 export function validRule(r: PriceRule): boolean {
   return (
@@ -327,10 +412,13 @@ const STATUS_TEXT: Record<OpportunityStatus, string> = {
   'no-buyers': 'no buyers',
 };
 
-function buyerTag(o: OrderSummary | null): string {
+/** " (bot, online)"; 0.7.4 (F23): an order not seen for CONFIRMED_MS says " (bot, last seen 4 d ago)" instead. */
+function buyerTag(o: OrderSummary | null, now: UnixMs): string {
   if (!o) return '';
   const parts = [o.isBot ? 'bot' : 'human'];
-  if (o.online === true) parts.push('online');
+  if (!orderSeenRecently(o.lastEventAt, now)) {
+    if (Number.isFinite(o.lastEventAt)) parts.push(buyerPresenceText(o, now));
+  } else if (o.online === true) parts.push('online');
   else if (o.online === false) parts.push('offline');
   return ` (${parts.join(', ')})`;
 }
@@ -397,10 +485,13 @@ function sameJson(a: unknown, b: unknown): boolean {
   return na === nb;
 }
 
-/** Equal in everything that matters to the user; the evaluation time and the PriceDB age (recomputed on read) do not. */
+/**
+ * Equal in everything that matters to the user; the evaluation time and the PriceDB age (recomputed on read) do
+ * not, nor (0.7.4, F66) the copy key, which is derived from the price row on every read and never stored.
+ */
 function materiallyEqual(a: Opportunity, b: Opportunity): boolean {
-  const { updatedAt: _ua, references: ra, ...restA } = a;
-  const { updatedAt: _ub, references: rb, ...restB } = b;
+  const { updatedAt: _ua, references: ra, copyKey: _ca, ...restA } = a;
+  const { updatedAt: _ub, references: rb, copyKey: _cb, ...restB } = b;
   const pa = ra.pricedb ? { ...ra.pricedb, ageMs: null } : null;
   const pb = rb.pricedb ? { ...rb.pricedb, ageMs: null } : null;
   return sameJson(restA, restB) && sameJson(pa, pb) && sameJson(ra.community, rb.community);
@@ -416,6 +507,8 @@ export const RETENTION = {
   requestLogMs: 7 * 24 * 60 * 60 * 1000,
   /** Saved scrap.tf/items list rows (F14): a month-old stock or price says nothing about today. */
   scraptfListMs: 30 * 24 * 60 * 60 * 1000,
+  /** 0.8 (H1): recorded exit runs; each base also keeps at most HOLDING_MARKS_PER_BASE_MAX. */
+  holdingMarksMs: HOLDING_MARKS_MAX_AGE_MS,
 } as const;
 
 /**
@@ -423,15 +516,16 @@ export const RETENTION = {
  * request-log rows older than 7 days, saved scrap.tf list rows older than 30
  * days, bank stock past its retention (F20 thinning: every save of the last day,
  * hourly to 7 days, daily to 90 days, at most 300 per page, a page's newest save and
- * the one it is compared with always kept; rows whose batch is gone too) and scrap.tf
- * change events older than 90 days (F20). Call engine.markAllDirty() afterwards so
+ * the one it is compared with always kept; rows whose batch is gone too), scrap.tf
+ * change events older than 90 days (F20) and (0.8, H1) recorded exit runs older than
+ * 180 days or beyond 2,000 per item. Call engine.markAllDirty() afterwards so
  * opportunities built on purged listings are re-evaluated, and refresh the list,
  * bank stock and history caches when their rows went.
  */
 export function runMaintenance(
   repo: Repo,
   now: UnixMs,
-): { listings: number; events: number; requests: number; scraptfList: number; bankStock: number; scraptfEvents: number } {
+): { listings: number; events: number; requests: number; scraptfList: number; bankStock: number; scraptfEvents: number; holdingMarks: number } {
   return {
     listings: repo.purgeListingsOlderThan(now - RETENTION.listingsMs),
     events: repo.purgeEventsOlderThan(now - RETENTION.eventsMs),
@@ -439,6 +533,7 @@ export function runMaintenance(
     scraptfList: repo.purgeScraptfListOlderThan(now - RETENTION.scraptfListMs),
     bankStock: repo.pruneBankStock(now, { orphans: true }),
     scraptfEvents: repo.pruneScraptfEvents(now),
+    holdingMarks: repo.pruneHoldingMarks(now),
   };
 }
 
@@ -486,6 +581,21 @@ export interface EngineDeps extends ServiceDeps {
    * keep one toast per find. Optional; a failing hook changes nothing here.
    */
   notified?(opps: readonly Pick<Opportunity, 'sku' | 'inputKind'>[], now: UnixMs): void;
+  /**
+   * 0.7.4 (F78): the highest price scrap.tf itself showed the plain copy of a base on sale for (core:
+   * scraptfSeenPriceOf over the saved /items list and the history's runs of the retained bank saves, in
+   * memory). A rule row is evaluated at the higher of the rule's cost and it, flagged 'rule-under-scraptf'.
+   * Omitted or failing: the rule's cost, as before.
+   */
+  scraptfSeenPriceOf?(baseSku: string, keyScrap: Scrap): ScraptfSeenPrice | null;
+  /**
+   * 0.8 (G1): the profit target the user's watches set for this copy of a base (core: watchFloorOf over the watch cache
+   * while notifications.watches is on), or null. A typed or imported opportunity of a watched copy is toasted at that bar
+   * instead of notifications.minProfitScrap, titled "Watch: <name>"; every other gate (status 'profitable', confidence,
+   * input kinds, suspect, stale input, unverified order, dedupe and fingerprint, ACT-3, ACT-8, told elsewhere) is unchanged.
+   * Omitted or failing: notifications.minProfitScrap, as before.
+   */
+  watchFloorFor?(baseSku: string, copyKey: string): Scrap | null;
 }
 
 interface SkuInfo {
@@ -524,6 +634,15 @@ function isAustralium(sku: string): boolean {
 export function createEngine(deps: EngineDeps): Engine {
   const { repo, log, clock, schema, events } = deps;
   const timers = deps.timers ?? realTimers;
+  /** 0.7.4 (F66): a paint's name for a "Profit:" title (the item schema's); null when unknown or unreadable. */
+  const paintNameOf = (decimal: number): string | null => {
+    try {
+      const name = schema.paintByDecimal(decimal)?.name;
+      return typeof name === 'string' && name.trim() !== '' ? name.trim() : null;
+    } catch {
+      return null;
+    }
+  };
   /** F14: the saved list's key row; a failed read must not stop the key price. */
   const scraptfKey = (): ScraptfListKey | null => {
     try {
@@ -794,7 +913,8 @@ export function createEngine(deps: EngineDeps): Engine {
       if (!indexLoaded) reloadIndex();
       const all = repo.baseSkusWithBuyOrders();
       withOrders = new Set(all);
-      const s = new Set<string>(all);
+      // 0.7.4 (F09/F14): a book filed under defindex twins is one item, evaluated once on its canonical base.
+      const s = new Set<string>(all.map((b) => canonicalBookBase(schema, b)));
       for (const b of explicitByBase.keys()) s.add(b);
       for (const b of byBase.keys()) s.add(b);
       scope = [...s];
@@ -823,15 +943,18 @@ export function createEngine(deps: EngineDeps): Engine {
     }
 
     const match = matchContext(settings, now);
-    const friction = nonNegative(p.frictionScrap);
-    const cannotProfit = (best: number, rule: PriceRule): boolean => best - valueScrap(rule.costKeys, rule.costScrap, K) - friction <= 0;
+    const cannotProfit = (best: number, rule: PriceRule): boolean => flipProfitBound(best, valueScrap(rule.costKeys, rule.costScrap, K), p) <= 0;
     const work = new Map<string, BaseWork>();
     const needListings: string[] = [];
     let evaluated = 0;
+    // 0.7.4 (F09/F14): a book is the base's own rows and its twins' (bookTwins.ts).
+    const ordersIn = (b: string): boolean => withOrders === null || bookBasesOf(schema, b).some((t) => withOrders!.has(t));
     for (const base of scope) {
       const explicit = explicitByBase.get(base) ?? [];
       let ruleList: PriceRule[] = [];
-      if (enabledRules.length > 0 && !CURRENCY.has(base) && !explicitSkus.has(base) && (withOrders === null || withOrders.has(base))) {
+      // 0.7.4: rule rows only on the canonical base of a book, and not beside a price of yours on a twin.
+      const ruleBase = enabledRules.length > 0 && canonicalBookBase(schema, base) === base && !bookBasesOf(schema, base).some((t) => explicitSkus.has(t));
+      if (ruleBase && !CURRENCY.has(base) && !explicitSkus.has(base) && ordersIn(base)) {
         const i = info(base);
         if (i.obj.tradable) {
           const subject = { obj: i.obj, category: i.category, name: () => nameOf(base) };
@@ -849,7 +972,7 @@ export function createEngine(deps: EngineDeps): Engine {
       }
       work.set(base, { explicit, rules: ruleList });
       const any = anyEffectBaseOf(base);
-      if (withOrders === null || withOrders.has(base) || (any !== null && withOrders.has(any))) needListings.push(base);
+      if (ordersIn(base) || (any !== null && ordersIn(any))) needListings.push(base);
     }
 
     // ----- evaluate -----
@@ -863,11 +986,27 @@ export function createEngine(deps: EngineDeps): Engine {
      */
     const evaluateBase = (base: string, listings: readonly Listing[], w: BaseWork, ownBuys: boolean): void => {
       let refs: ReferencePrices | null = null;
-      const references = (): ReferencePrices => (refs ??= referencePrices(lookupReferences(repo, base), K, now));
+      const references = (): ReferencePrices => (refs ??= referencePrices(lookupReferences(repo, base, schema), K, now));
+      // 0.7.4 (F70): the craftability twin's references, read at most once per base and only when a cost
+      // is far under this item's PriceDB band (scoreConfidence asks), so most bases never look it up.
+      let twinRefs: ReferencePrices | null | undefined;
+      const twin = {
+        get craftable(): boolean {
+          return !info(base).obj.craftable;
+        },
+        references: (): ReferencePrices | null => {
+          if (twinRefs === undefined) {
+            const raw = lookupTwinReferences(repo, base);
+            twinRefs = raw === null ? null : referencePrices(raw, K, now);
+          }
+          return twinRefs;
+        },
+      };
       let maxRaw = Number.NEGATIVE_INFINITY;
       for (const l of listings) if (l.intent === 'buy') maxRaw = Math.max(maxRaw, valueScrap(l.keys, l.metalScrap, K));
       setBestRaw(base, maxRaw);
 
+      const copies: Opportunity[] = [];
       for (const inp of w.explicit) {
         evaluated++;
         const i = info(inp.sku);
@@ -882,20 +1021,32 @@ export function createEngine(deps: EngineDeps): Engine {
           now,
           match,
           prev: known.get(inp.key) ?? null,
+          twin,
         });
         results.set(opp.key, opp);
+        copies.push(opp);
       }
+      // 0.7.4 (F27, F33): several copies of the item priced against one buy order (a kit's sheen combos, two
+      // painted hats); a buyer may take only one.
+      if (copies.length > 1) markSharedCopies(copies, p.useOrder);
 
       if (!ownBuys || w.rules.length === 0 || listings.length === 0) {
         evaluated += w.rules.length;
         return;
       }
       const i = info(base);
+      // 0.7.4 (F78): what scrap.tf itself showed for this item, read once per base (in memory).
+      let seen: ScraptfSeenPrice | null | undefined;
       for (const rule of w.rules) {
         evaluated++;
-        // Cheap upper bound: no order at all beats cost + friction, so the rule row would not be stored.
+        // Cheap upper bound: no order at all can leave a profit at this cost after friction and the price-move
+        // reserve (flipProfitBound), so the rule row would not be stored.
         if (cannotProfit(maxRaw, rule)) continue;
-        const inp = ruleInput(rule, base);
+        if (seen === undefined) seen = safeSeenPrice(base, K);
+        // 0.7.4 (F78): a rule never undercuts a price scrap.tf showed; the row is then judged at that price.
+        const bound = boundRuleCost(rule, seen, K);
+        const own = ruleInput(rule, base);
+        const inp = bound.underScraptf ? { ...own, costKeys: bound.costKeys, costScrapRaw: bound.costScrapRaw } : own;
         const opp = evaluateOpportunity({
           input: inp,
           listings,
@@ -910,6 +1061,13 @@ export function createEngine(deps: EngineDeps): Engine {
         });
         if (!STORED_RULE_STATUSES.has(opp.status)) continue;
         opp.name = nameOf(base);
+        if (bound.underScraptf && seen) {
+          // Before the 0.8 single-exit flag and reason, which stay last (as the mock's evaluateOpportunity writes them).
+          const flagAt = opp.flags.indexOf('single-exit');
+          opp.flags.splice(flagAt < 0 ? opp.flags.length : flagAt, 0, 'rule-under-scraptf');
+          const reasonAt = opp.reasons.findIndex((x) => x.startsWith(`0 ${SINGLE_EXIT_TEXT}`));
+          opp.reasons.splice(reasonAt < 0 ? opp.reasons.length : reasonAt, 0, ruleUnderScraptfReason(seen, valueScrap(rule.costKeys, rule.costScrap, K), K));
+        }
         results.set(opp.key, opp);
       }
     };
@@ -921,18 +1079,19 @@ export function createEngine(deps: EngineDeps): Engine {
       // Only books not cached since their last change are read from SQLite.
       const missing = new Set<string>();
       for (const base of chunk) {
-        if (hasOrders(base) && !bookCache.has(base)) missing.add(base);
+        // 0.7.4 (F09/F14, F08): the twins' books too, each cached on its own base.
+        for (const b of bookBasesOf(schema, base)) if (hasOrders(b) && !bookCache.has(b)) missing.add(b);
         const any = anyEffectBaseOf(base);
-        if (any !== null && hasOrders(any) && !bookCache.has(any)) missing.add(any);
+        if (any !== null) for (const b of bookBasesOf(schema, any)) if (hasOrders(b) && !bookCache.has(b)) missing.add(b);
       }
       const read = missing.size > 0 ? repo.buyListingsByBaseSkus([...missing]) : null;
       if (read) for (const [b, list] of read) cacheBook(b, list);
-      const bookOf = (b: string): Listing[] => bookCache.get(b) ?? read?.get(b) ?? [];
+      const bookOf = (b: string): Listing[] => (hasOrders(b) ? (bookCache.get(b) ?? read?.get(b) ?? []) : []);
       for (const base of chunk) {
-        const own = hasOrders(base) ? bookOf(base) : [];
+        const own = mergedBook(base, bookBasesOf(schema, base), bookOf);
         // A generic "any effect" book is combined per run: each part is invalidated by its own markDirty.
         const any = anyEffectBaseOf(base);
-        const generic = any !== null && any !== base && hasOrders(any) ? bookOf(any) : [];
+        const generic = any !== null && any !== base ? mergedBook(any, bookBasesOf(schema, any), bookOf) : [];
         const ownBuys = own.some((l) => l.intent === 'buy');
         evaluateBase(base, generic.length > 0 ? [...own, ...generic] : own, work.get(base)!, ownBuys);
       }
@@ -957,7 +1116,7 @@ export function createEngine(deps: EngineDeps): Engine {
       if (opp.status === 'profitable' && prev?.status !== 'profitable') {
         appeared++;
         const m = pct(opp.margin);
-        evs.push(eventOf(opp, 'appeared', `profit ${fmt(opp.profitScrap)}${m ? `, ${m} margin` : ''}${buyerTag(order)}`, now));
+        evs.push(eventOf(opp, 'appeared', `profit ${fmt(opp.profitScrap)}${m ? `, ${m} margin` : ''}${buyerTag(order, now)}`, now));
       } else if (opp.status === 'profitable' && prev?.status === 'profitable') {
         const parts: string[] = [];
         if (Math.abs((opp.profitScrap ?? 0) - (prev.profitScrap ?? 0)) >= CHANGE_PROFIT_DELTA) {
@@ -968,7 +1127,7 @@ export function createEngine(deps: EngineDeps): Engine {
         if ((prevOrder?.listingId ?? null) !== (order?.listingId ?? null)) parts.push('new buy order');
         if (parts.length > 0) {
           changed++;
-          evs.push(eventOf(opp, 'changed', `${parts.join('; ')}${buyerTag(order)}`, now));
+          evs.push(eventOf(opp, 'changed', `${parts.join('; ')}${buyerTag(order, now)}`, now));
         }
       } else if (prev?.status === 'profitable') {
         gone++;
@@ -999,6 +1158,8 @@ export function createEngine(deps: EngineDeps): Engine {
     // ----- notifications -----
     const n = settings.notifications;
     const toNotify: Opportunity[] = [];
+    // 0.8 (G1): the opportunities toasted at a watch's profit target ("Watch: <name>").
+    const watchedKeys = new Set<string>();
     let notifyMeta: string | null = null;
     if (n?.enabled) {
       const dedupMs = Number.isFinite(n.dedupMs) && n.dedupMs > 0 ? n.dedupMs : 0;
@@ -1008,11 +1169,14 @@ export function createEngine(deps: EngineDeps): Engine {
       let toldElsewhere = 0;
       for (const opp of results.values()) {
         if (opp.status !== 'profitable' || opp.profitScrap === null) continue;
-        if (opp.confidence < n.minConfidence || opp.profitScrap < n.minProfitScrap) continue;
+        // 0.8 (G1): a watched copy's own profit target is its bar (typed and imported prices; a rule candidate never).
+        const floor = opp.inputKind === 'rule' ? null : safeFloor(opp);
+        if (opp.confidence < n.minConfidence || opp.profitScrap < (floor ?? n.minProfitScrap)) continue;
         // F6: input kinds the user muted; F5: a suspect margin is shown but never toasted.
         if (!kinds.has(opp.inputKind) || opp.flags.includes('suspect-margin')) continue;
         // ACT-2: a price this old may be long gone from scrap.tf. The row stays in the lists; it is not news.
-        if (opp.flags.includes('stale-input')) continue;
+        // 0.7.4 (F22, F70): nor is a cost far under what bots pay for this item (likely another copy's price).
+        if (opp.flags.includes('stale-input') || opp.flags.includes('variant-suspect') || opp.flags.includes('cost-below-market')) continue;
         const print = notifyFingerprintOf(opp, p.useOrder);
         const told = last.get(opp.key);
         if (told !== undefined) {
@@ -1023,12 +1187,18 @@ export function createEngine(deps: EngineDeps): Engine {
         // ACT-3 and ACT-8: the item just bought, or a candidate a fresh save shows is not on its page. Not
         // recorded: a newer price, or a save that has gone stale, toasts again.
         if (safeBought(opp, now, staleMs) || absentFromFreshSave(opp, now, staleMs)) continue;
+        // 0.7.4 (F13, F21, F47): the order the profit rests on has not been seen for 24 h and may be gone
+        // (the feed has no catch-up after the app or the feed was off). Not recorded: the row toasts once a
+        // snapshot or a feed event confirms it. Core's snapshotPriority reads the stored row (a profitable one
+        // on an unconfirmed order) and the background snapshot job confirms its book first, most profit first.
+        if (revenueOrderOf(opp, p.useOrder)?.flags.includes('unverified')) continue;
         // F17: the "New on scrap.tf" toast already named this item; one toast per find.
         if (deps.toldElsewhere && safeTold(opp, now)) {
           last.set(opp.key, { t: now, f: print });
           toldElsewhere++;
           continue;
         }
+        if (floor !== null) watchedKeys.add(opp.key);
         toNotify.push(opp);
       }
       if (toNotify.length > 0) {
@@ -1074,7 +1244,7 @@ export function createEngine(deps: EngineDeps): Engine {
       });
       const individual = leads.slice(0, MAX_NOTIFICATIONS_PER_RUN);
       for (const opp of individual) {
-        safeCall(() => events.onNotify({ title: notificationTitle(opp), body: notificationBody(opp, K, p.useOrder), sku: opp.sku }));
+        safeCall(() => events.onNotify({ title: notificationTitle(opp, paintNameOf, watchedKeys.has(opp.key)), body: notificationBody(opp, K, p.useOrder), sku: opp.sku }));
       }
       const rest = leads.slice(individual.length);
       if (rest.length > 0) {
@@ -1106,6 +1276,21 @@ export function createEngine(deps: EngineDeps): Engine {
     }
   }
 
+  /**
+   * 0.8 (G1): deps.watchFloorFor for this opportunity's copy (its base and copyKey, '' plain), a finite number >= 0 or
+   * null. Without the hook, or when it fails (logged), null: notifications.minProfitScrap, as before.
+   */
+  function safeFloor(opp: Opportunity): Scrap | null {
+    if (!deps.watchFloorFor) return null;
+    try {
+      const floor = deps.watchFloorFor(baseOf(opp.sku), opp.copyKey ?? '');
+      return typeof floor === 'number' && Number.isFinite(floor) && floor >= 0 ? floor : null;
+    } catch (err) {
+      log.warn('Engine notification check failed', { error: String(err) });
+      return null;
+    }
+  }
+
   /** A failing check toasts as before: a second toast beats a lost one. */
   function safeTold(opp: Opportunity, now: UnixMs): boolean {
     try {
@@ -1134,20 +1319,51 @@ export function createEngine(deps: EngineDeps): Engine {
 
   /**
    * ACT-8: a rule candidate whose bank is one page (every bank but /unusuals), seen whole within
-   * `staleMs`: the item was not on that save. Never an australium (DC-5): its category says 'stranges', but
-   * scrap.tf sells australiums on its items bank too (SCRAPTF_BANKS), so that page is no proof. A failing
-   * check toasts.
+   * `staleMs`: the item was not on that save. 0.7.4 (F36): the bank an item of its kind is sold on
+   * (scraptfBankForItem), so a strange cosmetic is judged by a /buy/hats save and a killstreak weapon by a
+   * /buy/items one, not by pages that never list them. DC-5 (0.7.4, F79): an australium only when both its
+   * category's page and the items bank (which sells australiums, SCRAPTF_BANKS) were seen whole within
+   * `staleMs`; one of them alone is no proof. A failing check toasts.
    */
   function absentFromFreshSave(opp: Opportunity, now: UnixMs, staleMs: number): boolean {
     if (opp.inputKind !== 'rule' || !deps.recentBankSaveAt) return false;
-    const bank = bankForCategory(opp.category);
-    if (bank === 'unusuals' || isAustralium(opp.sku)) return false;
+    const banks: Exclude<ScraptfBank, 'list'>[] = isAustralium(opp.sku) ? [...new Set([bankForCategory(opp.category), 'items' as const])] : [ownBankOf(opp.sku, opp.category)];
+    if (banks.includes('unusuals')) return false;
     try {
-      const at = deps.recentBankSaveAt(bank);
-      return typeof at === 'number' && Number.isFinite(at) && now - at <= staleMs;
+      return banks.every((bank) => {
+        const at = deps.recentBankSaveAt!(bank);
+        return typeof at === 'number' && Number.isFinite(at) && now - at <= staleMs;
+      });
     } catch (err) {
       log.warn('Engine notification check failed', { error: String(err) });
       return false;
+    }
+  }
+
+  /** 0.7.4 (F78): EngineDeps.scraptfSeenPriceOf; a failing hook is no evidence (the rule's own cost stands). */
+  function safeSeenPrice(base: string, K: Scrap): ScraptfSeenPrice | null {
+    if (!deps.scraptfSeenPriceOf) return null;
+    try {
+      return deps.scraptfSeenPriceOf(base, K) ?? null;
+    } catch (err) {
+      log.warn('Could not read what scrap.tf showed for a rule candidate', { error: String(err) });
+      return null;
+    }
+  }
+
+  /** 0.7.4 (F36): the bank page an item of this kind is sold on, from its schema entry; else its category's. */
+  function ownBankOf(sku: string, category: Category): Exclude<ScraptfBank, 'list'> {
+    try {
+      const obj = info(sku).obj;
+      let item: CategoryItemInfo | null = null;
+      try {
+        item = schema.itemByDefindex(obj.defindex) ?? null;
+      } catch {
+        item = null;
+      }
+      return scraptfBankForItem(category, obj, item);
+    } catch {
+      return bankForCategory(category);
     }
   }
 
@@ -1209,6 +1425,12 @@ export function createEngine(deps: EngineDeps): Engine {
         // on this tick, including rule-only ones with no stored row (the run's own
         // expansion only covers SKUs with a price or a row).
         for (const b of forgetDependents(base)) dirty.add(b);
+        // 0.7.4 (F09/F14): every twin reads this base's rows as part of its book; their own rows stay cached.
+        for (const tw of twinBasesOf(schema, base)) {
+          dirty.add(tw);
+          bestRaw.delete(tw);
+          for (const b of forgetDependents(tw)) dirty.add(b);
+        }
         if (dirty.size > MAX_DIRTY) {
           dirty.clear();
           forgetAllBases();
@@ -1307,9 +1529,23 @@ export function notifyKinds(v: unknown): ReadonlySet<InputKind> {
   return new Set(INPUT_KIND_ORDER.filter((k) => v.includes(k)));
 }
 
-/** 'Candidate: <name>' for a rule estimate (the user still has to find it on scrap.tf), else 'Profit: <name>'. */
-export function notificationTitle(o: Pick<Opportunity, 'inputKind' | 'name' | 'sku'>): string {
-  return `${o.inputKind === 'rule' ? 'Candidate' : 'Profit'}: ${o.name || o.sku}`;
+/**
+ * 'Candidate: <name>' for a rule estimate (the user still has to find it on scrap.tf), else 'Profit: <name>'.
+ * 0.7.4 (F66 step 2): a copy with extras (Opportunity.copyKey) is named by its first two, as the Opportunities
+ * row's tag: 'Profit: The Last Laugh (After Eight)', so the toast says which copy to buy. `paintName` names a
+ * paint (the item schema's); without it, or for an unknown paint, 'Paint #rrggbb'. 0.8 (G1): `watched` (a typed or
+ * imported price toasted at a watch's profit target, EngineDeps.watchFloorFor) reads 'Watch: <name>'; a rule never.
+ */
+export function notificationTitle(
+  o: Pick<Opportunity, 'inputKind' | 'name' | 'sku'> & Partial<Pick<Opportunity, 'copyKey'>>,
+  paintName?: (decimal: number) => string | null,
+  watched = false,
+): string {
+  const title = `${o.inputKind === 'rule' ? 'Candidate' : watched ? 'Watch' : 'Profit'}: ${o.name || o.sku}`;
+  if (o.inputKind === 'rule') return title;
+  const extras = copyExtrasWords(o.copyKey, (d) => paintName?.(d) ?? `Paint #${d.toString(16).padStart(6, '0')}`);
+  if (extras.length === 0) return title;
+  return `${title} (${extras.slice(0, 2).join(', ')}${extras.length > 2 ? ` +${extras.length - 2}` : ''})`;
 }
 
 /** Title of the toast that folds the rest of a burst; rule candidates are not called flips (they are unverified). */

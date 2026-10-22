@@ -17,7 +17,7 @@ import { LIST_BOUNDARY_NOTE } from '../../src/renderer/scraptfListModel';
 import { emptyBankStockCounts } from '../../src/shared/bankStock';
 import { STATIC_EXTERNAL_URLS } from '../../src/shared/links';
 import { MAIN_METHODS, SERVICE_METHODS } from '../../src/shared/rpc';
-import type { BankStockCounts, BankStockQuery, BankStockResult, BankStockRow, ScraptfBank, ScraptfListStatus } from '../../src/shared/types';
+import type { BankStockCounts, BankStockQuery, BankStockResult, BankStockRow, ScraptfBank, ScraptfListStatus, ScraptfTimingBrief, ScraptfTurnover } from '../../src/shared/types';
 import { installDomShim, ShimElement, ShimEvent, type ShimDocument } from './domShim';
 
 const read = (rel: string) => readFileSync(new URL(`../../src/renderer/${rel}`, import.meta.url), 'utf8');
@@ -79,11 +79,16 @@ describe('the page', () => {
     expect(page).toMatch(/return \(\) => \{\s*l\.dispose\(\);/);
   });
 
-  it('remembers the filter, search and order per bank; opens the drawer by base SKU and the menu with the bank', () => {
+  it('remembers the filter, search and order per bank; opens the drawer by base SKU on the row copy and the menu with the bank', () => {
     expect(page).toContain('usePersistentState<BankStockView>(bankStockPrefKey(bank), DEFAULT_BANK_STOCK_VIEW, sanitizeBankStockView)');
-    expect(page).toContain('(r: BankStockRow) => openItem(r.sku)');
-    // ACT-11: with the row's exact copy, for Record buy.
-    expect(page).toContain('menuRef.current({ sku: r.sku, name: r.name, category: r.category, bank, copy: bankStockBuyCopy(r, bank) }, at)');
+    // 0.7.4 (F66): on the row's own copy (its special key), so the drawer's history is that copy's.
+    expect(page).toContain('(r: BankStockRow) => openItem(r.sku, bankStockRowCopyKey(r))');
+    // ACT-11: with the row's exact copy, for Record buy; 0.8 (G1): and its special key, for Watch on scrap.tf….
+    expect(page).toContain(
+      "menuRef.current({ sku: r.sku, name: r.name, category: r.category, bank, copy: bankStockBuyCopy(r, bank), special: bankStockRowCopyKey(r) ?? '' }, at)",
+    );
+    // 0.8 (G1): a watch added, changed or removed re-reads the page (its tags and the Watched chip).
+    expect(page).toContain("useVisiblePush('watches.changed', refreshSoon);");
   });
 });
 
@@ -302,6 +307,8 @@ describe('BankStockPageView, rendered', () => {
       ['Gone', '3', 'false'],
       ['Listed &gt; 24 h', '6', 'false'],
       ['Dropped since listed', '2', 'false'],
+      ['Dropping', '0', 'false'],
+      ['Watched', '0', 'false'],
     ]);
   });
 
@@ -733,5 +740,102 @@ describe('BankStockPage against the mock', () => {
     const t = await mountPage('stranges');
     fire(t.button(/All scrap\.tf banks/)!, 'click');
     expect(win()['location']).toEqual({ hash: '#/banks/stranges' });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 0.8 (T6, LC-4): the Dropping chip, the Wait / Buy now tag, the Verdict title and the turnover line
+// ---------------------------------------------------------------------------
+
+describe('0.8 buy timing on the bank stock page', () => {
+  const brief = (over: Partial<ScraptfTimingBrief> = {}): ScraptfTimingBrief => ({
+    verdict: 'wait',
+    why: 'drop-likely',
+    bank: 'hats',
+    key: '378;6|',
+    dropsThisRun: 2,
+    steps: [
+      { at: T0 - 30 * HOUR, prevAt: T0 - 31 * HOUR, fromScrap: 30, toScrap: 28, pct: -2 / 30 },
+      { at: T0 - 5 * HOUR, prevAt: T0 - 6 * HOUR, fromScrap: 28, toScrap: 27, pct: -1 / 28 },
+    ],
+    lastSeenAt: T0 - 12 * MIN,
+    horizonMs: 24 * HOUR,
+    pDrop: 0.35,
+    pGone: 0.25,
+    pRise: 0.15,
+    nextDropAt: null,
+    n: { states: 41, copies: 6, atRisk: 8, dropCopies: 5 },
+    ...over,
+  });
+  const TURNOVER: ScraptfTurnover = {
+    bank: 'hats',
+    ended: 25,
+    open: 12,
+    wideGap: 0,
+    imprecise: 4,
+    p25Ms: 10 * HOUR,
+    medianMs: 28 * HOUR,
+    p75Ms: 72 * HOUR,
+    resolutionMs: 2 * HOUR,
+    curve: [{ atMs: 0, stillListed: 1 }, { atMs: 28 * HOUR, stillListed: 0.5 }],
+    droppedBeforeGoneShare: 0.4,
+    since: T0 - 30 * 24 * HOUR,
+  };
+  const changed = { fromScrap: 30, toScrap: 27, deltaScrap: -3, pct: -0.1, since: T0 - 52 * HOUR };
+  const rows = [
+    row({ listedSince: T0 - 52 * HOUR, firstSeenAt: T0 - 52 * HOUR, changeSinceListed: changed, timing: brief() }),
+    row({ sku: '30;6', key: '30;6|', name: 'Hat B', timing: brief({ key: '30;6|', verdict: 'buy-now', why: 'flip-now', dropsThisRun: 0, steps: [] }) }),
+    row({ sku: '31;6', key: '31;6|', name: 'Hat C', verdict: 'over', timing: brief({ key: '31;6|', verdict: 'not-enough-data', why: 'few-drops', horizonMs: null, pDrop: null, pGone: null, pRise: null, dropsThisRun: 0, steps: [] }) }),
+    row({ sku: '32;6', key: '32;6|', name: 'Hat D' }),
+  ];
+  const timed = (over: Partial<BankStockResult> = {}) => ({ ...RESULT, rows, total: rows.length, counts: counts({ items: 48, inStock: 31, dropping: 1 }), turnover: TURNOVER, ...over });
+
+  it('the Dropping chip counts the rows with two or more drops in their run', () => {
+    const h = html({ result: timed() });
+    expect(h).toMatch(/aria-pressed="false"[^>]*>.*?<\/span>Dropping<span class="chip-count">1<\/span><\/button>/);
+  });
+
+  it("tags Wait and Buy now in the Item cell (nothing else), and adds the timing to the Verdict pill's title", () => {
+    const h = html({ result: timed() });
+    const cell = (i: number) => new RegExp(`<div id="bsrow-${i}"[\\s\\S]*?(?=<div id="bsrow-${i + 1}"|$)`).exec(h)![0];
+    expect(cell(0)).toMatch(/<div role="gridcell" class="bs-item">[\s\S]*?<span class="pill tone-warn timing-badge" title="Your saves suggest waiting about 1 d\. Of the 8 prices on scrap\.tf\/buy\/hats still at their price at this age \(from 41 prices of 6 items in your saves\)[^"]*From your save 12 min ago; an estimate, not a forecast\.">Wait ~1 d<\/span>/);
+    expect(cell(1)).toMatch(/<span class="pill tone-good timing-badge"[^>]*>Buy now<\/span>/);
+    expect(cell(2)).not.toContain('timing-badge');
+    expect(cell(3)).not.toContain('timing-badge');
+    // The Verdict title gains the timing sentence (the cell keeps its width: D23).
+    expect(cell(0)).toMatch(/class="pill verdict-pill tone-good" title="[^"]* Buy timing: Your saves suggest waiting about 1 d\./);
+    expect(cell(2)).toMatch(/class="pill verdict-pill tone-\w+" title="[^"]* Buy timing: not enough data\. Too few price drops in your saves of scrap\.tf\/buy\/hats so far, from 5 items/);
+    expect(cell(3)).not.toContain('Buy timing:');
+    // Since listed counts the run's drops.
+    expect(cell(0)).toMatch(/class="bs-since num tone-text-good"[^>]*>↓ 10 % · 2×</);
+    expect(h.match(/class="opp-row opp-item bs-row /g)).toHaveLength(4);
+  });
+
+  it("heads the page with the bank's turnover in the user's saves; none without one", () => {
+    const h = html({ result: timed() });
+    expect(h).toMatch(/<p class="bs-turnover muted small" title="Kaplan-Meier over your saves of scrap\.tf\/buy\/hats[^"]*">In your saves, items here stayed listed a median 1 d 4 h before going \(37 listings, ±2 h; 12 still listed\)<\/p>/);
+    expect(h.indexOf('class="bs-saved"')).toBeLessThan(h.indexOf('class="bs-turnover'));
+    expect(html({ result: timed({ turnover: undefined }) })).not.toContain('bs-turnover');
+    expect(html()).not.toContain('bs-turnover');
+  });
+
+  it('the stylesheet gives the tag the New pill\'s metrics and adds no grid track', () => {
+    const css = read('styles/components.css').replace(/\/\*[\s\S]*?\*\//g, '');
+    expect(css).toMatch(/\.timing-badge \{\s*flex-shrink: 0;[^}]*font-size: 10\.5px;/);
+    expect(read('styles/bank-stock.css')).not.toContain('timing');
+  });
+
+  it('against the mock: on-sale rows carry the shared brief, and a tag shows for each Wait or Buy now row', async () => {
+    const b = createMockBridge({ tickMs: 0, latencyMs: 0, now: () => T0 });
+    try {
+      const result = await b.rpc('scraptf.bankStock', { bank: 'hats', limit: 60 });
+      const h = html({ result });
+      const tagged = result.rows.filter((r) => r.timing?.verdict === 'wait' || r.timing?.verdict === 'buy-now').length;
+      expect(h.match(/timing-badge/g)?.length ?? 0).toBe(tagged);
+      expect(result.turnover).toBeDefined();
+      expect(h).toContain('class="bs-turnover muted small"');
+    } finally {
+      b.dispose();
+    }
   });
 });

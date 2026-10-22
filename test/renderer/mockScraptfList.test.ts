@@ -9,7 +9,7 @@ import { createMockBridge, type MockBridge } from '../../src/renderer/mock';
 import { SCRAPTF_ITEMS_URL } from '../../src/shared/links';
 import { MARKET_MAX_LIMIT } from '../../src/shared/market';
 import { PUSH_EVENTS, SERVICE_METHODS, type PushContract } from '../../src/shared/rpc';
-import { SCRAPTF_LIST_FRESH_MS, bestExitOf, valueScraptfListRow } from '../../src/shared/scraptfList';
+import { SCRAPTF_LIST_FRESH_MS, bestExitOf, scraptfListLookup, valueScraptfListRow } from '../../src/shared/scraptfList';
 import { KEY_SKU } from '../../src/shared/types';
 
 let bridge: MockBridge | null = null;
@@ -91,7 +91,8 @@ describe('the list in every feature', () => {
     const byStored = new Map(seedScraptfList(T0).map((r) => [r.sku, r]));
     let onList = 0;
     for (const r of res.rows) {
-      const s = byStored.get(r.sku);
+      // 0.7.4: a copy with no row of its own (a killstreak or Non-Craftable one) reads its family's unmarked row.
+      const s = scraptfListLookup((sku) => byStored.get(sku), r.sku)?.stored;
       if (!s) {
         expect(r).toMatchObject({ scraptfPaysScrap: null, scraptfStock: null, scraptfStockLimit: null, scraptfFull: false, scraptfListAt: null });
         continue;

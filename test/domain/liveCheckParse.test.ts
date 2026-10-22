@@ -70,19 +70,20 @@ const NOT_ITEM = { ok: false, status: 'not-item', reason: CHECK_NOT_ITEM_REASON 
 const ref = (scrap: number) => ({ keys: 0, scrap });
 
 describe('parseCheckText: the item alone (form 1)', () => {
-  it.each([
-    ['Team Captain', '378;6'],
-    ['  team CAPTAIN \u00a0', '378;6'],
-    ['\u200bTeam Captain', '378;6'],
-    ['378;6', '378;6'],
-    ['205;11;kt-3', '205;11;kt-3'],
-    ['Strange Professional Killstreak Rocket Launcher', '205;11;kt-3'],
+  // 0.7.4: craftStated (F41) says whether the item part names its copy: a SKU or an item link does, a plain name not.
+  it.each<[string, string, boolean]>([
+    ['Team Captain', '378;6', false],
+    ['  team CAPTAIN \u00a0', '378;6', false],
+    ['\u200bTeam Captain', '378;6', false],
+    ['378;6', '378;6', true],
+    ['205;11;kt-3', '205;11;kt-3', true],
+    ['Strange Professional Killstreak Rocket Launcher', '205;11;kt-3', false],
     // A name ending in a number is not read as "<name> <price>".
-    ['Mann Co. Supply Crate Series #30', '5022;6;c30'],
-    ['https://backpack.tf/stats/Unique/Team%20Captain/Tradable/Craftable', '378;6'],
+    ['Mann Co. Supply Crate Series #30', '5022;6;c30', false],
+    ['https://backpack.tf/stats/Unique/Team%20Captain/Tradable/Craftable', '378;6', true],
     // An item link holding a separator (";") resolves as a whole.
-    ['https://marketplace.tf/items/tf2/378;6', '378;6'],
-  ])('reads %j as %s', (text, sku) => {
+    ['https://marketplace.tf/items/tf2/378;6', '378;6', true],
+  ])('reads %j as %s', (text, sku, craftStated) => {
     expect(ok(parse(text))).toEqual({
       form: 'name',
       item: expect.objectContaining({ sku }),
@@ -94,6 +95,8 @@ describe('parseCheckText: the item alone (form 1)', () => {
       soldOut: false,
       fuzzy: false,
       incomplete: false,
+      craftStated,
+      priceAmbiguous: false,
     });
   });
 
@@ -307,10 +310,11 @@ describe('parseCheckText with the real resolver (schema fixture, fake HTTP)', ()
   const real = (t: string) => parseCheckText(t, (x) => schema.resolve(x), { confirmFuzzy: (x, i) => schema.search(x, 2).length === 1 && schema.search(x, 2)[0]!.sku === i.sku });
 
   it.each<[string, string, Partial<ParsedCheck>]>([
-    ['Team Captain', '378;6', { form: 'name', price: null }],
-    ['Team Captain, 1.33 ref', '378;6', { form: 'priced', price: ref(12) }],
-    ['Team Captain 1.33', '378;6', { form: 'priced', price: ref(12) }],
-    ['Team Captain 2', '378;6', { form: 'priced', price: ref(18) }],
+    ['Team Captain', '378;6', { form: 'name', price: null, priceAmbiguous: false }],
+    ['Team Captain, 1.33 ref', '378;6', { form: 'priced', price: ref(12), priceAmbiguous: false }],
+    ['Team Captain 1.33', '378;6', { form: 'priced', price: ref(12), priceAmbiguous: false }],
+    // 0.7.4 (F44): a bare whole number is read as ref, but flagged: scrap.tf always writes a unit.
+    ['Team Captain 2', '378;6', { form: 'priced', price: ref(18), priceAmbiguous: true }],
     ['Mann Co. Supply Crate Key = 62.33 ref', '5021;6', { form: 'priced', price: ref(561) }],
     ['Strange Professional Killstreak Rocket Launcher, 1 key 2 ref', '205;11;kt-3', { form: 'priced', price: { keys: 1, scrap: 18 } }],
     ['Crocodile Dandy\tSold out\t1.33 refined\t0/5', '31193;6', { form: 'items-row', soldOut: true, pays: ref(12), stock: 0, stockLimit: 5 }],
@@ -318,7 +322,8 @@ describe('parseCheckText with the real resolver (schema fixture, fake HTTP)', ()
     // As scrap.tf/items spells it and a browser copies the row (icon cell, limits bar on two lines).
     ['\tBills Hat\t3 keys, 53 refined\t3 keys, 42 refined\t2\n5\n', '126;6', { form: 'items-row', price: { keys: 3, scrap: 477 }, pays: { keys: 3, scrap: 378 }, stock: 2, stockLimit: 5 }],
     ['Unusual Team Captain', '378;5', { form: 'name', incomplete: true }],
-    ['Strange Rocket Launcher\n2 keys', '205;11', { form: 'two-lines', price: { keys: 2, scrap: 0 } }],
+    ['Strange Rocket Launcher\n2 keys', '205;11', { form: 'two-lines', price: { keys: 2, scrap: 0 }, priceAmbiguous: false }],
+    ['Strange Rocket Launcher\n2', '205;11', { form: 'two-lines', price: ref(18), priceAmbiguous: true }],
     ['378;6', '378;6', { form: 'name' }],
     ['https://marketplace.tf/items/tf2/378;6', '378;6', { form: 'name' }],
     ['https://marketplace.tf/items/tf2/378;6, 1.33 ref', '378;6', { form: 'priced', price: ref(12) }],

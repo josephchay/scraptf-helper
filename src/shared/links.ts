@@ -115,6 +115,9 @@ export function isScraptfBankUrl(url: unknown): url is string {
 /**
  * The bank page that sells a category, for items the user has not seen on a saved page: taunts and
  * 'other' are on the items bank (as scraptfPageFor), and so is anything unexpected. Never 'list'.
+ * 0.7.4 (F36): coarse, the page of a category filter; an item's own page is scraptfBankForItem
+ * (categories.ts), since scrap.tf lists strange cosmetics on /buy/hats and killstreak and australium
+ * weapons on /buy/items.
  */
 export function bankForCategory(category: Category): Exclude<ScraptfBank, 'list'> {
   switch (category) {
@@ -175,12 +178,16 @@ export function preferScraptfSeen(a: ScraptfSeen | null | undefined, b: ScraptfS
 /**
  * F19, MarketRow.scraptfLink: the page in `seen` (picked with preferScraptfSeen) when there is one,
  * else the category's bank (bankForCategory, never the list). The URL always comes from SCRAPTF_BANKS,
- * never from item data, so only static allowlisted pages ever reach links.open.
+ * never from item data, so only static allowlisted pages ever reach links.open. 0.7.4 (F36): `fallback`
+ * is the item's own bank page when the caller knows it (scraptfBankForItem in categories.ts: a strange
+ * cosmetic is on /buy/hats, a killstreak weapon on /buy/items); a bank id outside SCRAPTF_BANKS or 'list'
+ * falls back to the category's.
  */
-export function scraptfLinkFor(category: Category, seen: ScraptfSeen | null | undefined): MarketScraptfLink {
+export function scraptfLinkFor(category: Category, seen: ScraptfSeen | null | undefined, fallback?: ScraptfBank | null): MarketScraptfLink {
   const info = seenUsable(seen) ? scraptfBankInfo(seen.bank) : null;
   if (info && seen) return { bank: info.bank, url: info.url, seenAt: seen.at, source: 'seen' };
-  const bank = bankForCategory(category);
+  const own = fallback !== 'list' ? scraptfBankInfo(fallback) : null;
+  const bank = own ? own.bank : bankForCategory(category);
   return { bank, url: scraptfBankInfo(bank)?.url ?? scraptfPageFor(category), seenAt: null, source: 'category' };
 }
 

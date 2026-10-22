@@ -357,3 +357,71 @@ describe('v0.2 settings (reference age, suspect margin, notification controls)',
     expect(() => applySettingsPatch(clone(), { notifications: { inputKinds: ['everything'] } })).toThrow(/notifications\.inputKinds/);
   });
 });
+
+describe('0.8 settings keys (exitReservePct, watches, buyTiming, ownSteamIds)', () => {
+  const ids = (n: number) => Array.from({ length: n }, (_, i) => `765611980000000${String(i).padStart(2, '0')}`);
+
+  it('profit.exitReservePct: 0 to 0.5 accepted, outside refused; a file from before 0.8 reads 0, unreported', () => {
+    for (const pct of [0, 0.25, 0.5]) expect(applySettingsPatch(clone(), { profit: { exitReservePct: pct } }).profit.exitReservePct).toBe(pct);
+    expect(() => applySettingsPatch(clone(), { profit: { exitReservePct: 0.6 } })).toThrow(/profit\.exitReservePct/);
+    expect(() => applySettingsPatch(clone(), { profit: { exitReservePct: -0.1 } })).toThrow(/profit\.exitReservePct/);
+    const old = clone() as unknown as Record<string, any>;
+    delete old.profit.exitReservePct;
+    const loaded = parseSettingsWithReport(old);
+    expect(loaded.settings.profit.exitReservePct).toBe(0);
+    expect(loaded.invalid).toEqual([]);
+  });
+
+  it('notifications.watches: on by default, on for older files, off only when stored off', () => {
+    expect(DEFAULT_SETTINGS.notifications.watches).toBe(true);
+    const old = clone() as unknown as Record<string, any>;
+    delete old.notifications.watches;
+    const loaded = parseSettingsWithReport(old);
+    expect(loaded.settings.notifications.watches).toBe(true);
+    expect(loaded.invalid).toEqual([]);
+    const junk = clone() as unknown as Record<string, any>;
+    junk.notifications.watches = 'no';
+    const parsed = parseSettingsWithReport(junk);
+    expect(parsed.settings.notifications.watches).toBe(true);
+    expect(parsed.invalid).toEqual(['notifications.watches']);
+    const off = clone() as unknown as Record<string, any>;
+    off.notifications.watches = false;
+    expect(parseSettings(off).notifications.watches).toBe(false);
+    expect(applySettingsPatch(clone(), { notifications: { watches: false } }).notifications.watches).toBe(false);
+    expect(() => applySettingsPatch(clone(), { notifications: { watches: 'off' } })).toThrow(/notifications\.watches/);
+  });
+
+  it('notifications.buyTiming (D25): off by default, off for older files, on only when stored on', () => {
+    expect(DEFAULT_SETTINGS.notifications.buyTiming).toBe(false);
+    const old = clone() as unknown as Record<string, any>;
+    delete old.notifications.buyTiming;
+    const loaded = parseSettingsWithReport(old);
+    expect(loaded.settings.notifications.buyTiming).toBe(false);
+    expect(loaded.invalid).toEqual([]);
+    const junk = clone() as unknown as Record<string, any>;
+    junk.notifications.buyTiming = 'yes';
+    const parsed = parseSettingsWithReport(junk);
+    expect(parsed.settings.notifications.buyTiming).toBe(false);
+    expect(parsed.invalid).toEqual(['notifications.buyTiming']);
+    const on = clone() as unknown as Record<string, any>;
+    on.notifications.buyTiming = true;
+    expect(parseSettings(on).notifications.buyTiming).toBe(true);
+    expect(applySettingsPatch(clone(), { notifications: { buyTiming: true } }).notifications.buyTiming).toBe(true);
+    expect(() => applySettingsPatch(clone(), { notifications: { buyTiming: 1 } })).toThrow(/notifications\.buyTiming/);
+  });
+
+  it('ownSteamIds: up to 10 SteamID64s; an 11th or a non-id is refused; a 0.7.4 file reads [] and junk is dropped', () => {
+    expect(applySettingsPatch(clone(), { ownSteamIds: ids(10) }).ownSteamIds).toEqual(ids(10));
+    expect(applySettingsPatch(clone(), { ownSteamIds: [] }).ownSteamIds).toEqual([]);
+    expect(() => applySettingsPatch(clone(), { ownSteamIds: ids(11) })).toThrow(/ownSteamIds/);
+    expect(() => applySettingsPatch(clone(), { ownSteamIds: ['me'] })).toThrow(/ownSteamIds\.0/);
+    const old = clone() as unknown as Record<string, any>;
+    delete old.ownSteamIds;
+    const loaded = parseSettingsWithReport(old);
+    expect(loaded.settings.ownSteamIds).toEqual([]);
+    expect(loaded.invalid).toEqual([]);
+    const junk = clone() as unknown as Record<string, any>;
+    junk.ownSteamIds = ['76561198000000001', 'not-a-steamid', 42, '76561198000000001', ' 76561198000000002 '];
+    expect(parseSettings(junk).ownSteamIds).toEqual(['76561198000000001', '76561198000000002']);
+  });
+});

@@ -20,6 +20,13 @@ const KS_OPTIONS = [
   { value: 3, label: 'Professional' },
 ];
 
+/**
+ * A new rule's filter. 0.7.4 (F79): not australium and not festivized either, so switching the category to
+ * stranges or weapons does not price Strange Australiums or Festivized copies at a plain weapon's price
+ * (scrap.tf's weapons and stranges banks list neither). Existing rules keep what they were saved with.
+ */
+export const NEW_RULE_FILTER: Readonly<RuleFilter> = Object.freeze<RuleFilter>({ categories: ['hats'], qualities: [6], craftable: true, hasEffect: false, australium: false, festive: false });
+
 export function RulesPanel() {
   const { toast, bumpData } = useApp();
   const rules = useRpcQuery('rules.list', undefined);
@@ -96,8 +103,9 @@ export function RulesPanel() {
   return (
     <div className="rules-panel">
       <Banner icon="info">
-        Rules are your own observations, such as &quot;unique craftable hats cost 1.77 ref on scrap.tf&quot;. Every matching item with buy orders becomes a{' '}
-        <strong>candidate</strong> to check on scrap.tf by hand. The app cannot see scrap.tf&apos;s stock, and rule estimates never reach High confidence.
+        Rules are your own observations, such as &quot;unique craftable hats cost 1.77 ref on scrap.tf&quot;. Every matching item with buy orders and no price of yours becomes a{' '}
+        <strong>candidate</strong> to check on scrap.tf by hand. Your saves show only what was on sale when you saved; where they or your saved scrap.tf/items list showed an item for
+        more than the rule, that price is used instead. Rule estimates never reach High confidence.
       </Banner>
 
       <div className="section-actions">
@@ -228,7 +236,7 @@ export function RulesPanel() {
 function RuleEditor({ rule, onDone }: { rule: PriceRule | null; onDone: (saved: PriceRule | null) => void }) {
   const { keyScrap } = useApp();
   const [name, setName] = useState(rule?.name ?? '');
-  const [filter, setFilter] = useState<RuleFilter>(rule ? structuredClone(rule.filter) : { categories: ['hats'], qualities: [6], craftable: true, hasEffect: false });
+  const [filter, setFilter] = useState<RuleFilter>(() => structuredClone<RuleFilter>(rule ? rule.filter : NEW_RULE_FILTER));
   const [text, setText] = useState(rule ? fmtKeysMetal(rule.costKeys, rule.costScrap) : '');
   const [unit, setUnit] = useState<BareUnit>('ref');
   const [enabled, setEnabled] = useState(rule?.enabled ?? true);
@@ -326,6 +334,13 @@ function RuleEditor({ rule, onDone }: { rule: PriceRule | null; onDone: (saved: 
           </Field>
           <Field label="Australium">
             <TriState ariaLabel="Australium" value={filter.australium} onChange={(v) => set('australium', v)} />
+          </Field>
+          {/* 0.7.4 (F79): Festivized copies and elevated Strange (a Strange Unusual, say) can be left out. */}
+          <Field label="Festivized">
+            <TriState ariaLabel="Festivized" value={filter.festive} onChange={(v) => set('festive', v)} />
+          </Field>
+          <Field label="Elevated Strange">
+            <TriState ariaLabel="Elevated Strange (Strange on another quality)" value={filter.elevated} onChange={(v) => set('elevated', v)} />
           </Field>
         </div>
         <Field label="Name contains" htmlFor="rule-contains">

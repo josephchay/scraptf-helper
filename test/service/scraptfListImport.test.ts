@@ -34,6 +34,15 @@ const FIX = fileURLToPath(new URL('../fixtures/', import.meta.url));
 const schemaSubset = JSON.parse(readFileSync(path.join(FIX, 'pricedb/schema-subset.json'), 'utf8')) as unknown;
 const paintList = JSON.parse(readFileSync(path.join(FIX, 'pricedb/paint-list.json'), 'utf8')) as unknown;
 const LIST_HTML = readFileSync(path.join(FIX, 'import/items_list.html'), 'utf8');
+/**
+ * 0.7.4: the fixture with Bill's Hat's Non-Craftable copy on a row of its own (sold out), so its Bill's Hat
+ * row is proven the Craftable copy: a cost and "Use as my price". The fixture's other unmarked rows are
+ * family rows (one row for every copy at its price), shown but never a cost.
+ */
+const LIST_HTML_BOTH = LIST_HTML.replace(
+  '</tbody>',
+  '<tr data-quality="6" data-defindex="126"><td></td><td>Non-Craftable Bill\'s Hat</td><td>1 key, 1 refined</td><td>1 key</td><td><div title="0/5"></div></td></tr></tbody>',
+);
 const json = (data: unknown, status = 200) => new Response(JSON.stringify(data), { status, headers: { 'content-type': 'application/json' } });
 
 const requested: string[] = [];
@@ -136,6 +145,8 @@ describe('a saved scrap.tf/items list imported with import.html', () => {
       stockLimit: 5,
       full: false,
       observedAt: mtime,
+      // 0.7.4: unmarked, with no Non-Craftable row beside it: a family row.
+      craft: 'any',
     });
     // Out of stock: no import price (as before), but on the list with what scrap.tf pays.
     const earbuds = (await h.call<ItemDetail | null>('item.detail', { sku: '143;6', history: false }))!;
@@ -149,17 +160,18 @@ describe('a saved scrap.tf/items list imported with import.html', () => {
     expect(m.scraptf.allItems).toEqual({ label: 'All items', url: SCRAPTF_ITEMS_URL, lastSavedAt: mtime, items: 13 });
     expect(r.listRows).toBe(13);
 
-    // Live market rows join the list per read: Bill's Hat (in stock, so also a known price) carries it,
-    // and the "On scrap.tf's list" filter keeps it.
+    // Live market rows join the list per read: the Non-Craftable Tour of Duty Ticket (in stock and named so,
+    // so a known price; 0.7.4: Bill's Hat is a family row, no known price, so no row here) carries it, and
+    // the "On scrap.tf's list" filter keeps it.
     const row = await vi.waitFor(
       async () => {
-        const found = (await h.call<MarketListResult>('market.list', { onScraptfList: true })).rows.find((x) => x.sku === '126;6');
+        const found = (await h.call<MarketListResult>('market.list', { onScraptfList: true })).rows.find((x) => x.sku === '725;6;uncraftable');
         if (!found) throw new Error('not listed yet');
         return found;
       },
       { timeout: 5000, interval: 50 },
     );
-    expect(row).toMatchObject({ scraptfPaysScrap: 3 * K + 378, scraptfStock: 2, scraptfStockLimit: 5, scraptfFull: false, scraptfListAt: mtime });
+    expect(row).toMatchObject({ scraptfPaysScrap: 238, scraptfStock: 44, scraptfStockLimit: 400, scraptfFull: false, scraptfListAt: mtime });
 
     // An older copy of the list arriving later changes no row and announces nothing.
     await h.call('import.html', { html: LIST_HTML, fileName: 'old.html', mtimeMs: mtime - 10 * MIN });
@@ -171,7 +183,7 @@ describe('a saved scrap.tf/items list imported with import.html', () => {
 
   it('offers no "Use as my price" for a priced row with stock 0, as the import stores no price for it (F14-DM-1)', async () => {
     const h = await setup();
-    await h.call('import.html', { html: LIST_HTML, fileName: 'items.html', mtimeMs: NOW - 2 * MIN });
+    await h.call('import.html', { html: LIST_HTML_BOTH, fileName: 'items.html', mtimeMs: NOW - 2 * MIN });
     // Earbuds: "10 keys, 50 refined" to buy, 0/5 in stock. The import skips it as a price.
     const d = (await h.call<ItemDetail | null>('item.detail', { sku: '143;6', history: false }))!;
     expect(d.scraptfList).toMatchObject({ sellsKeys: 10, sellsScrapRaw: 450, stock: 0, stockLimit: 5 });
@@ -184,10 +196,11 @@ describe('a saved scrap.tf/items list imported with import.html', () => {
     expect(listPriceInput(d.scraptfList!, d)).toBeNull();
     // Quick entry shows the line, but no Use.
     const hint = quickListHint(d.scraptfList, '143;6', NOW)!;
-    expect(hint).toMatchObject({ price: null });
-    expect(hint.text).toMatch(/^sells 10 keys 50\.00 ref · stock 0, saved /);
+    expect(hint).toMatchObject({ price: null, unproven: false });
+    // 0.7.4: Earbuds is a family row (no Non-Craftable row beside it), and says so.
+    expect(hint.text).toMatch(/^sells 10 keys 50\.00 ref \(every copy at this price\) · stock 0 for every copy, saved /);
     expect(hint.title).toContain('Out of stock on scrap.tf');
-    // Genuine Shred Alert (0/3) likewise; Bill's Hat (2/5) still can.
+    // Genuine Shred Alert (0/3) likewise; Bill's Hat (2/5, proven Craftable by its Non-Craftable row) still can.
     const shred = (await h.call<ItemDetail | null>('item.detail', { sku: '1015;1', history: false }))!;
     expect(shred.scraptfList).toMatchObject({ stock: 0 });
     expect(listPriceInput(shred.scraptfList!, shred)).toBeNull();
@@ -198,7 +211,7 @@ describe('a saved scrap.tf/items list imported with import.html', () => {
 
   it('tells a painted drawer that its plain copy\'s list price is already saved, so it is not added twice (UI-1)', async () => {
     const h = await setup();
-    await h.call('import.html', { html: LIST_HTML, fileName: 'items.html', mtimeMs: NOW - 2 * MIN });
+    await h.call('import.html', { html: LIST_HTML_BOTH, fileName: 'items.html', mtimeMs: NOW - 2 * MIN });
     const PAINTED = '126;6;p15185211';
     const d = (await h.call<ItemDetail | null>('item.detail', { sku: PAINTED, history: false }))!;
     expect(d.scraptfList?.sku).toBe('126;6');
@@ -214,7 +227,7 @@ describe('a saved scrap.tf/items list imported with import.html', () => {
     expect(again.scraptfListSaved).toBe(true);
     // The plain drawer agrees, and a newer list (another date) is a new price to offer.
     expect((await h.call<ItemDetail | null>('item.detail', { sku: '126;6', history: false }))!.scraptfListSaved).toBe(true);
-    await h.call('import.html', { html: LIST_HTML, fileName: 'items (1).html', mtimeMs: NOW - MIN });
+    await h.call('import.html', { html: LIST_HTML_BOTH, fileName: 'items (1).html', mtimeMs: NOW - MIN });
     expect((await h.call<ItemDetail | null>('item.detail', { sku: PAINTED, history: false }))!.scraptfListSaved).toBe(false);
     expect(requested).toEqual([]);
   });

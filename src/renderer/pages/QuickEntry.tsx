@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { ItemDetail, ProfitSettings, Scrap, ScrapPrice } from '../../shared/types';
+import type { ItemDetail, ProfitSettings, Scrap, ScrapPrice, ScrapPriceInput } from '../../shared/types';
 import { DEFAULT_SETTINGS } from '../../shared/defaults';
+import { newestTypedPriceFor } from '../../shared/priceCopy';
+import { SCRAPTF_LIST_CRAFT_UNPROVEN } from '../../shared/scraptfList';
 import { rpc } from '../api';
 import { copyText } from '../clipboard';
 import { openOrCopy } from '../components/ExternalLink';
@@ -32,6 +34,7 @@ import {
   listPriceStamp,
   noRevenueText,
   prefillPriceText,
+  previewProfitTitle,
   previewRevenue,
   previewTone,
   profitPreview,
@@ -57,6 +60,20 @@ interface PreviewState {
 }
 
 /**
+ * 0.7.4 (F80): Save's 'prices.upsert'. replaceTyped: the user's newest typed price of this copy is updated
+ * (the service picks it, priceIsForSku), so re-typing an item's price never leaves the old one as a second,
+ * stale input; with none, a row is added. Exported for tests.
+ */
+export function quickSaveInput(it: { sku: string; name: string }, parsed: { keys: number; scrap: Scrap }, stamp: { observedAt: number; note: string | null }): ScrapPriceInput {
+  return { sku: it.sku, name: it.name, costKeys: parsed.keys, costScrap: parsed.scrap, source: 'user', observedAt: stamp.observedAt, note: stamp.note, replaceTyped: true };
+}
+
+/** 0.7.4 (F80): the earlier typed price a save updated (the same row id came back), for "replaces your price of …"; else null. */
+export function replacedPrice(earlier: Pick<ScrapPrice, 'id' | 'costKeys' | 'costScrap'> | null, saved: Pick<ScrapPrice, 'id'>): { costKeys: number; costScrap: Scrap } | null {
+  return earlier !== null && earlier.id === saved.id ? { costKeys: earlier.costKeys, costScrap: earlier.costScrap } : null;
+}
+
+/**
  * Compact always-on-top window: type an item and its scrap.tf price, see what it
  * sells for and the most to pay while typing; Enter saves, Shift+Enter only checks, Esc hides.
  */
@@ -68,7 +85,8 @@ export function QuickEntry() {
   const [note, setNote] = useState('');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [result, setResult] = useState<{ price: ScrapPrice; detail: ItemDetail | null } | null>(null);
+  // 0.7.4 (F80): `was`, the user's earlier typed price of this copy that the save updated (replaceTyped), or null.
+  const [result, setResult] = useState<{ price: ScrapPrice; detail: ItemDetail | null; was?: { costKeys: number; costScrap: Scrap } | null } | null>(null);
   const [preview, setPreview] = useState<PreviewState | null>(null);
   const [checked, setChecked] = useState<CheckedEntry | null>(null);
   const [bought, setBought] = useState<BoughtState | null>(null);
@@ -222,7 +240,7 @@ export function QuickEntry() {
         const ready = detail?.opportunities.some((o) => o.inputRef === `price:${price.id}`) ?? false;
         // The row as stored now: an edit elsewhere keeps its id, and 'Saved … at' and Bought it must follow it.
         const fresh = freshSavedPrice(price, detail);
-        setResult((r) => (r && r.price.id === price.id ? { price: fresh, detail } : r));
+        setResult((r) => (r && r.price.id === price.id ? { ...r, price: fresh, detail } : r));
         if (ready || !detail) return;
       } catch {
         // keep the saved confirmation; the push below retries
@@ -274,18 +292,12 @@ export function QuickEntry() {
     const { it, parsed } = entry;
     // A list price saved as Use put it keeps the list's date and note (F14); anything else is seen now.
     const stamp = listPriceStamp(listUse, { sku: it.sku, text }, note, Date.now());
+    // 0.7.4 (F80): the typed price this save replaces, as the preview read it (local), for the result line.
+    const earlier = preview && preview.sku === it.sku && preview.detail ? newestTypedPriceFor(preview.detail.scrapPrices, it.sku) : null;
     setSaving(true);
     try {
-      const price = await rpc('prices.upsert', {
-        sku: it.sku,
-        name: it.name,
-        costKeys: parsed.keys,
-        costScrap: parsed.scrap,
-        source: 'user',
-        observedAt: stamp.observedAt,
-        note: stamp.note,
-      });
-      setResult({ price, detail: null });
+      const price = await rpc('prices.upsert', quickSaveInput(it, parsed, stamp));
+      setResult({ price, detail: null, was: replacedPrice(earlier, price) });
       setItem(null);
       setText('');
       setNote('');
@@ -448,6 +460,11 @@ export function QuickEntry() {
             <Icon name="check" size={14} /> Saved <ItemName sku={result.price.sku} name={result.price.name} maxTags={2} /> at{' '}
             <span className="money">{fmtKeysMetal(result.price.costKeys, result.price.costScrap)}</span>
           </div>
+          {result.was ? (
+            <div className="muted small">
+              Replaces your earlier price of <span className="money">{fmtKeysMetal(result.was.costKeys, result.was.costScrap)}</span> for this item.
+            </div>
+          ) : null}
           {!d ? (
             <div className="muted small">Checking buy orders…</div>
           ) : (
@@ -458,7 +475,7 @@ export function QuickEntry() {
                   <>
                     <Money scrap={revenueOrder.valueScrap} keyScrap={k} />{' '}
                     <span className="buyer-type muted small">
-                      <OnlineDot online={revenueOrder.online} />
+                      <OnlineDot online={revenueOrder.online} seenAt={revenueOrder.lastEventAt} />
                       {revenueOrder.isBot ? 'bot' : 'human'}
                       {revenueOrder.flags.includes('outlier') ? ' (outlier)' : ''}
                     </span>
@@ -583,7 +600,7 @@ function QuickPreview({
                 <Money scrap={order.valueScrap} keyScrap={k} title={rev ? revenueBreakdown(rev, k) : undefined} />
               </strong>
               <span className="buyer-type small">
-                <OnlineDot online={order.online} />
+                <OnlineDot online={order.online} seenAt={order.lastEventAt} />
                 {order.isBot ? (
                   <>
                     <Icon name="bolt" size={12} /> bot
@@ -624,7 +641,7 @@ function QuickPreview({
           )}
           {pv && tone ? <TonePill tone={tone}>{ceilingVerdict(pv, k, rev?.eligibleCount ?? 0)}</TonePill> : null}
         </div>
-        <div className="qp-line">
+        <div className="qp-line" title={pv ? previewProfitTitle(pv, rev, d.buyOrders, profit, k) : undefined}>
           <span className="qp-label">Profit</span>
           {pv ? (
             <>
@@ -653,6 +670,11 @@ function QuickPreview({
                 title={`Put ${listHint.price} in the price field (Enter saves it, dated when you saved the list)`}
                 onClick={() => listHint.price && onUseListPrice(listHint.price, listHint.observedAt, listHint.otherCopy)}
               >
+                Use
+              </button>
+            ) : listHint.unproven ? (
+              // 0.7.4: a family row's price is no cost of this copy (quickListHint), so Use is off, and says why.
+              <button type="button" className="btn small ghost qp-use" disabled title={`${SCRAPTF_LIST_CRAFT_UNPROVEN}.`}>
                 Use
               </button>
             ) : null}

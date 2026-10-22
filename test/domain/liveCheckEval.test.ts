@@ -24,7 +24,7 @@ import { createMarketIndex, type MarketIndex } from '../../src/service/domain/ma
 import { createScraptfListCache, type ScraptfListCache } from '../../src/service/domain/scraptfList';
 import { buildItemDetail } from '../../src/service/domain/views';
 import { CHECK_NOT_ITEM_REASON, CHECK_RECENT_MAX } from '../../src/shared/check';
-import { frictionOf, maxCostFor, profitStatus } from '../../src/shared/ceiling';
+import { buyerDepthOf, exitCostsOf, exitOrdersOfSummaries, flipProfit, frictionOf, maxCostFor, profitStatus, singleExitOf } from '../../src/shared/ceiling';
 import { baseSku, fromString } from '../../src/shared/sku';
 import type { CheckResult, CheckSource, ItemSuggestion, Listing, MarketRow, ResolvedItem, ScrapPrice, ScraptfListStored, Settings } from '../../src/shared/types';
 import { FakeClock, FakeTimers, MIN, T0, createStubSchema, makeDeps, makeListing, noNetwork, recordingLogger, silentLogger, special, testSettings } from './helpers';
@@ -58,8 +58,9 @@ function buy(sku: string, metalScrap: number, over: Partial<Listing> = {}): List
   return makeListing({ sku, baseSku: sku, metalScrap, lastEventAt: T0 - MIN, ...over });
 }
 
+/** 0.7.4: a row proven to price its copy (shown beside its Non-Craftable row) unless `craft` says otherwise. */
 function listRow(over: Partial<ScraptfListStored> & { sku: string }): ScraptfListStored {
-  return { name: 'Team Captain', sellsKeys: 0, sellsScrap: 90, paysKeys: 0, paysScrap: 75, stock: 2, stockLimit: 5, batchId: 1, observedAt: T0 - 3 * MIN, ...over };
+  return { name: 'Team Captain', sellsKeys: 0, sellsScrap: 90, paysKeys: 0, paysScrap: 75, stock: 2, stockLimit: 5, batchId: 1, observedAt: T0 - 3 * MIN, craft: 'craftable', ...over };
 }
 
 interface Harness {
@@ -251,6 +252,50 @@ describe('evaluation parity', () => {
     expect(h.check('Team Captain, 9 ref').verdict).toBe('flip');
     expect(h.check('Team Captain, 1 key').verdict).toBe('over');
   });
+
+  it('0.8 (PC-1): takes the price-move reserve off profit as flipProfit, says what it took off, and flips up to Pay up to', () => {
+    const h = setup();
+    seedBook(h.repo);
+    h.settings.current = testSettings({ profit: { frictionScrap: 2, exitReservePct: 0.05 } });
+    h.build();
+    const p = h.settings.current.profit;
+    const verdicts = new Set<string>();
+    for (const text of ['Team Captain, 9 ref', 'Team Captain, 11 ref', 'Team Captain, 11.66 ref', 'Team Captain, 12 ref', 'Team Captain, 13.33 ref', 'Team Captain, 1 key']) {
+      const r = h.check(text);
+      const rev = r.revenue!.revenueScrap!;
+      const cost = r.price!.valueScrap;
+      expect(r.profitScrap, text).toBe(flipProfit(rev, cost, p));
+      expect(r.exitCosts, text).toEqual(exitCostsOf(rev, p));
+      expect(r.exitCosts!.reserveScrap, text).toBe(Math.ceil((rev * 5) / 100));
+      expect(r.verdict === 'flip', text).toBe(cost <= r.revenue!.maxCostScrap!);
+      verdicts.add(r.verdict!);
+    }
+    expect([...verdicts].sort()).toEqual(['flip', 'over']);
+    // No revenue: nothing was taken off.
+    expect(h.check('Taunt: The Bunnyhopper, 1 ref')).toMatchObject({ exitCosts: null, profitScrap: null });
+  });
+
+  it('0.8 (PC-2): names a flip only the revenue order buyer makes (singleExit), never an over, and leaves reason as it was', () => {
+    const h = setup();
+    seedBook(h.repo);
+    h.build();
+    // Bill's Hat has one buyer at 60: a flip at 1 ref rests on that buyer alone.
+    const thin = h.check("Bill's Hat, 1 ref");
+    expect(thin.verdict).toBe('flip');
+    expect(thin.singleExit).toEqual({ next: null, nextProfitScrap: null });
+    expect(thin.reason).toBeNull();
+    const over = h.check("Bill's Hat, 6.66 ref");
+    expect(over.verdict).toBe('over');
+    expect('singleExit' in over).toBe(false);
+    expect(over.reason).toBeNull();
+    // Three Team Captain buyers within a scrap of each other: the next one still makes the flip.
+    const deep = h.check('Team Captain, 9 ref');
+    expect(deep.verdict).toBe('flip');
+    expect('singleExit' in deep).toBe(false);
+    // The same book read as buyerDepthOf reads it.
+    const d = h.detail('126;6')!;
+    expect(singleExitOf(d.revenue!.revenueScrap, 9, buyerDepthOf(exitOrdersOfSummaries(d.buyOrders), d.revenue!.order!.listingId).nextBuyer, h.settings.current.profit)).toEqual(thin.singleExit);
+  });
 });
 
 describe('the price compared', () => {
@@ -287,6 +332,19 @@ describe('the price compared', () => {
     expect(h.check("Bill's Hat")).toMatchObject({ price: { valueScrap: 70, source: 'typed' }, scraptfPaysScrap: 40, stock: 0, stockLimit: 5, listAt: T0 - 3 * MIN });
     // Stock 0 on the list: the newest stored price, here an import.
     expect(h.check('Rocket Launcher')).toMatchObject({ price: { valueScrap: 55, source: 'import', observedAt: T0 - 10 * MIN } });
+  });
+
+  it("never takes a family row's price as the cost (0.7.4): its pays and stock still show", () => {
+    const h = setup();
+    seedBook(h.repo);
+    // Unmarked, with no Non-Craftable row beside it: one row for every copy at its price.
+    h.repo.upsertScraptfList([listRow({ sku: '378;6', craft: 'any' })]);
+    h.list.refresh();
+    typed(h.repo, '378;6', 100, T0 - 30 * MIN);
+    h.build();
+    expect(h.check('Team Captain')).toMatchObject({ price: { valueScrap: 100, source: 'typed' }, scraptfPaysScrap: 75, stock: 2, stockLimit: 5, listAt: T0 - 3 * MIN });
+    // A Non-Craftable copy with no row of its own reads the family row (match 'family'): shown, never its cost.
+    expect(h.check('378;6;uncraftable')).toMatchObject({ price: null, verdict: 'no-price', scraptfPaysScrap: 75, stock: 2 });
   });
 
   it("is none for a copied 'Sold out' row, whatever is stored, with the row's pays and stock", () => {

@@ -11,9 +11,20 @@
 // its check.arm is unexpired). A text with no item but a price is then checked as that SKU; the
 // reason names the resolved item (checkHintedNote), never the text. "A price" is checkHintPriceOf's:
 // no id, year or phone number, and from the watcher no bare whole number at all.
+//
+// 0.7.4 (F41): scrap.tf marks a Non-Craftable copy with a class only, which copied text never carries, so a
+// plain name (and F19's hinted price) is checked as the copy the user's own saved scrap.tf data matches
+// (checkCraftCopy over the list rows proven for each copy and the bank pages' newest saves): its
+// Non-Craftable twin, the Craftable copy, or, undecided, the copy that sells for less with a fixed note
+// (R20, R21: also for a copied price no saved copy is at, or a family /items row, when the twin trades; not for a
+// repriced card of a bank page that never lists Non-Craftable copies, CHECK_NONCRAFT_BANKS).
+// 0.7.4 (F44): a number without a unit after the item is no price from the watcher (scrap.tf writes a unit);
+// a check the user asked for keeps it as ref, noted. 0.7.4 (R14): the price is checked against PriceDB as the
+// engine checks a cost (checkCostNote: capped at Low, noted). Local data only, as before.
 
 import {
   blankCheckResult,
+  CHECK_BARE_REF_NOTE,
   CHECK_EXTRAS_NOTE,
   CHECK_FUZZY_NOTE,
   CHECK_INCOMPLETE_NOTE,
@@ -22,14 +33,22 @@ import {
   CHECK_SCHEMA_LOADING_REASON,
   CHECK_SCRAPTF_LINK_REASON,
   CHECK_SOLD_OUT_NOTE,
+  checkCostNote,
+  checkCraftCopy,
+  checkCraftTwinOf,
+  checkDecideCopy,
   checkHintedNote,
   checkHintPriceOf,
+  checkListCopyPrices,
+  checkListFamilyOnSale,
   checkTextRefusal,
+  checkTextStatesCraft,
+  type CheckCopyPrice,
 } from '../../shared/check';
 import { categoryOfSkuOnly } from '../../shared/categories';
-import { frictionOf, profitStatus } from '../../shared/ceiling';
+import { buyerDepthOf, exitCostsOf, exitOrdersOfSummaries, flipProfit, profitStatus, singleExitOf } from '../../shared/ceiling';
 import { parsePrice, valueScrap } from '../../shared/currency';
-import { scraptfListUsePrice } from '../../shared/scraptfList';
+import { scraptfListCraftProven, scraptfListUsePrice } from '../../shared/scraptfList';
 import { fromObject, fromString, isValidSku, looksLikeSku } from '../../shared/sku';
 import type {
   CheckHint,
@@ -41,6 +60,7 @@ import type {
   ItemDetail,
   ItemRevenue,
   KeyPriceState,
+  Listing,
   ResolvedItem,
   Scrap,
   ScrapPrice,
@@ -55,8 +75,11 @@ import { explicitInput } from './engine';
 import { DEFAULT_KEY_SCRAP } from './keyprice';
 import { evaluateMarketBase, type MarketIndex } from './market';
 import { anyEffectBaseOf, isSpecialEmpty, matchContext } from './matcher';
-import { lookupReferences, referencePrices } from './pricing';
+import { bookBasesOf, mergedBook, withTwins } from './bookTwins';
+import type { BankStock } from './bankStock';
+import { lookupReferences, lookupTwinReferences, referencePrices, usableReferences } from './pricing';
 import type { ScraptfListCache } from './scraptfList';
+import { confidenceLevel, LOW_CAP } from './tiers';
 import { buildItemDetail } from './views';
 
 /**
@@ -96,6 +119,19 @@ export interface ParsedCheck {
    * as having dropped one (an unknown paint, an extra quality): the general item is what is checked.
    */
   incomplete: boolean;
+  /**
+   * 0.7.4 (F41): the item part says which copy it is (checkTextStatesCraft: a SKU, an item link, a name with
+   * "Craftable", "Non-Craftable" or "Uncraftable"), so it is checked as written. Else (a plain name, F19's
+   * hinted price) a Craftable item's copy is decided from the user's saved scrap.tf data (checkCraftCopy).
+   * Only the flag is kept, never the text.
+   */
+  craftStated: boolean;
+  /**
+   * 0.7.4 (F44): `price` was a number without a unit after the item, read as ref (ParsedPrice.ambiguous).
+   * scrap.tf writes every price with a unit: from the watcher the item is checked without it, and a check the
+   * user asked for keeps it with CHECK_BARE_REF_NOTE.
+   */
+  priceAmbiguous: boolean;
 }
 
 export type ParseCheckResult =
@@ -140,11 +176,16 @@ const INVISIBLE = /[\u200b-\u200d\u2060\ufeff]/g;
 
 type Accepted = { item: ResolvedItem; fuzzy: boolean; incomplete: boolean };
 
-function moneyOf(field: string): CheckMoney | null {
+/** A price field read in ref, with whether it was a bare whole number (0.7.4, F44: ParsedPrice.ambiguous). */
+function readMoney(field: string): { money: CheckMoney; ambiguous: boolean } | null {
   const t = field.trim();
   if (!t || t.length > MAX_PRICE_FIELD) return null;
   const p = parsePrice(t, 'ref');
-  return p ? { keys: p.keys, scrap: p.scrap } : null;
+  return p ? { money: { keys: p.keys, scrap: p.scrap }, ambiguous: p.ambiguous } : null;
+}
+
+function moneyOf(field: string): CheckMoney | null {
+  return readMoney(field)?.money ?? null;
 }
 
 /** A zero price is no price ("0 ref" copied, or an empty cell read as 0). */
@@ -152,13 +193,18 @@ function nonZero(m: CheckMoney | null): CheckMoney | null {
   return m !== null && (m.keys > 0 || m.scrap > 0) ? m : null;
 }
 
-/** A "price to buy" cell: Sold out, or a price. Null when it is neither (or is labelled as what scrap.tf pays). */
-function sellsCell(field: string): { soldOut: true; price: null } | { soldOut: false; price: CheckMoney | null } | null {
+/**
+ * A "price to buy" cell: Sold out, or a price (0.7.4, F44: `ambiguous` when it had no unit). Null when it is
+ * neither (or is labelled as what scrap.tf pays).
+ */
+function sellsCell(field: string): { soldOut: true; price: null; ambiguous: false } | { soldOut: false; price: CheckMoney | null; ambiguous: boolean } | null {
   if (PAYS_LABEL.test(field)) return null;
   const t = field.replace(SELLS_LABEL, '').trim();
-  if (SOLD_OUT.test(t)) return { soldOut: true, price: null };
-  const m = moneyOf(t);
-  return m ? { soldOut: false, price: nonZero(m) } : null;
+  if (SOLD_OUT.test(t)) return { soldOut: true, price: null, ambiguous: false };
+  const m = readMoney(t);
+  if (!m) return null;
+  const price = nonZero(m.money);
+  return { soldOut: false, price, ambiguous: price !== null && m.ambiguous };
 }
 
 function isStockCell(field: string): boolean {
@@ -260,7 +306,11 @@ function kitItemOf(steamName: string, r: ResolvedItem | null): ResolvedItem | nu
   return keyed === r.sku ? r : null;
 }
 
-/** 0.7.3: an item name as copied, not a SKU, an item link (parseItemUrl reads http(s) only) or a name saying its craftability. */
+/**
+ * 0.7.3: an item name as copied, not a SKU, an item link (parseItemUrl reads http(s) only) or a name saying its
+ * craftability. The Taunt Unusualifier rule's own test (a leading word only); 0.7.4's craftStated reads the
+ * word anywhere (checkTextStatesCraft).
+ */
 function isPlainName(key: string): boolean {
   return !looksLikeSku(key) && !/^https?:\/\//i.test(key) && !/^(?:Non-)?Craftable\b/i.test(key);
 }
@@ -291,6 +341,9 @@ function isPlainName(key: string): boolean {
  * 3. `<item> <sep> <price>`: the bulk paste grammar (parsePriceLine), bare numbers in ref (tried
  *    before form 2 for a link followed by more text, which the URL parse would swallow);
  * 4. two lines: name, then price (or "Sold out").
+ *
+ * 0.7.4: a bare whole number read as ref is flagged `priceAmbiguous` (F44), and whether the item part
+ * states its craftability is kept as `craftStated` (F41); the check (judge) acts on both.
  */
 export function parseCheckText(text: string, resolve: (text: string) => ResolvedItem | null, opts: ParseCheckOptions = {}): ParseCheckResult {
   const refusal = checkTextRefusal(text);
@@ -356,7 +409,13 @@ export function parseCheckText(text: string, resolve: (text: string) => Resolved
     if (!allowFuzzy) return null;
     return confirm(itemText, item) ? { item, fuzzy: true, incomplete: false } : null;
   };
-  const parsed = (form: CheckForm, a: Accepted, extra: Partial<Omit<ParsedCheck, 'form' | 'item' | 'fuzzy' | 'incomplete'>> = {}): ParseCheckResult => ({
+  // 0.7.4 (F41): `itemText` is the item part that resolved; only whether it states a craftability is kept.
+  const parsed = (
+    form: CheckForm,
+    a: Accepted,
+    itemText: string,
+    extra: Partial<Omit<ParsedCheck, 'form' | 'item' | 'fuzzy' | 'incomplete' | 'craftStated'>> = {},
+  ): ParseCheckResult => ({
     ok: true,
     parsed: {
       form,
@@ -369,6 +428,8 @@ export function parseCheckText(text: string, resolve: (text: string) => Resolved
       soldOut: false,
       fuzzy: a.fuzzy,
       incomplete: a.incomplete,
+      craftStated: checkTextStatesCraft(itemText),
+      priceAmbiguous: false,
       ...extra,
     },
   });
@@ -377,13 +438,14 @@ export function parseCheckText(text: string, resolve: (text: string) => Resolved
       for (const c of rowCandidates(fields)) {
         const a = accept(lookup(c.nameField), c.nameField, allowFuzzy);
         if (a) {
-          return parsed('items-row', a, {
+          return parsed('items-row', a, c.nameField, {
             price: c.sells.price,
             soldOut: c.sells.soldOut,
             pays: c.pays,
             paysCopied: c.paysCopied,
             stock: c.stock,
             stockLimit: c.stockLimit,
+            priceAmbiguous: c.sells.ambiguous,
           });
         }
       }
@@ -412,7 +474,7 @@ export function parseCheckText(text: string, resolve: (text: string) => Resolved
     if (!sells) return notItem();
     for (const allowFuzzy of [false, true]) {
       const a = accept(lookup(first), first, allowFuzzy);
-      if (a) return parsed('two-lines', a, { price: sells.price, soldOut: sells.soldOut });
+      if (a) return parsed('two-lines', a, first, { price: sells.price, soldOut: sells.soldOut, priceAmbiguous: sells.ambiguous });
     }
     return notItem();
   }
@@ -433,7 +495,9 @@ export function parseCheckText(text: string, resolve: (text: string) => Resolved
     }
     const l = line;
     const a = l ? accept(l.item, l.itemText, allowFuzzy) : null;
-    return a && l ? parsed('priced', a, { price: nonZero({ keys: l.price.keys, scrap: l.price.scrap }) }) : null;
+    if (!a || !l) return null;
+    const price = nonZero({ keys: l.price.keys, scrap: l.price.scrap });
+    return parsed('priced', a, l.itemText, { price, priceAmbiguous: price !== null && l.price.ambiguous });
   };
   // A copied link never holds raw whitespace (browsers percent-encode it), so a link followed by more
   // text is "<link> <sep> <price>". Read that before the whole line: parsed as one URL, the price would
@@ -446,11 +510,11 @@ export function parseCheckText(text: string, resolve: (text: string) => Resolved
   // link may hold a separator (marketplace.tf/items/tf2/378;6). A fuzzy guess waits for the priced form.
   const whole = lookup(first);
   const exact = accept(whole, first, false);
-  if (exact) return parsed('name', exact);
+  if (exact) return parsed('name', exact, first);
   const cleanPriced = priced(false);
   if (cleanPriced) return cleanPriced;
   const guessed = accept(whole, first, true);
-  if (guessed) return parsed('name', guessed);
+  if (guessed) return parsed('name', guessed, first);
   return priced(true) ?? notItem();
 }
 
@@ -479,6 +543,9 @@ function hintSkuOf(hint: CheckHint | null | undefined): string | null {
  * from the Live market) when it is only a price (checkHintPrice, by `source`); null without a valid hint
  * or for any other text. Only for text parseCheckText found no item in: text that names an item wins. The
  * SKU is the app's own (main's arm), so it is taken as is: never resolved by name, never fuzzy or incomplete.
+ * 0.7.4 (F41): the arm comes from a backpack.tf row, the price from a scrap.tf card, so the copy is not stated
+ * (craftStated false: the saved scrap.tf data decides it). The price never counts as ambiguous: checkHintPriceOf
+ * already read a bare number by the source.
  */
 export function hintedCheck(text: string, hint: CheckHint | null | undefined, source: CheckSource): ParsedCheck | null {
   const sku = hintSkuOf(hint);
@@ -493,7 +560,20 @@ export function hintedCheck(text: string, hint: CheckHint | null | undefined, so
   } catch {
     return null;
   }
-  return { form: 'hinted', item, price, pays: null, paysCopied: false, stock: null, stockLimit: null, soldOut: false, fuzzy: false, incomplete: false };
+  return {
+    form: 'hinted',
+    item,
+    price,
+    pays: null,
+    paysCopied: false,
+    stock: null,
+    stockLimit: null,
+    soldOut: false,
+    fuzzy: false,
+    incomplete: false,
+    craftStated: false,
+    priceAmbiguous: false,
+  };
 }
 
 export interface LiveCheckDeps {
@@ -507,6 +587,11 @@ export interface LiveCheckDeps {
   market: Pick<MarketIndex, 'entryFor'>;
   /** The saved scrap.tf/items row: price, what scrap.tf pays, stock, limit, age. */
   scraptfList: Pick<ScraptfListCache, 'rowFor'>;
+  /**
+   * 0.7.4 (F41): the bank pages' newest saves, for which copy of a plain name is on sale (pricesFor). Omitted
+   * (tests, a service without bank stock): only the list rows decide.
+   */
+  bankStock?: Pick<BankStock, 'pricesFor'>;
 }
 
 export interface LiveCheck {
@@ -610,7 +695,9 @@ export function copiedSoldOut(parsed: Pick<ParsedCheck, 'soldOut' | 'stock'>): b
  * The price the check compares (spec F15/F16): the copied price first, else the saved list's price to
  * buy (scraptfListUsePrice: not sold out, not stock 0), else the newest typed or imported price. A
  * copied "Sold out" (or stock 0) row has no price at all: it is newer than anything stored. The list
- * prices plain copies only, so a painted check (`plain` false) never takes its price.
+ * prices plain copies only, so a painted check (`plain` false) never takes its price. 0.7.4: nor does a
+ * check of a copy the row is not proven to price (scraptfListCraftProven): a family row ('any', one row for
+ * every copy at its price) is shown (stock, what scrap.tf pays), never taken as this copy's cost.
  */
 export function chooseCheckPrice(a: {
   parsed: Pick<ParsedCheck, 'price' | 'soldOut' | 'stock'>;
@@ -627,7 +714,7 @@ export function chooseCheckPrice(a: {
     const { keys, scrap } = a.parsed.price;
     return { keys, scrapRaw: scrap, valueScrap: valueScrap(keys, scrap, K), source: 'clipboard', observedAt: a.now };
   }
-  const use = a.list && a.plain !== false ? scraptfListUsePrice(a.list) : null;
+  const use = a.list && a.plain !== false && scraptfListCraftProven(a.list) ? scraptfListUsePrice(a.list) : null;
   if (use && a.list) return { keys: use.keys, scrapRaw: use.scrap, valueScrap: valueScrap(use.keys, use.scrap, K), source: 'list', observedAt: a.list.observedAt };
   const p = a.stored;
   if (!p) return null;
@@ -682,14 +769,16 @@ export function createLiveCheck(deps: LiveCheckDeps): LiveCheck {
     try {
       const generic = anyEffectBaseOf(base);
       const other = generic !== null && generic !== base ? generic : null;
-      const books = deps.repo.buyListingsByBaseSkus(other ? [base, other] : [base]);
-      const own = books.get(base) ?? [];
-      const gen = other ? (books.get(other) ?? []) : [];
+      // 0.7.4 (F09/F14, F08): with every twin the item's book is filed under, as the Live market reads it.
+      const books = deps.repo.buyListingsByBaseSkus([...withTwins(deps.schema, other ? [base, other] : [base])]);
+      const bookOf = (b: string): readonly Listing[] => books.get(b) ?? [];
+      const own = mergedBook(base, bookBasesOf(deps.schema, base), bookOf);
+      const gen = other ? mergedBook(other, bookBasesOf(deps.schema, other), bookOf) : [];
       const obj = fromString(base);
       const ev = evaluateMarketBase({
         base,
         listings: gen.length > 0 ? [...own, ...gen] : own,
-        references: referencePrices(lookupReferences(deps.repo, base), K, now),
+        references: referencePrices(lookupReferences(deps.repo, base, deps.schema), K, now),
         isUnusual: obj.quality === 5 || (typeof obj.effect === 'number' && obj.effect > 0),
         settings,
         keyScrap: K,
@@ -704,7 +793,12 @@ export function createLiveCheck(deps: LiveCheckDeps): LiveCheck {
     }
   };
 
-  const evaluate = (parsed: ParsedCheck, source: CheckSource, now: UnixMs, id: number): CheckResult => {
+  /**
+   * `craftNote` (0.7.4, F41): CHECK_CRAFT_TWIN_NOTE or CHECK_CRAFT_UNSURE_NOTE when the saved data decided the copy (judge).
+   * `armedName` (0.7.4): for a hinted check answered by the Non-Craftable twin, the name of the item the user opened
+   * (the armed SKU), which the hinted note names; null: this copy's own name.
+   */
+  const evaluate = (parsed: ParsedCheck, source: CheckSource, now: UnixMs, id: number, craftNote: string | null = null, armedName: string | null = null): CheckResult => {
     const settings = deps.settings();
     const keyPrice = attempt<KeyPriceState | null>(() => deps.keyPrice(), null);
     // The value buildItemDetail prices the book at, so cost and revenue share one key price.
@@ -712,7 +806,8 @@ export function createLiveCheck(deps: LiveCheckDeps): LiveCheck {
     const obj = fromString(parsed.item.sku);
     const sku = fromObject(obj);
     const base = fromObject({ ...obj, paint: null });
-    // The list shows plain copies and is keyed by base SKU (a painted check reads its plain row).
+    // The list is keyed by base SKU (a painted check reads its plain row); 0.7.4: a copy with no row of its
+    // own reads its family row (match 'family'), for stock and pays only (chooseCheckPrice).
     const list = attempt(() => deps.scraptfList.rowFor(base, K), null);
     // item.detail {history:false, target:'plain'}: the stored book only, no PriceDB request.
     const detail = buildItemDetail({ repo: deps.repo, schema: deps.schema, sku, keyPrice, settings, now, snapshot: NO_SNAPSHOT, history: [], target: 'plain', scraptfList: list });
@@ -738,14 +833,40 @@ export function createLiveCheck(deps: LiveCheckDeps): LiveCheck {
 
     const revenue = detail.revenue;
     const revenueScrap = revenue?.revenueScrap ?? null;
-    const profitScrap = price !== null && revenueScrap !== null ? revenueScrap - price.valueScrap - frictionOf(settings.profit) : null;
+    const profitScrap = price !== null ? flipProfit(revenueScrap, price.valueScrap, settings.profit) : null;
+    // 0.8 (PC-1): what the profit took off, for the popup's breakdown.
+    const exitCosts = revenueScrap !== null ? exitCostsOf(revenueScrap, settings.profit) : null;
+    const verdict = checkVerdict(profitScrap, price, settings);
+    // 0.8 (PC-2): a flip only the revenue order's buyer makes, over the detail's own book (buyOrders, revenue.order).
+    const singleExit =
+      verdict === 'flip' && price !== null && revenue?.order
+        ? singleExitOf(revenueScrap, price.valueScrap, buyerDepthOf(exitOrdersOfSummaries(detail.buyOrders), revenue.order.listingId, settings.profit.useOrder).nextBuyer, settings.profit)
+        : null;
     const margin = profitScrap !== null && price !== null && price.valueScrap > 0 ? profitScrap / price.valueScrap : null;
-    const confidence = confidenceOf(base, revenue, settings, K, now);
+    // 0.7.4 (R14, F22/F70): the price against PriceDB, as the engine checks a cost: the item's own row (the
+    // detail's, lookupReferences of the base) and, only when the price is far under it, its craftability twin's,
+    // both age-gated (usableReferences). Flagged: capped at Low, noted, and never a flip notification.
+    const costNote =
+      price === null
+        ? null
+        : checkCostNote(price.valueScrap, usableReferences(detail.references, settings.profit.referenceMaxAgeMs, now).references.pricedb, () => {
+            const raw = attempt(() => lookupTwinReferences(deps.repo, base), null);
+            return raw === null ? null : usableReferences(referencePrices(raw, K, now), settings.profit.referenceMaxAgeMs, now).references.pricedb;
+          });
+    const scored = confidenceOf(base, revenue, settings, K, now);
+    const confidence = scored && costNote !== null && scored.value > LOW_CAP ? { value: LOW_CAP, level: confidenceLevel(LOW_CAP) } : scored;
     const notes = [
-      // F19: named from the item detail (the resolved item), never from the copied text.
-      parsed.form === 'hinted' ? checkHintedNote(detail.name) : null,
+      // F19: named from the item detail (the resolved item), never from the copied text. 0.7.4: the item the user
+      // opened, also when its Non-Craftable twin answers (armedName).
+      parsed.form === 'hinted' ? checkHintedNote(armedName ?? detail.name) : null,
+      // 0.7.4 (F41): which copy the saved scrap.tf data says it is, when the text did not.
+      craftNote,
+      // 0.7.4 (R14): the price is probably another copy's (fixed text, from PriceDB's numbers only).
+      costNote,
       parsed.fuzzy ? CHECK_FUZZY_NOTE : null,
       parsed.incomplete ? CHECK_INCOMPLETE_NOTE : null,
+      // 0.7.4 (F44): only a check the user asked for keeps such a price (judge drops it for the watcher).
+      parsed.priceAmbiguous && price?.source === 'clipboard' ? CHECK_BARE_REF_NOTE : null,
       copiedSoldOut(parsed) ? CHECK_SOLD_OUT_NOTE : null,
       otherCopy ? CHECK_EXTRAS_NOTE : null,
     ].filter((n): n is string => n !== null);
@@ -766,13 +887,80 @@ export function createLiveCheck(deps: LiveCheckDeps): LiveCheck {
       revenue,
       profitScrap,
       margin,
-      verdict: checkVerdict(profitScrap, price, settings),
+      verdict,
       confidence: confidence?.value ?? null,
       confidenceLevel: confidence?.level ?? null,
       links: detail.links,
       keyScrap: K,
       checkedAt: now,
+      exitCosts,
+      ...(singleExit ? { singleExit } : {}),
     };
+  };
+
+  /**
+   * 0.7.4 (F41): the prices the user's saved scrap.tf data has this very copy on sale at: its list row when the
+   * row is proven to price that copy (checkListCopyPrices; plain copies only, as the list prices them), and the
+   * bank pages' newest saves (deps.bankStock, painted cards by their paint). Local reads only; a failing read is
+   * no evidence.
+   */
+  const savedCopyPrices = (sku: string, craft: 'craftable' | 'uncraftable'): CheckCopyPrice[] => {
+    const base = canonicalBase(sku);
+    const plain = base !== null && base === attempt(() => fromObject(fromString(sku)), null);
+    const list = plain ? attempt(() => deps.scraptfList.rowFor(base), null) : null;
+    const bank = attempt(() => deps.bankStock?.pricesFor(sku) ?? [], []);
+    return [...checkListCopyPrices(list, craft), ...bank];
+  };
+
+  /** 0.7.4 (F41): the Non-Craftable twin to decide against, or null: the text said, or no twin applies (kits, 9258, Non-Craftable). */
+  const craftTwinFor = (parsed: ParsedCheck): string | null => {
+    if (parsed.craftStated) return null;
+    const obj = attempt(() => fromString(parsed.item.sku), null);
+    if (!obj || !obj.craftable || importKeysNonCraftable(obj.defindex)) return null;
+    return checkCraftTwinOf(parsed.item.sku);
+  };
+
+  /**
+   * 0.7.4 (R20): the item's /items row is a family row with something to buy (checkListFamilyOnSale): one row
+   * for every copy at its price, so scrap.tf has some copy, never known to be the Craftable one. Plain copies
+   * only, as the list prices them; a failing read is no evidence.
+   */
+  const familyOnSale = (sku: string): boolean => {
+    const base = canonicalBase(sku);
+    const plain = base !== null && base === attempt(() => fromObject(fromString(sku)), null);
+    return plain && checkListFamilyOnSale(attempt(() => deps.scraptfList.rowFor(base), null));
+  };
+
+  /**
+   * The parsed check judged as the copy it is. 0.7.4 (F44): from the watcher a number without a unit is no
+   * price, so the item is checked alone, as a copy of its name would be. 0.7.4 (F41): a Craftable item whose
+   * text did not say (craftStated false) is checked as the copy the saved scrap.tf data matches (checkCraftCopy,
+   * checkDecideCopy): the Craftable copy as before; its Non-Craftable twin with CHECK_CRAFT_TWIN_NOTE (Save price
+   * and Bought it then write the twin's SKU); undecided, both copies with CHECK_CRAFT_UNSURE_NOTE and the one that
+   * sells for less answers (checkWorseCopy), never the Craftable book alone. 0.7.4 (R20, R21): a copied price no
+   * saved copy is at, or only a family /items row, is undecided too when the twin trades, unless every saved
+   * Craftable price is a card of a bank page that never lists Non-Craftable copies (CHECK_NONCRAFT_BANKS: a
+   * repriced /buy/hats card is still the Craftable copy). A hinted check's note names the armed item either way.
+   */
+  const judge = (input: ParsedCheck, source: CheckSource, now: UnixMs, id: number): CheckResult => {
+    const parsed = input.priceAmbiguous && source === 'watch' ? { ...input, price: null, priceAmbiguous: false } : input;
+    const twinSku = craftTwinFor(parsed);
+    if (twinSku === null) return evaluate(parsed, source, now, id);
+    const choice = checkCraftCopy({
+      price: parsed.price,
+      craftable: savedCopyPrices(parsed.item.sku, 'craftable'),
+      twin: savedCopyPrices(twinSku, 'uncraftable'),
+      familyOnSale: familyOnSale(parsed.item.sku),
+    });
+    // Only the SKU is read by the evaluation; the name and category come from the twin's item detail.
+    const asTwin = (): ParsedCheck => ({ ...parsed, item: { ...parsed.item, sku: twinSku, skuObject: fromString(twinSku) } });
+    // 0.7.4: F19's note names the item the user opened (the armed Craftable SKU), not the twin that answers.
+    const armedName = (copy: 'craftable' | 'twin'): string | null => {
+      if (copy !== 'twin' || parsed.form !== 'hinted') return null;
+      const n = attempt<unknown>(() => deps.schema.nameForSku(parsed.item.sku), null);
+      return typeof n === 'string' && n.trim() !== '' ? n : parsed.item.sku;
+    };
+    return checkDecideCopy(choice, (copy, note) => evaluate(copy === 'twin' ? asTwin() : parsed, source, now, id, note, armedName(copy)));
   };
 
   const kept = (result: CheckResult): CheckResult => {
@@ -791,14 +979,14 @@ export function createLiveCheck(deps: LiveCheckDeps): LiveCheck {
         // source matters: the watcher sees copies from any app, so it takes only a price written as one.
         const hinted = noItem ? hintedCheck(text, hint, source) : null;
         if (hinted) {
-          const result = evaluate(hinted, source, now, id);
+          const result = judge(hinted, source, now, id);
           if (result.status === 'item') return kept(result);
         }
         // Names cannot resolve before the schema has loaded; say so instead of "not an item".
         const loading = noItem && !attempt(() => deps.schema.isLoaded(), true);
         return blankCheckResult(parsed.status, loading ? CHECK_SCHEMA_LOADING_REASON : parsed.reason, source, now, id, keyScrapOf());
       }
-      return kept(evaluate(parsed.parsed, source, now, id));
+      return kept(judge(parsed.parsed, source, now, id));
     },
     recent: () => ring.map((r) => structuredClone(r)),
   };

@@ -15,6 +15,9 @@ export const ruleFilterSchema = z.object({
   qualities: z.array(z.number().int()).max(30).optional(),
   craftable: z.boolean().nullable().optional(),
   australium: z.boolean().nullable().optional(),
+  // 0.7.4 (F79): a backup without them keeps "either".
+  festive: z.boolean().nullable().optional(),
+  elevated: z.boolean().nullable().optional(),
   killstreak: z.array(z.number().int().min(0).max(3)).max(4).optional(),
   hasEffect: z.boolean().nullable().optional(),
   defindexes: z.array(z.number().int().min(0)).max(500).optional(),

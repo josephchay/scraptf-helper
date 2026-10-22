@@ -7,7 +7,7 @@
 import { z } from 'zod';
 import { categorize } from '../../shared/categories';
 import { itemUrlParts } from '../../shared/itemUrl';
-import { baseSku, canonical, fromObject, fromString, isValidSku, looksLikeSku } from '../../shared/sku';
+import { baseSku, canonical, fromObject, fromString, isValidSku, looksLikeSku, toLegacy } from '../../shared/sku';
 import type { Category, ConnState, ConnectorHealth, ItemSuggestion, ResolvedItem, SkuObject, UnixMs } from '../../shared/types';
 import { KILLSTREAK_NAMES, QUALITY_NAMES } from '../../shared/types';
 import type {
@@ -21,6 +21,7 @@ import type {
 } from '../contracts';
 import { HostBlockedError, HttpStatusError, NetworkPausedError, RateLimitedError } from '../net/errors';
 import {
+  CRAFT_NUMBER_DROPPED,
   RETIRED_KEYS,
   SchemaIndex,
   emptyExtras,
@@ -453,6 +454,7 @@ export function createSchemaService(deps: ServiceDeps): SchemaService {
     index = new SchemaIndex(data);
     loadedAt = at;
     nameCache.clear();
+    bookCache.clear();
     searchEntries = null;
   };
 
@@ -733,22 +735,76 @@ export function createSchemaService(deps: ServiceDeps): SchemaService {
       return resolved(obj, parsed.exact ? 'exact' : 'fuzzy', warnings);
     }
 
-    let learnedSku: string | null = null;
-    try {
-      learnedSku = repo.findSkuByBptfName(t);
-    } catch {
-      learnedSku = null;
+    // 0.7.4 (F15/F42/F72): the schema's exact reading first, the rule the import keys cards by (pickDefindex:
+    // the Upgradeable weapon, the Genuine-only copy ...). Names learned from backpack.tf only when it has none:
+    // bp.tf files one name under defindex twins (18 and 205), and the shortest or newest of them was another
+    // SKU than the import's, an answer that moved as the feed learned names.
+    const parsed = index ? index.parseName(t) : null;
+    if (parsed?.exact) {
+      const craft = reconcileCraftNumber(parsed.obj, parsed.warnings);
+      return resolved(craft.obj, 'exact', craft.warnings);
     }
-    if (learnedSku && looksLikeSku(learnedSku)) {
-      const obj = fromString(learnedSku);
-      const r = resolved(obj, 'exact', []);
-      return { ...r, name: nameForSku(learnedSku) };
-    }
+    const learned = learnedFor(t);
+    if (learned) return learned;
 
-    if (!index) return null;
-    const parsed = index.parseName(t);
     if (!parsed) return null;
-    return resolved(parsed.obj, parsed.exact ? 'exact' : 'fuzzy', parsed.warnings);
+    const craft = reconcileCraftNumber(parsed.obj, parsed.warnings);
+    return resolved(craft.obj, 'fuzzy', craft.warnings);
+  };
+
+  /**
+   * 0.7.4 (F15/F42/F72): a name the schema cannot read exactly, by the SKUs backpack.tf filed it under. One is
+   * taken as is; of several (defindex twins), the one the schema's own rule picks, else the first by SKU,
+   * with a warning, so the answer never depends on which listing the feed updated last.
+   */
+  const learnedFor = (t: string): ResolvedItem | null => {
+    let skus: string[];
+    try {
+      skus = repo.findSkusByBptfName(t).filter((s) => looksLikeSku(s) && isValidSku(s));
+    } catch {
+      skus = [];
+    }
+    if (skus.length === 0) return null;
+    let pick = skus[0]!;
+    const warnings: string[] = [];
+    if (skus.length > 1) {
+      // Twins of one book (a defindex or a kit target apart): the book's canonical SKU, pickDefindex's choice.
+      const canon = bookOf(skus[0]!).canonical;
+      if (skus.includes(canon) && skus.every((s) => bookOf(s).canonical === canon)) pick = canon;
+      else {
+        const objs = skus.map((s) => fromString(s));
+        const first = objs[0]!;
+        const sameButDefindex = objs.every((o) => fromObject({ ...o, defindex: first.defindex }) === fromObject(first));
+        const d = index && sameButDefindex ? index.pickDefindex(objs.map((o) => o.defindex), first.paintkit, first.quality) : null;
+        const hit = d !== null ? skus.find((s, i) => objs[i]!.defindex === d) : undefined;
+        if (hit !== undefined) pick = hit;
+      }
+      warnings.push(`backpack.tf lists this name under ${skus.length} items; using ${pick}`);
+    }
+    const r = resolved(fromString(pick), 'exact', warnings);
+    return { ...r, name: nameForSku(pick) };
+  };
+
+  /**
+   * 0.7.4 (F46): a "#N" after an item that is no crate is a craft or medal number, which no backpack.tf order
+   * carries (bp.tf keys a numbered medal as the plain item). Kept only when something prices that exact SKU
+   * (a PriceDB row such as "160;3;n4", a learned name, a listing); otherwise the plain item, with a warning.
+   */
+  const reconcileCraftNumber = (obj: SkuObject, warnings: readonly string[]): { obj: SkuObject; warnings: string[] } => {
+    if (obj.craftnumber === null) return { obj, warnings: [...warnings] };
+    const numbered = fromObject(obj);
+    const priced = ((): boolean => {
+      try {
+        return repo.getPricedb(numbered) !== null || repo.getPricedb(toLegacy(numbered)) !== null || repo.getBptfName(numbered) !== null || repo.listingsByBaseSku(baseSku(numbered), 'buy').length > 0;
+      } catch {
+        return false;
+      }
+    })();
+    if (priced) return { obj, warnings: [...warnings] };
+    return {
+      obj: { ...obj, craftnumber: null },
+      warnings: [...warnings, `"#${obj.craftnumber}" ${CRAFT_NUMBER_DROPPED}; read as the plain item, which backpack.tf keys it as`],
+    };
   };
 
   // ----- search -----
@@ -800,8 +856,10 @@ export function createSchemaService(deps: ServiceDeps): SchemaService {
     // A complete name with prefixes ("burning flames team captain") resolves to one exact SKU.
     if (index && query.includes(' ')) {
       const parsed = index.parseName(q);
-      if (parsed?.exact && !isPlainItem(index, parsed.obj)) {
-        const sku = fromObject(parsed.obj);
+      // 0.7.4 (F46): the SKU resolve() gives for the same text (no stray craft number), offered even when plain.
+      const rec = parsed?.exact ? reconcileCraftNumber(parsed.obj, []).obj : null;
+      if (parsed && rec && (!isPlainItem(index, rec) || rec !== parsed.obj)) {
+        const sku = fromObject(rec);
         offer({ sku, name: nameForSku(sku), source: 'schema', rank: -1 });
       }
     }
@@ -830,10 +888,107 @@ export function createSchemaService(deps: ServiceDeps): SchemaService {
       }
     }
 
-    return [...hits.values()]
+    // 0.7.4 (F15): defindex twins backpack.tf files one name under ("Strange Australium Sniper Rifle" as 14 and
+    // 201) are one suggestion: the book's canonical SKU (the one resolve() gives), else the best-ranked twin.
+    const byBook = new Map<string, Hit>();
+    for (const h of hits.values()) {
+      const book = looksLikeSku(h.sku) ? bookOf(h.sku).canonical : h.sku;
+      const prev = byBook.get(book);
+      if (prev === undefined) {
+        byBook.set(book, h);
+        continue;
+      }
+      const better = (h.sku === book) !== (prev.sku === book) ? h.sku === book : h.rank < prev.rank;
+      byBook.set(book, { ...(better ? h : prev), rank: Math.min(h.rank, prev.rank) });
+    }
+    return [...byBook.values()]
       .sort((a, b) => a.rank - b.rank || a.name.length - b.name.length || a.name.localeCompare(b.name))
       .slice(0, lim)
       .map((h) => ({ sku: h.sku, name: h.name, category: categoryForSku(h.sku), source: h.source }));
+  };
+
+  // ----- 0.7.4 book twins -----
+
+  /**
+   * 0.7.4 (F08/F43/F69): an unusual skin's quality forms, canonical first: Unusual plus the effect (strange as
+   * quality2), the feed's Strange-primary form of a strange one, and the 0.7.3 Decorated form rows may still carry.
+   * 0.7.4 (R19): a strange skin or War Paint without an effect is one bp.tf item ("Strange Pumpkin Pied War Paint
+   * (Field-Tested)", its order id md5 of that name) keyed Strange 11 by the resolver, the import and most buyers,
+   * and Decorated 15 plus strange by some: both forms, the 11 one canonical. A Decorated skin that is not strange
+   * keeps its own form.
+   */
+  const skinForms = (o: SkuObject): { quality: number; quality2: number | null }[] => {
+    if (o.paintkit !== null && o.effect === null && ((o.quality === 11 && o.quality2 === null) || (o.quality === 15 && o.quality2 === 11))) {
+      return [
+        { quality: 11, quality2: null },
+        { quality: 15, quality2: 11 },
+      ];
+    }
+    if (o.paintkit === null || o.effect === null || (o.quality !== 5 && o.quality !== 11 && o.quality !== 15)) return [{ quality: o.quality, quality2: o.quality2 }];
+    const strange = o.quality === 11 || o.quality2 === 11;
+    return strange
+      ? [
+          { quality: 5, quality2: 11 },
+          { quality: 11, quality2: null },
+          { quality: 15, quality2: 11 },
+        ]
+      : [
+          { quality: 5, quality2: null },
+          { quality: 15, quality2: null },
+        ];
+  };
+
+  const BOOK_BASES_MAX = 64;
+  const BOOK_CACHE_MAX = 100_000;
+  const bookCache = new Map<string, { canonical: string; bases: readonly string[] }>();
+
+  /**
+   * 0.7.4: SchemaService.bookBases / bookBase, memoised per index. 0.7.4 (R17): a tool's target is twinned only
+   * with targets a SKU can hold: the Upgradeable Bat's (190) twin is the stock Bat, defindex 0, and fromObject
+   * writes no td-0, so "Bat kit" twinned with the targetless kit (another item's book, which a Bat kit
+   * snapshot then reconciled away). 0.7.4 (R18): a targeted strangifier and a Collector's Chemistry Set are
+   * twinned across their item_name's defindexes (SchemaIndex.toolBookTwins).
+   */
+  const bookOf = (base: string): { canonical: string; bases: readonly string[] } => {
+    const b = String(base ?? '').trim();
+    if (!index || !looksLikeSku(b)) return { canonical: b, bases: [b] };
+    const ix = index;
+    // Most items have no twin: no paintkit, no target, no output, a defindex of its own (every Live market rebuild asks).
+    if (!b.includes(';pk') && !b.includes(';td-') && !b.includes(';od-') && ix.bookTwinDefindexes(Number(b.slice(0, b.indexOf(';'))), null).length < 2) {
+      return { canonical: b, bases: [b] };
+    }
+    const hit = bookCache.get(b);
+    if (hit) return hit;
+    const o = fromString(b);
+    const targeted = o.target !== null && isTargetedTool(ix, o.defindex);
+    const tool = ix.toolBookTwins(o);
+    const defs = tool?.defs ?? ix.bookTwinDefindexes(o.defindex, o.paintkit);
+    // A td- of 0 would be dropped (no target at all): never a twin target, nor the canonical one.
+    const targets = targeted ? ix.bookTwinDefindexes(o.target!, null).filter((t) => t > 0) : [o.target];
+    const canonicalTarget = targeted ? ix.bookDefindex(o.target!, null, null, null) : o.target;
+    const forms = skinForms(o);
+    const canonical = fromObject({
+      ...o,
+      ...forms[0]!,
+      defindex: tool?.canonical ?? ix.bookDefindex(o.defindex, o.paintkit, forms[0]!.quality, o.crateseries),
+      target: canonicalTarget !== null && canonicalTarget > 0 ? canonicalTarget : o.target,
+    });
+    const out = new Set<string>([canonical, b]);
+    for (const d of defs) {
+      for (const t of targets) {
+        for (const f of forms) {
+          if (out.size >= BOOK_BASES_MAX) break;
+          const twin = fromObject({ ...o, ...f, defindex: d, target: t });
+          // Backstop: a targeted tool never twins into its targetless form, another item (or none).
+          if (o.target !== null && !twin.includes(';td-')) continue;
+          out.add(twin);
+        }
+      }
+    }
+    const entry = { canonical, bases: Object.freeze([...out]) };
+    if (bookCache.size >= BOOK_CACHE_MAX) bookCache.clear();
+    bookCache.set(b, entry);
+    return entry;
   };
 
   // ----- health -----
@@ -871,5 +1026,11 @@ export function createSchemaService(deps: ServiceDeps): SchemaService {
     paintkitName: (id) => index?.paintkitName(id) ?? null,
     paintkitIdByName: (name) => index?.paintkitIdByName(name) ?? null,
     paintkits: () => (index ? [...index.paintkitList] : []),
+    bookBases: (base) => bookOf(base).bases,
+    bookBase: (base) => bookOf(base).canonical,
+    isTargetlessTool: (sku) => {
+      const t = String(sku ?? '').trim();
+      return index !== null && looksLikeSku(t) && isTargetlessTool(index, fromString(t));
+    },
   };
 }

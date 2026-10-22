@@ -34,7 +34,7 @@ import { DEFAULT_SETTINGS, mergeSettings } from '../../src/shared/defaults';
 import { SCRAPTF_BANKS } from '../../src/shared/links';
 import type { PushContract, PushEvent } from '../../src/shared/rpc';
 import { SCRAPTF_CHANGES_CSV_COLUMNS } from '../../src/shared/scraptfHistory';
-import type { BankStockResult, ImportResult, Listing, MarketListResult, MarketRow, ScraptfChangeEvent, ScraptfItemHistory, Settings } from '../../src/shared/types';
+import type { BankStockResult, ImportResult, Listing, MarketListResult, MarketRow, OppListResult, ScraptfChangeEvent, ScraptfItemHistory, Settings } from '../../src/shared/types';
 import { FakeSocket } from '../bptf/helpers';
 import { makeListing } from '../domain/helpers';
 
@@ -403,6 +403,69 @@ describe('scrap.tf history, wired end to end (F20)', () => {
     expect(warnings.join('\n')).not.toMatch(/https?:|\/buy\/|example|Bill|126;/);
 
     // Nothing left this process after start: no scrap.tf, no anything (R1).
+    expect(requested).toEqual([]);
+  }, 60_000);
+
+  // 0.8 (T3-T7, LC-4, LC-5): buy_hats.html and two later saves of it (Non-Craftable Bill's Hat repriced down twice
+  // with its stock unchanged, B.A.S.E. Jumper and then Genuine Bill's Hat gone): the verdict and the cycles reach the
+  // drawer, the bank stock rows (Dropping), the Live market and Health, from the saves in memory; nothing is requested.
+  it('carries the buy timing and the cycles from three saves to every surface, offline', async () => {
+    const h = await setup();
+    await waitFor('the Live market build', async () => {
+      const m = await h.call<MarketListResult>('market.list', {});
+      return !m.stats.building && m.stats.lastFullAt !== null && m.rows.some((r) => r.sku === NON_CRAFT && r.buyerCount === 3);
+    });
+    const reprice = (html: string, from: [string, string], to: [string, string]): string => {
+      const c = card(html, 'C14');
+      return swap(html, c, c.replace(`data-item-value="${from[0]}"`, `data-item-value="${to[0]}"`).replace(`>${from[1]}<`, `>${to[1]}<`));
+    };
+    const second = swap(reprice(HATS, ['9', '1 ref'], ['8', '0.89 ref']), card(HATS, 'C13'), '');
+    const third = swap(reprice(second, ['8', '0.89 ref'], ['7', '0.78 ref']), card(second, 'C36'), '');
+    await h.importPage(HATS, NOW - 5 * HOUR);
+    await h.importPage(second, NOW - 3 * HOUR);
+    await h.importPage(third, NOW - HOUR);
+
+    // The drawer: the copy's run with its two drops, and a verdict (whatever it is, with its why).
+    const item = await h.call<ScraptfItemHistory>('scraptf.itemHistory', { sku: NON_CRAFT });
+    expect(item.cycles).toMatchObject({ runsTotal: 1, returns: 0, dropAts: [NOW - 3 * HOUR, NOW - HOUR] });
+    expect(item.timing).toMatchObject({ bank: 'hats', key: bankStockKey(NON_CRAFT, ''), dropsThisRun: 2, lastSeenAt: NOW - HOUR });
+    expect(item.timing!.why).toEqual(expect.any(String));
+    expect(item.timing!.steps.map((s) => [s.fromScrap, s.toScrap])).toEqual([
+      [9, 8],
+      [8, 7],
+    ]);
+
+    // Bank stock: the same verdict on the row, the Dropping chip, and the bank's turnover.
+    const stock = await h.call<BankStockResult>('scraptf.bankStock', { bank: 'hats', limit: 2000 });
+    const row = stock.rows.find((r) => r.key === bankStockKey(NON_CRAFT, ''))!;
+    expect(row.timing).toMatchObject({ verdict: item.timing!.verdict, why: item.timing!.why, dropsThisRun: 2 });
+    expect(stock.counts.dropping).toBe(1);
+    const dropping = await h.call<BankStockResult>('scraptf.bankStock', { bank: 'hats', filter: 'dropping' });
+    expect(dropping.rows.map((r) => r.sku)).toEqual([NON_CRAFT]);
+    expect(stock.turnover).toMatchObject({ bank: 'hats', reason: 'not-enough-data' });
+    const gone = await h.call<BankStockResult>('scraptf.bankStock', { bank: 'hats', filter: 'gone' });
+    expect(gone.rows.map((r) => r.sku)).toEqual([GENUINE]);
+    expect(gone.rows[0]).not.toHaveProperty('timing');
+
+    // The Live market's page: the listed copy's verdict, as the bank stock row has it.
+    const market = await h.call<MarketListResult>('market.list', { limit: 2000 });
+    expect(market.rows.find((r) => r.sku === NON_CRAFT)!.scraptfTiming).toEqual(row.timing);
+
+    // Opportunities: the imported price's row carries its copy's verdict (judged against the row's own Sells for).
+    const opp = await waitFor('the imported price as an opportunity', async () => {
+      const list = await h.call<OppListResult>('opps.list', { limit: 500 });
+      return list.rows.find((o) => o.sku === NON_CRAFT && o.inputKind === 'import' && o.costScrap === 7);
+    });
+    expect(opp.timing).toMatchObject({ bank: 'hats', key: bankStockKey(NON_CRAFT, ''), dropsThisRun: 2 });
+
+    // Health: the hats bank's asset-id stability. Every single card keeps its data-id across the three saves (two
+    // looks apart each), over 50 pairs: stable, so the drawer may say 'the same item came back'.
+    const health = await h.call<{ scraptfAssetIds?: { bank: string; pairs: number; same: number; stable: boolean }[] }>('health.get');
+    expect(health.scraptfAssetIds).toEqual([expect.objectContaining({ bank: 'hats', stable: true })]);
+    expect(health.scraptfAssetIds![0]!.pairs).toBeGreaterThanOrEqual(50);
+    expect(health.scraptfAssetIds![0]!.same).toBe(health.scraptfAssetIds![0]!.pairs);
+    expect(item.cycles!.assetIdsStable).toBe(true);
+
     expect(requested).toEqual([]);
   }, 60_000);
 });

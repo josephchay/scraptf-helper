@@ -296,6 +296,9 @@ describe('the copy', () => {
     const complete = "as 'Webpage, Complete'";
     expect(bankFreshness(null, T0).title).toContain(`save it (Ctrl+S) ${complete} into your watch folder`);
     expect(ALL_ITEMS_TIP).toContain(`save scrap.tf/items (Ctrl+S) ${complete} into your watch folder`);
+    // 0.7.4 (R38): a list save prices only the rows that show which copy they are, never every price.
+    expect(ALL_ITEMS_TIP).not.toMatch(/every scrap\.tf price|price every item/);
+    expect(ALL_ITEMS_TIP).toContain('only rows that show which copy they are become prices');
     const notOnList = listPaysCell({ scraptfPaysScrap: null, scraptfStock: null, scraptfStockLimit: null, scraptfFull: false, scraptfListAt: null, revenueScrap: 9 }, null, T0);
     expect(notOnList.title).toContain(`save scrap.tf/items (Ctrl+S) ${complete} into your watch folder`);
     expect(BANK_SAVE_TIP).toContain(`${SAVE_MODE_ALT}') ${SAVE_MODE_REASON}`);

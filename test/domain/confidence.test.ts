@@ -56,10 +56,16 @@ describe('scoreConfidence (brief §5.7 table)', () => {
     expect(delta({ order: order(130, { isBot: false, uaLastPulse: pulse(MIN) }) })).toBe(0);
   });
 
-  it('+5 when the buyer is online', () => {
-    expect(delta({ order: order(130, { userOnline: true }) })).toBe(5);
-    expect(delta({ order: order(130, { userOnline: false }) })).toBe(0);
-    expect(delta({ order: order(130, { userOnline: null }) })).toBe(0);
+  it('+5 when the buyer is online, as of an event in the last 2 h (0.7.4)', () => {
+    // Within 2 h the order also gets the +10 for a recent confirmation.
+    expect(delta({ order: order(130, { userOnline: true, lastEventAt: T0 - 2 * HOUR }) })).toBe(15);
+    expect(delta({ order: order(130, { userOnline: false, lastEventAt: T0 - 2 * HOUR }) })).toBe(10);
+    expect(delta({ order: order(130, { userOnline: null, lastEventAt: T0 - 2 * HOUR }) })).toBe(10);
+    // The flag is as old as the order's last event: 3 h (the helper's default) or 5 days says nothing about now.
+    expect(delta({ order: order(130, { userOnline: true }) })).toBe(0);
+    const old = scoreConfidence(base({ order: order(130, { userOnline: true, lastEventAt: T0 - 5 * 24 * HOUR }) }));
+    expect(old.score).toBe(35);
+    expect(old.reasons).not.toContain('+5 Buyer is online');
   });
 
   it('+10 when the order was confirmed within 2 h', () => {
@@ -75,7 +81,7 @@ describe('scoreConfidence (brief §5.7 table)', () => {
 
     const strong = order(100, { lastEventAt: T0 - 25 * HOUR, isBot: true, uaLastPulse: Math.floor(T0 / 1000), userOnline: true });
     const other = order(100, { steamid: 'other' });
-    // 50 + 20 + 5 - 15 + 10 (2 buyers) + 10 (agrees) = 80 -> capped at 69
+    // 50 + 20 - 15 + 10 (2 buyers) + 10 (agrees) = 75 -> capped at 69 (0.7.4: no +5 online from a 25 h old event)
     const capped = scoreConfidence(base({ order: strong, eligible: [strong, other], revenueScrap: 100 }));
     expect(capped.score).toBe(69);
     expect(capped.level).toBe('medium');

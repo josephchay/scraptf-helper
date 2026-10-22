@@ -46,6 +46,7 @@ export { createScraptfListCache, type ScraptfListCache, type ScraptfListCacheDep
 export {
   BANK_STOCK_NOTIFY_META_KEY,
   BANK_STOCK_RETRY_MS,
+  BANK_STOCK_TIMING_META_KEY,
   bankStockCsv,
   createBankStock,
   createNewFlipNotifier,
@@ -57,6 +58,8 @@ export {
   type NewFlipNotifier,
   type NewFlipNotifierDeps,
 } from './bankStock';
+
+export { createWatchCache, type WatchCache, type WatchCacheDeps } from './watches';
 
 export {
   SCRAPTF_HISTORY_RETRY_MS,

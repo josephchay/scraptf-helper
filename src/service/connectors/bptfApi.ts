@@ -7,7 +7,8 @@ import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import type { BptfApi, HttpRequestOptions, HttpResponse, SchemaService, ServiceDeps, SnapshotResult } from '../contracts';
 import type { CommunityRow, ConnState, ConnectorHealth, KeyPriceQuote, Listing, SecretName, UnixMs, UnixSec } from '../../shared/types';
-import { baseSku, looksLikeSku } from '../../shared/sku';
+import { baseSku, fromString, looksLikeSku } from '../../shared/sku';
+import { orderSeenRecently } from '../../shared/buyerSeen';
 import { scrapToRef } from '../../shared/currency';
 import { BPTF_API_ACCESS_URL } from '../../shared/links';
 import { HttpStatusError, NetworkPausedError, RateLimitedError, scrubText } from '../net';
@@ -21,6 +22,11 @@ export const USERS_URL = `${BPTF_API_BASE}/users/info/v1`;
 
 export const SNAPSHOT_CACHE_MS = 10 * 60_000;
 export const SNAPSHOT_CACHE_MAX = 500;
+/**
+ * 0.7.4 (F51): bp.tf's v1 snapshot returns at most this many listings per side (best first): no snapshot in
+ * the user's data ever held more, while feed-only books hold up to 85 buy orders. A full side is a page.
+ */
+export const SNAPSHOT_SIDE_PAGE = 30;
 /** After a 404/410 the endpoint is probed again at most once per this interval. */
 export const SNAPSHOT_REPROBE_MS = 24 * 60 * 60_000;
 export const USERS_BATCH_SIZE = 100;
@@ -116,6 +122,26 @@ function toSec(v: unknown): UnixSec | null {
   return n > 1e12 ? Math.floor(n / 1000) : Math.floor(n);
 }
 
+/**
+ * 0.7.4 (F51): raw snapshot rows per side, mapped or not (bp.tf's page counts every row it returned). The
+ * intent is read as listingFromSnapshot reads it ('buy'/'sell', 0/1); a row whose intent cannot be read
+ * counts on both sides, so it can only make a side look full (reconciled more carefully), never complete.
+ */
+function rawSides(raws: readonly unknown[]): { buy: number; sell: number } {
+  let buy = 0;
+  let sell = 0;
+  for (const raw of raws) {
+    const i = isRecord(raw) ? raw['intent'] : undefined;
+    if (i === 'buy' || i === 0 || i === '0') buy++;
+    else if (i === 'sell' || i === 1 || i === '1') sell++;
+    else {
+      buy++;
+      sell++;
+    }
+  }
+  return { buy, sell };
+}
+
 /** A ban flag: 1/true/"1", a non-empty array, or a ban object such as `{end, reason}`. */
 function truthy(v: unknown): boolean {
   if (v === undefined || v === null || v === false || v === 0 || v === '0' || v === '') return false;
@@ -199,6 +225,27 @@ export function alternateTheName(name: string): string | null {
   if (/^The\s+\S/i.test(n)) return n.replace(/^The\s+/i, '');
   if (n.length === 0) return null;
   return `The ${n}`;
+}
+
+/**
+ * 0.7.4 (F74): the one other spelling of a snapshot name worth a second call when the first came back empty.
+ * A leading "The" is dropped (unless the item's effect name itself starts with it). One is added only where
+ * backpack.tf writes it: before a plain Unique item ("The Team Captain", "The Festivized Wrangler", a crate),
+ * and after "Non-Craftable " for a festivized one ("Non-Craftable The Festivized Blutsauger"). Any other name
+ * (an effect, a paintkit, a quality, a killstreak tier, a target) never takes one: no second call.
+ */
+export function bptfNameVariant(name: string, sku: string, effectName: string | null = null): string | null {
+  const n = name.trim();
+  if (n.length === 0) return null;
+  if (/^The\s+\S/i.test(n)) return effectName !== null && /^The\s/i.test(effectName.trim()) ? null : n.replace(/^The\s+/i, '');
+  if (!looksLikeSku(sku)) return `The ${n}`;
+  const o = fromString(baseSku(sku));
+  const plain =
+    o.quality === 6 && o.effect === null && o.killstreak === 0 && !o.australium && o.paintkit === null && o.wear === null && o.quality2 === null && o.target === null && o.output === null && o.tradable;
+  if (!plain) return null;
+  if (o.craftable) return `The ${n}`;
+  if (o.festive && /^Non-Craftable\s+(?!The\s)/i.test(n)) return n.replace(/^Non-Craftable\s+/i, 'Non-Craftable The ');
+  return null;
 }
 
 function responseMessage(res: HttpResponse): string {
@@ -433,6 +480,7 @@ export function createBptfApi(deps: ServiceDeps & { schema: SchemaService }): Bp
     createdAt: UnixSec | null;
     listings: Listing[];
     rawCount: number;
+    sides: { buy: number; sell: number };
   }
 
   /** `sku` is the SKU the name was resolved from; it fills SKU fields v1 attributes lack (recipe outputs). */
@@ -456,10 +504,14 @@ export function createBptfApi(deps: ServiceDeps & { schema: SchemaService }): Bp
       const l = listingFromSnapshot(raw, schema, now, usedName, mapStats, sku);
       if (l) listings.push(l);
     }
-    return { name: usedName, createdAt: toSec(parsed.data.createdAt), listings, rawCount: raws.length };
+    return { name: usedName, createdAt: toSec(parsed.data.createdAt), listings, rawCount: raws.length, sides: rawSides(raws) };
   };
 
   const resolveName = (sku: string): { name: string; learned: boolean } => {
+    // 0.7.4 (F74): a kit or tool without its target ("Kit", "The Kit") names no item anyone lists: no call.
+    if (safe(() => schema.isTargetlessTool?.(baseSku(sku)) === true, false)) {
+      throw new Error(`${sku} is a kit or tool without its target item; backpack.tf has no listings for it`);
+    }
     const fromFeed =
       safe(() => repo.getBptfName(sku)?.name ?? null, null) ?? safe(() => repo.getBptfName(baseSku(sku))?.name ?? null, null);
     if (fromFeed && fromFeed.trim() !== '') return { name: fromFeed.trim(), learned: true };
@@ -483,7 +535,9 @@ export function createBptfApi(deps: ServiceDeps & { schema: SchemaService }): Bp
   const snapshotUncached = async (sku: string, name: string, learned: boolean, priority: 'user' | 'background'): Promise<SnapshotResult> => {
     let got = await fetchSnapshot(name, sku, priority);
     if (got.rawCount === 0) {
-      const alt = alternateTheName(name);
+      // 0.7.4 (F74): only a spelling backpack.tf can use costs a second call.
+      const effect = safe(() => fromString(baseSku(sku)).effect, null);
+      const alt = bptfNameVariant(name, sku, effect !== null ? safe(() => schema.effectName(effect), null) : null);
       if (alt) {
         const second = await fetchSnapshot(alt, sku, priority);
         if (second.rawCount > 0) {
@@ -497,7 +551,7 @@ export function createBptfApi(deps: ServiceDeps & { schema: SchemaService }): Bp
         }
       }
     }
-    const result: SnapshotResult = { name: got.name, createdAt: got.createdAt, listings: got.listings };
+    const result: SnapshotResult = { name: got.name, createdAt: got.createdAt, listings: got.listings, sides: got.sides };
     remember(name, result);
     safe(() => repo.setSnapshotAt(sku, clock.now()), undefined);
     return result;
@@ -508,17 +562,25 @@ export function createBptfApi(deps: ServiceDeps & { schema: SchemaService }): Bp
    * (440_<steamid>_<md5(name)>, 440_<assetid>) and core upserts them over the
    * stored rows. Keep what the feed learned about the user so a snapshot never
    * clears a ban flag (§5.2) or blanks names; a later feed update still can.
-   * Runs on every call (cached results too), against the rows stored right now.
+   * 0.7.4 (F23): the online flag only from a feed row ('ws') whose last event is
+   * within ORDER_CONFIRMED_MS. Presence is a moment's state the snapshot did not
+   * observe, and the snapshot stamps the row as seen now, so a days-old "online"
+   * would read as current; such a row keeps the snapshot's own (null, unknown).
+   * A row a snapshot already stored (origin 'snapshot', stamped at that snapshot)
+   * never passes the flag on: its recent stamp is the snapshot's, not the feed's,
+   * so a carried flag lasts at most until the next snapshot (a feed event sets it
+   * afresh). Runs on every call (cached results too), against the rows stored now.
    */
   const withStoredUserData = (result: SnapshotResult): SnapshotResult => {
     let changed = false;
+    const now = clock.now();
     const listings = result.listings.map((l) => {
       const old = safe(() => repo.getListing(l.id), null);
       if (!old || old.steamid !== l.steamid) return l;
       const merged: Listing = {
         ...l,
         userBanned: l.userBanned || old.userBanned,
-        userOnline: l.userOnline ?? old.userOnline,
+        userOnline: l.userOnline ?? (old.origin === 'ws' && orderSeenRecently(old.lastEventAt, now) ? old.userOnline : null),
         userName: l.userName ?? old.userName,
         marketName: l.marketName ?? old.marketName,
       };

@@ -339,11 +339,17 @@ function bestFlipOf(b: ScraptfWindowRead['bestFlip']): BestFlipView | null {
   return { sku: b.sku, name: truncate(b.name.trim(), 60), profit: b.profitScrap > 0 ? `+${profit}` : profit };
 }
 
-/** "10 flips (2 new)" when main says how many flips are on sale on the page; "2 new flips" otherwise. */
-function flipsPart(pageFlips: number | null, fresh: number): string | null {
-  const onPage = pageFlips === null ? 0 : Math.max(pageFlips, fresh);
-  if (onPage > 0) return `${plural(onPage, 'flip', 'flips')}${fresh > 0 ? ` (${fmtInt(fresh)} new)` : ''}`;
-  return fresh > 0 ? `${fmtInt(fresh)} new ${fresh === 1 ? 'flip' : 'flips'}` : null;
+/**
+ * "10 flips (2 new)" when main says how many flips are on sale on the page; "2 new flips" otherwise. 0.8 (G2): flips
+ * this read dropped under Pay up to (`dropped`) join the brackets, "10 flips (2 new, 1 cheaper)"; with none the
+ * words are as before.
+ */
+function flipsPart(pageFlips: number | null, fresh: number, dropped = 0): string | null {
+  const onPage = pageFlips === null ? 0 : Math.max(pageFlips, fresh + dropped);
+  const which = [fresh ? `${fmtInt(fresh)} new` : '', dropped ? `${fmtInt(dropped)} cheaper` : ''].filter(Boolean).join(', ');
+  if (onPage > 0) return `${plural(onPage, 'flip', 'flips')}${which ? ` (${which})` : ''}`;
+  const told = fresh + dropped;
+  return told > 0 ? `${which} ${told === 1 ? 'flip' : 'flips'}` : null;
 }
 
 /** The toolbar's status line for the newest read; `readOnLoad` words the line before the first one. */
@@ -384,27 +390,35 @@ export function readStatusView(read: ScraptfWindowRead | null | undefined, now: 
   const best = bestFlipOf(read.bestFlip);
   const parts = [`Read ${plural(items, 'item', 'items')} from ${path}`];
   if (stored !== null && items > 0 && stored !== items) parts.push(`stored ${fmtInt(stored)}`);
-  const flipsText = flipsPart(pageFlips, flips);
+  // 0.7.4 (F53): a bank page left before its settle read stored prices but no stock save, so its history,
+  // stock and gone cards did not move on: the line says so, and the title what to do.
+  const unsettled = read.stockSave === 'unsettled' && items > 0 && read.bank !== null;
+  if (unsettled) parts.push('no stock save');
+  // 0.8 (G2): flips this read dropped under Pay up to (ImportResult.droppedFlips), when main reported them.
+  const dropped = count(read.droppedFlips);
+  const flipsText = flipsPart(pageFlips, flips, dropped);
   if (flipsText) parts.push(flipsText);
   const lead = parts.join(' · ');
   const tail = warn ? ` · ${warn}` : '';
   const main = `${best ? `${lead} · best ${best.name} ${best.profit}` : lead}${tail}`;
   const bank = SCRAPTF_BANKS.find((b) => b.bank === read.bank);
-  const onPage = pageFlips === null ? 0 : Math.max(pageFlips, flips);
+  const onPage = pageFlips === null ? 0 : Math.max(pageFlips, flips + dropped);
   const title = [
     `${at === null ? 'Read' : `Read ${fmtDateTime(at)}`}: ${plural(items, 'item', 'items')} on scrap.tf${path}${bank ? ` (${bank.label})` : ''}, imported like a saved page.`,
     stored !== null && items > 0 ? `${fmtInt(stored)} stored as prices.` : '',
+    unsettled ? `Prices stored, but no stock save: the page was left before it finished loading, so its stock and history did not change. Stay on a page a few seconds, or press Read page now.` : '',
     onPage > 0
       ? `${plural(onPage, 'flip', 'flips')} on sale on this page now${flips > 0 ? `, ${fmtInt(flips)} of them new since your previous save` : ''}.`
       : flips > 0
         ? `${fmtInt(flips)} of them new since your previous save and a flip now.`
         : '',
+    dropped > 0 ? `${fmtInt(dropped)} of them dropped under your Pay up to on this read.` : '',
     best ? `Best: ${best.name}, ${best.profit} profit.` : '',
     warn ? `Note: ${warn}.` : '',
   ]
     .filter(Boolean)
     .join(' ');
-  return { main, age, tone: warn && !info ? 'warn' : onPage > 0 || flips > 0 ? 'good' : null, title, lead, best, tail };
+  return { main, age, tone: warn && !info ? 'warn' : onPage > 0 || flips > 0 || dropped > 0 ? 'good' : null, title, lead, best, tail };
 }
 
 /** The toolbar's "Show flips" (0.7.1, F21-2): the read's bank and the chip its stock page opens on. */

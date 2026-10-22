@@ -3,6 +3,7 @@
 
 import { refToScrap, valueScrap } from '../../shared/currency';
 import { COMMUNITY_MIN_MAX_AGE_MS, communityMaxAgeMs } from '../../shared/referenceAge';
+import { craftabilityTwin } from '../../shared/ceiling';
 import { toLegacy } from '../../shared/sku';
 import type {
   CommunityRow,
@@ -14,10 +15,12 @@ import type {
   Scrap,
   UnixMs,
 } from '../../shared/types';
-import type { Repo } from '../contracts';
+import type { Repo, SchemaService } from '../contracts';
+import { canonicalBookBase } from './bookTwins';
 import type { OrderClass } from './matcher';
 
 export { maxCostFor, minProfitFor, profitStatus, profitTier } from './tiers';
+export { craftabilityTwin };
 
 export interface ClassifiedOrder extends OrderClass {
   listing: Listing;
@@ -75,7 +78,7 @@ export interface PriceResult<T> {
   instant: T | null;
   /** Listing ids of eligible orders that are outliers. */
   outlierIds: Set<string>;
-  /** Median of the top min(5, n) values. */
+  /** Median of the top min(5, n) positive values of the verified orders (all orders when none is verified). */
   ref: number | null;
 }
 
@@ -88,10 +91,31 @@ function positive(v: number | null | undefined): number | null {
 }
 
 /**
+ * 0.7.4: an order classifyOrder flagged 'unverified' (no feed event or snapshot for 24 h). Orders
+ * without flags (ValuedOrderLike callers) count as verified.
+ */
+export function isUnverifiedOrder(o: ValuedOrderLike): boolean {
+  const flags = (o as { flags?: unknown }).flags;
+  return Array.isArray(flags) && flags.includes('unverified');
+}
+
+/**
  * Brief §5.5. An order is an outlier when (n ≥ 3 and value > 1.30 × median of
  * the top five), or value > 1.50 × the PriceDB sell price, or value > 1.50 ×
  * the community high price. Best is the top order, Conservative the first
  * non-outlier, Instant the best non-outlier bot order.
+ *
+ * 0.7.4 (F13, F21, F47): an order nobody has confirmed for 24 h may have been filled or removed while
+ * the app or the feed was off (the feed has no catch-up). When at least one order is verified,
+ * Conservative and the median come from the verified orders only; Best stays the overall top order (it
+ * keeps its 'unverified' flag). With none verified, Conservative is picked as before (the row is capped
+ * at Medium and never toasted). Verified orders are preferred, not exclusive: when every verified order
+ * is an outlier (one fresh mistaken order above PriceDB's sell price on an older book), Conservative is
+ * the top non-outlier unverified order, as with none verified (it keeps its flag: Medium at most, never
+ * toasted), so a fresher book never prices worse than the same book without its fresh order. Instant
+ * never picks an unverified bot order: a bot not seen for a day is no instant sale (F23). F19: a
+ * zero-valued order (a "0.05 ref" weapon-priced one rounds to 0 scrap) is left out of the median and is
+ * never an outlier, so it cannot make every real order one.
  */
 export function computePrices<T extends ValuedOrderLike>(
   eligible: readonly T[],
@@ -99,31 +123,43 @@ export function computePrices<T extends ValuedOrderLike>(
   settings: Pick<ProfitSettings, 'outlierVsMedian' | 'outlierVsRef'>,
 ): PriceResult<T> {
   const sorted = [...eligible].sort(compareValued);
-  const n = sorted.length;
-  const ref = median(sorted.slice(0, MEDIAN_TOP).map((o) => o.valueScrap));
+  const anyVerified = sorted.some((o) => !isUnverifiedOrder(o));
+  const inPool = (o: T): boolean => !anyVerified || !isUnverifiedOrder(o);
+  const sample = sorted.filter((o) => inPool(o) && o.valueScrap > 0);
+  const n = sample.length;
+  const ref = median(sample.slice(0, MEDIAN_TOP).map((o) => o.valueScrap));
   const vsMedian = multiplier(settings.outlierVsMedian, DEFAULT_OUTLIER_VS_MEDIAN);
   const vsRef = multiplier(settings.outlierVsRef, DEFAULT_OUTLIER_VS_REF);
   const pdbSell = positive(refs.pricedbSellScrap);
   const commHigh = positive(refs.communityHighScrap);
 
   const isOutlier = (v: number): boolean =>
-    (n >= 3 && ref !== null && v > vsMedian * ref) ||
-    (pdbSell !== null && v > vsRef * pdbSell) ||
-    (commHigh !== null && v > vsRef * commHigh);
+    v > 0 &&
+    ((n >= 3 && ref !== null && v > vsMedian * ref) || (pdbSell !== null && v > vsRef * pdbSell) || (commHigh !== null && v > vsRef * commHigh));
 
   const outlierIds = new Set<string>();
   let conservative: T | null = null;
   let instant: T | null = null;
+  /** 0.7.4: the top non-outlier order outside the verified pool, for a book whose verified orders are all outliers. */
+  let fallback: T | null = null;
   for (const o of sorted) {
     if (isOutlier(o.valueScrap)) {
       outlierIds.add(o.listing.id);
       continue;
     }
+    if (!inPool(o)) {
+      if (fallback === null) fallback = o;
+      continue;
+    }
     if (conservative === null) conservative = o;
-    if (instant === null && o.listing.isBot) instant = o;
+    if (instant === null && o.listing.isBot && !isUnverifiedOrder(o)) instant = o;
     if (conservative !== null && instant !== null) break;
   }
-  // The checks are monotone in value, so everything below the conservative order is not an outlier.
+  // The checks are monotone in value (an outlier is worth more than every non-outlier), so every outlier
+  // comes before the conservative and instant orders and none is missed by the early break. The loop only
+  // breaks once a pool order is Conservative, so with none `fallback` is the highest non-outlier unverified
+  // order. Instant stays verified bots only (F23).
+  if (conservative === null) conservative = fallback;
   return { best: sorted[0] ?? null, conservative, instant, outlierIds, ref };
 }
 
@@ -171,8 +207,22 @@ export interface RawReferences {
 
 type RefRepo = Pick<Repo, 'getPricedb' | 'getSkuAlias' | 'getCommunity'>;
 
-/** PriceDB row by the canonical v3 SKU, then the alias, then the legacy form; community by v3, then legacy. */
-export function lookupReferences(repo: RefRepo, sku: string): RawReferences {
+/**
+ * PriceDB row by the canonical v3 SKU, then the alias, then the legacy form; community by v3, then legacy.
+ * 0.7.4 (F09): with a schema, a base that is not its book's canonical one (811;1, 833;14, 18;11;australium)
+ * and finds no row of a source takes that source's row from the canonical base (SchemaService.bookBase),
+ * the copy PriceDB and backpack.tf price the name under. Local reads only, no request.
+ */
+export function lookupReferences(repo: RefRepo, sku: string, schema?: Pick<SchemaService, 'bookBase'> | null): RawReferences {
+  const own = lookupOwnReferences(repo, sku);
+  if ((own.pricedb && own.community) || !schema) return own;
+  const canonical = canonicalBookBase(schema, sku);
+  if (canonical === sku) return own;
+  const book = lookupOwnReferences(repo, canonical);
+  return { pricedb: own.pricedb ?? book.pricedb, community: own.community ?? book.community };
+}
+
+function lookupOwnReferences(repo: RefRepo, sku: string): RawReferences {
   const legacy = toLegacy(sku);
   // pricedb.ts stores rows under our canonical v3 SKU; the alias (PriceDB's own
   // spelling) and the legacy form only cover rows written by older code.
@@ -185,6 +235,12 @@ export function lookupReferences(repo: RefRepo, sku: string): RawReferences {
   let community = repo.getCommunity(sku);
   if (!community && legacy !== sku) community = repo.getCommunity(legacy);
   return { pricedb, community };
+}
+
+/** 0.7.4 (F70): the twin's references (lookupReferences on craftabilityTwin(sku)), or null without a twin. */
+export function lookupTwinReferences(repo: RefRepo, sku: string): RawReferences | null {
+  const twin = craftabilityTwin(sku);
+  return twin === null ? null : lookupReferences(repo, twin);
 }
 
 /** A community price in scrap; USD (or unknown currencies) cannot be converted. */

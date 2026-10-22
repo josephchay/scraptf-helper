@@ -82,7 +82,8 @@ describe("'check.text' hint (mock)", () => {
     for (const text of ['1.33 ref', '1 key 5.33 ref', '  2 keys 5.11\t']) {
       const r = await b.rpc('check.text', { text, source: 'manual', hint: { sku: '378;6' } });
       expect(r).toMatchObject({ status: 'item', sku: '378;6', name: 'Team Captain', price: { source: 'clipboard' } });
-      expect(r.reason).toBe(checkHintedNote('Team Captain'));
+      // The hinted note first (0.7.4 review R14: a price far under PriceDB's buy adds the cost check's note after it).
+      expect(r.reason?.startsWith(checkHintedNote('Team Captain'))).toBe(true);
       expect(checkMatchedByHint(r)).toBe(true);
     }
   });

@@ -1,7 +1,7 @@
 // Read-side views: the grouped and paged opportunity list, the item detail
 // drawer and the rule preview.
 
-import { categoryOfSkuOnly } from '../../shared/categories';
+import { categoryOfSkuOnly, scraptfBankForItem } from '../../shared/categories';
 import { buildLinks, scraptfSeenOn } from '../../shared/links';
 import { scraptfListPriceSaved } from '../../shared/scraptfList';
 import { fromObject, fromString, isValidSku, looksLikeSku } from '../../shared/sku';
@@ -21,15 +21,21 @@ import type {
   OrderSummary,
   RuleFilter,
   ScrapPrice,
+  ScraptfBuyTiming,
   ScraptfListRow,
+  ScraptfTimingBrief,
   Settings,
   UnixMs,
 } from '../../shared/types';
 import type { Repo, SchemaService } from '../contracts';
-import { explicitInput } from './engine';
+import { onceByOrderProfit } from '../../shared/copyExtras';
+import type { ScraptfEventBuySide } from '../../shared/scraptfHistory';
+import { scraptfOpportunityTiming } from '../../shared/scraptfTiming';
+import { explicitInput, revenueOrderOf } from './engine';
 import { DEFAULT_KEY_SCRAP } from './keyprice';
 import { EXCLUDING_FLAGS, UNVERIFIED_AFTER_MS, anyEffectBaseOf, classifyOrder, dedupeOrders, matchContext, ruleMatches } from './matcher';
 import type { MatchContext, MatchTarget } from './matcher';
+import { bookBasesOf, canonicalBookBase, mergedBook } from './bookTwins';
 import {
   computePrices,
   lookupReferences,
@@ -43,6 +49,8 @@ import {
 } from './pricing';
 import type { PriceResult, ValuedOrderLike } from './pricing';
 import { CONFIDENCE_LABELS, CONFIDENCE_ORDER, INPUT_KIND_LABELS, INPUT_KIND_ORDER, TIER_ORDER, maxCostFor } from './tiers';
+import { askSideOf } from '../../shared/holdings';
+import { askCandidatesOf } from './asks';
 
 export const DEFAULT_LIST_LIMIT = 500;
 export const MAX_LIST_LIMIT = 5000;
@@ -91,15 +99,19 @@ function orderIndex(order: readonly string[], key: string): number {
 }
 
 /** Non-empty groups in display order, with counts and summed profit (null profit counts as 0). */
-export function summarizeGroups(rows: readonly Opportunity[], by: GroupBy): GroupSummary[] {
+export function summarizeGroups(rows: readonly Opportunity[], by: GroupBy, useOrder: Settings['profit']['useOrder'] = 'conservative'): GroupSummary[] {
   const map = new Map<string, GroupSummary>();
+  const rowsOf = new Map<string, Opportunity[]>();
   for (const o of rows) {
     const key = groupKeyOf(o, by);
     let g = map.get(key);
     if (!g) map.set(key, (g = { by, key, label: groupLabel(by, key), count: 0, totalProfitScrap: 0 }));
     g.count++;
-    g.totalProfitScrap += typeof o.profitScrap === 'number' && Number.isFinite(o.profitScrap) ? o.profitScrap : 0;
+    rowsOf.set(key, [...(rowsOf.get(key) ?? []), o]);
   }
+  // 0.7.4 (F27, F33; R27): an item's revenue order counts once per group, at its best copy among these rows
+  // (as opportunityGroupStats), so a filter that hid the best copy no longer counts the buyer zero times.
+  for (const [key, g] of map) g.totalProfitScrap = onceByOrderProfit(rowsOf.get(key) ?? [], (o) => revenueOrderOf(o, useOrder));
   const order = groupOrder(by);
   return [...map.values()].sort((a, b) => orderIndex(order, a.key) - orderIndex(order, b.key) || a.key.localeCompare(b.key));
 }
@@ -114,8 +126,18 @@ function clampInt(v: unknown, fallback: number, min: number, max: number): numbe
  * when grouped, rows are ordered by group first (keeping the requested sort
  * inside each group) so a page holds whole groups in display order. Groups
  * and the total are counted in SQL over every match, not just the page.
+ * 0.7.4 (R27): `useOrder` (settings.profit.useOrder) names each row's revenue order for the group totals.
+ * 0.8 (T4/T7): `joins.timingForCopy` (the history's, in memory) joins Opportunity.timing on the page's 'import' rows
+ * (scraptfOpportunityTiming); a failed join leaves the field out, never the row.
  */
-export function listOpportunities(repo: Repo, q: OppQuery, keyPrice: KeyPriceState | null, now: UnixMs): OppListResult {
+export function listOpportunities(
+  repo: Repo,
+  q: OppQuery,
+  keyPrice: KeyPriceState | null,
+  now: UnixMs,
+  useOrder?: Settings['profit']['useOrder'],
+  joins?: { timingForCopy?(baseSku: string, specialKey: string, buy: ScraptfEventBuySide, now: UnixMs): ScraptfBuyTiming | null },
+): OppListResult {
   const query: OppQuery = q && typeof q === 'object' ? q : {};
   const by = typeof query.groupBy === 'string' && GROUP_BYS.includes(query.groupBy) ? query.groupBy : null;
 
@@ -124,7 +146,7 @@ export function listOpportunities(repo: Repo, q: OppQuery, keyPrice: KeyPriceSta
   if (by) {
     const order = groupOrder(by);
     groups = repo
-      .opportunityGroupStats(query, by)
+      .opportunityGroupStats(query, by, useOrder)
       .filter((s) => s.count > 0)
       .map((s) => ({ by, key: s.key, label: groupLabel(by, s.key), count: s.count, totalProfitScrap: s.profitScrap }))
       .sort((a, b) => orderIndex(order, a.key) - orderIndex(order, b.key) || a.key.localeCompare(b.key));
@@ -136,7 +158,18 @@ export function listOpportunities(repo: Repo, q: OppQuery, keyPrice: KeyPriceSta
   const offset = clampInt(query.offset, 0, 0, Number.MAX_SAFE_INTEGER);
   const limit = clampInt(query.limit, DEFAULT_LIST_LIMIT, 1, MAX_LIST_LIMIT);
   const page = offset >= total ? [] : repo.queryOpportunities(query, { limit, offset, group: by ? { by, order: groupOrder(by) } : null });
-  const rows = page.map((o) => ({ ...o, references: refreshReferenceAge(o.references, now) }));
+  const timingForCopy = joins?.timingForCopy ? joins.timingForCopy.bind(joins) : null;
+  const rows = page.map((o) => {
+    let brief: ScraptfTimingBrief | null = null;
+    if (timingForCopy) {
+      try {
+        brief = scraptfOpportunityTiming(o, timingForCopy, now);
+      } catch {
+        brief = null;
+      }
+    }
+    return { ...o, references: refreshReferenceAge(o.references, now), ...(brief ? { timing: brief } : {}) };
+  });
   return { rows, total, groups, keyPrice, generatedAt: now };
 }
 
@@ -246,13 +279,14 @@ export function buildItemDetail(args: ItemDetailArgs): ItemDetail | null {
   const baseRows = paint === null ? null : repo.scrapPricesForSku(base);
   const scrapPrices = paint === null || baseRows === null ? repo.scrapPricesForSku(sku) : pricesOfPaint(repo, sku, base, paint, baseRows);
   const opportunities = repo.opportunitiesForSku(sku);
-  const listings = repo.listingsByBaseSku(base);
+  // 0.7.4 (F09/F14, F08): the item's book from every twin it is filed under (bookTwins.ts), as the engine reads it.
+  const listings = mergedBook(base, bookBasesOf(schema, base), (b) => repo.listingsByBaseSku(b));
   const anyBase = anyEffectBaseOf(base);
   // Generic "Unusual <item>" orders buy any effect, so they are exits for this one too.
-  const anyEffectBuys = anyBase !== null ? repo.listingsByBaseSku(anyBase, 'buy') : [];
+  const anyEffectBuys = anyBase !== null ? mergedBook(anyBase, bookBasesOf(schema, anyBase), (b) => repo.listingsByBaseSku(b, 'buy')) : [];
   const buys = [...listings.filter((l) => l.intent === 'buy'), ...anyEffectBuys];
   const sells = listings.filter((l) => l.intent === 'sell');
-  const raw = lookupReferences(repo, base);
+  const raw = lookupReferences(repo, base, schema);
   const schemaItem = attempt(() => schema.itemByDefindex(obj.defindex), null);
   const scraptfList = args.scraptfList ?? null;
   if (
@@ -353,7 +387,12 @@ export function buildItemDetail(args: ItemDetailArgs): ItemDetail | null {
     // F15: the bank of the newest imported price shown here (ScrapPrice.bank is joined by the repo), for
     // the drawer's "Seen on" and every "Open bank page" (the drawer's and the ItemMenu's item.detail).
     seenOn: itemSeenOn(scrapPrices, baseRows),
+    // 0.7.4 (F36): where an item of its kind is sold, for "Open bank page" when no save names a page.
+    kindBank: scraptfBankForItem(category, obj, schemaItem),
     bankStock: args.bankStock ?? null,
+    // 0.8 (H3, PC-7): the lowest ask for this copy (the drawer SKU's paint, no other extras) from the sell listings
+    // already read above; context only, never used in profit, Pay up to or a notification.
+    ask: attempt(() => askSideOf(askCandidatesOf(sells, paint, match, keyScrap), now, new Set(settings.ownSteamIds ?? [])), null),
   };
 }
 
@@ -376,8 +415,10 @@ export function previewRule(
   const limit = clampInt(sampleLimit, 20, 0, 500);
   const sample: { sku: string; name: string }[] = [];
   let matchingSkus = 0;
-  for (const base of repo.baseSkusWithBuyOrders()) {
+  // 0.7.4 (F09/F14): one item per book, on its canonical base, as the engine's rule rows are.
+  for (const base of new Set(repo.baseSkusWithBuyOrders().map((b) => canonicalBookBase(schema, b)))) {
     if (CURRENCY.has(base) || explicit.has(base) || !looksLikeSku(base)) continue;
+    if (bookBasesOf(schema, base).some((t) => explicit.has(t))) continue;
     const obj = fromString(base);
     if (!obj.tradable) continue;
     const rawCategory = attempt<Category | null>(() => schema.categoryForSku(base), null);

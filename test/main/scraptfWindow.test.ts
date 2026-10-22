@@ -1276,6 +1276,24 @@ describe('reads', () => {
     await expect(s.m.readNow()).resolves.toMatchObject({ read: { items: 0, warning: 'no-cards-saved' }, reason: null });
   });
 
+  it("0.7.4 (F53): carries the import's stock save onto the read, and only the known values", async () => {
+    const s = setup({ readOnLoad: false });
+    s.m.open();
+    s.land(HATS);
+    s.importHtml.mockResolvedValueOnce(importResult({ stockSave: 'unsettled' }));
+    await expect(s.m.readNow()).resolves.toMatchObject({ read: { path: '/buy/hats', stockSave: 'unsettled' }, reason: null });
+    s.ctl.t += READ_MANUAL_MIN_GAP_MS;
+    s.wc().html = '<html>2</html>';
+    s.importHtml.mockResolvedValueOnce(importResult({ stockSave: 'written' }));
+    await expect(s.m.readNow()).resolves.toMatchObject({ read: { stockSave: 'written' } });
+    // Anything else from the service is left out, as an older service's answer is.
+    s.ctl.t += READ_MANUAL_MIN_GAP_MS;
+    s.wc().html = '<html>3</html>';
+    s.importHtml.mockResolvedValueOnce(importResult({ stockSave: 'nonsense' as never }));
+    const out = await s.m.readNow();
+    expect(out.read).not.toHaveProperty('stockSave');
+  });
+
   it('reads nothing while the window is closed', async () => {
     const s = setup();
     await expect(s.m.readNow()).resolves.toEqual({ read: null, reason: SCRAPTF_READ_REASONS.notOpen });

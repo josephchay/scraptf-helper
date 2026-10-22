@@ -10,6 +10,7 @@ import { openRepo } from '../../src/service/db';
 import { importSavedPage, type HandlerContext } from '../../src/service/rpcHandlers';
 import { BANK_STOCK_KEEP_SAVES, BANK_STOCK_PLAIN_KEY, bankStockOnSale } from '../../src/shared/bankStock';
 import { DEFAULT_SETTINGS, mergeSettings } from '../../src/shared/defaults';
+import { SKIP_CRAFT_UNPROVEN } from '../../src/shared/importCodes';
 import type { ScraptfBank } from '../../src/shared/types';
 import { createStubSchema } from './schemaStub';
 
@@ -84,9 +85,11 @@ describe('importSavedPage writes the bank stock of a recognised page (F17)', () 
     expect(rows.length).toBeGreaterThan(0);
     // Keyed as the import keys prices: base SKU (no paint), the extras in the special key.
     for (const row of rows) expect(row.sku).not.toMatch(/;p\d/);
-    // Every in-stock card with a price became a price, and the same card is the stock row on sale.
+    // Every in-stock card with a price became a price, and the same card is the stock row on sale. 0.7.4: on
+    // the /items list a family row (proven neither Craftable nor Non-Craftable) is on sale but no cost.
     const onSale = rows.filter(bankStockOnSale);
-    expect(onSale).toHaveLength(r.stored);
+    expect(onSale).toHaveLength(r.stored + (r.skippedCounts?.[SKIP_CRAFT_UNPROVEN] ?? 0));
+    if (bank !== 'list') expect(r.skippedCounts?.[SKIP_CRAFT_UNPROVEN]).toBeUndefined();
     const prices = h.repo.listScrapPrices().filter((p) => p.importBatch === r.batchId);
     const plainPrice = new Map(prices.filter((p) => p.special === null || (p.special.paint === null && p.special.spells.length === 0 && p.special.parts.length === 0)).map((p) => [p.sku, [p.costKeys, p.costScrap]]));
     for (const row of onSale.filter((x) => x.specialKey === BANK_STOCK_PLAIN_KEY)) {

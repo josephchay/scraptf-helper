@@ -885,8 +885,10 @@ describe('cells', () => {
   });
 
   it('explains Sells for and Pay up to', () => {
-    const t = marketSellsForTitle(row({ sku: 'a', flags: ['outlier-best'] }), KEY);
+    // 0.7.4: presence as of `now`; the order's event a minute old is recent, 23 h old is not.
+    const t = marketSellsForTitle(row({ sku: 'a', flags: ['outlier-best'] }), KEY, NOW);
     expect(t).toContain('to BuyBot (bot, online)');
+    expect(marketSellsForTitle(row({ sku: 'a' }), KEY, NOW + 23 * 60 * MIN)).toContain('to BuyBot (bot, last seen 23 h ago)');
     expect(t).toContain('best 14.44 ref (outlier)');
     expect(t).toContain('4 buyers');
     expect(marketSellsForTitle(row({ sku: 'a', revenueScrap: null, revenueOrder: null, buyerCount: 0 }), KEY)).toContain('No eligible');

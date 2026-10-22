@@ -278,7 +278,8 @@ describe('reference age, suspect margins and notification input kinds', () => {
 
   it('notifies only the input kinds the user kept', async () => {
     const b = make();
-    await b.rpc('settings.set', { notifications: { minConfidence: 0, minProfitScrap: 0, inputKinds: ['import'] }, profit: { suspectMargin: 0 } });
+    // 0.7.4: referenceMaxAgeMs 0 leaves no usable PriceDB price, so a 1-2 scrap cost is not 'cost-below-market' (never notified).
+    await b.rpc('settings.set', { notifications: { minConfidence: 0, minProfitScrap: 0, inputKinds: ['import'] }, profit: { suspectMargin: 0, referenceMaxAgeMs: 0 } });
     const muted = await b.rpc('prices.upsert', { sku: '378;6', costScrap: 1 });
     const notified = async (ref: string) => (await b.rpc('opps.events', { kinds: ['notified'], limit: 2000 })).some((e) => e.key === `378;6|${ref}`);
     expect(await notified(`price:${muted.id}`)).toBe(false);

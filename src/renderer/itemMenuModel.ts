@@ -8,7 +8,17 @@ import { SCRAPTF_BOUNDARY_SHORT } from '../shared/boundaryText';
 import { valueScrap } from '../shared/currency';
 import { SCRAPTF_BANK_PAGES, SCRAPTF_ITEMS_URL, bankForCategory, scraptfBankInfo, scraptfPageFor } from '../shared/links';
 import { communityMaxAgeMs } from '../shared/referenceAge';
-import { bestExitOf, scraptfListFresh, scraptfListPriceSaved, scraptfListUsePrice } from '../shared/scraptfList';
+import {
+  SCRAPTF_LIST_CRAFT_UNPROVEN,
+  SCRAPTF_LIST_FAMILY_LABEL,
+  bestExitOf,
+  scraptfListCraftProven,
+  scraptfListFresh,
+  scraptfListIsFamily,
+  scraptfListPriceSaved,
+  scraptfListUsePrice,
+} from '../shared/scraptfList';
+import { priceIsForSku } from '../shared/priceCopy';
 import { fromString } from '../shared/sku';
 import { CATEGORIES, HOLDING_EXIT_VENUES } from '../shared/types';
 import type {
@@ -22,6 +32,7 @@ import type {
   Scrap,
   ScrapPrice,
   ScrapPriceInput,
+  ScraptfBank,
   ScraptfListRow,
   ScraptfSeenOn,
   UnixMs,
@@ -32,6 +43,7 @@ import type { RecordTradeInit } from './components/RecordTradeDialog';
 import { fmtAgo, fmtDateTime, fmtInt, fmtKeysMetal, fmtRefOnly, truncate } from './format';
 import { revenueOrderOf, type UseOrder } from './oppModel';
 import { BUY_VENUE, LIST_PRICE_NOTE, listSellsText, previewRevenue, type PreviewSettings } from './quickModel';
+import { WATCH_MENU_LABEL, WATCH_MENU_TITLE } from './watchesModel';
 
 // ---------------------------------------------------------------------------
 // Placement
@@ -363,7 +375,9 @@ export type ItemMenuAction =
   | { kind: 'record'; side: 'buy' | 'sell' }
   /** F14: copy the name for scrap.tf's search, then open its page in the user's browser (links.open). */
   | { kind: 'scraptf'; url: string; name: string }
-  | { kind: 'link'; url: string };
+  | { kind: 'link'; url: string }
+  /** 0.8 (G1): the Watch dialog (a local list; nothing is fetched or bought). */
+  | { kind: 'watch' };
 
 export type LinksState = { status: 'loading' } | { status: 'error'; message: string } | { status: 'ready'; links: readonly LinkSpec[] };
 
@@ -392,13 +406,22 @@ export function hostLabel(url: string): string {
 /**
  * Item menu content: Open details; Copy SKU / name / backpack.tf name; Record
  * scrap.tf price… (quick entry, prefilled); Record buy… / Record sale… (the
- * journal, F12); Open on scrap.tf (copies name) (F14); then the link groups
+ * journal, F12); Open on scrap.tf (copies name) (F14) and (0.8, G1) Watch on scrap.tf…; then the link groups
  * once 'links.forSku' answers. `seenOn` is the item's ItemDetail.seenOn once read (F15); a row
  * that names its scrap.tf page itself (ItemMenuTarget.bank, the banks page) goes there instead.
  * `inWindow` (F21, scraptfLinksInWindow) only words the scrap.tf action's tooltip: main decides where it opens.
+ * 0.7.4 (R28): `kindBank` (ItemDetail.kindBank) is kept apart from `seenOn`, as the drawer's scraptfOpenUrl
+ * call does, so an item last seen on scrap.tf/items (no bank page) opens the bank its kind is sold on.
  */
-export function itemMenuSections(target: ItemMenuTarget, links: LinksState, seenOn: Pick<ScraptfSeenOn, 'bank'> | null = null, inWindow = false): MenuSection<ItemMenuAction>[] {
-  const stfUrl = scraptfOpenUrl(target.category, links, target.bank ? { bank: target.bank } : seenOn);
+export function itemMenuSections(
+  target: ItemMenuTarget,
+  links: LinksState,
+  seenOn: Pick<ScraptfSeenOn, 'bank'> | null = null,
+  inWindow = false,
+  kindBank: ScraptfBank | null = null,
+): MenuSection<ItemMenuAction>[] {
+  // A row that names its bank goes there; else the drawer's own call (seenOn, then the kind's bank).
+  const stfUrl = scraptfOpenUrl(target.category, links, target.bank ? { bank: target.bank } : seenOn, target.bank ? null : kindBank);
   const stfName = scraptfSearchName(target);
   const sections: MenuSection<ItemMenuAction>[] = [
     { id: 'open', items: [{ id: 'details', label: 'Open details', icon: 'chevronRight', action: { kind: 'details' } }] },
@@ -427,6 +450,8 @@ export function itemMenuSections(target: ItemMenuTarget, links: LinksState, seen
           disabled: stfUrl === null,
           action: stfUrl ? { kind: 'scraptf', url: stfUrl, name: stfName } : null,
         },
+        // 0.8 (G1): judged only on the pages the user reads or saves; it opens nothing.
+        { id: 'scraptf-watch', label: WATCH_MENU_LABEL, hint: 'Notify', title: WATCH_MENU_TITLE, icon: 'eye', action: { kind: 'watch' } },
       ],
     },
   ];
@@ -746,31 +771,9 @@ export function newestScrapPrice(prices: readonly ScrapPrice[], keyScrap: Scrap 
   return best;
 }
 
-/** The paint a SKU names, or null (also for text that is not a SKU). */
-function paintOfSku(sku: string): number | null {
-  try {
-    const paint = fromString(sku).paint;
-    return typeof paint === 'number' && paint > 0 ? paint : null;
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Whether a stored price is one for the copy `sku` names. Prices sit under the base SKU with the paint
- * and other extras in `special` (null: never recorded, read as a plain copy, as the saved-page import
- * does): a painted SKU takes prices of its paint, a plain SKU only prices with no extras at all.
- * 0.7.2: a sheen or killstreaker is not an extra here (the service's isOtherCopy): every specialized and
- * professional kit or weapon carries one, so counted, such an item had no price of its own to prefill.
- */
-export function priceIsForSku(p: Pick<ScrapPrice, 'sku' | 'special'>, sku: string): boolean {
-  const s = p.special;
-  const paint = (typeof s?.paint === 'number' && s.paint > 0 ? s.paint : null) ?? paintOfSku(p.sku);
-  const want = paintOfSku(sku);
-  if (want !== null || paint !== null) return paint === want;
-  if (!s) return true;
-  return s.spells.length === 0 && s.parts.length === 0 && !s.customName && !s.customDesc;
-}
+// Whether a stored price is one for the copy a SKU names. 0.7.4 (F80): in src/shared/priceCopy.ts, so the
+// service's 'prices.upsert' (replaceTyped) picks the same copy the drawer's form does.
+export { priceIsForSku };
 
 /**
  * ACT-11: the exact copy a row shows (a bank stock row: ItemMenuTarget.copy), for Record buy only. The
@@ -898,9 +901,12 @@ export function seenBankPageUrl(seenOn: Pick<ScraptfSeenOn, 'bank'> | null | und
   return info && info.categories.length > 0 ? info.url : null;
 }
 
-/** Every "Open bank page": where the user last saw the item, else the bank of its category (bankForCategory). */
-export function bankPageUrl(seenOn: Pick<ScraptfSeenOn, 'bank'> | null | undefined, category: Category): string {
-  return seenBankPageUrl(seenOn) ?? scraptfBankInfo(bankForCategory(category))!.url;
+/**
+ * Every "Open bank page": where the user last saw the item, else 0.7.4 (F36) the bank an item of its kind is
+ * sold on (ItemDetail.kindBank, when the service sent it), else the bank of its category (bankForCategory).
+ */
+export function bankPageUrl(seenOn: Pick<ScraptfSeenOn, 'bank'> | null | undefined, category: Category, kindBank?: ScraptfBank | null): string {
+  return seenBankPageUrl(seenOn) ?? seenBankPageUrl(kindBank ? { bank: kindBank } : null) ?? scraptfBankInfo(bankForCategory(category))!.url;
 }
 
 /**
@@ -908,10 +914,16 @@ export function bankPageUrl(seenOn: Pick<ScraptfSeenOn, 'bank'> | null | undefin
  * on (F15, `seenOn`), else the item's bank page (scraptfPageFor) when its category is known, else the
  * one links.forSku gave ('scraptf-page'), else the full price list (scrap.tf/items lists every item).
  * null while the links are still loading. Every one of them is a static allowlisted page (links.ts);
- * the app never fetches them (R1).
+ * the app never fetches them (R1). 0.7.4 (F36): `kindBank` (ItemDetail.kindBank) before the category's page,
+ * so a strange cosmetic opens /buy/hats.
  */
-export function scraptfOpenUrl(category: Category | null | undefined, links: LinksState | null, seenOn: Pick<ScraptfSeenOn, 'bank'> | null = null): string | null {
-  const seen = seenBankPageUrl(seenOn);
+export function scraptfOpenUrl(
+  category: Category | null | undefined,
+  links: LinksState | null,
+  seenOn: Pick<ScraptfSeenOn, 'bank'> | null = null,
+  kindBank: ScraptfBank | null = null,
+): string | null {
+  const seen = seenBankPageUrl(seenOn) ?? seenBankPageUrl(kindBank ? { bank: kindBank } : null);
   if (seen) return seen;
   if (isCategory(category)) return scraptfPageFor(category);
   if (links === null) return SCRAPTF_ITEMS_URL;
@@ -931,8 +943,14 @@ export function unpaintedName(name: string): string {
   return name.replace(/\s*\(Paint: [^()]*\)\s*$/, '').trim();
 }
 
-/** 0.7.2: killstreak kits by defindex (6527 basic, 6523 specialized, 6526 professional). */
-const KIT_DEFINDEXES: ReadonlySet<number> = new Set([6527, 6523, 6526]);
+/**
+ * 0.7.2: killstreak kits by defindex (6527 basic, 6523 specialized, 6526 professional). 0.7.4 (F17): and the
+ * schema's legacy "X Killstreakifier Basic" kits (item_name "Kit"), which backpack.tf files some kit orders under.
+ */
+const KIT_DEFINDEXES: ReadonlySet<number> = new Set([
+  6527, 6523, 6526, 5726, 5727, 5728, 5729, 5730, 5731, 5732, 5733, 5743, 5744, 5745, 5746, 5747, 5748, 5749, 5750, 5751, 5793, 5794, 5795, 5796, 5797,
+  5798, 5799, 5800, 5801,
+]);
 
 /** A kit's name as the schema builds it (or backpack.tf names it): the weapon is what is left. */
 const KIT_NAME_RE = /^(?:Non-Tradable\s+)?(?:Non-Craftable\s+)?(?:(?:Basic|Specialized|Professional)\s+)?(?:Killstreak\s+)?(.+?)\s+Kit$/i;
@@ -1024,12 +1042,25 @@ export interface ScraptfListView {
   title: string;
   /** The list shows a price to buy (the line reads "sells X"; else "sold out"). */
   hasSells: boolean;
-  /** "Use as my price" has a price to save: a price to buy, and scrap.tf has the item in stock. */
+  /**
+   * "Use as my price" has a price to save: a price to buy, scrap.tf has the item in stock, and 0.7.4 the row
+   * is proven to price this very copy (scraptfListCraftProven).
+   */
   canUse: boolean;
-  /** Why "Use as my price" has nothing to save (sold out, or stock 0); null when it can. */
+  /** Why "Use as my price" has nothing to save (sold out, stock 0, or a family row); null when it can. */
   unusable: string | null;
   /** The block's line: "sells X · pays Y · stock n/limit · saved 3 min ago". */
   line: string;
+  /**
+   * 0.7.4: which copy the row prices as the list shows it ("Non-Craftable", "Craftable"), or null for a
+   * family row, which prices every copy at its price (`family`).
+   */
+  copy: string | null;
+  /** 0.7.4: a row for every copy at its price (craft 'any', or read as the copy's family): its stock counts all of them. */
+  family: boolean;
+  /** 0.7.4: the family row's label and its hover (SCRAPTF_LIST_FAMILY_LABEL); null for a row of its own copy. */
+  familyText: string | null;
+  familyTitle: string | null;
 }
 
 /** The drawer's "scrap.tf price list" block for the item's row of the saved scrap.tf/items list. */
@@ -1052,7 +1083,12 @@ export function scraptfListView(row: ScraptfListRow, keyScrap: Scrap | null, now
     .join(' ');
   const sells = sellsText ?? 'sold out';
   // A priced row with stock 0 is refused as a price by the import too (scraptfListUsePrice).
-  const canUse = scraptfListUsePrice(row) !== null;
+  const price = scraptfListUsePrice(row);
+  // 0.7.4: and a family row (one row for every copy at its price, Craftable or not) is no cost of this copy,
+  // as the import never stores one as a price: shown, never saved as the user's.
+  const canUse = price !== null && scraptfListCraftProven(row);
+  const family = scraptfListIsFamily(row);
+  const copy = family ? null : row.craft === 'uncraftable' ? 'Non-Craftable' : row.craft === 'craftable' ? 'Craftable' : null;
   return {
     sells,
     pays,
@@ -1069,8 +1105,23 @@ export function scraptfListView(row: ScraptfListRow, keyScrap: Scrap | null, now
       ? null
       : sellsText === null
         ? 'The saved list shows no price to buy (sold out), so there is nothing to use.'
-        : 'Out of stock on scrap.tf (stock 0 in your saved list), so there is nothing to buy at this price.',
-    line: [sellsText ? `sells ${sellsText}` : 'sold out', `pays ${pays}`, stock !== null ? `stock ${stock}${row.full ? ' (full)' : ''}` : null, saved].filter((x) => x !== null).join(' · '),
+        : price === null
+          ? 'Out of stock on scrap.tf (stock 0 in your saved list), so there is nothing to buy at this price.'
+          : `${SCRAPTF_LIST_CRAFT_UNPROVEN}.`,
+    line: [
+      sellsText ? `sells ${sellsText}` : 'sold out',
+      `pays ${pays}`,
+      stock !== null ? `stock ${stock}${family ? ' for every copy' : ''}${row.full ? ' (full)' : ''}` : null,
+      saved,
+    ]
+      .filter((x) => x !== null)
+      .join(' · '),
+    copy,
+    family,
+    familyText: family ? SCRAPTF_LIST_FAMILY_LABEL : null,
+    familyTitle: family
+      ? "scrap.tf/items lists this item on one row for every copy it sells at this price (Craftable or Non-Craftable, any killstreak tier, festivized), so its stock counts all of them and its price is no cost of one copy. Your saved bank page shows which copies scrap.tf has and each one's price."
+      : null,
   };
 }
 
@@ -1079,11 +1130,13 @@ export function scraptfListView(row: ScraptfListRow, keyScrap: Scrap | null, now
  * as an import of the list would store it: under the base SKU the list row is for (a plain copy),
  * keys and metal as listed, dated when the list was saved (an old list reads stale, as it should).
  * The name drops a painted drawer's "(Paint: X)": the row prices the unpainted copy. null when there
- * is nothing to buy: a sold-out row, or one with stock 0, which the import refuses as a price too.
+ * is nothing to buy: a sold-out row, or one with stock 0, which the import refuses as a price too; and
+ * 0.7.4 for a row not proven to price this copy (a family row, scraptfListCraftProven), which the import
+ * never stores as a price either: a typed copy would outlive every later import as the wrong copy's cost.
  */
 export function listPriceInput(row: ScraptfListRow, item: { name: string }): ScrapPriceInput | null {
   const price = scraptfListUsePrice(row);
-  if (price === null) return null;
+  if (price === null || !scraptfListCraftProven(row)) return null;
   return {
     sku: row.sku,
     name: unpaintedName(item.name) || row.name.trim() || row.sku,

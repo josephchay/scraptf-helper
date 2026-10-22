@@ -384,7 +384,8 @@ describe('ACT-8: no "Candidate:" toast for an item a fresh save shows is not on 
     await h.engine.runNow();
     // Both are 'stranges' by category; only the plain strange is known absent from that fresh save.
     expect(h.titles()).toEqual(['Candidate: Strange Australium Rocket Launcher']);
-    expect(asked).toEqual(['stranges']);
+    // 0.7.4 (F79): the australium is asked about the items bank too (both pages must be fresh), which was never saved.
+    expect(asked.sort()).toEqual(['items', 'stranges', 'stranges']);
     expect(h.repo.opportunitiesForSku('205;11').map((o) => [o.inputKind, o.status, o.category])).toEqual([['rule', 'profitable', 'stranges']]);
     expect(h.repo.opportunitiesForSku('205;11;australium').map((o) => [o.inputKind, o.status, o.category])).toEqual([['rule', 'profitable', 'stranges']]);
   });

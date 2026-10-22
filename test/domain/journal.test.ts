@@ -11,12 +11,36 @@ function row(side: JournalEntry['side'], sku: string, scrap: number, over: Parti
 
 describe('journalSummary (FIFO)', () => {
   it('realises profit when a sell closes a buy', () => {
-    const s = journalSummary([row('buy', 'A', 90), row('sell', 'A', 108)]);
+    const buy = row('buy', 'A', 90);
+    const sell = row('sell', 'A', 108);
+    const s = journalSummary([buy, sell]);
     expect(s).toEqual({
       realizedProfitScrap: 18,
       realizedTrades: 1,
       open: [],
       bySku: [{ sku: 'A', name: 'Item A', realizedProfitScrap: 18, trades: 1 }],
+      waitingSales: [],
+      // 0.8 (J1): the pair as booked.
+      closed: [
+        {
+          sellId: sell.id,
+          buyId: buy.id,
+          kind: 'sell',
+          sku: 'A',
+          name: 'Item A',
+          boughtAt: buy.ts,
+          soldAt: sell.ts,
+          heldMs: 1000,
+          buyVenue: 'scrap.tf',
+          sellVenue: 'backpack.tf',
+          costScrap: 90,
+          proceedsScrap: 108,
+          feesScrap: null,
+          feesKnown: false,
+          profitScrap: 18,
+          keyPriceScrap: 567,
+        },
+      ],
     });
   });
 
@@ -68,8 +92,9 @@ describe('journalSummary (FIFO)', () => {
     // Bought for 2 keys, sold for 1 key + 600 scrap when a key was worth 580: 600 - 580 = 20.
     const s = journalSummary([row('buy', 'U', 0, { keys: 2, keyPriceScrap: 500 }), row('sell', 'U', 600, { keys: 1, keyPriceScrap: 580 })]);
     expect(s.realizedProfitScrap).toBe(20);
-    // A sell logged first and matched by a later buy also uses the sell's key price.
-    const early = journalSummary([row('sell', 'V', 9, { keys: 3, keyPriceScrap: 600 }), row('buy', 'V', 0, { keys: 3, keyPriceScrap: 500 })]);
+    // A buy logged after its sale but dated before it (a backfill) also pairs at the sell's key price.
+    const sell = row('sell', 'V', 9, { keys: 3, keyPriceScrap: 600 });
+    const early = journalSummary([sell, row('buy', 'V', 0, { keys: 3, keyPriceScrap: 500, ts: sell.ts - 60_000 })]);
     expect(early.realizedProfitScrap).toBe(9);
   });
 
@@ -99,12 +124,42 @@ describe('journalSummary (FIFO)', () => {
     expect(journalSummary([s2, b2]).realizedTrades).toBe(1);
   });
 
-  it('pairs a sell logged before its buy with the next buy, and ignores sells that never match', () => {
-    const s = journalSummary([row('sell', 'A', 30), row('buy', 'A', 20), row('sell', 'B', 99)]);
-    expect(s.realizedProfitScrap).toBe(10);
-    expect(s.realizedTrades).toBe(1);
-    expect(s.open).toEqual([]);
-    expect(s.bySku.map((x) => x.sku)).toEqual(['A']);
+  // 0.7.4 (F38): a sale with no buy before it never takes a later buy (in TF2 that is another copy).
+  it('keeps a sell with no earlier buy waiting, and the later buy held', () => {
+    const sale = row('sell', 'A', 30);
+    const buy = row('buy', 'A', 20);
+    const other = row('sell', 'B', 99);
+    const s = journalSummary([sale, buy, other]);
+    expect(s.realizedProfitScrap).toBe(0);
+    expect(s.realizedTrades).toBe(0);
+    expect(s.bySku).toEqual([]);
+    expect(s.open).toEqual([{ sku: 'A', name: 'Item A', qty: 1, costScrap: 20, lots: [{ id: buy.id, ts: buy.ts, costScrap: 20, keys: 0, scrap: 20, keyPriceScrap: 567 }] }]);
+    expect(s.waitingSales).toEqual([
+      { id: sale.id, ts: sale.ts, sku: 'A', name: 'Item A', keys: 0, scrap: 30 },
+      { id: other.id, ts: other.ts, sku: 'B', name: 'Item B', keys: 0, scrap: 99 },
+    ]);
+  });
+
+  it('matches a sale once its buy is recorded dated before it', () => {
+    const sale = row('sell', 'A', 30);
+    const s = journalSummary([sale, row('buy', 'A', 20, { ts: sale.ts - 60_000 })]);
+    expect(s).toMatchObject({ realizedProfitScrap: 10, realizedTrades: 1, open: [], waitingSales: [] });
+  });
+
+  it('never lets an old sale shift every later flip of the item by one (the cascade)', () => {
+    // A sale of a copy owned before the app, then three flips of the same item: S0, B1, S1, B2, S2, B3.
+    const s0 = row('sell', 'K', 250, { keys: 1 });
+    const b1 = row('buy', 'K', 90, { keys: 1 });
+    const s1 = row('sell', 'K', 250, { keys: 1 });
+    const b2 = row('buy', 'K', 90, { keys: 1 });
+    const s2 = row('sell', 'K', 250, { keys: 1 });
+    const b3 = row('buy', 'K', 90, { keys: 1 });
+    const s = journalSummary([s0, b1, s1, b2, s2, b3]);
+    // The held copy is B3's; S1 and S2 closed B1 and B2; S0 has no cost basis.
+    expect(s.open.map((p) => [p.sku, p.qty, p.lots.map((l) => l.id)])).toEqual([['K', 1, [b3.id]]]);
+    expect(s.realizedTrades).toBe(2);
+    expect(s.realizedProfitScrap).toBe(320);
+    expect(s.waitingSales.map((w) => w.id)).toEqual([s0.id]);
   });
 
   it('uses the latest name for a SKU and sorts open positions by cost', () => {
@@ -140,16 +195,16 @@ describe('journalSummary (FIFO)', () => {
     ]);
   });
 
-  it('keeps lots in time order with their buy row ids; a buy that settles an earlier sell is no lot', () => {
+  it('keeps lots in time order with their buy row ids; a sale before any buy waits and holds no lot back', () => {
     // Logged out of order: ids do not follow time.
     const third = row('buy', 'L', 30, { ts: T0 + 3_000_000 });
     const first = row('buy', 'L', 10, { ts: T0 + 1_000_000 });
     const second = row('buy', 'L', 20, { ts: T0 + 2_000_000 });
-    // A sale logged before any buy of M waits for M's next buy, which then is not held.
+    // 0.7.4 (F38): a sale logged before any buy of M waits; M's later buys are both held.
     const earlySell = row('sell', 'M', 50, { ts: T0 + 500_000 });
-    const settles = row('buy', 'M', 40, { ts: T0 + 600_000 });
+    const later = row('buy', 'M', 40, { ts: T0 + 600_000 });
     const held = row('buy', 'M', 45, { ts: T0 + 700_000 });
-    const s = journalSummary([third, earlySell, first, held, settles, second]);
+    const s = journalSummary([third, earlySell, first, held, later, second]);
     const l = s.open.find((p) => p.sku === 'L')!;
     expect(l.lots).toEqual([
       { id: first.id, ts: first.ts, costScrap: 10, keys: 0, scrap: 10, keyPriceScrap: 567 },
@@ -158,12 +213,16 @@ describe('journalSummary (FIFO)', () => {
     ]);
     expect(l.qty).toBe(l.lots.length);
     expect(l.costScrap).toBe(60);
-    expect(s.open.find((p) => p.sku === 'M')!.lots).toEqual([{ id: held.id, ts: held.ts, costScrap: 45, keys: 0, scrap: 45, keyPriceScrap: 567 }]);
-    expect(s.realizedProfitScrap).toBe(10);
+    expect(s.open.find((p) => p.sku === 'M')!.lots).toEqual([
+      { id: later.id, ts: later.ts, costScrap: 40, keys: 0, scrap: 40, keyPriceScrap: 567 },
+      { id: held.id, ts: held.ts, costScrap: 45, keys: 0, scrap: 45, keyPriceScrap: 567 },
+    ]);
+    expect(s.waitingSales.map((w) => w.id)).toEqual([earlySell.id]);
+    expect(s.realizedProfitScrap).toBe(0);
   });
 
   it('ignores junk rows and an empty journal', () => {
-    expect(journalSummary([])).toEqual({ realizedProfitScrap: 0, realizedTrades: 0, open: [], bySku: [] });
+    expect(journalSummary([])).toEqual({ realizedProfitScrap: 0, realizedTrades: 0, open: [], bySku: [], waitingSales: [], closed: [] });
     const junk = [row('buy', '', 10), { ...row('buy', 'A', 10), side: 'hold' as 'buy' }];
     expect(journalSummary(junk).open).toEqual([]);
   });

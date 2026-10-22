@@ -2,15 +2,18 @@
 // BankStockRow's listedSince / firstSeenAt / changeSinceListed from the history's runs index (one read
 // per list, never a query per row), the 'long-listed' and 'dropped' filters and counts, the 'listed' and
 // 'sinceListed' sorts, a multi-page bank, a history that fails, and none at all. Real in-memory repo.
-// Saves are pages the user saved (R10); nothing here touches scrap.tf or the network.
+// 0.8: the rows' buy timing and the result's turnover from the same history. Saves are pages the user saved
+// (R10); nothing here touches scrap.tf or the network.
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { Repo } from '../../src/service/contracts';
 import { openRepo } from '../../src/service/db';
-import { createBankStock, type BankStock } from '../../src/service/domain/bankStock';
+import { createBankStock, type BankStock, type BankStockDeps } from '../../src/service/domain/bankStock';
+import type { MarketEval } from '../../src/service/domain/market';
 import { createScraptfHistory, type ScraptfHistory } from '../../src/service/domain/scraptfHistory';
-import { bankStockKey } from '../../src/shared/bankStock';
+import { BANK_STOCK_DROPPING_MIN, bankStockKey } from '../../src/shared/bankStock';
 import { DEFAULT_SETTINGS } from '../../src/shared/defaults';
+import { scraptfTimingBrief } from '../../src/shared/scraptfTiming';
 import type { BankStockQuery, BankStockRow, BankStockStored, KeyPriceState, ScraptfBank, UnixMs } from '../../src/shared/types';
 import { recordingLogger } from './helpers';
 
@@ -245,5 +248,112 @@ describe('a quiet page of a bank whose other pages are saved often', () => {
     }
     // The bank's newest saves overall (no perPage) still read as before.
     expect(h.repo.bankStockSaves('list', 500).some((s) => s.page === '/items/3')).toBe(false);
+  });
+});
+
+// 0.8 (T4, LC-4): each on-sale row's buy-timing brief from history.timingFor (judged at list()'s and all()'s
+// `now`), never on a gone or an /items family row, and the bank's turnover on the result.
+describe('BankStockRow.timing and BankStockResult.turnover (0.8)', () => {
+  /** Sells for 60, Pay up to 55, for every base. */
+  const BUY = { revenueScrap: 60, maxCostScrap: 55 } as const;
+
+  function timed(history?: BankStockDeps['history']) {
+    const repo = openRepo(':memory:');
+    repos.push(repo);
+    const log = recordingLogger();
+    const entryFor = () => BUY as unknown as MarketEval;
+    const real = createScraptfHistory({ clock: { now: () => NOW }, log, repo, market: { entryFor }, keyPrice: () => KEY, profit: () => DEFAULT_SETTINGS.profit });
+    const stock = createBankStock({
+      clock: { now: () => NOW },
+      log,
+      repo,
+      market: { entryFor },
+      keyPrice: () => KEY,
+      settings: () => DEFAULT_SETTINGS,
+      categoryOf: () => 'hats',
+      history: history ?? { runsFor: (bank) => real.runsFor(bank), timingFor: (bank, key, buy, now) => real.timingFor(bank, key, buy, now), turnoverFor: (bank) => real.turnoverFor(bank) },
+    });
+    return { repo, log, history: real, stock };
+  }
+
+  /** Hats saved every 2 h for 2 days: 1;6 drops 4 % every 3 saves, 2;6 every 4, 3;6 steady, 5;6 gone 2 h ago. */
+  function seedTimed(repo: Repo): void {
+    for (let i = 0; i < 24; i++) {
+      const rows = [r('1;6', Math.round(50 * 0.96 ** Math.floor(i / 3))), r('2;6', Math.round(40 * 0.96 ** Math.floor(i / 4))), r('3;6', 20)];
+      if (i < 23) rows.push(r('5;6', 7));
+      save(repo, 'hats', NOW - 30 * MIN - (23 - i) * 2 * HOUR, rows);
+    }
+  }
+
+  it("on-sale rows carry history.timingFor's brief for the same copy; gone rows none; the result its turnover", () => {
+    const h = timed();
+    seedTimed(h.repo);
+    const res = h.stock.list({ bank: 'hats', filter: 'all', limit: 2000 }, NOW);
+    const rows = new Map(res.rows.map((x) => [x.key, x]));
+    for (const sku of ['1;6', '2;6', '3;6']) {
+      const t = h.history.timingFor('hats', key(sku), BUY, NOW);
+      expect(t, sku).not.toBeNull();
+      expect(rows.get(key(sku))!.timing, sku).toEqual(scraptfTimingBrief(t!));
+    }
+    const gone = h.stock.list({ bank: 'hats', filter: 'gone', limit: 2000 }, NOW).rows;
+    expect(gone.map((x) => x.key)).toEqual([key('5;6')]);
+    expect(gone[0]).not.toHaveProperty('timing');
+    expect(res.turnover).toEqual(h.history.turnoverFor('hats'));
+    // 1;6 dropped in its current run, so the 'dropping' count reads the row's timing.
+    expect(rows.get(key('1;6'))!.timing!.dropsThisRun).toBeGreaterThan(0);
+    expect(res.counts.dropping).toBe(res.rows.filter((x) => x.change !== 'gone' && (x.timing?.dropsThisRun ?? 0) >= BANK_STOCK_DROPPING_MIN).length);
+    // The CSV path (all()) joins the same briefs.
+    const csvRows = new Map(h.stock.all({ bank: 'hats', filter: 'all' }, NOW).map((x) => [x.key, x]));
+    for (const [k, row] of rows) expect(csvRows.get(k)!.timing, k).toEqual(row.timing);
+  });
+
+  it('an /items family row gets no timing; a Craftable list row does', () => {
+    const h = timed();
+    for (let i = 0; i < 4; i++) {
+      save(h.repo, 'list', NOW - (4 - i) * HOUR, [{ ...r('1;6', 30), craft: 'craftable' }, r('2;6', 20)], '/items');
+    }
+    const rows = new Map(h.stock.list({ bank: 'list', limit: 2000 }, NOW).rows.map((x) => [x.key, x]));
+    expect(rows.get(key('1;6'))!.timing).toEqual(scraptfTimingBrief(h.history.timingFor('list', key('1;6'), BUY, NOW)!));
+    expect(rows.get(key('2;6'))).toMatchObject({ listFamily: true });
+    expect(rows.get(key('2;6'))).not.toHaveProperty('timing');
+  });
+
+  it('without timingFor (0.7 wiring) or when it fails, the rows read without timing; a failure is logged once', () => {
+    const h = timed();
+    seedTimed(h.repo);
+    const none = timed({ runsFor: (bank) => h.history.runsFor(bank) });
+    seedTimed(none.repo);
+    const plain = none.stock.list({ bank: 'hats', limit: 2000 }, NOW);
+    expect(plain.rows.every((x) => x.timing === undefined)).toBe(true);
+    expect(plain).not.toHaveProperty('turnover');
+    const broken = timed({
+      runsFor: (bank) => h.history.runsFor(bank),
+      timingFor: () => {
+        throw new Error('history down');
+      },
+      turnoverFor: () => {
+        throw new Error('history down');
+      },
+    });
+    seedTimed(broken.repo);
+    const res = broken.stock.list({ bank: 'hats', limit: 2000 }, NOW);
+    expect(res.rows).toHaveLength(3);
+    expect(res.rows.every((x) => x.timing === undefined)).toBe(true);
+    expect(res).not.toHaveProperty('turnover');
+    broken.stock.list({ bank: 'hats', limit: 2000 }, NOW);
+    expect(broken.log.lines.filter((l) => l.msg === 'Bank stock could not read the buy timing')).toHaveLength(1);
+  });
+
+  it("whatsNew asks for no timing (alerts' look passes its own time, D9)", () => {
+    const real = timed();
+    seedTimed(real.repo);
+    const timingFor = vi.fn((_bank: ScraptfBank, _key: string, _buy: unknown, _now: UnixMs) => null);
+    const h = timed({ runsFor: (bank) => real.history.runsFor(bank), timingFor });
+    seedTimed(h.repo);
+    h.stock.whatsNew('hats');
+    expect(timingFor).not.toHaveBeenCalled();
+    h.stock.list({ bank: 'hats', limit: 2000 }, NOW);
+    // Asked once per row on sale now (gone rows are not asked), at list()'s time.
+    expect(timingFor.mock.calls.map((c) => [c[1], c[3]]).sort()).toEqual([[key('1;6'), NOW], [key('2;6'), NOW], [key('3;6'), NOW]]);
   });
 });

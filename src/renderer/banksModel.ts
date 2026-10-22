@@ -16,10 +16,12 @@ import { BANK_LOOK_FOR, BANK_TOP_FLIPS } from '../shared/banks';
 import { SCRAPTF_BANKS, scraptfBankInfo, type ScraptfBankInfo } from '../shared/links';
 import { cleanCategoryCounts, isEmptyBankSave } from '../shared/market';
 import { BANK_STOCK_OPEN_FILTERS } from '../shared/types';
+import { fromString } from '../shared/sku';
 import type {
   BankStockOpenFilter,
   ConfidenceLevel,
   ImportBatch,
+  ItemDetail,
   Scrap,
   ScraptfBank,
   ScraptfBankFlip,
@@ -190,6 +192,14 @@ export function bankSavedText(s: Pick<ScraptfBankSummary, 'lastSavedAt' | 'pages
   const items = count(s.items);
   const inStock = Math.min(items, count(s.inStock));
   const pages = count(s.pages);
+  if (isList && items === 0) {
+    // 0.7.4: a list read but no row kept: the upgrade (V14) cleared the rows stored before each read said
+    // which copy it prices, or the page gave none. One more read fills it.
+    return {
+      text: `read ${fmtAgo(Math.min(at, now), now)} · no rows kept: read scrap.tf/items again`,
+      title: `Your last read of scrap.tf/items (${fmtDateTime(at)}) left no rows on your price list. Flip Desk 0.7.4 cleared the rows saved before it read whether a row is the Craftable or the Non-Craftable copy: open scrap.tf/items once more (in the scrap.tf window, or save it with Ctrl+S as '${SAVE_MODE}') to read it again.`,
+    };
+  }
   // A file time a little ahead of the clock (another machine's mtime) reads "just now", not "in 2 min".
   const text = `saved ${fmtAgo(Math.min(at, now), now)} · ${fmtInt(items)} ${itemsWord(items)} (${fmtInt(inStock)} in stock)`;
   const from = pages > 1 ? ` from ${fmtInt(pages)} saved pages` : '';
@@ -451,6 +461,60 @@ export function seenOnText(seenOn: Pick<ScraptfSeenOn, 'bank' | 'at'> | null | u
   return {
     text: at === null ? `Seen on ${path}` : `Seen on ${path} · ${fmtAgo(Math.min(at, now), now)}`,
     title: `The newest scrap.tf price imported for this item (for a painted item with none of its own, for another copy of it) came from your saved copy of ${path}${at === null ? '' : ` (${fmtDateTime(at)})`}. ${SCRAPTF_BOUNDARY_SHORT}`,
+  };
+}
+
+/** 0.7.4 (F65) unsavedLookOf: a newer look of a page than the save the drawer's stock line and history read. */
+export interface UnsavedLook {
+  bank: ScraptfBank;
+  /** When that look was taken (the saved file's time, else its import). */
+  at: UnixMs;
+  /** What the look showed in stock (the /items list's row); null when unknown (a bank page's look). */
+  stock: number | null;
+  stockLimit: number | null;
+}
+
+/** Differences under a second are one look (a save and its prices share the file's time). */
+const UNSAVED_LOOK_SLACK_MS = 1_000;
+
+/**
+ * 0.7.4 (F65): a look of the item's page newer than the stored save its stock line and history are read
+ * from (ItemDetail.bankStock), that showed the item but stored no save: a window read cut short (ACT-4) or
+ * a partial look (DM-2, P1) still stores its prices and list rows. For the /items list, the item's own list
+ * row (an exact one: never a family row, never the plain row of a painted drawer) newer than the list save
+ * it was read with, or with no stored save at all; for a bank page, the item's newest imported price from
+ * that bank newer than that bank's save (a plain drawer only: a painted one may be seen as another copy).
+ * null when the stored save is the newest look, so "Now" and "in your save" stand.
+ */
+export function unsavedLookOf(d: Pick<ItemDetail, 'sku' | 'bankStock' | 'seenOn' | 'scraptfList'>, now: UnixMs): UnsavedLook | null {
+  let painted = false;
+  try {
+    painted = !!fromString(d.sku).paint;
+  } catch {
+    return null;
+  }
+  if (painted) return null;
+  const saved = d.bankStock;
+  const list = d.scraptfList;
+  const newer = (at: unknown, than: UnixMs | null): at is UnixMs => timeOf(at) !== null && (than === null || (at as number) - than > UNSAVED_LOOK_SLACK_MS);
+  if (list && (list.match ?? 'exact') === 'exact' && (saved === null || saved.bank === 'list') && newer(list.observedAt, saved?.savedAt ?? null)) {
+    return { bank: 'list', at: Math.min(list.observedAt, now), stock: list.stock, stockLimit: list.stockLimit };
+  }
+  const seen = d.seenOn;
+  if (saved && seen && seen.bank === saved.bank && saved.bank !== 'list' && newer(seen.at, saved.savedAt)) {
+    return { bank: saved.bank, at: Math.min(seen.at, now), stock: null, stockLimit: null };
+  }
+  return null;
+}
+
+/** 0.7.4 (F65): the drawer's note under its stock line when a newer look stored no save (unsavedLookOf). */
+export function unsavedLookText(u: UnsavedLook, now: UnixMs): { text: string; title: string } {
+  const info = scraptfBankInfo(u.bank);
+  const path = info ? bankPath(info.url) : 'scrap.tf';
+  const stock = typeof u.stock === 'number' && Number.isFinite(u.stock) ? ` (it showed stock ${fmtInt(u.stock)}${typeof u.stockLimit === 'number' && Number.isFinite(u.stockLimit) ? `/${fmtInt(u.stockLimit)}` : ''})` : '';
+  return {
+    text: `Your newer look at ${path} ${fmtAgo(u.at, now)}${stock} stored no save, so the stock line and history are from an older save.`,
+    title: `Your look at ${path} of ${fmtDateTime(u.at)} stored its prices but no bank stock save: it was cut short before the page settled, or caught only part of the page. Read the page again and let it finish loading to bring the history up to date. ${SCRAPTF_BOUNDARY_SHORT}`,
   };
 }
 

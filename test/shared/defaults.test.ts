@@ -153,3 +153,18 @@ describe('v0.2 defaults', () => {
     expect(out.notifications.inputKinds).not.toBe(DEFAULT_SETTINGS.notifications.inputKinds);
   });
 });
+
+describe('0.8 defaults keep 0.7.4 behaviour', () => {
+  it('takes no price-move reserve, tells of watches, sends no "Buy now" toast and leaves no listing out', () => {
+    expect(DEFAULT_SETTINGS.profit.exitReservePct).toBe(0);
+    expect(DEFAULT_SETTINGS.notifications.watches).toBe(true);
+    expect(DEFAULT_SETTINGS.notifications.buyTiming).toBe(false);
+    expect(DEFAULT_SETTINGS.ownSteamIds).toEqual([]);
+  });
+
+  it('replaces the own accounts list instead of merging it', () => {
+    const b = mergeSettings(base(), { ownSteamIds: ['76561198000000001', '76561198000000002'] });
+    expect(mergeSettings(b, { ownSteamIds: ['76561198000000003'] }).ownSteamIds).toEqual(['76561198000000003']);
+    expect(b.ownSteamIds).not.toBe(DEFAULT_SETTINGS.ownSteamIds);
+  });
+});

@@ -1,10 +1,17 @@
 // F10 Live market wiring, checked statically (the renderer tests run in node,
 // without a DOM): the nav entry and route, the only app methods the page
-// calls, and the stylesheet's use of tokens and reduced motion.
+// calls, and the stylesheet's use of tokens and reduced motion. 0.8 (T7): the table rendered server-side
+// for the Wait / Buy now tag in the Item cell.
 
 import { readFileSync } from 'node:fs';
+import { createElement } from 'react';
+import { renderToString } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
+import { DEFAULT_MARKET_SORT, marketDisplayRows } from '../../src/renderer/marketModel';
+import type { MarketTableProps } from '../../src/renderer/pages/MarketPage';
+import { scraptfLinkFor } from '../../src/shared/links';
 import { SERVICE_METHODS, MAIN_METHODS } from '../../src/shared/rpc';
+import type { MarketRow, ScraptfTimingBrief } from '../../src/shared/types';
 
 const read = (rel: string) => readFileSync(new URL(`../../src/renderer/${rel}`, import.meta.url), 'utf8');
 
@@ -223,5 +230,104 @@ describe('the scrap.tf list filter (F14)', () => {
   it("refetches the window on 'scraptf.listChanged' like a price change (throttled, hidden-gated, counted while frozen)", () => {
     // A maintenance purge pushes only this: the list cells, the filter and the "All items" chip must follow.
     expect(page).toContain("usePush('scraptf.listChanged', () => onLiveChange(1));");
+  });
+});
+
+describe('0.8 (T7): the buy-timing tag in the Item cell', () => {
+  const page = read('pages/MarketPage.tsx');
+  const T0 = Date.UTC(2026, 9, 22, 12, 0, 0);
+  const HOUR = 3_600_000;
+  const brief = (over: Partial<ScraptfTimingBrief> = {}): ScraptfTimingBrief => ({
+    verdict: 'wait',
+    why: 'drop-likely',
+    bank: 'hats',
+    key: '378;6|',
+    dropsThisRun: 1,
+    steps: [],
+    lastSeenAt: T0 - 3 * HOUR,
+    horizonMs: 24 * HOUR,
+    pDrop: 0.4,
+    pGone: 0.2,
+    pRise: 0.1,
+    nextDropAt: null,
+    n: { states: 30, copies: 5, atRisk: 9, dropCopies: 4 },
+    ...over,
+  });
+  function row(sku: string, over: Partial<MarketRow> = {}): MarketRow {
+    return {
+      sku,
+      name: `Item ${sku}`,
+      category: 'hats',
+      revenueScrap: 120,
+      bestScrap: 130,
+      consScrap: 120,
+      instantScrap: 110,
+      revenueOrder: null,
+      buyerCount: 3,
+      maxCostScrap: 100,
+      confidence: 60,
+      confidenceLevel: 'medium',
+      flags: [],
+      knownCostScrap: null,
+      knownSource: 'none',
+      knownObservedAt: null,
+      stock: null,
+      ruleCostScrap: null,
+      profitScrap: null,
+      verdict: 'unchecked',
+      lastOrderChangeAt: T0 - HOUR,
+      evaluatedAt: T0,
+      scraptfPaysScrap: null,
+      scraptfStock: null,
+      scraptfStockLimit: null,
+      scraptfFull: false,
+      scraptfListAt: null,
+      scraptfNewAt: null,
+      scraptfListedSince: null,
+      scraptfLink: scraptfLinkFor('hats', { bank: 'hats', at: T0 - 3 * HOUR }),
+      ...over,
+    };
+  }
+
+  it('sits after the New pill, from the row\'s scraptfTiming (no grid track of its own)', () => {
+    expect(page).toContain('const timing = timingBadge(r.scraptfTiming, now, keyScrap);');
+    const cell = page.slice(page.indexOf('<div role="gridcell" className="m-item">'), page.indexOf('<div role="gridcell" className="m-cat'));
+    expect(cell.indexOf('market-new')).toBeLessThan(cell.indexOf('timing-badge'));
+    expect(read('styles/market.css')).not.toContain('timing');
+  });
+
+  it("shows 'Wait ~1 d' for a wait row and 'Buy now' for a buy-now row, nothing for the other verdicts", async () => {
+    const { MarketTable } = await import('../../src/renderer/pages/MarketPage');
+    const rows = [
+      row('378;6', { scraptfTiming: brief() }),
+      row('30;6', { scraptfTiming: brief({ key: '30;6|', verdict: 'buy-now', why: 'gone-risk' }) }),
+      row('31;6', { scraptfTiming: brief({ key: '31;6|', verdict: 'over', why: 'over' }) }),
+      row('32;6'),
+    ];
+    const props: MarketTableProps = {
+      rows: marketDisplayRows(rows, rows.length),
+      dataKey: 'q',
+      keyScrap: 568,
+      now: T0,
+      density: 'comfortable',
+      selectedId: null,
+      flash: { seq: 0, dirs: new Map() },
+      sort: { ...DEFAULT_MARKET_SORT },
+      loadingMore: false,
+      frozen: false,
+      onSelect: () => undefined,
+      onOpen: () => undefined,
+      onMenu: () => undefined,
+      onLoadMore: () => undefined,
+      onSort: () => undefined,
+    };
+    const h = renderToString(createElement(MarketTable, props)).replace(/<!-- -->/g, '');
+    const tags = [...h.matchAll(/<span class="pill tone-(\w+) timing-badge" title="([^"]*)">([^<]+)<\/span>/g)].map((m) => [m[1], m[3]]);
+    expect(tags).toEqual([
+      ['warn', 'Wait ~1 d'],
+      ['good', 'Buy now'],
+    ]);
+    expect(h).toContain('Of the 9 prices on scrap.tf/buy/hats still at their price at this age (from 30 prices of 5 items in your saves), 40 % dropped within 1 d');
+    expect(h).toContain('From your save 3 h ago; an estimate, not a forecast.');
   });
 });

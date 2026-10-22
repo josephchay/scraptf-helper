@@ -181,7 +181,9 @@ describe('F18 through the real core and its folder watch', () => {
 
     // ---- The .mhtml save ("Webpage, Single File"), with what the watch must skip beside it. ----
     const dirs = await setup('mhtml');
-    const file = mhtmlOf(HATS);
+    // 0.7.4 (F82): each file's Date header is its save time, as its mtime says (else the Date would date it).
+    const dated = (at: number) => ({ date: new Date(at).toUTCString() });
+    const file = mhtmlOf(HATS, dated(FIRST));
     // Chromium writes no address into the page itself; the Content-Location still names the bank.
     expect(mhtmlOf(withoutAddress(HATS))).toContain('Content-Location: https://scrap.tf/buy/hats');
     save(dirs.folder, 'Hat Trading - TF2 - Scrap.TF.mhtml', file, FIRST);
@@ -226,7 +228,7 @@ describe('F18 through the real core and its folder watch', () => {
     // ---- The page saved again without its cards (an .mhtml of the empty shell). ----
     const EMPTY = NOW - 30 * MIN;
     const pricesBefore = mhtmlDisk.listScrapPrices().map((p) => ({ ...p }));
-    save(dirs.folder, 'Hat Trading - TF2 - Scrap.TF (1).mhtml', mhtmlOf(withoutAddress(emptyHats())), EMPTY);
+    save(dirs.folder, 'Hat Trading - TF2 - Scrap.TF (1).mhtml', mhtmlOf(withoutAddress(emptyHats()), dated(EMPTY)), EMPTY);
     watch.changed('Hat Trading - TF2 - Scrap.TF (1).mhtml');
     const empty = (await waitFor('the empty save', () => (h.imports().length === 2 ? h.imports() : null)))[1]!;
     expect(empty).toMatchObject({ fileName: 'Hat Trading - TF2 - Scrap.TF (1).mhtml', pageKind: 'buy', bank: 'hats', parsed: 0, stored: 0 });
@@ -249,7 +251,7 @@ describe('F18 through the real core and its folder watch', () => {
 
     // ---- The next real save (one card sold since) moves them all, compared with the last save with cards. ----
     const LATER = NOW - 5 * MIN;
-    save(dirs.folder, 'Hat Trading - TF2 - Scrap.TF (2).mhtml', mhtmlOf(hatsWithoutC38()), LATER);
+    save(dirs.folder, 'Hat Trading - TF2 - Scrap.TF (2).mhtml', mhtmlOf(hatsWithoutC38(), dated(LATER)), LATER);
     watch.changed('Hat Trading - TF2 - Scrap.TF (2).mhtml');
     const later = (await waitFor('the later save', () => (h.imports().length === 3 ? h.imports() : null)))[2]!;
     expect(later).toMatchObject({ bank: 'hats', stored: fromMhtml!.stored - 1 });

@@ -32,6 +32,7 @@ import {
   scraptfItemHistoryOf,
   type ScraptfSaveRows,
 } from '../../src/shared/scraptfHistory';
+import { scraptfBankCyclesOf, scraptfItemTimingOf } from '../../src/shared/scraptfTiming';
 import type { BankStockStored, KeyPriceState, ScraptfBank, ScraptfChangeEvent, UnixMs } from '../../src/shared/types';
 import { createStubSchema } from '../import/schemaStub';
 import { recordingLogger } from './helpers';
@@ -230,7 +231,10 @@ describe('the service reads (createScraptfHistory, createBankStock)', () => {
       .filter((x) => x.bank === 'killstreaks')
       .map((x) => ({ batchId: x.batchId, savedAt: x.savedAt, page: x.page, rows: h.repo.bankStockRows(x.batchId) }));
     const events = h.repo.scraptfEventsForSku(RL, 500).map((e) => scraptfChangeEvent(e, K, null));
-    expect(item).toEqual(scraptfItemHistoryOf({ sku: RL, specialKey: null, banks: [{ bank: 'killstreaks', saves }], events, keyPrice: KEY, now: NOW }));
+    const expected = scraptfItemHistoryOf({ sku: RL, specialKey: null, banks: [{ bank: 'killstreaks', saves }], events, keyPrice: KEY, now: NOW });
+    // 0.8 (T3-T5): plus the copy's cycles in its bank (no profit settings wired here, so timing null).
+    const cycles = scraptfItemTimingOf(expected, { cyclesOf: (b) => scraptfBankCyclesOf(b, saves, K), buy: null, profit: null, keyScrap: K, now: NOW });
+    expect(item).toEqual({ ...expected, ...cycles });
     expect(h.stock.detailFor(RL)).toEqual({ bank: 'killstreaks', savedAt: NOW, change: 'cheaper', previousCostScrap: 300, stock: 1 });
     // Unchanged: an item never saved, and an explicit copy.
     expect(h.history.itemHistory('999;6', null, NOW)).toMatchObject({ sku: '999;6', name: 'Schema Hat', bank: null, points: [], events: [] });

@@ -419,6 +419,100 @@ UPDATE import_batches SET item_count = 0
                                AND k.id > import_batches.id)));
 `;
 
+// 0.7.4: an unmarked scrap.tf/items row stands for every copy scrap.tf sells at its price (Craftable and
+// Non-Craftable, killstreak and festivized copies alike), yet every list read before 0.7.4 stored it as the
+// plain Craftable copy: its price met Craftable buy orders (false flips), its stock counted every copy, it
+// took over bank pages' rows, and no later read or bank save could remove it. A stored row cannot tell which
+// copy it priced (both carry the same name), so everything the list wrote goes and the user's next read of
+// scrap.tf/items rebuilds it with each row's craftability (scraptf_list.craft): the list's imported prices
+// (a typed price, "Use as my price" included, stays), its rows, its stock saves (the oldest held the
+// pre-0.7.1 parser's rows with no stock, read as on sale) with their change events, and its batches' counts
+// (item_count 0). Unlike a V12/V13 bank page, a list batch still dates the list: BANK_NEWEST_SAVE and
+// isEmptyBankSave count the list with no rows, so the Banks list card reads "read <ago> · no rows kept: read
+// scrap.tf/items again" (banksModel bankSavedText) until the next read. Opportunities need no SQL: the
+// engine's first full run drops the ones whose price is gone. The list's new stock saves carry each row's
+// craftability too (bank_stock.craft, NULL on a bank page's card), so a family row's stock is joined to no
+// Craftable buyer (bankStockListFamily); a list row remembers the page it was read on (scraptf_list.page,
+// F60: a whole save of that page retires the rows it no longer shows). Also key_prices.price_at (when the
+// source last set the quote's price; NULL: unknown).
+const V14_LIST_FAMILY_ROWS = `
+DELETE FROM scrap_prices
+ WHERE source = 'import'
+   AND import_batch IN (SELECT id FROM import_batches WHERE page_kind = 'items-list');
+DELETE FROM scraptf_list;
+DELETE FROM scraptf_events WHERE bank = 'list';
+DELETE FROM bank_stock WHERE bank = 'list';
+DELETE FROM bank_stock_saves WHERE bank = 'list';
+UPDATE import_batches SET item_count = 0 WHERE page_kind = 'items-list' AND item_count > 0;
+ALTER TABLE scraptf_list ADD COLUMN craft TEXT NOT NULL DEFAULT 'any';
+ALTER TABLE scraptf_list ADD COLUMN page TEXT NOT NULL DEFAULT '';
+ALTER TABLE bank_stock ADD COLUMN craft TEXT;
+ALTER TABLE key_prices ADD COLUMN price_at INTEGER;
+`;
+
+// 0.8.0: the release's one migration (nullable columns and new tables only; no row is read or rewritten).
+// J2: a fee per journal row; G1/G3: the user's scrap.tf watches; H1: recorded exit-price runs of held and watched
+// items. A 0.7.4 build refuses a V15 database (SchemaVersionError), as for every migration.
+const V15_ROUND_080 = `
+-- 0.8 (J2): a fee per journal row, keys and metal apart. NULL in both is "not recorded" (every row written before
+-- V15), 0 is "none". journal.side also takes 'writeoff' from 0.8 (TEXT; no change needed).
+ALTER TABLE journal ADD COLUMN fee_keys REAL;
+ALTER TABLE journal ADD COLUMN fee_scrap INTEGER;
+
+-- 0.8 (G1, G3): the user's scrap.tf watches, one row per watched copy (special_key: the bank_stock key) or per base for
+-- every copy (special_key NULL). Price targets are raw keys + metal as typed (max_cost_scrap NULL: none), the profit
+-- floor whole scrap (NULL: none). remind_at is reserved for the timed look reminder (T9): 0.8 never reads or writes
+-- it. User data, never pruned (at most WATCHES_MAX rows, rpcHandlers). One watch per copy: '*' stands for every copy
+-- (a special key is '' or JSON, never '*'). AUTOINCREMENT, so a removed watch's id (and its dedupe key) is never reused.
+CREATE TABLE IF NOT EXISTS scraptf_watches (
+  id               INTEGER PRIMARY KEY AUTOINCREMENT,
+  sku              TEXT NOT NULL,
+  special_key      TEXT,
+  name             TEXT NOT NULL DEFAULT '',
+  max_cost_keys    REAL NOT NULL DEFAULT 0,
+  max_cost_scrap   INTEGER,
+  min_profit_scrap INTEGER,
+  on_restock       INTEGER NOT NULL DEFAULT 0,
+  enabled          INTEGER NOT NULL DEFAULT 1,
+  remind_at        INTEGER,
+  created_at       INTEGER NOT NULL,
+  updated_at       INTEGER NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS scraptf_watches_copy ON scraptf_watches(sku, IFNULL(special_key, '*'));
+
+-- 0.8 (H1): recorded exit-price runs of held and watched items, one row per run of identical values seen while the
+-- backpack.tf live feed was up (holdings' MarkRecorder). Prices are raw keys + metal (valued per read at the current
+-- key price, so a key move alone is never a price move); NULL where that side had nothing. Only data the app already
+-- had (the live book, the kept sell listings, the saved list); nothing is fetched. A new run starts when a price
+-- changes; the counts (buyer_count, verified_buyer_count, ask_count) are the latest seen in the run, updated when it is
+-- extended. key_scrap is NULL when the key price was not known (never a default written as an observation).
+-- Retention (180 days, at most 2,000 runs per base) is Repo.pruneHoldingMarks.
+CREATE TABLE IF NOT EXISTS holding_marks (
+  id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+  base_sku             TEXT NOT NULL,
+  from_at              INTEGER NOT NULL,
+  to_at                INTEGER NOT NULL,
+  rev_keys             REAL,
+  rev_metal_scrap      INTEGER,
+  rev_is_bot           INTEGER,
+  rev_verified         INTEGER,
+  best_keys            REAL,
+  best_metal_scrap     INTEGER,
+  next_keys            REAL,
+  next_metal_scrap     INTEGER,
+  buyer_count          INTEGER NOT NULL DEFAULT 0,
+  verified_buyer_count INTEGER,
+  ask_keys             REAL,
+  ask_metal_scrap      INTEGER,
+  ask_count            INTEGER,
+  scraptf_pays_keys    REAL,
+  scraptf_pays_scrap   INTEGER,
+  key_scrap            INTEGER
+);
+CREATE INDEX IF NOT EXISTS holding_marks_base_from ON holding_marks(base_sku, from_at);
+CREATE INDEX IF NOT EXISTS holding_marks_to_at ON holding_marks(to_at);
+`;
+
 export const MIGRATIONS: readonly Migration[] = Object.freeze([
   { version: 1, name: 'initial schema', sql: V1_INITIAL },
   { version: 2, name: 'opportunity pay-up-to ceiling', sql: V2_MAX_COST },
@@ -433,6 +527,8 @@ export const MIGRATIONS: readonly Migration[] = Object.freeze([
   { version: 11, name: 'remove killstreak kits stored without their target', sql: V11_BARE_KITS },
   { version: 12, name: 'remove bare killstreak kits again and the bank stock saves they left empty', sql: V12_BARE_KITS_AGAIN },
   { version: 13, name: 'killstreaks looks left with no prices and no bank stock save count no items', sql: V13_BARE_KIT_LOOKS },
+  { version: 14, name: 'remove scrap.tf/items list data stored without its craftability', sql: V14_LIST_FAMILY_ROWS },
+  { version: 15, name: 'journal fees, scrap.tf watches and recorded exit runs', sql: V15_ROUND_080 },
 ]);
 
 export const SCHEMA_VERSION: number = MIGRATIONS.reduce((max, m) => Math.max(max, m.version), 0);

@@ -40,8 +40,9 @@ const HOUR = 60 * MIN;
 const K = 568;
 const P = DEFAULT_SETTINGS.profit;
 
+/** 0.7.4: proven the Craftable copy (the list shows its Non-Craftable row apart) unless `craft` says otherwise. */
 function stored(over: Partial<ScraptfListStored> = {}): ScraptfListStored {
-  return { sku: '378;6', name: 'Team Captain', sellsKeys: 0, sellsScrap: 12, paysKeys: 0, paysScrap: 11, stock: 2, stockLimit: 5, batchId: 101, observedAt: T0 - 3 * MIN, ...over };
+  return { sku: '378;6', name: 'Team Captain', sellsKeys: 0, sellsScrap: 12, paysKeys: 0, paysScrap: 11, stock: 2, stockLimit: 5, batchId: 101, observedAt: T0 - 3 * MIN, craft: 'craftable', ...over };
 }
 const listRow = (over: Partial<ScraptfListStored> = {}, k = K) => valueScraptfListRow(stored(over), k);
 
@@ -173,6 +174,24 @@ describe('"Use as my price"', () => {
     // Stock not shown, or in stock, still saves.
     expect(listPriceInput(listRow({ stock: null, stockLimit: null }), ITEM)).not.toBeNull();
     expect(listPriceInput(listRow({ stock: 1 }), ITEM)).not.toBeNull();
+  });
+
+  it('is off for a family row, whose price is no cost of one copy, and says why (0.7.4, F03)', () => {
+    // Unmarked with no Non-Craftable row beside it: scrap.tf's one row for every copy at its price.
+    const family = listRow({ sku: '5040;6', name: 'A Distinctive Lack of Hue', sellsKeys: 1, sellsScrap: 389, paysKeys: 1, paysScrap: 333, stock: 4, stockLimit: 25, craft: 'any' });
+    expect(listPriceInput(family, ITEM)).toBeNull();
+    const v = scraptfListView(family, K, T0);
+    expect(v).toMatchObject({ canUse: false, family: true, copy: null, familyText: 'One scrap.tf/items row for every copy at this price' });
+    expect(v.unusable).toBe('The scrap.tf/items list does not show whether this is the Craftable or Non-Craftable copy; check the bank page.');
+    expect(v.line).toBe('sells 1 key 43.22 ref · pays 1 key 37.00 ref · stock 4/25 for every copy · saved 3 min ago');
+    // The same row read for a Non-Craftable copy with no row of its own (rowFor's match 'family').
+    expect(scraptfListView({ ...family, match: 'family' }, K, T0)).toMatchObject({ canUse: false, family: true });
+    expect(listPriceInput({ ...family, match: 'family' }, ITEM)).toBeNull();
+    // A Non-Craftable row (named so) is proven: it saves, and says which copy it is.
+    const nc = listRow({ sku: '725;6;uncraftable', name: 'Non-Craftable Tour of Duty Ticket', sellsScrap: 273, craft: 'uncraftable' });
+    expect(scraptfListView(nc, K, T0)).toMatchObject({ canUse: true, family: false, copy: 'Non-Craftable', familyText: null });
+    expect(listPriceInput(nc, ITEM)?.sku).toBe('725;6;uncraftable');
+    expect(scraptfListView(listRow(), K, T0).copy).toBe('Craftable');
   });
 
   it('confirms with the price and the age of the list', () => {
@@ -327,7 +346,8 @@ describe('item drawer wiring (F14)', () => {
     // UX-11: the price-list block offers scrap.tf/items only; the item's bank page is the header's Open on scrap.tf.
     expect(drawer).not.toContain('bankPageUrl(');
     expect(drawer).not.toContain('Open bank page');
-    expect(drawer).toContain('const stfUrl = scraptfOpenUrl(d.category, null, d.seenOn) ?? SCRAPTF_ITEMS_URL;');
+    // 0.7.4 (F36): with the bank its kind is sold on (ItemDetail.kindBank) before the category's page.
+    expect(drawer).toContain('const stfUrl = scraptfOpenUrl(d.category, null, d.seenOn, d.kindBank ?? null) ?? SCRAPTF_ITEMS_URL;');
     // F19: armed with the drawer's SKU and exactly the name it copies, so a price copied there comes back.
     expect(drawer).toContain('openOnScraptf(stfUrl, scraptfSearchName(d), toast, { sku: d.sku, settings })');
     expect(drawer.match(/openOnScraptf\(/g)).toHaveLength(1);

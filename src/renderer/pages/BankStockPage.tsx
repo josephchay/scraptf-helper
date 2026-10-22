@@ -9,6 +9,7 @@
 // ('scraptfWindow.open' with the bank's static SCRAPTF_BANKS page, on a click only) sits by Open, which
 // follows openLinksInWindow (F21-9); #/banks/<bank>/stock/<flips|new> (the toolbar's Show flips, F21-2)
 // opens the page on that chip once; Record buy books the row's exact copy at its price (ACT-11).
+// 0.8 (G1): a watched row carries its watch tag (bankStockWatchTag); 'watches.changed' re-reads the page.
 
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent, type MouseEvent, type RefObject } from 'react';
 import { bankStockDefaultDir } from '../../shared/bankStock';
@@ -44,11 +45,14 @@ import {
   bankStockPriceTitle,
   bankStockQueryKey,
   bankStockQueryOf,
+  bankStockRowCopyKey,
   bankStockSellsTitle,
   bankStockSinceListedCell,
   bankStockSortChange,
   bankStockStockCell,
+  bankStockTurnoverText,
   bankStockVerdictPill,
+  bankStockWatchTag,
   createBankStockLoader,
   sanitizeBankStockView,
   type BankStockEmptyReason,
@@ -75,6 +79,7 @@ import { anchoredScrollTop } from '../marketModel';
 import { isMenuKeyEcho, isSearchShortcut, menuAnchorRect, moveCursor } from '../oppModel';
 import { listBoundaryNote, listSetupNote, listSetupState } from '../scraptfListModel';
 import { bankWindowView, OPEN_IN_WINDOW_LABEL, windowOpenFailedText, windowOpenTitle, type BankWindowView } from '../scraptfWindowModel';
+import { timingBadge, timingVerdictTitle } from '../timingModel';
 
 type MenuPoint = { x: number; y: number };
 
@@ -128,6 +133,8 @@ function useBankStock(query: BankStockQuery): { answer: BankStockAnswer | null; 
   const refreshSoon = useThrottled(refresh, BANK_STOCK_REFRESH_MS);
   useVisiblePush('scraptf.banksChanged', refreshSoon);
   useVisiblePush('market.changed', refreshSoon);
+  // 0.8 (G1): a watch added, changed or removed re-joins the rows' watch tags and the Watched chip.
+  useVisiblePush('watches.changed', refreshSoon);
   return { answer, error, busy, refresh, refreshSoon };
 }
 
@@ -207,10 +214,13 @@ export function BankStockPage({ bank }: { bank: ScraptfBank }) {
   // Through refs, so the memoised rows keep stable handlers.
   const menuRef = useRef(menu.open);
   menuRef.current = menu.open;
-  const onOpen = useCallback((r: BankStockRow) => openItem(r.sku), [openItem]);
+  // 0.7.4 (F66): on the row's own copy, so a painted or kit-sheen copy's item panel shows that copy's history.
+  const onOpen = useCallback((r: BankStockRow) => openItem(r.sku, bankStockRowCopyKey(r)), [openItem]);
   // ACT-11: Record buy books this row's exact copy (a painted one as painted) at the price the save showed.
+  // 0.8 (G1): Watch on scrap.tf… watches that copy too ('' a plain one).
   const onMenu = useCallback(
-    (r: BankStockRow, at: MenuPoint) => menuRef.current({ sku: r.sku, name: r.name, category: r.category, bank, copy: bankStockBuyCopy(r, bank) }, at),
+    (r: BankStockRow, at: MenuPoint) =>
+      menuRef.current({ sku: r.sku, name: r.name, category: r.category, bank, copy: bankStockBuyCopy(r, bank), special: bankStockRowCopyKey(r) ?? '' }, at),
     [bank],
   );
 
@@ -250,6 +260,7 @@ export function BankStockPage({ bank }: { bank: ScraptfBank }) {
         now={now}
         keyScrap={keyScrap}
         useOrder={settings?.profit.useOrder ?? null}
+        reservePct={settings?.profit.exitReservePct ?? null}
         density={settings?.ui.density ?? 'comfortable'}
         selectedKey={selectedKey}
         picking={folder.picking}
@@ -300,6 +311,8 @@ export interface BankStockPageViewProps {
   keyScrap: Scrap | null;
   /** 0.7.3: Settings' Revenue used for profit, which says why buyers give no revenue (bankStockSellsTitle); null until read. */
   useOrder?: ProfitSettings['useOrder'] | null;
+  /** 0.8 (PC-1): Settings' price-move reserve, named in the Flip hover only when above 0; null or absent: none. */
+  reservePct?: number | null;
   density: 'comfortable' | 'compact';
   selectedKey: string | null;
   /** The folder dialog is open. */
@@ -425,6 +438,7 @@ export function BankStockPageView(p: BankStockPageViewProps) {
               previousSavedAt={r.previousSavedAt}
               keyScrap={p.keyScrap}
               useOrder={p.useOrder ?? null}
+              reservePct={p.reservePct ?? null}
               now={p.now}
               density={p.density}
               selectedKey={p.selectedKey}
@@ -457,6 +471,7 @@ function BankStockHeader(p: BankStockPageViewProps & { head: BankStockHeaderView
   const h = p.head;
   const w = p.scraptfWindow ?? null;
   const older = bankStockOlderPages(p.result, p.now);
+  const turnover = bankStockTurnoverText(p.result?.turnover, h.path);
   // Until (or unless) the list status is read, nothing is assumed off.
   const setup = p.status ? listSetupState(p.status, w !== null) : null;
   const note = setup ? listSetupNote(setup, 'banks', p.status?.watchError ?? null) : null;
@@ -499,6 +514,12 @@ function BankStockHeader(p: BankStockPageViewProps & { head: BankStockHeaderView
               </span>
             </>
           ) : null}
+        </p>
+      ) : null}
+      {/* 0.8 (LC-4): how long items stayed listed here in the user's saves (an estimate with its n, never a forecast). */}
+      {turnover ? (
+        <p className="bs-turnover muted small" title={turnover.title}>
+          {turnover.text}
         </p>
       ) : null}
       {note ? <SetupNoteView note={note} picking={p.picking} onGoImport={p.onGoImport} onPickFolder={p.onPickFolder} /> : null}
@@ -798,6 +819,8 @@ export interface BankStockTableProps {
   keyScrap: Scrap | null;
   /** 0.7.3: for the Sells for hover (bankStockSellsTitle); null or absent while unknown. */
   useOrder?: ProfitSettings['useOrder'] | null;
+  /** 0.8 (PC-1): for the Flip hover (bankStockVerdictPill); null or absent: no reserve. */
+  reservePct?: number | null;
   now: UnixMs;
   density: 'comfortable' | 'compact';
   selectedKey: string | null;
@@ -813,7 +836,7 @@ export interface BankStockTableProps {
  * The bank's rows (up to 2,000), virtualised like the Live market and with its keyboard model; rows
  * are keyed by `key` (SKU and extras), so a plain and a painted copy are two rows. Exported for tests.
  */
-export function BankStockTable({ rows, dataKey, gone, previousSavedAt, keyScrap, useOrder = null, now, density, selectedKey, sort, dir, onSort, onSelect, onOpen, onMenu }: BankStockTableProps) {
+export function BankStockTable({ rows, dataKey, gone, previousSavedAt, keyScrap, useOrder = null, reservePct = null, now, density, selectedKey, sort, dir, onSort, onSelect, onOpen, onMenu }: BankStockTableProps) {
   const scroller = useRef<HTMLDivElement>(null);
   const header = useRef<HTMLDivElement>(null);
   // Only the first visible row is state, so scrolling within a row costs no render.
@@ -994,6 +1017,7 @@ export function BankStockTable({ rows, dataKey, gone, previousSavedAt, keyScrap,
               previousSavedAt={previousSavedAt}
               keyScrap={keyScrap}
               useOrder={useOrder}
+              reservePct={reservePct}
               now={now}
               onSelect={onSelect}
               onOpen={onOpen}
@@ -1020,6 +1044,7 @@ const StockRow = memo(function StockRow({
   previousSavedAt,
   keyScrap,
   useOrder,
+  reservePct,
   now,
   onSelect,
   onOpen,
@@ -1034,6 +1059,7 @@ const StockRow = memo(function StockRow({
   previousSavedAt: UnixMs | null;
   keyScrap: Scrap | null;
   useOrder: ProfitSettings['useOrder'] | null;
+  reservePct: number | null;
   now: UnixMs;
   onSelect: (key: string) => void;
   onOpen: (r: BankStockRow) => void;
@@ -1042,13 +1068,18 @@ const StockRow = memo(function StockRow({
   const order = r.revenueOrder;
   const buyer = bankStockBuyer(r);
   const change = bankStockChangeTag(r, keyScrap, previousSavedAt, now);
-  const pill = bankStockVerdictPill(r, keyScrap, useOrder);
+  const pill = bankStockVerdictPill(r, keyScrap, useOrder, reservePct);
   const priceTitle = bankStockPriceTitle(r, keyScrap);
   const payTitle = bankStockPayTitle(r, keyScrap, useOrder);
   const stock = gone ? null : bankStockStockCell(r, hasPrevious);
   const seen = gone ? bankStockLastSeen(r, previousSavedAt, now) : null;
   const listed = bankStockListedCell(r, now);
   const since = bankStockSinceListedCell(r, keyScrap);
+  // 0.8 (T6, D23): the Wait / Buy now tag in the flexible Item cell, and the timing sentence on the Verdict title.
+  const badge = timingBadge(r.timing, now);
+  const timingTitle = timingVerdictTitle(r.timing, now);
+  // 0.8 (G1): the row's watch (BankStockRow.watch) and where it stands, after the extras tag.
+  const watchTag = bankStockWatchTag(r, keyScrap);
   return (
     <div
       id={`bsrow-${index}`}
@@ -1070,18 +1101,33 @@ const StockRow = memo(function StockRow({
     >
       <div role="gridcell" className="bs-item">
         <ItemName sku={r.sku} name={r.name} maxTags={2} />
-        {change?.kind === 'new' ? (
-          <span className="pill tone-good bs-new" title={change.title}>
-            New
-          </span>
-        ) : change && change.kind !== 'gone' ? (
-          <span className={`bs-was tone-text-${change.tone}`} title={change.title}>
-            {change.text}
-          </span>
-        ) : null}
-        {r.hasExtras ? (
-          <span className="bs-extras" title={bankStockExtrasTitle(r.key)}>
-            extras
+        {/* 0.8: the tags share what the name leaves (bank-stock.css .bs-tags), so the name always keeps a floor. */}
+        {(change && change.kind !== 'gone') || badge || r.hasExtras || watchTag ? (
+          <span className="bs-tags">
+            {change?.kind === 'new' ? (
+              <span className="pill tone-good bs-new" title={change.title}>
+                New
+              </span>
+            ) : change && change.kind !== 'gone' ? (
+              <span className={`bs-was tone-text-${change.tone}`} title={change.title}>
+                {change.text}
+              </span>
+            ) : null}
+            {badge ? (
+              <span className={`pill tone-${badge.tone} timing-badge`} title={badge.title}>
+                {badge.text}
+              </span>
+            ) : null}
+            {r.hasExtras ? (
+              <span className="bs-extras" title={bankStockExtrasTitle(r.key)}>
+                extras
+              </span>
+            ) : null}
+            {watchTag ? (
+              <span className={`bs-watch tone-text-${watchTag.tone}`} title={watchTag.title}>
+                {watchTag.text}
+              </span>
+            ) : null}
           </span>
         ) : null}
       </div>
@@ -1107,7 +1153,7 @@ const StockRow = memo(function StockRow({
         {r.revenueScrap !== null ? <Money scrap={r.revenueScrap} keyScrap={keyScrap} /> : <span className="muted">{DASH}</span>}
         {order ? (
           <span className="buyer-type">
-            <OnlineDot online={order.online} />
+            <OnlineDot online={order.online} seenAt={order.lastEventAt} />
             <Icon name={order.isBot ? 'bolt' : 'user'} size={12} title={order.isBot ? 'Bot' : 'Human'} />
           </span>
         ) : null}
@@ -1117,7 +1163,7 @@ const StockRow = memo(function StockRow({
         {r.maxCostScrap !== null ? <Money scrap={r.maxCostScrap} keyScrap={keyScrap} title={payTitle} /> : <span className="muted">{DASH}</span>}
       </div>
       <div role="gridcell" className="bs-verdict">
-        <span className={`pill verdict-pill tone-${pill.tone}`} title={pill.title}>
+        <span className={`pill verdict-pill tone-${pill.tone}`} title={timingTitle ? `${pill.title} ${timingTitle}` : pill.title}>
           {pill.text}
         </span>
       </div>

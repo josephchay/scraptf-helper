@@ -82,7 +82,8 @@ describe('the age of a told save (ACT-6)', () => {
     const newest = save(h.repo, 'hats', NOW - 48 * HOUR, [s('9;6', 5), ...NEW.slice(0, 3)]);
     expect(h.stock.savedAtOf(newest)).toBe(NOW - 48 * HOUR);
     expect(h.run(newest)).toBe(1);
-    expect(h.sent).toEqual([{ ...bankStockOldSaveNotice(3, 'https://scrap.tf/buy/hats', 48 * HOUR), sku: null }]);
+    // 0.8 (G5): the summary opens the bank's stock page on the New chip (an in-app route, no URL).
+    expect(h.sent).toEqual([{ ...bankStockOldSaveNotice(3, 'https://scrap.tf/buy/hats', 48 * HOUR), sku: null, openBankStock: { bank: 'hats', filter: 'new' } }]);
     expect(h.sent[0]!.title).toBe('3 new flips in your save of scrap.tf/buy/hats from 2 d ago');
     // Recorded in the dedupe like any told row: the same look is not told again.
     expect(h.run(newest)).toBe(0);

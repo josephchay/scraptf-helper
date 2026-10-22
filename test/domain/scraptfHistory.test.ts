@@ -4,6 +4,8 @@
 // read once per save, rebuilt after an import and after thinning, no query per read), S3's item history
 // and listed-since joins, S4's feed and CSV, failed reads and a missing key price. A fake entryFor stands
 // for the Live market. Saves are pages the user saved (R10); nothing here touches scrap.tf or the network.
+// 0.8 (T1-T4, LC-3-LC-5): the cycles each bank builds once per runs rebuild (the builder is wrapped to count its
+// calls; its results are the real ones), the buy-timing reads, turnover, asset-id stability and the drawer's fields.
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { Repo } from '../../src/service/contracts';
@@ -13,6 +15,21 @@ import { DEFAULT_KEY_SCRAP } from '../../src/service/domain/keyprice';
 import type { MarketEval } from '../../src/service/domain/market';
 import { SCRAPTF_HISTORY_RETRY_MS, createScraptfHistory, type ScraptfHistory } from '../../src/service/domain/scraptfHistory';
 import { bankStockKey, bankStockSpecialKey } from '../../src/shared/bankStock';
+import { DEFAULT_SETTINGS } from '../../src/shared/defaults';
+import { scraptfBankCyclesOf, scraptfBankTurnover, scraptfItemTimingOf, scraptfTimingForKey } from '../../src/shared/scraptfTiming';
+
+const built = vi.hoisted(() => ({ cycles: [] as string[] }));
+
+vi.mock('../../src/shared/scraptfTiming', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../src/shared/scraptfTiming')>();
+  return {
+    ...actual,
+    scraptfBankCyclesOf: (...a: Parameters<typeof actual.scraptfBankCyclesOf>) => {
+      built.cycles.push(a[0]);
+      return actual.scraptfBankCyclesOf(...a);
+    },
+  };
+});
 import {
   SCRAPTF_CHANGES_CSV_COLUMNS,
   SCRAPTF_CHANGES_DEFAULT_LIMIT,
@@ -20,10 +37,13 @@ import {
   SCRAPTF_ITEM_EVENTS,
   SCRAPTF_ITEM_STOCK_EVENTS,
   SCRAPTF_PRICE_KINDS,
+  scraptfAssetStabilityOf,
   scraptfChangeEvent,
+  scraptfCopyBankOf,
   scraptfEventsOf,
   scraptfItemHistoryOf,
   scraptfKeyStatesOf,
+  scraptfListedOf,
   scraptfListedSinceOf,
   scraptfMarkSuperseded,
   scraptfRunsOf,
@@ -71,6 +91,8 @@ interface Harness {
   repo: Repo;
   history: ScraptfHistory;
   key: { v: number | null; throws: boolean };
+  /** 0.8: deps.profit (wired only with setup({ profit: true })) throws while set. */
+  profit: { throws: boolean };
   clock: { t: UnixMs };
   entries: Map<string, Pick<MarketEval, 'revenueScrap' | 'maxCostScrap'>>;
   entryFor: ReturnType<typeof vi.fn>;
@@ -79,10 +101,12 @@ interface Harness {
   importSave(bank: ScraptfBank, at: UnixMs, rows: readonly BankStockStored[], page?: string): { batchId: number; events: number };
 }
 
-function setup(): Harness {
+/** `profit` (0.8): wire deps.profit (DEFAULT_SETTINGS.profit), as core does; without it no timing is judged. */
+function setup(opts: { profit?: boolean } = {}): Harness {
   const repo = openRepo(':memory:');
   repos.push(repo);
   const key = { v: 600 as number | null, throws: false };
+  const profit = { throws: false };
   const clock = { t: NOW };
   const entries = new Map<string, Pick<MarketEval, 'revenueScrap' | 'maxCostScrap'>>();
   const entryFor = vi.fn((base: string) => (entries.get(base) ?? null) as Readonly<MarketEval> | null);
@@ -97,11 +121,20 @@ function setup(): Harness {
       return keyPrice(key.v as number);
     },
     nameOf: (sku) => (sku === '999;6' ? 'Schema Hat' : sku),
+    ...(opts.profit
+      ? {
+          profit: () => {
+            if (profit.throws) throw new Error('settings unreadable');
+            return DEFAULT_SETTINGS.profit;
+          },
+        }
+      : {}),
   });
   return {
     repo,
     history,
     key,
+    profit,
     clock,
     entries,
     entryFor,
@@ -474,7 +507,9 @@ describe('itemHistory (S3)', () => {
         keyPrice: keyPrice(K),
         now: NOW,
       });
-      expect(h.history.itemHistory('1;6', null, NOW)).toEqual(expected);
+      // 0.8 (T3-T5): with the copy's cycles in its bank (no deps.profit here, so timing null).
+      const cyclesOf = (bank: ScraptfBank) => scraptfBankCyclesOf(bank, savesOf(h.repo, bank), K);
+      expect(h.history.itemHistory('1;6', null, NOW)).toEqual({ ...expected, ...scraptfItemTimingOf(expected, { cyclesOf, buy: null, profit: null, keyScrap: K, now: NOW }) });
     }
     // A key price move alone moves the values, never an unchanged raw price's change.
     const item = h.history.itemHistory('1;6', null, NOW);
@@ -641,5 +676,242 @@ describe('changes and csv (S4)', () => {
     expect(h.history.changes({}, NOW)).toEqual([]);
     expect(h.history.csv({}, NOW).slice(CSV_BOM.length).trim()).toBe(SCRAPTF_CHANGES_CSV_COLUMNS.join(','));
     expect(h.log.lines.filter((l) => l.level === 'warn')).toHaveLength(2);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 0.8: cycles, buy timing, turnover and asset ids
+// ---------------------------------------------------------------------------
+
+/** The busy hats page of the timing tests: 48 saves 2 h apart, the newest 30 minutes ago. */
+const CYCLE_SAVES = 48;
+const cycleAt = (i: number): UnixMs => NOW - 30 * MIN - (CYCLE_SAVES - 1 - i) * 2 * HOUR;
+
+/**
+ * Save `i` of 16 hats (100;6 to 115;6), each repriced down 3 % every 3 to 6 saves on its own rhythm; 105;6 repriced
+ * up once, 107;6 off the page for four saves and back, 109;6 gone for good.
+ */
+function cycleRows(i: number): BankStockStored[] {
+  const out: BankStockStored[] = [];
+  for (let c = 0; c < 16; c++) {
+    if (c === 7 && i >= 30 && i < 34) continue;
+    if (c === 9 && i >= 40) continue;
+    const drops = Math.floor(i / (3 + (c % 4)));
+    out.push(r(`${100 + c};6`, Math.round((60 + 8 * c) * 0.97 ** drops) + (c === 5 && i >= 20 ? 4 : 0)));
+  }
+  return out;
+}
+
+function seedCycles(h: Harness): void {
+  for (let i = 0; i < CYCLE_SAVES; i++) save(h.repo, 'hats', cycleAt(i), cycleRows(i));
+  h.history.refresh();
+}
+
+/** Sells for 120, Pay up to 111 (the timing tests' buy side for every copy). */
+const BUY = { revenueScrap: 120, maxCostScrap: 111 };
+const HAT = (c: number): string => bankStockKey(`${100 + c};6`, '');
+
+describe('0.8: the cycles each bank builds once per runs rebuild', () => {
+  it("compact keeps a single card's asset id, and a row whose id changed is never shared with the save before", () => {
+    const h = setup();
+    const rows = (a: string, c: string) => [r('1;6', 10, 1, { assetId: a }), r('2;6', 20, 2, { assetId: 'stack' }), r('3;6', 30, 1, { assetId: c })];
+    save(h.repo, 'hats', NOW - 3 * HOUR, rows('a1', 'c1'));
+    save(h.repo, 'hats', NOW - 2 * HOUR, rows('a1', 'c2'));
+    save(h.repo, 'hats', NOW - HOUR, rows('a1', 'c2'));
+    // 1;6 kept its id between both pairs of looks, 3;6 in one of two; a stack makes no pair. Sharing save 1's row
+    // for 3;6 would have read c1 three times (4 of 4 the same).
+    const want = { pairs: 4, same: 3, share: 0.75, stable: false };
+    expect(h.history.assetStability()).toEqual([{ bank: 'hats', ...want }]);
+    expect(scraptfAssetStabilityOf(savesOf(h.repo, 'hats'))).toEqual(want);
+  });
+
+  it('builds each bank once (reading no row again), and only the bank an import changed after it', () => {
+    const h = setup({ profit: true });
+    seedCycles(h);
+    save(h.repo, 'weapons', NOW - 2 * HOUR, [r('45;6', 3)]);
+    save(h.repo, 'weapons', NOW - HOUR, [r('45;6', 2)]);
+    h.history.refresh();
+    built.cycles.length = 0;
+    const rows = vi.spyOn(h.repo, 'bankStockRowsOf');
+    const turnover = h.history.turnoverFor('hats');
+    for (let i = 0; i < 20; i++) {
+      h.history.timingFor('hats', HAT(0), BUY, NOW);
+      h.history.timingForBase('101;6', null, BUY, NOW);
+      h.history.turnoverFor('hats');
+      h.history.itemHistory('102;6', null, NOW);
+    }
+    h.history.turnoverFor('weapons');
+    h.history.assetStability();
+    expect(built.cycles.sort()).toEqual(['hats', 'weapons']);
+    expect(h.history.turnoverFor('hats')).toBe(turnover);
+    expect(rows).not.toHaveBeenCalled();
+    // A new hats save: hats alone is rebuilt, on its next read.
+    h.importSave('hats', NOW, cycleRows(CYCLE_SAVES));
+    built.cycles.length = 0;
+    const after = h.history.turnoverFor('hats');
+    expect(after).not.toBe(turnover);
+    h.history.turnoverFor('weapons');
+    h.history.timingFor('hats', HAT(0), BUY, NOW);
+    expect(built.cycles).toEqual(['hats']);
+  });
+});
+
+describe('0.8 (T3/T4): timingFor, timingForBase and timingForCopy', () => {
+  it('timingFor equals scraptfTimingForKey over the same saves; null off sale, for a bank never saved and without deps.profit', () => {
+    const h = setup({ profit: true });
+    seedCycles(h);
+    const cycles = scraptfBankCyclesOf('hats', savesOf(h.repo, 'hats'), 600);
+    const verdicts = new Set<string>();
+    for (let c = 0; c < 16; c++) {
+      const want = scraptfTimingForKey({ cycles, key: HAT(c), buy: BUY, profit: DEFAULT_SETTINGS.profit, keyScrap: 600, now: NOW });
+      expect(h.history.timingFor('hats', HAT(c), BUY, NOW), HAT(c)).toEqual(want);
+      if (want) verdicts.add(want.verdict);
+    }
+    // The pooled table answers (not only 'not enough data'), and the copies' prices give different verdicts.
+    expect(verdicts.size).toBeGreaterThan(1);
+    expect(h.history.timingFor('hats', HAT(9), BUY, NOW)).toBeNull();
+    expect(h.history.timingFor('weapons', HAT(0), BUY, NOW)).toBeNull();
+    const plain = setup();
+    seedCycles(plain);
+    expect(plain.history.timingFor('hats', HAT(0), BUY, NOW)).toBeNull();
+  });
+
+  it("reads an import's own save at once, and never throws: a failure is logged once per streak", () => {
+    const h = setup({ profit: true });
+    seedCycles(h);
+    expect(h.history.timingFor('hats', HAT(0), BUY, NOW)!.lastSeenAt).toBe(cycleAt(CYCLE_SAVES - 1));
+    // Committed by an import, before core's refresh: the next read sees it (onImport marked the index stale).
+    h.repo.transaction(() => {
+      h.history.onImport(save(h.repo, 'hats', NOW, cycleRows(CYCLE_SAVES)));
+    });
+    expect(h.history.timingFor('hats', HAT(0), BUY, NOW)!.lastSeenAt).toBe(NOW);
+    const warned = () => h.log.lines.filter((l) => l.level === 'warn' && l.msg === 'scrap.tf history could not judge buy timing');
+    h.profit.throws = true;
+    expect(h.history.timingFor('hats', HAT(0), BUY, NOW)).toBeNull();
+    expect(h.history.timingForCopy('100;6', '', BUY, NOW)).toBeNull();
+    expect(warned()).toHaveLength(1);
+    h.profit.throws = false;
+    expect(h.history.timingFor('hats', HAT(0), BUY, NOW)).not.toBeNull();
+    h.profit.throws = true;
+    expect(h.history.timingForBase('100;6', 'hats', BUY, NOW)).toBeNull();
+    expect(warned()).toHaveLength(2);
+  });
+
+  it("timingForBase reads listedFor's pick; timingForCopy reads the bank scraptfCopyBankOf picks", () => {
+    const h = setup({ profit: true });
+    seedCycles(h);
+    // The /items list lists 100;6 too (a Craftable row: it prices one copy), and a painted 101;6 only there.
+    const list = [r('100;6', 50, 1, { craft: 'craftable' }), r('101;6', 90, 1, { specialKey: PAINT, craft: 'craftable' })];
+    save(h.repo, 'list', NOW - 3 * HOUR, list, '/items');
+    save(h.repo, 'list', NOW - HOUR, list, '/items');
+    h.history.refresh();
+    const t = (bank: ScraptfBank, key: string) => h.history.timingFor(bank, key, BUY, NOW);
+    for (const bank of ['hats', 'list'] as const) {
+      const listed = scraptfListedOf(h.history.runsFor(bank), '100;6')!;
+      expect(h.history.timingForBase('100;6', bank, BUY, NOW), bank).toEqual(t(bank, listed.key!));
+    }
+    expect(h.history.timingForBase('100;6', 'list', BUY, NOW)).not.toBeNull();
+    // Without a bank: the bank listing it now, a bank page before the list.
+    expect(h.history.timingForBase('100;6', null, BUY, NOW)).toEqual(t('hats', HAT(0)));
+    expect(h.history.timingForBase('101;6', undefined, BUY, NOW)).toEqual(t('hats', HAT(1)));
+    expect(h.history.timingForBase('109;6', 'hats', BUY, NOW)).toBeNull();
+    expect(h.history.timingForBase('999;6', null, BUY, NOW)).toBeNull();
+    // timingForCopy: the copy itself, in the bank its item history reads.
+    const painted = bankStockKey('101;6', PAINT);
+    const banks = (['hats', 'list'] as const).map((bank) => ({ bank, life: scraptfBankCyclesOf(bank, savesOf(h.repo, bank), 600).life }));
+    expect(scraptfCopyBankOf(banks, painted)).toBe('list');
+    expect(h.history.timingForCopy('101;6', PAINT, BUY, NOW)).toEqual(t('list', painted));
+    expect(h.history.timingForCopy('101;6', PAINT, BUY, NOW)).not.toBeNull();
+    expect(h.history.itemHistory('101;6', PAINT, NOW).bank).toBe('list');
+    expect(h.history.timingForCopy('100;6', '', BUY, NOW)).toEqual(t('hats', HAT(0)));
+    expect(h.history.timingForCopy('999;6', '', BUY, NOW)).toBeNull();
+  });
+});
+
+describe('0.8 (LC-4, LC-5, T5): turnover, asset ids and the drawer', () => {
+  it('turnoverFor is scraptfBankTurnover over the bank, memoised; null for a bank never saved', () => {
+    const h = setup();
+    seedCycles(h);
+    const t = h.history.turnoverFor('hats');
+    expect(t).toEqual(scraptfBankTurnover(scraptfBankCyclesOf('hats', savesOf(h.repo, 'hats'), 600)));
+    expect(t!.ended + t!.open + t!.wideGap + t!.imprecise).toBeGreaterThan(0);
+    expect(h.history.turnoverFor('hats')).toBe(t);
+    expect(h.history.turnoverFor('skins')).toBeNull();
+  });
+
+  it('assetStability: each saved bank in SCRAPTF_BANKS order; [] while the saves cannot be read', () => {
+    const h = setup();
+    save(h.repo, 'list', NOW - HOUR, [r('1;6', 10, 1, { assetId: 'x' })], '/items');
+    save(h.repo, 'weapons', NOW - HOUR, [r('45;6', 3)]);
+    save(h.repo, 'hats', NOW - HOUR, [r('2;6', 3)]);
+    const got = h.history.assetStability();
+    expect(got.map((a) => a.bank)).toEqual(['hats', 'weapons', 'list']);
+    for (const a of got) expect(a).toEqual({ bank: a.bank, ...scraptfAssetStabilityOf(savesOf(h.repo, a.bank)) });
+    const broken = setup();
+    vi.spyOn(broken.repo, 'bankStockSaveIndex').mockImplementation(() => {
+      throw new Error('database is locked');
+    });
+    expect(broken.history.assetStability()).toEqual([]);
+  });
+
+  it("assetStability (Health's 5 s poll) builds no bank's lifecycle: the pre-pass alone, kept per runs rebuild", () => {
+    const h = setup({ profit: true });
+    seedCycles(h);
+    save(h.repo, 'weapons', NOW - 2 * HOUR, [r('45;6', 3)]);
+    save(h.repo, 'weapons', NOW - HOUR, [r('45;6', 2)]);
+    h.history.refresh();
+    built.cycles.length = 0;
+    const first = h.history.assetStability();
+    for (let i = 0; i < 5; i++) expect(h.history.assetStability()).toEqual(first);
+    expect(first.map((a) => a.bank)).toEqual(['hats', 'weapons']);
+    expect(built.cycles).toEqual([]);
+    // The lifecycle built later carries the same figures (it reuses the pre-pass), and Health reads them unchanged.
+    h.history.turnoverFor('hats');
+    expect(built.cycles).toEqual(['hats']);
+    expect(h.history.assetStability()).toEqual(first);
+    for (const a of first) expect(a).toEqual({ bank: a.bank, ...scraptfAssetStabilityOf(savesOf(h.repo, a.bank)) });
+    // A new save: that bank's figures are read again from its saves.
+    h.importSave('weapons', NOW, [r('45;6', 1)]);
+    built.cycles.length = 0;
+    const after = h.history.assetStability();
+    expect(after.find((a) => a.bank === 'weapons')).toEqual({ bank: 'weapons', ...scraptfAssetStabilityOf(savesOf(h.repo, 'weapons')) });
+    expect(built.cycles).toEqual([]);
+  });
+
+  it("itemHistory carries the copy's cycles and timing (scraptfItemTimingOf); timing null without deps.profit", () => {
+    const h = setup({ profit: true });
+    seedCycles(h);
+    h.entries.set('100;6', BUY);
+    const item = h.history.itemHistory('100;6', null, NOW);
+    const cyclesOf = (bank: ScraptfBank) => scraptfBankCyclesOf(bank, savesOf(h.repo, bank), 600);
+    const want = scraptfItemTimingOf(item, { cyclesOf, buy: BUY, profit: DEFAULT_SETTINGS.profit, keyScrap: 600, now: NOW });
+    expect(item.cycles).toEqual(want.cycles);
+    expect(item.timing).toEqual(want.timing);
+    expect(item.timing).toMatchObject({ bank: 'hats', key: HAT(0), revenueScrap: 120, maxCostScrap: 111 });
+    expect(item.cycles!.runs.at(-1)!.firstOnSaleAt).toBe(item.listedSince);
+    // 107;6 came back after four saves off the page: two runs, one return.
+    expect(h.history.itemHistory('107;6', null, NOW).cycles).toMatchObject({ runsTotal: 2, returns: 1 });
+    const plain = setup();
+    seedCycles(plain);
+    const noProfit = plain.history.itemHistory('100;6', null, NOW);
+    expect(noProfit.timing).toBeNull();
+    expect(noProfit.cycles).toEqual(want.cycles);
+    // Never saved: neither field.
+    expect(plain.history.itemHistory('999;6', null, NOW)).not.toHaveProperty('cycles');
+  });
+
+  it('a failed cycles read leaves both fields out of the item history, logged once per streak', () => {
+    const h = setup({ profit: true });
+    seedCycles(h);
+    h.profit.throws = true;
+    const item = h.history.itemHistory('100;6', null, NOW);
+    expect(item).toMatchObject({ bank: 'hats', listedSince: expect.any(Number) });
+    expect(item.points).toHaveLength(CYCLE_SAVES);
+    expect(item).not.toHaveProperty('cycles');
+    expect(item).not.toHaveProperty('timing');
+    h.history.itemHistory('101;6', null, NOW);
+    expect(h.log.lines.filter((l) => l.msg === 'scrap.tf history could not read the price cycles')).toHaveLength(1);
+    h.profit.throws = false;
+    expect(h.history.itemHistory('100;6', null, NOW).timing).not.toBeNull();
   });
 });

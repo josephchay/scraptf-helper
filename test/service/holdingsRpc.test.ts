@@ -17,7 +17,7 @@ import { createLogger } from '../../src/service/logger';
 import { DEFAULT_SETTINGS, mergeSettings } from '../../src/shared/defaults';
 import { HOLDINGS_CSV_COLUMNS } from '../../src/shared/holdings';
 import { SERVICE_METHODS, type PushEvent } from '../../src/shared/rpc';
-import type { HoldingsResult, JournalEntry, MarketListResult } from '../../src/shared/types';
+import type { HoldingDetail, HoldingsResult, JournalEntry, MarketListResult } from '../../src/shared/types';
 import { FakeSocket } from '../bptf/helpers';
 
 const FIX = fileURLToPath(new URL('../fixtures/', import.meta.url));
@@ -92,6 +92,26 @@ describe("'holdings.list'", () => {
     await expect(h.call('holdings.list', { search: 'x'.repeat(201) })).rejects.toThrow(/Invalid parameters for holdings\.list/);
     await expect(h.call('holdings.list', { search: 5 })).rejects.toThrow(/Invalid parameters for holdings\.list/);
     await expect(h.call('opps.exportCsv', { kind: 'holdings', holdings: { search: 7 } })).rejects.toThrow(/Invalid parameters for opps\.exportCsv/);
+  });
+});
+
+describe("'holdings.detail'", () => {
+  it('is a registered service method answering a HoldingDetail from local data only', async () => {
+    const h = await setup();
+    expect(SERVICE_METHODS).toContain('holdings.detail');
+    await expect(h.call('holdings.detail', { sku: 7 })).rejects.toThrow(/Invalid parameters for holdings\.detail/);
+    await h.call<JournalEntry>('journal.add', { side: 'buy', venue: 'scrap.tf', sku: '378;6', scrap: 30 });
+    const d = await h.call<HoldingDetail>('holdings.detail', { sku: '378;6' });
+    expect(d).toMatchObject({ sku: '378;6', baseSku: '378;6', closed: [], marks: [], truncated: false, typicalHold: null });
+    expect(d.row).toMatchObject({ sku: '378;6', qty: 1, status: 'no-buyers' });
+    expect(d.row!.advice?.kind).toBe('unclear');
+    expect(d.lots).toHaveLength(1);
+    expect(d.history).toEqual({ runs: 0, observedMs: 0, firstAt: null, trend: null });
+    expect(d.keyScrap).toBeGreaterThan(0);
+    expect(typeof d.generatedAt).toBe('number');
+    const unheld = await h.call<HoldingDetail>('holdings.detail', { sku: '126;6' });
+    expect(unheld).toMatchObject({ sku: '126;6', row: null, lots: [], history: null });
+    expect(requested).toEqual([]);
   });
 });
 

@@ -42,6 +42,26 @@ export const ERROR_TEXT_LIMIT = 2_048;
 export const MAX_BODY_BYTES = 128 * 1024 * 1024;
 /** Pause applied when RateLimit-Remaining is low but no reset time is given. */
 export const RATELIMIT_RESET_FALLBACK_MS = 60_000;
+/**
+ * 0.7.4 (F52): answers meaning the server, or Cloudflare in front of it, cannot serve now: 500, 502, 503, 504 and
+ * Cloudflare's 520-527 and 530. Each pauses its budget like a 503 (Retry-After, else the backoff) and neither counts
+ * toward nor ends a 429 streak. 501 and the 4xx answer the request itself and end a streak, as before.
+ */
+export const UNAVAILABLE_STATUSES: ReadonlySet<number> = new Set([500, 502, 503, 504, 520, 521, 522, 523, 524, 525, 526, 527, 530]);
+
+export function isUnavailableStatus(status: number): boolean {
+  return UNAVAILABLE_STATUSES.has(status);
+}
+
+/** 0.7.4 (F52): the caller's HttpRequestOptions.isAnswer for an unavailable status; a throwing callback is no answer. */
+function callerAnswer(ropts: HttpRequestOptions, status: number, data: unknown): boolean {
+  if (typeof ropts.isAnswer !== 'function') return false;
+  try {
+    return ropts.isAnswer(status, data) === true;
+  } catch {
+    return false;
+  }
+}
 
 /** Network failure (DNS, TLS, connection reset). The URL is already redacted. */
 export class NetworkRequestError extends Error {
@@ -267,7 +287,7 @@ function toNumber(v: string | number | undefined): number | null {
 }
 
 /**
- * Delay requested by a 429/503, in the order node-bptf-listings uses (§6):
+ * Delay requested by a 429 or an unavailable answer (a 503, 502...), in the order node-bptf-listings uses (§6):
  * body retry_after_ms, body retry_after, Retry-After header, "in N seconds"
  * in the message. Null when the server gave no hint.
  */
@@ -856,7 +876,11 @@ export function createHttpClient(opts: CreateHttpClientOptions): SeedableHttpCli
 
         const now = clock.now();
         const budgetHost = normalizeHost(spec.host);
-        if (status === 429 || status === 503) {
+        // 0.7.4 (F52): every unavailable answer (500, 502, 504, Cloudflare's 52x and 530) waits like a 503, so an
+        // outage is not polled at the budget's spacing and a 5xx between two 429s does not end their streak. A 5xx
+        // the caller reads as its answer about this request (ropts.isAnswer: Steam Market's 500 {"success":false},
+        // no listing under that name) is no outage and counts as a success, as before F52; never a 429.
+        if (status === 429 || (isUnavailableStatus(status) && !callerAnswer(ropts, status, data))) {
           if (parsedForHints === null && text.trim().startsWith('{')) {
             try {
               parsedForHints = JSON.parse(text);
@@ -865,8 +889,9 @@ export function createHttpClient(opts: CreateHttpClientOptions): SeedableHttpCli
             }
           }
           const hinted = retryDelayFromResponse(resHeaders, parsedForHints, text, now);
-          const result = status === 429 ? scheduler.record429(hinted, now) : scheduler.recordUnavailable(hinted, now);
-          // A 503 neither counts toward nor ends a host's 429 streak, like the per-budget counter.
+          const result = status === 429 ? scheduler.record429(hinted, now) : scheduler.recordUnavailable(hinted, now, status);
+          // A 503 (or another unavailable answer) neither counts toward nor ends a host's 429 streak, like the
+          // per-budget counter.
           const hostStreak = status === 429 ? (host429.get(budgetHost) ?? 0) + 1 : 0;
           if (status === 429) host429.set(budgetHost, hostStreak);
           const longPause = result.longPause || hostStreak >= CONSECUTIVE_429_LIMIT;

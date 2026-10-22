@@ -5,7 +5,7 @@ import { z } from 'zod';
 import type { Logger } from '../service/contracts';
 import { isAllowedExternalUrl, isScraptfBankUrl } from '../shared/links';
 import type { PushContract } from '../shared/rpc';
-import type { Settings } from '../shared/types';
+import { BANK_STOCK_OPEN_FILTERS, SCRAPTF_BANK_IDS, type BankStockOpen, type BankStockOpenFilter, type ScraptfBank, type Settings } from '../shared/types';
 import { isHttpsUrl, safeErrorMessage } from './paths';
 
 export const NOTIFY_TITLE_MAX = 120;
@@ -19,6 +19,14 @@ const notifySchema = z.looseObject({
   sku: z.string().nullable().catch(null),
   // F20: a bad openUrl costs the toast its link, never the toast itself.
   openUrl: z.string().max(NOTIFY_URL_MAX).optional().catch(undefined),
+  // 0.8 (G5): a bad bank stock link costs the toast its link, never the toast itself.
+  openBankStock: z
+    .object({
+      bank: z.enum(SCRAPTF_BANK_IDS as unknown as [ScraptfBank, ...ScraptfBank[]]),
+      filter: z.enum(BANK_STOCK_OPEN_FILTERS as unknown as [BankStockOpenFilter, ...BankStockOpenFilter[]]),
+    })
+    .optional()
+    .catch(undefined),
 });
 
 export function clip(s: string, max: number): string {
@@ -42,18 +50,34 @@ export function notificationOpenUrl(url: unknown): string | null {
 }
 
 /**
+ * 0.8 (G5): the bank stock page a notification click may show, or null: a plain object naming a known bank
+ * (SCRAPTF_BANK_IDS) and an open chip (BANK_STOCK_OPEN_FILTERS), returned as a fresh { bank, filter }. An in-app
+ * route, never a URL: nothing loads scrap.tf. Checked when the push arrives and again at click time.
+ */
+export function notificationBankStock(v: unknown): BankStockOpen | null {
+  if (typeof v !== 'object' || v === null || Array.isArray(v)) return null;
+  const { bank, filter } = v as { bank?: unknown; filter?: unknown };
+  if (typeof bank !== 'string' || typeof filter !== 'string') return null;
+  if (!SCRAPTF_BANK_IDS.includes(bank as ScraptfBank) || !BANK_STOCK_OPEN_FILTERS.includes(filter as BankStockOpenFilter)) return null;
+  return { bank: bank as ScraptfBank, filter: filter as BankStockOpenFilter };
+}
+
+/**
  * The toast for a 'notify' push, clipped to what Windows shows; null when the payload is malformed.
- * `openUrl` is kept only when notificationOpenUrl accepts it (the key is absent otherwise).
+ * `openUrl` is kept only when notificationOpenUrl accepts it, and (0.8, G5) `openBankStock` only when it names a known
+ * bank and chip (each key is absent otherwise).
  */
 export function notificationContent(payload: unknown): PushContract['notify'] | null {
   const parsed = notifySchema.safeParse(payload);
   if (!parsed.success) return null;
   const openUrl = notificationOpenUrl(parsed.data.openUrl);
+  const openBankStock = notificationBankStock(parsed.data.openBankStock);
   return {
     title: clip(parsed.data.title, NOTIFY_TITLE_MAX),
     body: clip(parsed.data.body, NOTIFY_BODY_MAX),
     sku: parsed.data.sku,
     ...(openUrl !== null ? { openUrl } : {}),
+    ...(openBankStock !== null ? { openBankStock } : {}),
   };
 }
 
@@ -72,12 +96,17 @@ export function notificationOptions(
   return { title: data.title, body: data.body, icon, silent: prefs.silent === true };
 }
 
-/** What a notification click did: opened the bank page in the browser, an item's drawer, or the dashboard. */
-export type NotificationClickAction = 'url' | 'item' | 'dashboard';
+/**
+ * What a notification click did: opened the bank page in the browser, (0.8, G5) a bank's stock page in the
+ * dashboard, an item's drawer, or the dashboard.
+ */
+export type NotificationClickAction = 'url' | 'bankStock' | 'item' | 'dashboard';
 
 export interface NotificationClickDeps {
   /** shell.openExternal, the opener links.open uses: the user's browser, never an app window. */
   openExternal(url: string): Promise<void> | void;
+  /** 0.8 (G5): shows the dashboard on a bank's stock page and chip (main: showBankStock); absent: the click goes on to the item or the dashboard. */
+  openBankStock?(open: BankStockOpen): void;
   /** Shows the dashboard and opens the item's drawer. */
   openItem(sku: string): void;
   showDashboard(): void;
@@ -85,11 +114,13 @@ export interface NotificationClickDeps {
 }
 
 /**
- * A toast click. An openUrl is checked again here (the data object lives on in a closure, so the check
- * at receipt is not trusted alone) and opened only when it is still a static bank page; any other
- * openUrl is refused and the click does what it always did: the SKU's drawer, else the dashboard.
- * A browser that fails to open (openExternal throws or rejects) is logged and falls back to the
- * dashboard, so that path never rejects; openItem/showDashboard errors propagate as they did before.
+ * A toast click, in this order: openUrl, then (0.8, G5) openBankStock, then the SKU's drawer, then the dashboard.
+ * An openUrl is checked again here (the data object lives on in a closure, so the check at receipt is not
+ * trusted alone) and opened only when it is still a static bank page; any other openUrl is refused and the
+ * click goes on. An openBankStock is checked again the same way (notificationBankStock) and shows the bank's
+ * stock page in the dashboard; no URL is involved. A browser that fails to open (openExternal throws or rejects)
+ * is logged and falls back to the dashboard, so that path never rejects; openBankStock/openItem/showDashboard
+ * errors propagate as they did before.
  */
 export async function handleNotificationClick(data: PushContract['notify'], deps: NotificationClickDeps): Promise<NotificationClickAction> {
   if (data.openUrl !== undefined) {
@@ -106,6 +137,14 @@ export async function handleNotificationClick(data: PushContract['notify'], deps
     }
     // No URL in the log: a refused one may be built from item data.
     deps.log.warn('a notification click refused a link that is not a static scrap.tf bank page');
+  }
+  if (data.openBankStock !== undefined && deps.openBankStock) {
+    // Checked again at click time, as the URL is; no URL is involved and nothing loads scrap.tf.
+    const open = notificationBankStock(data.openBankStock);
+    if (open !== null) {
+      deps.openBankStock(open);
+      return 'bankStock';
+    }
   }
   if (data.sku) {
     deps.openItem(data.sku);

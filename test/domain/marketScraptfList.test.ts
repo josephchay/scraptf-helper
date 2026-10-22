@@ -171,7 +171,12 @@ describe('Live market rows join the saved scrap.tf list (F14)', () => {
     expect(h.row('30920;6')).toMatchObject({ verdict: 'no-buyers', scraptfPaysScrap: 180, scraptfStock: 0, scraptfStockLimit: 3, scraptfFull: false });
 
     // Parity: every row is the shared rule over the cache's own row at the same key price.
-    for (const r of h.rows()) expect(listPart(r)).toEqual(marketListFields(h.list.rowFor(r.sku, K)));
+    // 0.7.4: and the family flag of an unmarked row (stored without craftability here) rides along.
+    for (const r of h.rows()) {
+      const fields = marketListFields(h.list.rowFor(r.sku, K));
+      expect(listPart(r)).toEqual(Object.fromEntries(LIST_FIELDS.map((f) => [f, fields[f]])));
+      expect(r.scraptfListFamily).toBe(fields.scraptfListFamily);
+    }
     // list() pages carry the same fields as all().
     expect(h.market.list({ limit: 2, offset: 1 }, T0).rows.map(listPart)).toEqual(h.rows().slice(1, 3).map(listPart));
   });

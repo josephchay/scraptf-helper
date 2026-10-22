@@ -1,7 +1,7 @@
 // Pure helpers for the main process. Nothing here imports 'electron', so all
 // of it is unit-tested directly (path traversal, sender checks, launch flags).
 
-import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeSync } from 'node:fs';
+import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, statSync, truncateSync, unlinkSync, writeSync } from 'node:fs';
 import { open } from 'node:fs/promises';
 import path from 'node:path';
 
@@ -235,6 +235,102 @@ export function resolveAppPaths(appPath: string, userData: string): AppPaths {
     logDir,
     mainLog: path.join(logDir, 'main.log'),
   };
+}
+
+// ---------------------------------------------------------------------------
+// Chromium's own log (0.7.4, F54)
+// ---------------------------------------------------------------------------
+
+/** Chromium's log file, beside main.log in the logs folder. */
+export const CHROMIUM_LOG_NAME = 'chromium.log';
+/** At start, a chromium.log over this size becomes chromium.log.old (the one copy kept); while running it is emptied. */
+export const CHROMIUM_LOG_MAX_BYTES = 1024 * 1024;
+
+/** The part of node:fs that prepareChromiumLog uses. */
+export interface ChromiumLogFs {
+  mkdirSync(dir: string, opts: { recursive: true }): unknown;
+  statSync(file: string): { size: number; isFile(): boolean };
+  renameSync(from: string, to: string): void;
+  truncateSync(file: string, len: number): void;
+}
+
+const realChromiumLogFs: ChromiumLogFs = { mkdirSync, statSync, renameSync, truncateSync };
+
+export type ChromiumLogSetup =
+  /** `rotated`: what was done to a file over the limit ('moved' to chromium.log.old, or 'emptied'), else null. */
+  | { ok: true; file: string; rotated: 'moved' | 'emptied' | null }
+  | { ok: false; reason: string };
+
+function fsCode(err: unknown): string {
+  const code = (err as NodeJS.ErrnoException | null)?.code;
+  return typeof code === 'string' && code !== '' ? code : 'unknown error';
+}
+
+/**
+ * Readies <logDir>/chromium.log for Chromium's file logging (main's --enable-logging=file and --log-file): makes the
+ * folder and, when the file is over `maxBytes`, moves it to chromium.log.old (replacing the one before) or, if it
+ * cannot be moved, empties it. Chromium only appends to an explicit log file, so this keeps it bounded across runs.
+ * Not ok when the folder cannot be made or the file can be neither checked nor bounded: main then leaves Chromium's
+ * logging off for this run rather than let the file grow. Main calls it before 'ready' with the instance lock held,
+ * so neither this process's Chromium nor another copy has the file open yet.
+ */
+export function prepareChromiumLog(logDir: string, fsImpl: ChromiumLogFs = realChromiumLogFs, maxBytes = CHROMIUM_LOG_MAX_BYTES): ChromiumLogSetup {
+  const file = path.join(logDir, CHROMIUM_LOG_NAME);
+  try {
+    fsImpl.mkdirSync(logDir, { recursive: true });
+  } catch (err) {
+    return { ok: false, reason: `the logs folder could not be created (${fsCode(err)})` };
+  }
+  let size: number;
+  try {
+    const st = fsImpl.statSync(file);
+    if (!st.isFile()) return { ok: false, reason: `${CHROMIUM_LOG_NAME} is not a file` };
+    size = st.size;
+  } catch (err) {
+    if (fsCode(err) === 'ENOENT') return { ok: true, file, rotated: null };
+    return { ok: false, reason: `${CHROMIUM_LOG_NAME} could not be checked (${fsCode(err)})` };
+  }
+  if (size <= maxBytes) return { ok: true, file, rotated: null };
+  try {
+    fsImpl.renameSync(file, `${file}.old`);
+    return { ok: true, file, rotated: 'moved' };
+  } catch {
+    // Held open (a child process of an earlier run still exiting, a scanner) or the .old is: empty it instead.
+  }
+  try {
+    fsImpl.truncateSync(file, 0);
+    return { ok: true, file, rotated: 'emptied' };
+  } catch (err) {
+    return { ok: false, reason: `${CHROMIUM_LOG_NAME} is over its size limit and could be neither moved nor emptied (${fsCode(err)})` };
+  }
+}
+
+/**
+ * 0.7.4 (F54): the least time between two size checks of chromium.log while the app runs. main checks on the
+ * status pushes it already handles (no timer of its own), at most this often.
+ */
+export const CHROMIUM_LOG_CHECK_MS = 10 * 60_000;
+
+/**
+ * 0.7.4 (F54): bounds chromium.log during a long tray session, which prepareChromiumLog's check at start does not
+ * cover: over `maxBytes` the file is emptied in place. It is not moved: this process's Chromium holds it open (an
+ * open file cannot be renamed on Windows without FILE_SHARE_DELETE), and Chromium appends, so it carries on from
+ * the start. 'emptied', or null when under the limit, missing, not a file, or on any error (a local file check
+ * only: no network, nothing of Chromium's session).
+ */
+export function boundChromiumLogWhileRunning(
+  file: string,
+  fsImpl: Pick<ChromiumLogFs, 'statSync' | 'truncateSync'> = realChromiumLogFs,
+  maxBytes = CHROMIUM_LOG_MAX_BYTES,
+): 'emptied' | null {
+  try {
+    const st = fsImpl.statSync(file);
+    if (!st.isFile() || st.size <= maxBytes) return null;
+    fsImpl.truncateSync(file, 0);
+    return 'emptied';
+  } catch {
+    return null;
+  }
 }
 
 // ---------------------------------------------------------------------------

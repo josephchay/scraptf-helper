@@ -7,8 +7,13 @@
 // here contacts scrap.tf (R1).
 
 import { SCRAPTF_BOUNDARY_SHORT } from '../shared/boundaryText';
+import { buyerPresenceText, orderSeenRecently } from '../shared/buyerSeen';
+import { singleExitText } from '../shared/ceiling';
 import {
   CHECK_ARM_NAME_MAX,
+  CHECK_COST_BELOW_MARKET_NOTE,
+  CHECK_COST_VARIANT_NOTE,
+  CHECK_CRAFT_UNSURE_NOTE,
   CHECK_EXTRAS_NOTE,
   CHECK_HINT,
   CHECK_HINTED_NOTE_TAIL,
@@ -16,6 +21,7 @@ import {
   CHECK_PRICE_TEXT_MAX,
   CHECK_RECENT_MAX,
   CHECK_SOLD_OUT_NOTE,
+  checkCraftUndecided,
   checkHintedNote,
   checkMatchedByHint,
   checkPriceIsOtherCopy,
@@ -25,6 +31,7 @@ import type { HotkeyState } from '../shared/rpc';
 import { scraptfListFull } from '../shared/scraptfList';
 import type { CheckArm, CheckPrice, CheckPriceSource, CheckResult, CheckSettings, CheckSource, JournalInput, ScrapPriceInput, UnixMs } from '../shared/types';
 import { accelLabel, categoryLabel, fmtAgo, fmtDateTime, fmtInt, fmtMoney, fmtPct, fmtSignedMoney, type Tone } from './format';
+import { exitCostsWords, profitBreakdownText } from './oppModel';
 import { BUY_VENUE, buyerCountLabel, noRevenueText, revenueBreakdown } from './quickModel';
 
 /** The note on a price or journal row the popup writes (Save price, Bought it). */
@@ -120,6 +127,11 @@ export function checkPriceLine(r: CheckResult, now: UnixMs): CheckPriceLine {
               : `scrap.tf price ${price}, from a scrap.tf page you imported (saved, or read in the Flip Desk window) ${fmtDateTime(p.observedAt)}.`,
     );
     if (checkPriceIsOtherCopy(r)) parts.push(CHECK_EXTRAS_NOTE);
+    // 0.7.4 (F41): the price is shown, but neither copy is known to be the one copied.
+    if (checkCraftUndecided(r)) parts.push(CHECK_CRAFT_UNSURE_NOTE);
+    // 0.7.4 review (R14): PriceDB says the price is probably another copy's (the service's cost check).
+    const costNote = [CHECK_COST_VARIANT_NOTE, CHECK_COST_BELOW_MARKET_NOTE].find((n) => typeof r.reason === 'string' && r.reason.includes(n));
+    if (costNote) parts.push(costNote);
   } else if (typeof r.reason === 'string' && r.reason.includes(CHECK_SOLD_OUT_NOTE)) {
     // 0.7.3: a copied sold-out row drops every price on purpose, stored ones too. By the note, not by
     // outOfStock: a list-only stock 0 has nothing copied, and a copied "Sold out" row can show stock.
@@ -222,7 +234,12 @@ export interface CheckSellsLine {
   revenue: string | null;
   buyer: string | null;
   kind: 'bot' | 'human' | null;
+  /** 0.7.4 (F23): the buyer's online flag while the order was seen in the last 2 h, else null (see `seen`). */
   online: boolean | null;
+  /** 0.7.4 (F23): "last seen 4 d ago" when the order's last event is older than 2 h; null otherwise. */
+  seen: string | null;
+  /** The order's lastEventAt, for the popup's online dot; null without an order. */
+  seenAt: UnixMs | null;
   /** "6 buyers". */
   count: string;
   /** In place of a missing revenue: "no eligible buy order", or (0.7.3) "no usable buy order"; null with one. */
@@ -235,23 +252,30 @@ function noUsableOrder(r: CheckResult): boolean {
   return !!r.revenue && !finite(r.revenue.revenueScrap) && finite(r.revenue.eligibleCount) && r.revenue.eligibleCount > 0;
 }
 
-/** Line 2: "Sells for <revenue> to <buyer> (bot, online) · 6 buyers". */
-export function checkSellsLine(r: CheckResult): CheckSellsLine {
+/**
+ * Line 2: "Sells for <revenue> to <buyer> (bot, online) · 6 buyers". 0.7.4 (F23): past 2 h since the
+ * order's last event, "(bot, last seen 4 d ago)" instead of a stale online flag.
+ */
+export function checkSellsLine(r: CheckResult, now: UnixMs = Date.now()): CheckSellsLine {
   const k = r.keyScrap ?? null;
   const rev = r.revenue;
   const order = rev?.order ?? null;
   const count = buyerCountLabel(finite(rev?.eligibleCount) ? rev.eligibleCount : 0);
+  const none = { revenue: null, buyer: null, kind: null, online: null, seen: null, seenAt: null, count };
   if (!rev || !finite(rev.revenueScrap)) {
     // 0.7.3: buyers none of which is usable say why (noRevenueText), not "no eligible buy order".
-    if (noUsableOrder(r)) return { revenue: null, buyer: null, kind: null, online: null, count, none: 'no usable buy order', title: `${noRevenueText(rev)}.` };
-    return { revenue: null, buyer: null, kind: null, online: null, count, none: 'no eligible buy order', title: 'No eligible backpack.tf buy order in the live book right now.' };
+    if (noUsableOrder(r)) return { ...none, none: 'no usable buy order', title: `${noRevenueText(rev)}.` };
+    return { ...none, none: 'no eligible buy order', title: 'No eligible backpack.tf buy order in the live book right now.' };
   }
   const buyer = order?.userName?.trim() ? order.userName.trim() : null;
+  const recent = order ? orderSeenRecently(order.lastEventAt, now) : false;
   return {
     revenue: fmtMoney(rev.revenueScrap, k),
     buyer,
     kind: order ? (order.isBot ? 'bot' : 'human') : null,
-    online: order ? order.online : null,
+    online: order && recent ? order.online : null,
+    seen: order && !recent && Number.isFinite(order.lastEventAt) ? buyerPresenceText(order, now) : null,
+    seenAt: order && Number.isFinite(order.lastEventAt) ? order.lastEventAt : null,
     count,
     none: null,
     title: `${revenueBreakdown(rev, k)}. From the live backpack.tf book on this computer.`,
@@ -280,10 +304,18 @@ export function checkVerdictView(r: CheckResult): CheckVerdictView | null {
   switch (r.verdict) {
     case 'flip': {
       const profit = fmtSignedMoney(r.profitScrap, k);
+      // 0.8 (PC-1, PC-2): the breakdown when the result says what was taken off, and a flip only this buyer makes.
+      const rev = r.revenue?.revenueScrap;
+      const price = r.price?.valueScrap;
+      const breakdown =
+        r.exitCosts && finite(rev) && finite(price) && finite(r.profitScrap)
+          ? profitBreakdownText({ revenueScrap: rev, costScrap: price, ...r.exitCosts, profitScrap: r.profitScrap }, k)
+          : null;
+      const head = breakdown ? `Profitable at this price by your profit thresholds. ${breakdown}` : 'Profitable at this price by your profit thresholds, after friction.';
       return {
         tone: 'good',
         text: finite(r.margin) ? `Flip ${profit} (${fmtPct(r.margin)})` : `Flip ${profit}`,
-        title: 'Profitable at this price by your profit thresholds, after friction.',
+        title: r.singleExit ? `${head} ${singleExitText(r.singleExit, (v) => fmtMoney(v, k))}.` : head,
       };
     }
     case 'over': {
@@ -330,7 +362,12 @@ export function checkPayUpTo(r: CheckResult): CheckPayUpTo {
             : 'No eligible buyer, so no price to pay.',
     };
   }
-  return { text: fmtMoney(ceiling, r.keyScrap ?? null), prominent, title: 'The most to pay on scrap.tf that still clears your profit thresholds (after friction).' };
+  return {
+    text: fmtMoney(ceiling, r.keyScrap ?? null),
+    prominent,
+    // 0.8 (PC-1): names the price-move reserve when the result applied one; at 0 the 0.7.4 text.
+    title: `The most to pay on scrap.tf that still clears your profit thresholds (after ${exitCostsWords(r.exitCosts?.reservePct)}).`,
+  };
 }
 
 /** Header subtitle: the category label; null without one. */
@@ -380,7 +417,14 @@ export interface CheckActions {
   quick: CheckActionView;
 }
 
-/** Which buttons work for this result, each with its tooltip. */
+/** 0.7.4 (F41): Save price's and Bought it's tooltip while the copy is undecided (checkCraftUndecided). */
+export const CHECK_CRAFT_UNDECIDED_ACTION =
+  'The copied text does not say whether this is the Craftable or the Non-Craftable copy. Check its card on scrap.tf, then use Quick entry….';
+
+/**
+ * Which buttons work for this result, each with its tooltip. 0.7.4 (F41): an undecided craftability
+ * (checkCraftUndecided) turns Save price and Bought it off: neither copy is known to be the one copied.
+ */
 export function checkActions(r: CheckResult | null | undefined): CheckActions {
   const off = (title: string): CheckActionView => ({ enabled: false, title });
   if (!isItem(r)) {
@@ -389,8 +433,10 @@ export function checkActions(r: CheckResult | null | undefined): CheckActions {
   }
   const price = checkPriceText(r.price);
   const noPrice = 'No scrap.tf price to use. Copy its row from scrap.tf/items, or use Quick entry….';
+  const undecided = checkCraftUndecided(r);
   let save: CheckActionView;
   if (!r.price || !price) save = off(noPrice);
+  else if (undecided) save = off(CHECK_CRAFT_UNDECIDED_ACTION);
   else if (r.price.source === 'typed') save = off('This is already your saved price.');
   else if (r.price.source === 'import') save = off('This price is already in your price sheet, from a scrap.tf page you imported.');
   else
@@ -401,15 +447,25 @@ export function checkActions(r: CheckResult | null | undefined): CheckActions {
   // A price for a copy with extras is not what this plain one cost: Holdings would book it wrong.
   const bought: CheckActionView = !r.price || !price
     ? off(noPrice)
-    : checkPriceIsOtherCopy(r)
-      ? off('This price is for a copy with extras (paint, spells, parts or a tag), not a plain one. Record the buy with Quick entry… or from the dashboard instead.')
-      : { enabled: true, title: `Record that you bought it on scrap.tf at ${price}: a journal buy, shown in Holdings. Nothing is bought. (B)` };
+    : undecided
+      ? off(CHECK_CRAFT_UNDECIDED_ACTION)
+      : checkPriceIsOtherCopy(r)
+        ? off('This price is for a copy with extras (paint, spells, parts or a tag), not a plain one. Record the buy with Quick entry… or from the dashboard instead.')
+        : { enabled: true, title: `Record that you bought it on scrap.tf at ${price}: a journal buy, shown in Holdings. Nothing is bought. (B)` };
   return {
     save,
     bought,
     details: { enabled: true, title: 'Open the item in the dashboard (D).' },
-    quick: { enabled: true, title: price && !checkPriceIsOtherCopy(r) ? `Open Quick entry with this item and ${price}` : 'Open Quick entry with this item' },
+    quick: { enabled: true, title: price && quickTakesPrice(r) ? `Open Quick entry with this item and ${price}` : 'Open Quick entry with this item' },
   };
+}
+
+/**
+ * Quick entry… may take the checked price: not one for a copy with extras (it would be saved as the plain
+ * item's), nor, 0.7.4 (F41), one whose copy is undecided (it would be saved as whichever copy is open).
+ */
+function quickTakesPrice(r: CheckResult): boolean {
+  return !checkPriceIsOtherCopy(r) && !checkCraftUndecided(r);
 }
 
 /** prices.upsert for Save price: the checked price as a typed price, dated when it was seen. null when it cannot be saved. */
@@ -444,8 +500,9 @@ export function checkBoughtInput(r: CheckResult | null | undefined): JournalInpu
 /** app.showQuickEntry for Quick entry…: the SKU, plus the price as text its price field reads (units included). */
 export function checkQuickEntryParams(r: CheckResult | null | undefined): { sku: string; price?: string } | null {
   if (!isItem(r)) return null;
-  // A price for a copy with extras would be saved as the plain item's: quick entry gets the item only.
-  const price = checkPriceIsOtherCopy(r) ? null : checkPriceText(r.price);
+  // A price for a copy with extras would be saved as the plain item's, and (0.7.4, F41) one of an undecided
+  // copy as whichever copy is open: quick entry gets the item only.
+  const price = quickTakesPrice(r) ? checkPriceText(r.price) : null;
   return price && price.length <= CHECK_PRICE_TEXT_MAX ? { sku: r.sku, price } : { sku: r.sku };
 }
 

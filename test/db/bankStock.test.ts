@@ -67,6 +67,8 @@ describe('migration V6 on an existing version 5 database', () => {
       ['stock', 'INTEGER', 0, null, 0],
       ['asset_id', 'TEXT', 0, null, 0],
       ['page', 'TEXT', 1, "''", 0],
+      // 0.7.4 (V14): the /items list's rows' craftability; NULL on a bank page's card.
+      ['craft', 'TEXT', 0, null, 0],
     ]);
     const index = check.prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'bank_stock' AND name NOT LIKE 'sqlite_%'").all();
     expect(index.map((r) => r['name'])).toEqual(['bank_stock_bank_batch']);
@@ -386,15 +388,19 @@ describe('bank_stock_saves (V8): one entry per kept save, kept with bank_stock',
     insRow.run(3, 'hats', '378;6', '/buy/hats');
     insRow.run(3, 'hats', '126;6', '/buy/hats');
     insRow.run(4, 'list', '5021;6', '/items/2');
+    // V8 itself: one entry per save that has rows, with its bank, page and row count.
+    expect(migrate(raw, MIGRATIONS.slice(0, 8)).applied).toEqual([8]);
+    expect(raw.prepare('SELECT batch_id, bank, page, items FROM bank_stock_saves ORDER BY batch_id').all().map((r) => ({ ...r }))).toEqual([
+      { batch_id: 3, bank: 'hats', page: '/buy/hats', items: 2 },
+      { batch_id: 4, bank: 'list', page: '/items/2', items: 1 },
+    ]);
     raw.close();
 
     const repo = openRepo(path);
     cleanups.push(() => repo.close());
-    expect(repo.bankStockSaveIndex()).toEqual([
-      { batchId: 3, savedAt: T0 - 10 * MIN, bank: 'hats', page: '/buy/hats' },
-      { batchId: 4, savedAt: T0 - 5 * MIN, bank: 'list', page: '/items/2' },
-    ]);
+    // 0.7.4: V14 drops the /items list's saves (stored before list rows read their craftability).
+    expect(repo.bankStockSaveIndex()).toEqual([{ batchId: 3, savedAt: T0 - 10 * MIN, bank: 'hats', page: '/buy/hats' }]);
     expect(repo.bankStockSaves('hats')).toEqual([{ batchId: 3, savedAt: T0 - 10 * MIN, items: 2, page: '/buy/hats' }]);
-    expect(repo.bankStockSaves('list', 10, { perPage: 1 })).toEqual([{ batchId: 4, savedAt: T0 - 5 * MIN, items: 1, page: '/items/2' }]);
+    expect(repo.bankStockSaves('list', 10, { perPage: 1 })).toEqual([]);
   });
 });

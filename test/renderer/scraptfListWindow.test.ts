@@ -72,10 +72,14 @@ describe('the setup state with the window on', () => {
     expect(listWindowOpenHint(false)).toContain('read when you press Read page now');
   });
 
-  it('first run leads with one save of scrap.tf/items (UX-4)', () => {
-    expect(FIRST_PRICE_LEAD).toBe('Save scrap.tf/items once to price every item scrap.tf trades');
-    expect(firstPriceText(false)).toBe('Save scrap.tf/items once to price every item scrap.tf trades.');
-    expect(firstPriceText(true)).toBe('Save scrap.tf/items once to price every item scrap.tf trades, or browse it in the Flip Desk window.');
+  it('first run leads with the bank pages, and says what scrap.tf/items adds (UX-4; 0.7.4, R38)', () => {
+    expect(FIRST_PRICE_LEAD).toBe("Save scrap.tf's bank pages to price each copy they sell");
+    expect(firstPriceText(false)).toBe(
+      "Save scrap.tf's bank pages to price each copy they sell; scrap.tf/items adds what scrap.tf pays and every item's stock, and prices only the rows that show which copy they are.",
+    );
+    expect(firstPriceText(true)).toBe(
+      "Save scrap.tf's bank pages to price each copy they sell (or browse them in the Flip Desk window); scrap.tf/items adds what scrap.tf pays and every item's stock, and prices only the rows that show which copy they are.",
+    );
   });
 });
 

@@ -36,6 +36,16 @@ function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
+/**
+ * 0.7.4 (F52): priceoverview's answer for a name with no market listing, HTTP 500 with a JSON {"success":false}
+ * (HttpRequestOptions.isAnswer). The same rule fetchOverview caches as "no listing"; any other 5xx is an outage.
+ */
+export function unknownItemAnswer(status: number, data: unknown): boolean {
+  if (status !== 500) return false;
+  const parsed = overviewSchema.safeParse(data);
+  return parsed.success && !parsed.data.success;
+}
+
 export function createSteamMarket(deps: ServiceDeps): SteamMarket {
   const { clock, log, repo, http } = deps;
   const cache = new Map<string, { at: UnixMs; value: PriceOverview }>();
@@ -109,6 +119,9 @@ export function createSteamMarket(deps: ServiceDeps): SteamMarket {
         budget: 'scm',
         priority: 'user',
         maxWaitMs: 15_000,
+        // 0.7.4 (F52): Steam's "no listing under that name" is a 500 with {"success":false}, an answer about this
+        // item, not an outage, so it does not pause the scm budget for every other item. Any other 5xx still does.
+        isAnswer: unknownItemAnswer,
       });
       if (res.status === 429) {
         lockOut();

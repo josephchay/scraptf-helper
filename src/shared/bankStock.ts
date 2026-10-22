@@ -4,7 +4,7 @@
 // for their features). Pure: no I/O, no network. A save is a page the user saved
 // from their own browser (R10); nothing here fetches anything (R1).
 
-import { frictionOf, profitStatus, type CeilingSettings } from './ceiling';
+import { flipProfit, profitStatus, type CeilingSettings } from './ceiling';
 import { formatScrap, valueScrap } from './currency';
 import { scraptfBankInfo } from './links';
 import { marketSearchTokens } from './market';
@@ -29,6 +29,8 @@ import type {
   ScraptfBankWhatsNew,
   ScraptfKeyRun,
   ScraptfPriceChange,
+  ScraptfTimingBrief,
+  ScraptfTurnover,
   SpecialAttrs,
   UnixMs,
 } from './types';
@@ -509,6 +511,16 @@ export function scraptfPriceChange(from: { keys: number; scrap: Scrap }, to: { k
   return { fromScrap, toScrap, deltaScrap, pct: fromScrap > 0 ? deltaScrap / fromScrap : null, since };
 }
 
+/**
+ * 0.7.4 (the calibration bug, F01): a stored row of the /items list ('list') not proven to price one copy
+ * (BankStockStored.craft not 'craftable' or 'uncraftable': a family row, every copy at its price, or rows of
+ * one item that differ; a row with no craft at all counts as one). Its price is no cost of the Craftable copy
+ * its SKU names, so it is joined to no buy side (bankStockRow). A bank page's card never is.
+ */
+export function bankStockListFamily(bank: ScraptfBank | null | undefined, row: Pick<BankStockStored, 'craft'> | null | undefined): boolean {
+  return bank === 'list' && row?.craft !== 'craftable' && row?.craft !== 'uncraftable';
+}
+
 /** profitStatus of the row's profit: profitable is 'flip', no revenue 'no-buyers', anything else 'over'. */
 export function bankStockVerdict(profitScrap: Scrap | null, costScrap: Scrap, p: CeilingSettings): BankStockVerdict {
   const s = profitStatus(profitScrap, costScrap, p);
@@ -524,13 +536,25 @@ export function bankStockVerdict(profitScrap: Scrap | null, costScrap: Scrap, p:
  * also fills lastSeenAt (its newest save on sale); absent otherwise. 0.7.3: a gone row takes its last
  * price and lastSeenAt from the run (the newest save that listed it on sale, often a window read inside
  * the latest run of saves), else its price is the previous save's (the session baseline it is judged by).
+ * 0.7.4: with `bank`, a row of the /items list not proven to price one copy (bankStockListFamily, read on the
+ * row shown) gets no buy side whatever `buy` holds, and `listFamily`: never a flip. 0.8 (T4): `timing` (the copy's
+ * buy-timing brief, scraptfTimingBrief) is carried by an on-sale row only: never by a gone row or a family row.
  */
 export function bankStockRow(
   d: BankStockDiffRow,
-  a: { category: Category; buy: BankStockBuySide | null; keyScrap: Scrap; profit: CeilingSettings; run?: ScraptfKeyRun | null },
+  a: {
+    category: Category;
+    buy: BankStockBuySide | null;
+    keyScrap: Scrap;
+    profit: CeilingSettings;
+    run?: ScraptfKeyRun | null;
+    bank?: ScraptfBank | null;
+    timing?: ScraptfTimingBrief | null;
+  },
 ): BankStockRow | null {
   const shown = d.change === 'gone' ? d.previous : d.onSale ? d.current : null;
   if (!shown || !finite(shown.costScrap)) return null;
+  const family = bankStockListFamily(a.bank, shown);
   const run = a.run ?? null;
   const goneRun = d.change === 'gone' && run && finite(run.lastSeenAt) ? run : null;
   const last = goneRun?.lastOnSale && finite(goneRun.lastOnSale.scrap) ? goneRun.lastOnSale : null;
@@ -540,9 +564,9 @@ export function bankStockRow(
   const costScrap = valueScrap(costKeys, costScrapRaw, a.keyScrap);
   const prev = d.previous;
   const previousCostScrap = prev && finite(prev.costScrap) ? valueScrap(finite(prev.costKeys) ? prev.costKeys : 0, prev.costScrap, a.keyScrap) : null;
-  const buy = a.buy;
+  const buy = family ? null : a.buy;
   const revenueScrap = buy && finite(buy.revenueScrap) ? buy.revenueScrap : null;
-  const profitScrap = revenueScrap === null ? null : revenueScrap - costScrap - frictionOf(a.profit);
+  const profitScrap = flipProfit(revenueScrap, costScrap, a.profit);
   const listedSince = d.change !== 'gone' && run && finite(run.listedSince) ? run.listedSince : null;
   return {
     sku: d.sku,
@@ -572,10 +596,16 @@ export function bankStockRow(
       listedSince !== null && run?.runStart ? scraptfPriceChange(run.runStart, { keys: costKeys, scrap: costScrapRaw }, listedSince, a.keyScrap) : null,
     // Only with a current run (0.7.3: or a gone row's last sighting), so rows without history keep their shape.
     ...(listedSince !== null && run && finite(run.lastSeenAt) ? { lastSeenAt: run.lastSeenAt } : goneRun ? { lastSeenAt: goneRun.lastSeenAt } : {}),
+    ...(family ? { listFamily: true as const } : {}),
+    ...(a.timing && d.change !== 'gone' && !family ? { timing: a.timing } : {}),
   };
 }
 
-/** Every row a bank's page can show (bankStockRow over diffBankStock), in diff order. `runOf` (F20) is optional. */
+/**
+ * Every row a bank's page can show (bankStockRow over diffBankStock), in diff order. `runOf` (F20) is optional;
+ * 0.7.4: `bank` gives the /items list's unproven rows no buy side (bankStockListFamily), as the service does.
+ * 0.8 (T4): `timingOf` (optional) is asked only for rows on sale now, with the row's buy side.
+ */
 export function bankStockRows(a: {
   newest: readonly BankStockStored[];
   previous: readonly BankStockStored[] | null;
@@ -584,10 +614,14 @@ export function bankStockRows(a: {
   categoryOf(sku: string): Category;
   buySideOf(sku: string): BankStockBuySide | null;
   runOf?(key: string): ScraptfKeyRun | null;
+  bank?: ScraptfBank | null;
+  timingOf?(key: string, buy: BankStockBuySide | null): ScraptfTimingBrief | null;
 }): BankStockRow[] {
   const out: BankStockRow[] = [];
   for (const d of diffBankStock(a.newest, a.previous, a.keyScrap)) {
-    const row = bankStockRow(d, { category: a.categoryOf(d.sku), buy: a.buySideOf(d.sku), keyScrap: a.keyScrap, profit: a.profit, run: a.runOf?.(d.key) ?? null });
+    const buy = a.buySideOf(d.sku);
+    const timing = d.onSale && a.timingOf ? a.timingOf(d.key, buy) : null;
+    const row = bankStockRow(d, { category: a.categoryOf(d.sku), buy, keyScrap: a.keyScrap, profit: a.profit, run: a.runOf?.(d.key) ?? null, bank: a.bank ?? null, timing });
     if (row) out.push(row);
   }
   return out;
@@ -633,12 +667,36 @@ export function bankStockDropped(r: Pick<BankStockRow, 'change' | 'changeSinceLi
 }
 
 /**
+ * 0.8 (G2): a row this read dropped into flip range: cheaper than on the save before (change 'cheaper'), a flip now,
+ * and its previous price over today's Pay up to. Judged at today's book, not the book of that save: "now under Pay up to".
+ */
+export function bankStockDroppedIntoFlip(r: Pick<BankStockRow, 'change' | 'verdict' | 'previousCostScrap' | 'maxCostScrap'>): boolean {
+  return r.change === 'cheaper' && r.verdict === 'flip' && finite(r.previousCostScrap) && finite(r.maxCostScrap) && r.previousCostScrap > r.maxCostScrap;
+}
+
+/** 0.8 (T6): the 'dropping' chip's bar: reprice-downs in the current run. */
+export const BANK_STOCK_DROPPING_MIN = 2;
+
+/**
+ * 0.8 (T6, review): a row's reprice-downs since its listing began (its timing's dropsSinceListed, else dropsThisRun;
+ * 0 without a timing). A flap restarts the row's listing (listedSince, the Since listed baseline) while the timing joins
+ * it to the run before, so the Since listed cell, the Dropping chip and its count read this, never the flap chain's.
+ */
+export function bankStockRunDrops(r: { timing?: Pick<ScraptfTimingBrief, 'dropsThisRun' | 'dropsSinceListed'> | null }): number {
+  const t = r.timing;
+  if (!t) return 0;
+  const n = finite(t.dropsSinceListed) ? t.dropsSinceListed : t.dropsThisRun;
+  return finite(n) ? n : 0;
+}
+
+/**
  * The filter chips: All (in stock), New, Flips, Price changes, Gone, and from F20 Listed > 24 h and
- * Dropped since listed (both need `now`: without it 'long-listed' matches nothing). Gone rows show
- * under 'gone' only.
+ * Dropped since listed (both need `now`: without it 'long-listed' matches nothing). 0.8: Dropping (at least
+ * BANK_STOCK_DROPPING_MIN reprice-downs since its listing began, bankStockRunDrops) and Watched (a watch joined
+ * to the row). Gone rows show under 'gone' only.
  */
 export function bankStockFilterMatches(
-  r: Pick<BankStockRow, 'change' | 'verdict' | 'listedSince' | 'changeSinceListed' | 'lastSeenAt'>,
+  r: Pick<BankStockRow, 'change' | 'verdict' | 'listedSince' | 'changeSinceListed' | 'lastSeenAt' | 'timing' | 'watch'>,
   filter: BankStockFilter,
   opts: { now?: UnixMs; minListedMs?: number } = {},
 ): boolean {
@@ -655,6 +713,10 @@ export function bankStockFilterMatches(
       return opts.now !== undefined && bankStockLongListed(r, opts.now, opts.minListedMs ?? SCRAPTF_LONG_LISTED_MS);
     case 'dropped':
       return bankStockDropped(r);
+    case 'dropping':
+      return r.change !== 'gone' && bankStockRunDrops(r) >= BANK_STOCK_DROPPING_MIN;
+    case 'watched':
+      return r.change !== 'gone' && r.watch !== undefined;
     case 'all':
       return r.change !== 'gone';
   }
@@ -738,7 +800,7 @@ export function bankStockMatching(rows: readonly BankStockRow[], q: Omit<BankSto
 }
 
 export function emptyBankStockCounts(): BankStockCounts {
-  return { items: 0, inStock: 0, new: 0, gone: 0, cheaper: 0, pricier: 0, flips: 0, newFlips: 0, longListed: 0, dropped: 0 };
+  return { items: 0, inStock: 0, new: 0, gone: 0, cheaper: 0, pricier: 0, flips: 0, newFlips: 0, longListed: 0, dropped: 0, dropping: 0, watched: 0 };
 }
 
 /**
@@ -764,6 +826,9 @@ export function bankStockCounts(rows: readonly BankStockRow[], items: number, op
     }
     if (opts.now !== undefined && bankStockLongListed(r, opts.now, minListed)) c.longListed++;
     if (bankStockDropped(r)) c.dropped++;
+    // 0.8 (T6, G1): as bankStockFilterMatches; only on-sale rows reach here.
+    if (bankStockRunDrops(r) >= BANK_STOCK_DROPPING_MIN) c.dropping++;
+    if (r.watch !== undefined) c.watched++;
   }
   return c;
 }
@@ -787,6 +852,8 @@ export function bankStockResult(a: {
   pages?: { count: number; oldestSavedAt: UnixMs | null };
   /** 0.7.1 (DM-5, bankStockCurrentPages): pages left out for being far older than the newest; left out when none. */
   olderPages?: { count: number; newestSavedAt: UnixMs } | null;
+  /** 0.8 (LC-4): how long items stayed listed in the bank (scraptfBankTurnover); left out when not known. */
+  turnover?: ScraptfTurnover | null;
   keyPrice: KeyPriceState | null;
   now: UnixMs;
 }): BankStockResult {
@@ -802,6 +869,7 @@ export function bankStockResult(a: {
     saves: a.saves,
     ...(a.pages && a.pages.count > 1 ? { pages: a.pages.count, oldestSavedAt: a.pages.oldestSavedAt } : {}),
     ...(a.olderPages && a.olderPages.count > 0 ? { olderPages: { count: a.olderPages.count, newestSavedAt: a.olderPages.newestSavedAt } } : {}),
+    ...(a.turnover ? { turnover: a.turnover } : {}),
     counts: bankStockCounts(a.rows, a.items, { now: a.now, minListedMs: bankStockMinListedMs(a.q) }),
     rows: matched.slice(offset, offset + limit),
     total: matched.length,
@@ -908,6 +976,28 @@ export function bankStockItemOf(banks: readonly BankStockBankDiff[], sku: string
   };
 }
 
+/**
+ * 0.7.4 (F41, the Live check's craftability): the prices this very copy of `sku` (bankStockIsOwnCopy) is on sale
+ * at on `banks`' newest saves, keys and metal as listed, from bank pages only: the /items list ('list') stores an
+ * unmarked row as every copy at its price, so it tells no copy apart (its list rows carry their own craft).
+ * Empty when no bank page has the copy on sale. 0.7.4: each price carries its bank, so the check can tell a page
+ * that lists Non-Craftable copies (CHECK_NONCRAFT_BANKS in check.ts) from one that never does.
+ */
+export function bankStockPricesOf(banks: readonly BankStockBankDiff[], sku: string): { keys: number; scrap: Scrap; bank: ScraptfBank }[] {
+  const target = bankStockTargetOf(sku);
+  if (!target) return [];
+  const out: { keys: number; scrap: Scrap; bank: ScraptfBank }[] = [];
+  for (const b of banks) {
+    if (b.bank === 'list') continue;
+    for (const d of b.diff) {
+      const c = d.current;
+      if (!d.onSale || c === null || !finite(c.costScrap) || !bankStockIsOwnCopy(d, target)) continue;
+      out.push({ keys: finite(c.costKeys) ? c.costKeys : 0, scrap: c.costScrap, bank: b.bank });
+    }
+  }
+  return out;
+}
+
 // ---------------------------------------------------------------------------
 // Notifications (spec S3) and CSV
 // ---------------------------------------------------------------------------
@@ -930,19 +1020,36 @@ export function bankStockSaveAgeText(ms: number): string {
 }
 
 /**
- * "New on scrap.tf (<Bank>): <name>" / "<cost>, sells for <revenue> to <buyer>, +<profit>". 0.7.1
- * (ACT-6): `savedAgoMs` of BANK_STOCK_NOTIFY_AGE_NOTE_MS or more adds "; in your save 3 h ago".
+ * 0.7.1 (ACT-6), shared from 0.8 by every S3 toast body: "; in your save 3 h ago" for a save at least
+ * BANK_STOCK_NOTIFY_AGE_NOTE_MS old, else '' (a fresh save, or its age unknown).
  */
-export function bankStockNewFlipNotice(label: string, r: BankStockRow, keyScrap: Scrap | null, savedAgoMs?: number | null): { title: string; body: string } {
+export function bankStockSaveAgeNote(savedAgoMs: number | null | undefined): string {
+  return finite(savedAgoMs) && savedAgoMs >= BANK_STOCK_NOTIFY_AGE_NOTE_MS ? `; in your save ${bankStockSaveAgeText(savedAgoMs)} ago` : '';
+}
+
+/**
+ * "New on scrap.tf (<Bank>): <name>" / "<cost>, sells for <revenue> to <buyer>, +<profit>". 0.7.1
+ * (ACT-6): `savedAgoMs` of BANK_STOCK_NOTIFY_AGE_NOTE_MS or more adds "; in your save 3 h ago". 0.8 (G4): `note`
+ * (the notifier's wait note) goes before that age part; without it the text is 0.7.4's.
+ */
+export function bankStockNewFlipNotice(
+  label: string,
+  r: BankStockRow,
+  keyScrap: Scrap | null,
+  savedAgoMs?: number | null,
+  note?: string | null,
+): { title: string; body: string } {
   const key = finite(keyScrap) && keyScrap > 0 ? keyScrap : null;
   const o = r.revenueOrder;
   const buyer = o ? o.userName || o.steamid : 'a buyer';
-  const age = finite(savedAgoMs) && savedAgoMs >= BANK_STOCK_NOTIFY_AGE_NOTE_MS ? `; in your save ${bankStockSaveAgeText(savedAgoMs)} ago` : '';
   return {
     title: `New on scrap.tf (${label}): ${r.name}`,
-    body: `${formatScrap(r.costScrap, key)}, sells for ${formatScrap(r.revenueScrap, key)} to ${buyer}, +${formatScrap(r.profitScrap, key)}${age}`,
+    body: `${formatScrap(r.costScrap, key)}, sells for ${formatScrap(r.revenueScrap, key)} to ${buyer}, +${formatScrap(r.profitScrap, key)}${note ?? ''}${bankStockSaveAgeNote(savedAgoMs)}`,
   };
 }
+
+/** 0.8: the body of every S3 summary of a fresh save ("+N more …"), hoisted from the service's notifier. */
+export const BANK_STOCK_MORE_BODY = 'From the page you saved. Open TF2 Flip Desk to see them.';
 
 /** The one summary after BANK_STOCK_MAX_NOTIFICATIONS: "+N more new flips on scrap.tf/buy/hats". */
 export function bankStockMoreNotice(more: number, url: string): string {

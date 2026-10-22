@@ -21,6 +21,7 @@ import {
   RateLimitedError,
   assertAllowed,
   backoffMs,
+  isUnavailableStatus,
   parseRateLimit,
   realTimers,
   type TimerApi,
@@ -325,7 +326,9 @@ export function createPriceDb(deps: ServiceDeps, options: PriceDbOptions = {}): 
       restDisabledReason = err.reason;
     } else if (err instanceof NetworkPausedError) restErrorState = 'paused';
     else if (err instanceof RateLimitedError) restErrorState = 'backoff';
-    else if (err instanceof HttpStatusError && (err.status === 429 || err.status === 503)) restErrorState = 'backoff';
+    // 0.7.4 (F52): every "host unavailable" status (500, 502-504, Cloudflare 52x) pauses the budget as 503
+    // does, so Data health says backoff for it, not error.
+    else if (err instanceof HttpStatusError && (err.status === 429 || isUnavailableStatus(err.status))) restErrorState = 'backoff';
     else restErrorState = 'error';
     log.warn(`PriceDB request failed: ${restLastError}`);
   };
@@ -666,6 +669,8 @@ export function createPriceDb(deps: ServiceDeps, options: PriceDbOptions = {}): 
       buyScrap: buy,
       sellScrap: sell,
       observedAt: row.time > 0 ? row.time * 1000 : row.fetchedAt,
+      // 0.7.4 (F71): PriceDB's own price time, as backpack.tf's quote carries its last_update.
+      priceAt: row.time > 0 ? row.time * 1000 : null,
     };
     repo.upsertKeyQuote(quote);
     return quote;
@@ -812,6 +817,7 @@ export function createPriceDb(deps: ServiceDeps, options: PriceDbOptions = {}): 
           buyScrap: key.buyScrap,
           sellScrap: key.sellKeys === 0 && key.sellScrap > 0 ? key.sellScrap : null,
           observedAt: key.time > 0 ? key.time * 1000 : now,
+          priceAt: key.time > 0 ? key.time * 1000 : null,
         });
       }
     } catch (err) {

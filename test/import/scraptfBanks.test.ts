@@ -236,10 +236,10 @@ describe('saved /buy/skins page', () => {
     ['9600000004', '208;11;w2;pk300', 'Strange Frozen Aurora Flame Thrower (Minimal Wear)', 0, 99, 1, []],
     ['9600000005', '15000;15;w1;pk14;kt-3', 'Professional Killstreak Night Owl Sniper Rifle (Factory New)', 1, 0, 1, []],
     ['9600000006', '15063;11;w2;pk70;kt-2', 'Strange Specialized Killstreak Haunted Ghosts Revolver (Minimal Wear)', 0, 72, 1, []],
-    ['9600000007', '208;15;u702;w3;pk300', 'Isotope Frozen Aurora Flame Thrower (Field-Tested)', 4, 0, 1, []],
-    ['9600000008', '15000;15;u704;w1;pk14', 'Energy Orb Night Owl Sniper Rifle (Factory New)', 12, 0, 1, []],
-    ['9600000009', '15000;15;u703;w2;pk1014', 'Cool Night Owl Mk.II Sniper Rifle (Minimal Wear)', 6, 0, 1, []],
-    ['9600000010', '15000;15;u701;w4;pk14;strange', 'Strange Hot Night Owl Sniper Rifle (Well-Worn)', 9, 0, 1, []],
+    ['9600000007', '208;5;u702;w3;pk300', 'Isotope Frozen Aurora Flame Thrower (Field-Tested)', 4, 0, 1, []],
+    ['9600000008', '15000;5;u704;w1;pk14', 'Energy Orb Night Owl Sniper Rifle (Factory New)', 12, 0, 1, []],
+    ['9600000009', '15000;5;u703;w2;pk1014', 'Cool Night Owl Mk.II Sniper Rifle (Minimal Wear)', 6, 0, 1, []],
+    ['9600000010', '15000;5;u701;w4;pk14;strange', 'Strange Hot Night Owl Sniper Rifle (Well-Worn)', 9, 0, 1, []],
     ['9600000011', '16104;15;w5;pk104', 'Masked Mender War Paint (Battle Scarred)', 0, 9, 1, []],
     ['9600000012', '16070;15;w1;pk70', 'Haunted Ghosts War Paint (Factory New)', 0, 27, 1, []],
     ['9600000013', '16105;15;w2;pk105', 'Masked Mender Mk.II War Paint (Minimal Wear)', 0, 22, 1, []],
@@ -251,9 +251,10 @@ describe('saved /buy/skins page', () => {
     ['9600000019', null, 'Unusual Night Owl Sniper Rifle (Field-Tested)', 8, 0, 1, ['unusual-without-effect']],
   ]);
 
-  it('keys unusual skins as Decorated plus the effect, whatever quality class scrap.tf gives them', () => {
+  // 0.7.4 (F08/F43/F69): as backpack.tf's buyers key them (0.7.3 keyed them Decorated plus the effect, which no order uses).
+  it('keys unusual skins as Unusual plus the effect, whatever quality class scrap.tf gives them', () => {
     for (const id of ['9600000007', '9600000008', '9600000009', '9600000010']) {
-      expect(byAsset(r.items, id).skuObject?.quality).toBe(15);
+      expect(byAsset(r.items, id).skuObject?.quality).toBe(5);
     }
     // Without an effect neither the Unusual class nor an "Unusual" title is turned into a guess.
     for (const id of ['9600000018', '9600000019']) {
@@ -574,7 +575,7 @@ describe('unusual skins and War Paint names', () => {
 
   it('"Unusual" in a skin title agrees with a quality15 class; on a hat it still disagrees', () => {
     const skin = sniper('quality15', 'Unusual Night Owl Sniper Rifle (Factory New)', 701);
-    expect(skin.sku).toBe('15000;15;u701;w1;pk14');
+    expect(skin.sku).toBe('15000;5;u701;w1;pk14');
     expect(skin.warnings).toEqual([]);
     const hat = one({ 'data-defindex': '378', class: 'item quality6 app440', 'data-title': 'Unusual Team Captain', 'data-item-value': '9' });
     expect(codes(hat)).toEqual(['quality-mismatch']);
@@ -622,7 +623,7 @@ describe('unusual skins and War Paint names', () => {
       'data-title': 'Isotope Frozen Aurora Flame Thrower (Field-Tested)',
       'data-item-value': '900',
     });
-    expect(it.sku).toBe('208;15;u702;w3;pk300');
+    expect(it.sku).toBe('208;5;u702;w3;pk300');
     expect(it.warnings).toEqual([]);
   });
 

@@ -52,7 +52,9 @@ export function SetupChecklist() {
       code: 'first-price',
       title: 'Add your first scrap.tf prices',
       body: `${firstPriceText(scraptfWindowOn(settings))} Or type a price you see, or add a price-sheet rule for a whole category.`,
+      // 0.7.4 (R38): the bank pages price each copy, so they come first; the list adds stock and what scrap.tf pays.
       actions: [
+        { label: 'scrap.tf bank pages', run: () => navigate('banks') },
         { label: 'Save scrap.tf/items', run: () => navigate('import') },
         { label: 'Quick entry', run: openQuick },
         { label: 'Price sheet', run: () => navigate('prices') },

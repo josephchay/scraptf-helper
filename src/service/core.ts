@@ -6,12 +6,16 @@
 
 import { appendFileSync, existsSync, mkdirSync, readdirSync, rmSync, statSync } from 'node:fs';
 import path from 'node:path';
+import { orderSeenRecently } from '../shared/buyerSeen';
+import { valueScrap } from '../shared/currency';
 import type { PushContract, PushEvent, RpcMethod } from '../shared/rpc';
 import { WATCH_WAITING_FOR_SCHEMA } from '../shared/scraptfList';
 import { baseSku as toBaseSku, looksLikeSku } from '../shared/sku';
-import type { AppStatus, ConnectorHealth, HealthReport, JournalEntry, Listing, RequestLogRow, ScraptfBank, SecretName, Settings, UnixMs } from '../shared/types';
+import type { AppStatus, ConnectorHealth, HealthReport, JournalEntry, Listing, Opportunity, OrderSummary, RequestLogRow, Scrap, ScraptfBank, SecretName, Settings, UnixMs } from '../shared/types';
 import { HOLDING_EXIT_VENUES, SECRET_NAMES } from '../shared/types';
-import { createBptfApi } from './connectors/bptfApi';
+import { isScraptfVenue } from '../shared/venues';
+import { watchFloorOf } from '../shared/watches';
+import { SNAPSHOT_SIDE_PAGE, createBptfApi } from './connectors/bptfApi';
 import { createBptfSocket, type SocketTimers } from './connectors/bptfSocket';
 import { META_LOAD_ALL_AT, createPriceDb, type PricedbSocketFactory } from './connectors/pricedb';
 import { createSchemaService } from './connectors/schema';
@@ -31,10 +35,16 @@ import {
   createResaveReminders,
   createScraptfHistory,
   createScraptfListCache,
+  createWatchCache,
   explicitInput,
   marketCategoryOf,
+  revenueOrderOf,
   selectKeyPrice,
 } from './domain';
+import { bookBasesOf, withTwins } from './domain/bookTwins';
+import { bankStockCostCheck } from './domain/bankStock';
+import { unverifiedUpside } from './domain/engine';
+import { scraptfSeenPriceOf, type ScraptfSeenPrice } from '../shared/ruleEvidence';
 import {
   ImportTooLargeError,
   createFolderWatcher,
@@ -56,7 +66,7 @@ import {
   unregisterSecret,
   type NetPauseState,
 } from './net';
-import { createRpcHandlers, importSavedPage, recordSkippedImport, type HandlerContext } from './rpcHandlers';
+import { META_BANK_PRICES_RECONCILED, createRpcHandlers, importSavedPage, reconcileBankPrices, recordSkippedImport, type HandlerContext } from './rpcHandlers';
 import { buildJobs, createScheduler, snapshotIsStale, type Scheduler } from './scheduler';
 
 export const DB_FILE_NAME = 'flipdesk.sqlite';
@@ -157,14 +167,13 @@ const HOST_JOBS: Readonly<Record<string, readonly string[]>> = {
 export const USER_PRICE_TOLD_MS = 5 * 60_000;
 
 /**
- * ACT-3: the newest scrap.tf buy per base SKU in the journal (side 'buy', venue 'scrap.tf' in any case),
- * for EngineDeps.boughtSince. A row whose SKU cannot be read is skipped.
+ * ACT-3: the newest scrap.tf buy per base SKU in the journal (side 'buy', venue scrap.tf by venueLabel, any
+ * case or alias, 0.8 J4), for EngineDeps.boughtSince. A row whose SKU cannot be read is skipped.
  */
 export function newestScraptfBuys(entries: readonly Pick<JournalEntry, 'side' | 'venue' | 'sku' | 'ts'>[]): Map<string, UnixMs> {
-  const venue = HOLDING_EXIT_VENUES.scraptf;
   const out = new Map<string, UnixMs>();
   for (const e of entries) {
-    if (e.side !== 'buy' || typeof e.venue !== 'string' || e.venue.trim().toLowerCase() !== venue || !Number.isFinite(e.ts)) continue;
+    if (e.side !== 'buy' || typeof e.venue !== 'string' || !isScraptfVenue(e.venue) || !Number.isFinite(e.ts)) continue;
     let base: string;
     try {
       base = toBaseSku(e.sku);
@@ -175,6 +184,42 @@ export function newestScraptfBuys(entries: readonly Pick<JournalEntry, 'side' | 
     if (prev === undefined || e.ts > prev) out.set(base, e.ts);
   }
   return out;
+}
+
+/**
+ * 0.7.4 (F51): the band at the edge of a full snapshot page. Inside the page's range (buy orders above
+ * its lowest price by more than this share, sell listings below its highest), a stored order the page
+ * lacks is gone; within the band (bp.tf's own key value, ties at the 30th row) it may just not have fit.
+ */
+export const SNAPSHOT_PAGE_EDGE_BAND = 0.01;
+
+/**
+ * 0.7.4 (F51): the stored listings of one side to delete after a snapshot whose side is a full page
+ * (bp.tf returns the best SNAPSHOT_SIDE_PAGE per side): those missing from `keepIds` whose value lies
+ * inside the range the page covered, measured over every row of the page (all bases: the page is per
+ * item name). A page with no readable row of that side covers nothing, so nothing is deleted.
+ */
+export function snapshotPageDeletes(
+  stored: readonly Listing[],
+  keepIds: ReadonlySet<string>,
+  page: readonly Listing[],
+  intent: 'buy' | 'sell',
+  keyScrap: number,
+): string[] {
+  const value = (l: Listing): number => valueScrap(Number.isFinite(l.keys) ? l.keys : 0, Number.isFinite(l.metalScrap) ? l.metalScrap : 0, keyScrap);
+  const side = page.filter((l) => l.intent === intent).map(value);
+  if (side.length === 0) return [];
+  const covered =
+    intent === 'buy'
+      ? (() => {
+          const edge = Math.min(...side);
+          return (v: number) => v > edge * (1 + SNAPSHOT_PAGE_EDGE_BAND);
+        })()
+      : (() => {
+          const edge = Math.max(...side);
+          return (v: number) => v < edge * (1 - SNAPSHOT_PAGE_EDGE_BAND);
+        })();
+  return stored.filter((l) => !keepIds.has(l.id) && covered(value(l))).map((l) => l.id);
 }
 
 /**
@@ -388,25 +433,59 @@ export function createServiceCore(opts: ServiceCoreOptions): ServiceCore {
 
   // ----- watchlist: base SKUs with a scrap.tf price, and held ones (F11) -----
   let watched: Set<string> | null = null;
+  let watchedBook: Set<string> | null = null;
   let priceCount = 0;
+  /**
+   * 0.7.4 (F74): a kit or tool SKU without its target names no item anyone lists (bptfApi.resolveName refuses
+   * it before any request): it is never watched and never queued for a snapshot.
+   */
+  const targetless = (base: string): boolean => {
+    try {
+      return schema.isTargetlessTool?.(base) === true;
+    } catch {
+      return false;
+    }
+  };
+  // 0.8 (G1): the user's scrap.tf watches in memory (no network): the rows' Watched chip, the S3 notifier, the engine's
+  // profit bar, holdings' exit record (H1) and the watch list below.
+  const watchCache = createWatchCache({ repo, log, clock });
   const watchedSet = (): Set<string> => {
     if (watched) return watched;
     const set = new Set<string>();
     const prices = repo.listScrapPrices();
     for (const sp of prices) {
       const inp = explicitInput(sp);
-      if (inp) set.add(inp.baseSku);
+      if (inp && !targetless(inp.baseSku)) set.add(inp.baseSku);
     }
     // Open journal lots: the budgeted snapshot job keeps their book fresh and their sell listings are kept.
     // No new request kind: held SKUs only join the same watch list (reset by ctx.journalChanged).
     try {
-      for (const b of holdings.heldBases()) set.add(b);
+      for (const b of holdings.heldBases()) if (!targetless(b)) set.add(b);
     } catch (err) {
       log.warn(`could not read the held items: ${errorText(err)}`);
     }
+    // 0.8 (G1): watched items too (critic merge), so the budgeted snapshot job keeps their book fresh and their sell
+    // listings are kept; the 30-min pricedb-watched bulk refresh includes them as it does held items (at most 2 more
+    // requests per run at WATCHES_MAX). No new request kind: the same jobs, cadences and budgets.
+    try {
+      for (const b of watchCache.bases()) if (!targetless(b)) set.add(b);
+    } catch (err) {
+      log.warn(`could not read the watched items: ${errorText(err)}`);
+    }
     priceCount = prices.length;
     watched = set;
+    watchedBook = null;
     return set;
+  };
+  /**
+   * 0.7.4 (F14): the watched bases with every twin their book is filed under (SchemaService.bookBases), for
+   * the sell listings kept: a watched item's sell listing under its twin defindex is the item's too. Storage
+   * only; the snapshot job still walks watchedSet.
+   */
+  const watchedBookSet = (): Set<string> => {
+    const w = watchedSet();
+    if (watchedBook === null) watchedBook = withTwins(schema, w);
+    return watchedBook;
   };
 
   // ----- opportunity log (JSONL per local day) -----
@@ -548,6 +627,13 @@ export function createServiceCore(opts: ServiceCoreOptions): ServiceCore {
         }
       }
     },
+    // 0.7.4 (F16, F24, F30): a row on an order nobody has confirmed gets its book snapshotted first through
+    // snapshotPriority (below), which ranks the stored rows by profit at each pick; no separate confirm queue.
+    // 0.7.4 (F78): a rule never undercuts a price scrap.tf showed (the saved list and the retained bank saves,
+    // in memory). Late-bound (the history is below); the engine asks only while it runs, after start().
+    scraptfSeenPriceOf: (base, K) => seenPriceOf(base, K),
+    // 0.8 (G1): a watched copy's profit target is its "Profit:" bar ("Watch: <name>"), while watch notifications are on.
+    watchFloorFor: (base, copyKey) => (settings.notifications.watches === false ? null : watchFloorOf(watchCache.index(), base, copyKey)),
     events: {
       onChanged: (summary) => {
         flushOppLog();
@@ -598,7 +684,11 @@ export function createServiceCore(opts: ServiceCoreOptions): ServiceCore {
       // 0.7.1 (DM-5): the run's newest sighting too, so "Listed > 24 h" measures between saves, not to now.
       listedFor: (base, bank) => scraptfHistory.listedFor(base, bank),
       version: () => scraptfHistory.version(),
+      // 0.8 (T7): MarketRow.scraptfTiming on list()'s page, late-bound the same way (called only after start).
+      timingForBase: (base, bank, buy, now, inputs) => scraptfHistory.timingForBase(base, bank, buy, now, inputs),
     },
+    // 0.7.4 (F78): the rule verdict's bound, the engine's own hook (late-bound the same way).
+    scraptfSeenPriceOf: (base, K) => seenPriceOf(base, K),
   });
 
   // Holdings (F11): open journal lots priced from the market index; "Sell:" notifications go through main.
@@ -611,6 +701,11 @@ export function createServiceCore(opts: ServiceCoreOptions): ServiceCore {
     notify: (n) => push('notify', n),
     // F14: a held base's saved-list row is its scrap.tf exit.
     scraptfList,
+    // 0.8 (H1): exit runs are recorded only while the live feed is up. Late-bound: holdings calls it only from its
+    // timers, after start().
+    feedLiveSince: () => feedLiveSince(),
+    // 0.8 (H1, D10): watched bases' exits are recorded too (the watch cache, built above; ctx.watchesChanged tells holdings).
+    markBases: () => watchCache.bases(),
   });
 
   // scrap.tf bank stock (F17): each saved page's two newest saves, diffed in memory and joined to the Live
@@ -627,8 +722,17 @@ export function createServiceCore(opts: ServiceCoreOptions): ServiceCore {
     settings: () => settings,
     categoryOf: (sku) => marketCategoryOf(schema, sku),
     schemaLoaded: () => schema.isLoaded(),
-    // F20: BankStockRow's time listed from the history's runs; late-bound, read only by list()/all().
-    history: { runsFor: (bank) => scraptfHistory.runsFor(bank) },
+    // F20: BankStockRow's time listed from the history's runs; late-bound, read only by list()/all(). 0.8 (T4, LC-4):
+    // and each on-sale row's buy timing and the bank's turnover, from the same cached saves.
+    history: {
+      runsFor: (bank) => scraptfHistory.runsFor(bank),
+      timingFor: (bank, key, buy, now, inputs) => scraptfHistory.timingFor(bank, key, buy, now, inputs),
+      turnoverFor: (bank) => scraptfHistory.turnoverFor(bank),
+    },
+    // 0.7.4 (F22, F70): page flips and "New on scrap.tf" skip a price the engine's cost checks would flag.
+    costSuspect: bankStockCostCheck({ repo, schema, keyPrice: () => engine.keyPrice(), settings: () => settings }),
+    // 0.8 (G1): BankStockRow.watch (the Watched chip, the row tag) from the watch cache, in memory.
+    watches: () => watchCache.index(),
   });
 
   // scrap.tf banks (F15): per-page summaries from the batches, opportunities, market index and saved list,
@@ -662,7 +766,14 @@ export function createServiceCore(opts: ServiceCoreOptions): ServiceCore {
     keyPrice: () => engine.keyPrice(),
     // An item history's name when no save names it (the drawer of an item never saved).
     nameOf: (sku) => schema.nameForSku(sku),
+    // 0.8 (T3/T4): the buy-timing EV goes through flipProfit with the user's profit settings, read per call.
+    profit: () => settings.profit,
   });
+
+  // 0.7.4 (F78): the highest price scrap.tf showed the plain copy of a base on sale for: its exact row on the
+  // saved /items list (sold out too) and its runs in the retained bank saves. In memory; no request (R1).
+  const seenPriceOf = (base: string, K: Scrap): ScraptfSeenPrice | null =>
+    scraptfSeenPriceOf(base, { listRow: (b) => scraptfList.rowFor(b, K), runsFor: (bank) => scraptfHistory.runsFor(bank) }, K);
 
   // F20 S5: opt-in re-save reminders (a notification only; the app never refreshes scrap.tf itself).
   const resaveReminders = createResaveReminders({
@@ -677,6 +788,7 @@ export function createServiceCore(opts: ServiceCoreOptions): ServiceCore {
 
   // S3 "New on scrap.tf" notifications. An import made before the Live market's first build (the folder
   // watch's catch-up at start) is held until it has built: flushed on its change push and the status tick.
+  // 0.8: the one pipeline of every scrap.tf toast (watch hits, new, cheaper, back on sale, buy now).
   const newFlipNotifier = createNewFlipNotifier({
     log,
     repo,
@@ -686,6 +798,8 @@ export function createServiceCore(opts: ServiceCoreOptions): ServiceCore {
     keyPrice: () => engine.keyPrice(),
     notify: (n) => push('notify', n),
     marketBuilt: () => market.stats().lastFullAt !== null,
+    // 0.8 (G1): watch hits (notifyNewBankFlips reads notifications.watches).
+    watches: () => watchCache.index(),
   });
 
   /**
@@ -714,6 +828,8 @@ export function createServiceCore(opts: ServiceCoreOptions): ServiceCore {
     keyPrice: () => engine.keyPrice(),
     market,
     scraptfList,
+    // 0.7.4 (F41): which copy of a plain copied name the bank pages' newest saves have on sale.
+    bankStock,
   });
 
   // ----- backpack.tf feed -----
@@ -736,7 +852,7 @@ export function createServiceCore(opts: ServiceCoreOptions): ServiceCore {
   const onBatch = (b: FeedBatch): void => {
     rememberFeedDeletes(b);
     const keepAll = settings.liveFeed.keepSellListings === 'all';
-    const watch = watchedSet();
+    const watch = watchedBookSet();
     const keep = b.upserts.filter((l) => l.intent === 'buy' || keepAll || watch.has(l.baseSku));
     const affected = new Set<string>();
     repo.transaction(() => {
@@ -761,9 +877,83 @@ export function createServiceCore(opts: ServiceCoreOptions): ServiceCore {
   // ----- snapshots -----
   const snapshotQueue: string[] = [];
   const queueSnapshot = (base: string): void => {
-    if (!looksLikeSku(base) || snapshotQueue.includes(base)) return;
+    if (!looksLikeSku(base) || snapshotQueue.includes(base) || targetless(base)) return;
     snapshotQueue.push(base);
     if (snapshotQueue.length > 50) snapshotQueue.shift();
+  };
+  /**
+   * 0.7.4 (F16, F24, F30): the watched bases snapshot-watched serves after its queue and before its
+   * oldest-first scan, most urgent first: 'profitable', then 'below-threshold' rows whose revenue order is
+   * unverified or not seen within CONFIRMED_MS (most profit first); then rows of any other status whose
+   * unverified best order would be a flip against their cost (unverifiedUpside: the verified orders price them
+   * lower, most potential profit first); then held items to sell on backpack.tf on an unconfirmed order; then
+   * (0.8, H8) held items whose advice says refresh first, most cost first, by base when they have no revenue
+   * order. The base is the order's own book when that is watched; an order a name snapshot of the row's item cannot
+   * return (a generic any-effect order filed under another base, outside the item's book twins) gives no
+   * pick, since snapshotting the item would confirm nothing and only take the slot every 30 min. Rows of
+   * unwatched bases (rule candidates) are never picked, and the job needs an access token: those wait for
+   * the live feed or Refresh from backpack.tf. Read at the job's cadence (once a minute at most); it only
+   * reorders the same budget.
+   */
+  const snapshotPriority = (): string[] => {
+    const now = clock.now();
+    const watch = watchedSet();
+    const out: string[] = [];
+    const seen = new Set<string>();
+    const unconfirmed = (o: OrderSummary | null | undefined): o is OrderSummary =>
+      o !== null && o !== undefined && (o.flags.includes('unverified') || !orderSeenRecently(o.lastEventAt, now));
+    const add = (sku: string, o: OrderSummary): void => {
+      const item = toBaseSku(sku);
+      const own = repo.getListing(o.listingId)?.baseSku ?? null;
+      let base = item;
+      if (own !== null && watch.has(own)) base = own;
+      else if (o.flags.includes('any-effect') || (own !== null && !bookBasesOf(schema, item).includes(own))) return;
+      if (seen.has(base) || !watch.has(base)) return;
+      seen.add(base);
+      out.push(base);
+    };
+    for (const status of ['profitable', 'below-threshold'] as const) {
+      for (const opp of repo.queryOpportunities({ status: [status], sort: 'profit', dir: 'desc' })) {
+        const o = revenueOrderOf(opp, settings.profit.useOrder);
+        if (unconfirmed(o)) add(opp.sku, o);
+      }
+    }
+    // 0.7.4 (F16): a flip the verified-order preference hides (Strange Archer's Sterling: a verified 100 scrap
+    // order prices it at a loss, a 114 scrap bot not seen for a day would pay 11 over its cost). Explicit
+    // prices only: a rule candidate's base is never watched.
+    const upside: { opp: Opportunity; profit: Scrap }[] = [];
+    for (const opp of repo.queryOpportunities({ status: ['below-threshold', 'unprofitable', 'no-buyers'], inputKinds: ['user', 'import'] })) {
+      const profit = unverifiedUpside(opp, settings.profit);
+      if (profit !== null && opp.bestOrder && watch.has(toBaseSku(opp.sku))) upside.push({ opp, profit });
+    }
+    upside.sort((a, b) => b.profit - a.profit || (a.opp.key < b.opp.key ? -1 : a.opp.key > b.opp.key ? 1 : 0));
+    for (const u of upside) add(u.opp.sku, u.opp.bestOrder!);
+    // 0.8 (H8): then held items whose advice rests on a book nobody has confirmed (HoldingAdvice.refreshFirst: the
+    // revenue order unseen for 24 h, or no eligible order and neither a change nor a snapshot for 24 h), most cost
+    // first. A row with no revenue order has no listing to resolve, so it is added by its base. Ordering only.
+    const addBase = (base: string): void => {
+      if (seen.has(base) || !watch.has(base) || targetless(base)) return;
+      seen.add(base);
+      out.push(base);
+    };
+    try {
+      const held = holdings.all({}, now);
+      for (const r of held) if (r.status === 'sell' && r.bestExit === 'backpack' && unconfirmed(r.revenueOrder)) add(r.sku, r.revenueOrder);
+      const stale = held.filter((r) => r.advice?.refreshFirst === true).sort((a, b) => b.costScrap - a.costScrap || (a.sku < b.sku ? -1 : a.sku > b.sku ? 1 : 0));
+      for (const r of stale) {
+        if (r.revenueOrder) add(r.sku, r.revenueOrder);
+        else {
+          try {
+            addBase(toBaseSku(r.sku));
+          } catch {
+            // An unreadable SKU has no book to refresh.
+          }
+        }
+      }
+    } catch (err) {
+      log.warn(`could not read the held items to refresh: ${errorText(err)}`);
+    }
+    return out;
   };
 
   /** Fetches a snapshot and reconciles stored listings for that base SKU. */
@@ -787,27 +977,57 @@ export function createServiceCore(opts: ServiceCoreOptions): ServiceCore {
       const cur = repo.getListing(l.id);
       return cur !== null && cur.lastEventAt >= snapshotTime;
     };
-    const affected = new Set<string>([base]);
+    // 0.7.4 (F09/F14/F49): one name's snapshot is the whole book of every base it is filed under (defindex
+    // twins, the unusual-skin forms; SchemaService.bookBases), so each of them is reconciled, not the base alone:
+    // the item's book reads its twins' stored orders too (bookTwins.ts).
+    const group = new Set(bookBasesOf(schema, base));
+    const affected = new Set<string>(group);
     let mine: Listing[] = [];
+    const partial: string[] = [];
     repo.transaction(() => {
       const rows = result.listings
-        .filter((l) => l.baseSku === base || l.intent === 'buy' || keepAll)
+        .filter((l) => group.has(l.baseSku) || l.intent === 'buy' || keepAll)
         .filter((l) => !feedIsNewer(l))
         // Seen as of the snapshot, not as of the fetch (confidence counts recent confirmations).
         .map((l) => ({ ...l, lastEventAt: Math.min(l.lastEventAt, snapshotTime) }));
-      mine = rows.filter((l) => l.baseSku === base);
+      mine = rows.filter((l) => group.has(l.baseSku));
       repo.upsertListings(rows);
       for (const l of rows) affected.add(l.baseSku);
       for (const intent of ['buy', 'sell'] as const) {
+        // 0.7.4 (F18): every row of a name snapshot is the requested item. Rows of this side that all map to
+        // another item mean the mapper read the name wrong (a 'Festivized Formation' effect read as festive):
+        // deleting the base's stored book against them would empty it, so this side is left to the feed.
+        const sideBases = new Set(result.listings.filter((l) => l.intent === intent).map((l) => l.baseSku));
+        if (sideBases.size > 0 && ![...sideBases].some((b) => group.has(b))) {
+          log.warn(`snapshot ${base}: every ${intent} row of "${result.name}" maps to ${[...sideBases].slice(0, 3).join(', ')}; ${intent} orders left as they were`);
+          continue;
+        }
         const keepIds = new Set(mine.filter((l) => l.intent === intent).map((l) => l.id));
-        // Listings the feed reported after the snapshot was taken stay.
-        for (const l of repo.listingsByBaseSku(base, intent)) if (l.lastEventAt >= snapshotTime) keepIds.add(l.id);
-        repo.deleteListingsNotIn(base, intent, [...keepIds]);
+        const page = result.sides?.[intent] ?? 0;
+        for (const b of group) {
+          const stored = repo.listingsByBaseSku(b, intent);
+          const keep = new Set(keepIds);
+          // Listings the feed reported after the snapshot was taken stay.
+          for (const l of stored) if (l.lastEventAt >= snapshotTime) keep.add(l.id);
+          if (page < SNAPSHOT_SIDE_PAGE) {
+            repo.deleteListingsNotIn(b, intent, [...keep]);
+            continue;
+          }
+          // 0.7.4 (F51): a full page is the side's best 30, not its whole book: only stored orders inside the
+          // range the page covered are known to be gone. Deeper ones stay with the feed and the 14-day purge.
+          const gone = snapshotPageDeletes(stored, keep, result.listings, intent, engine.keyPrice().valueScrap);
+          if (gone.length > 0) repo.deleteListings(gone);
+        }
+        if (page >= SNAPSHOT_SIDE_PAGE) partial.push(`${intent} side a full page of ${page}`);
       }
+      // The twins' books were reconciled by this snapshot too, so their snapshot time moves with the base's and
+      // the background job does not fetch the same name again for a watched twin (fewer requests, same budget).
+      for (const b of group) if (b !== base && (repo.getSnapshotAt(b) ?? -Infinity) < after) repo.setSnapshotAt(b, after);
     });
     engine.markDirty(affected);
     market.markDirty(affected);
-    log.info(`snapshot ${base}: ${mine.length} listings`);
+    const over = group.size > 1 ? ` over ${group.size} bases of its book` : '';
+    log.info(`snapshot ${base}: ${mine.length} listings${over}${partial.length > 0 ? ` (${partial.join(', ')}: deeper orders kept)` : ''}`);
   };
 
   // ----- key price moves -----
@@ -1057,6 +1277,13 @@ export function createServiceCore(opts: ServiceCoreOptions): ServiceCore {
     if (settings.networkPaused) return 'paused';
     return socket.health().state;
   };
+  // 0.8 (H1): since when the backpack.tf feed has been live without a break, sampled by the status tick (every
+  // STATUS_INTERVAL_MS) and on each read, so an outage longer than a tick starts a new exit run. null while not live.
+  let feedLiveAt: UnixMs | null = null;
+  const feedLiveSince = (): UnixMs | null => {
+    if (feedState() !== 'live') return (feedLiveAt = null);
+    return (feedLiveAt ??= clock.now());
+  };
 
   const computeStatus = (): AppStatus => {
     const setupNeeded: AppStatus['setupNeeded'] = [];
@@ -1096,6 +1323,15 @@ export function createServiceCore(opts: ServiceCoreOptions): ServiceCore {
       checkStatus();
     }, 250);
   }
+
+  /** 0.8 (LC-5) HealthReport.scraptfAssetIds: per saved bank, how stable scrap.tf's item ids are across your saves; [] on failure. */
+  const scraptfAssetIdsHealth = (): NonNullable<HealthReport['scraptfAssetIds']> => {
+    try {
+      return scraptfHistory.assetStability();
+    } catch {
+      return [];
+    }
+  };
 
   const computeHealth = (): HealthReport => {
     const feedStats = socket.stats();
@@ -1157,6 +1393,7 @@ export function createServiceCore(opts: ServiceCoreOptions): ServiceCore {
       db: { path: repo.path, sizeBytes: repo.sizeBytes() },
       engine: engine.stats(),
       pricedb: { rows: repo.pricedbCount(), loadedAt: Number.isFinite(loadAllAt) ? loadAllAt : null },
+      scraptfAssetIds: scraptfAssetIdsHealth(),
     };
   };
 
@@ -1201,6 +1438,15 @@ export function createServiceCore(opts: ServiceCoreOptions): ServiceCore {
       holdings.journalChanged();
       push('journal.changed', { at: clock.now() });
     },
+    watches: watchCache,
+    watchesChanged: () => {
+      // 0.8 (G1): the cache re-reads the watches; watched bases join or leave the snapshot watch list; holdings
+      // records the new set's exits (H1, D10); every page showing watches refetches.
+      watchCache.invalidate();
+      watched = null;
+      holdings.markBasesChanged();
+      push('watches.changed', { at: clock.now() });
+    },
     queueSnapshot,
     snapshot,
     // 0.7.3: the scheduler's test, so a snapshot stamped in the future (clock moved back) is stale too.
@@ -1235,6 +1481,7 @@ export function createServiceCore(opts: ServiceCoreOptions): ServiceCore {
     market,
     watchedBaseSkus: () => [...watchedSet()],
     nextQueuedSnapshot: () => snapshotQueue.shift() ?? null,
+    snapshotPriority,
     snapshot,
     keyQuotesChanged,
     scraptfListChanged,
@@ -1254,6 +1501,18 @@ export function createServiceCore(opts: ServiceCoreOptions): ServiceCore {
       } catch (err) {
         log.warn(`opportunity log init failed: ${errorText(err)}`);
       }
+      // 0.7.4 (F31, F62): once, before the engine's first run reads them: imported prices older builds left of
+      // cards a one-page bank's newest whole save does not show (the engine's full run below drops their rows).
+      // Counts only in the log; a failure only leaves them until that bank's next whole save.
+      try {
+        if (repo.getMeta(META_BANK_PRICES_RECONCILED) !== '1') {
+          const gone = reconcileBankPrices(repo);
+          repo.setMeta(META_BANK_PRICES_RECONCILED, '1');
+          if (gone.length > 0) log.info(`removed imported prices of ${gone.length} items no newer bank save shows on sale`);
+        }
+      } catch (err) {
+        log.warn(`bank price reconcile failed: ${errorText(err)}`);
+      }
       lastKeyScrap = selectKeyPrice(repo.keyQuotes(), settings, clock.now(), scraptfList.keyRow()).valueScrap;
       engine.start();
       market.start();
@@ -1266,11 +1525,15 @@ export function createServiceCore(opts: ServiceCoreOptions): ServiceCore {
         // F17: the market's last build chunk may push before it counts as built.
         newFlipNotifier.flush();
         checkStatus();
+        // 0.8 (H1): samples the feed, so a break between two Holdings checks is not missed.
+        feedLiveSince();
       }, STATUS_INTERVAL_MS);
       checkStatus();
       // Cached schema first (a first run downloads it); listings need it for SKUs and names.
       await schema.init();
       if (stopped) return;
+      // 0.7.4 (F74, F14): the watch list read before the schema loaded knew no targetless tool and no twin.
+      watched = null;
       scheduler.start();
       syncFeed();
       syncPricedbSocket();
@@ -1345,7 +1608,7 @@ export function createServiceCore(opts: ServiceCoreOptions): ServiceCore {
       const marketKey = (s: Settings) => JSON.stringify([s.profit, s.blocklist]);
       if (marketKey(prev) !== marketKey(next)) market.markAllDirty();
       // Holdings judge sells with the profit thresholds and gate "Sell:" notifications on settings.notifications.
-      const holdingsKey = (s: Settings) => JSON.stringify([s.profit, s.blocklist, s.notifications]);
+      const holdingsKey = (s: Settings) => JSON.stringify([s.profit, s.blocklist, s.ownSteamIds, s.notifications]);
       if (holdingsKey(prev) !== holdingsKey(next)) holdings.settingsChanged();
       if (prev.connectors.bptfApi !== next.connectors.bptfApi || prev.connectors.pricedb !== next.connectors.pricedb) {
         for (const id of ['key-bptf', 'bptf-prices', 'key-pricedb', 'pricedb-all']) scheduler.kick(id);

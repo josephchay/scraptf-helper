@@ -11,6 +11,10 @@ const TIMED = [
   'test/db/bankStockThinPerf.test.ts',
   'test/import/scraptfHtml.slowInput.test.ts',
   'test/import/audit-parser-depth.test.ts',
+  // 0.8 (cycles, R-3): the lifecycle walk over 8 banks and one bank's estimators.
+  'test/shared/scraptfLifecyclePerf.test.ts',
+  // 0.8 (T7, R-3): the Live market's pages with the buy-timing join on, over 8 banks x 250 saves.
+  'test/domain/marketTimingPerf.test.ts',
 ];
 
 export default defineConfig({

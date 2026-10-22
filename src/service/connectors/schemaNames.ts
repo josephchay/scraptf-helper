@@ -54,6 +54,12 @@ export const EXCLUSIVE_GENUINE: ReadonlyMap<number, number> = new Map([
   [30724, 30739],
 ]);
 
+/**
+ * 0.7.4 (F46): the words of SchemaService.resolve's warning when it drops a "#N" craft or medal number no market
+ * keys (the saved-page import refuses a tool whose "Series #N" title the resolver read so).
+ */
+export const CRAFT_NUMBER_DROPPED = 'is a craft or medal number';
+
 /** Mann Co. Supply Crate series per defindex (upstream; the schema's own series attribute is wrong for these). */
 const MANN_CO_CRATE_SERIES: ReadonlyMap<number, readonly number[]> = new Map([
   [5022, [1, 3, 7, 12, 13, 18, 19, 23, 26, 31, 34, 39, 43, 47, 54, 57, 75]],
@@ -138,6 +144,18 @@ const D_UNUSUALIFIER = 9258;
 const D_WAR_PAINT_GENERIC = 9536;
 /** Duplicate "Name Tag" that upstream never resolves to. */
 const D_NAME_TAG_DUPLICATE = 2093;
+
+/** 0.7.4: tools whose identity is their tier, target or output (bookTwinDefindexes never twins them). */
+const TWINLESS_DEFINDEXES: ReadonlySet<number> = new Set([
+  D_STRANGIFIER,
+  D_KIT_BASIC,
+  D_KIT_SPECIALIZED,
+  D_KIT_PROFESSIONAL,
+  D_UNUSUALIFIER,
+  ...Array.from({ length: 10 }, (_, i) => D_STRANGIFIER_CHEMISTRY + i),
+]);
+/** 0.7.4: item_names shared by different items: every kit is "Kit", and the retired keys are "Mann Co. Supply Crate Key". */
+const TWINLESS_NAME_KEYS: ReadonlySet<string> = new Set(['kit', 'fabricator', 'strangifier', 'unusualifier', 'chemistry set', 'mann co. supply crate key']);
 
 const WEAR_BY_KEY: ReadonlyMap<string, number> = new Map([
   ['factory new', 1],
@@ -330,6 +348,10 @@ export class SchemaIndex {
   private readonly skinByWeaponAndKit = new Map<string, number>();
   private readonly warPaintByKit = new Map<number, number>();
   private readonly skinSpecific = new Set<number>();
+  /** 0.7.4: a skin-specific weapon's own paintkit (15000 -> 14). */
+  private readonly skinPaintkitOf = new Map<number, number>();
+  /** 0.7.4: bookTwinDefindexes results, by "defindex|paintkit". */
+  private readonly twinCache = new Map<string, readonly number[]>();
   private readonly crateSeriesAttr: ReadonlySet<number>;
   private readonly retiredKeyByKey = new Map<string, number>();
   private readonly tokens: Token[];
@@ -378,6 +400,7 @@ export class SchemaIndex {
         if (d !== D_WAR_PAINT_GENERIC && !this.warPaintByKit.has(pk)) this.warPaintByKit.set(pk, d);
       } else {
         this.skinSpecific.add(d);
+        this.skinPaintkitOf.set(d, pk);
         this.skinByWeaponAndKit.set(`${normKey(it.itemName)}|${pk}`, d);
       }
     }
@@ -390,6 +413,7 @@ export class SchemaIndex {
       for (const [pk, d] of pairs) {
         if (!this.items.has(d)) continue;
         this.skinSpecific.add(d);
+        if (!this.skinPaintkitOf.has(d)) this.skinPaintkitOf.set(d, pk);
         const key = `${weapon}|${pk}`;
         if (!this.skinByWeaponAndKit.has(key)) this.skinByWeaponAndKit.set(key, d);
       }
@@ -503,6 +527,93 @@ export class SchemaIndex {
     let d = Math.min(...pool);
     if (quality === Q_GENUINE) d = EXCLUSIVE_GENUINE.get(d) ?? d;
     return d;
+  }
+
+  /**
+   * 0.7.4 (F09/F14/F49/F73): the defindexes backpack.tf files one item's buy orders under. A buy order is one
+   * per buyer and full name (its id is md5 of the name), but each keeps the defindex of the item document its
+   * maker sent, so one name's book is split. Twins share the item_name and item_class: the stock weapon and its
+   * Upgradeable copy (18/205), the class shotguns and pistols (9-12/199, 22/23/209), promo, Genuine-only and
+   * autogrant copies (160/294, 810/831, 743/744), the Name Tag duplicate 2093; with a paintkit, also the
+   * skin-specific weapon of that paintkit (201/15000 for pk14), and War Paint 9536 with the paintkit's own
+   * War Paint (9536/17208 for pk208); crates of one name (the series stays in the SKU). Never twinned: the
+   * retired keys (each trades under its own name), kits, fabricators, strangifiers, unusualifiers and
+   * chemistry sets (their tier and target are the item; a targeted strangifier and a Collector's set are
+   * twinned by their SKU's identity instead, toolBookTwins), a skin-specific weapon of another paintkit.
+   * Ascending, `defindex` included; [defindex] for anything else. 0.7.4 (R17): a weapon twin may be the
+   * stock weapon defindex 0 (TF_WEAPON_BAT, the Upgradeable Bat 190's twin), which a SKU cannot hold as a
+   * target (no td-0): a caller twinning a tool's target must drop it.
+   */
+  bookTwinDefindexes(defindex: number, paintkit: number | null): readonly number[] {
+    const key = `${defindex}|${paintkit ?? ''}`;
+    const hit = this.twinCache.get(key);
+    if (hit !== undefined) return hit;
+    let out: number[] = [defindex];
+    const it = this.items.get(defindex);
+    if (it && !TWINLESS_DEFINDEXES.has(defindex) && !RETIRED_KEYS.has(defindex)) {
+      const nameKey = normKey(it.itemName);
+      if (this.isWarPaintRow(it)) {
+        const own = paintkit !== null ? this.warPaintByKit.get(paintkit) : undefined;
+        if (paintkit !== null) out = [defindex, D_WAR_PAINT_GENERIC, ...(own !== undefined ? [own] : [])];
+      } else if (!TWINLESS_NAME_KEYS.has(nameKey)) {
+        out = (this.byName.get(nameKey) ?? [defindex]).filter((d) => {
+          if (d === defindex) return true;
+          if (this.items.get(d)?.itemClass !== it.itemClass || RETIRED_KEYS.has(d)) return false;
+          // A skin-specific weapon is the plain weapon only with its own paintkit.
+          return !this.skinSpecific.has(d) || (paintkit !== null && this.skinPaintkitOf.get(d) === paintkit);
+        });
+      }
+    }
+    const sorted = Object.freeze([...new Set(out)].sort((a, b) => a - b));
+    if (this.twinCache.size >= 20_000) this.twinCache.clear();
+    this.twinCache.set(key, sorted);
+    return sorted;
+  }
+
+  /**
+   * 0.7.4 (R18): a tool whose identity is in the SKU itself, not in its defindex, so every defindex of its
+   * item_name is one item: a targeted strangifier ("Classic Strangifier", td-1098, filed by backpack.tf under
+   * 6522, the Pomson 6000 Strangifier's 5661 or another named strangifier's defindex) and a Collector's
+   * Chemistry Set (od-X;oq-14, filed under 20001 as often as under the parser's 20006/20007). The target,
+   * output and qualities stay; `canonical` is the parser's defindex (specialForm: 6522, 20006, or 20007 for a
+   * festive output), so resolve() and bookBase agree. null for anything else (kits and fabricators keep
+   * their tier's defindex, a strangifier chemistry set or a bare tool its own).
+   */
+  toolBookTwins(o: Pick<SkuObject, 'defindex' | 'target' | 'output' | 'outputQuality'>): { defs: readonly number[]; canonical: number } | null {
+    const it = this.items.get(o.defindex);
+    if (!it) return null;
+    const nameKey = normKey(it.itemName);
+    let canonical: number;
+    if (nameKey === 'strangifier' && o.target !== null) {
+      canonical = D_STRANGIFIER;
+    } else if (nameKey === 'chemistry set' && o.output !== null && o.outputQuality === Q_COLLECTORS) {
+      const out = normKey(this.items.get(o.output)?.itemName ?? '');
+      canonical = out.includes('festive') && !out.includes('a rather festive tree') ? D_COLLECTOR_CHEMISTRY_FESTIVE : D_COLLECTOR_CHEMISTRY;
+    } else {
+      return null;
+    }
+    const defs = (this.byName.get(nameKey) ?? []).filter((d) => this.items.get(d)?.itemClass === it.itemClass);
+    if (!defs.includes(o.defindex)) defs.push(o.defindex);
+    if (!this.items.has(canonical) || !defs.includes(canonical)) canonical = o.defindex;
+    return { defs: Object.freeze([...new Set(defs)].sort((a, b) => a - b)), canonical };
+  }
+
+  /**
+   * 0.7.4: the one defindex of bookTwinDefindexes the app keys the book by: the name resolver's own choice
+   * (pickDefindex: the Upgradeable weapon, the skin-specific weapon of the paintkit, the Genuine-only copy
+   * for Genuine), the paintkit's own War Paint, a Mann Co. crate's series defindex.
+   */
+  bookDefindex(defindex: number, paintkit: number | null, quality: number | null, crateseries: number | null): number {
+    const twins = this.bookTwinDefindexes(defindex, paintkit);
+    if (twins.length < 2) return defindex;
+    const it = this.items.get(defindex);
+    if (it && this.isWarPaintRow(it)) return (paintkit !== null ? this.warPaintByKit.get(paintkit) : undefined) ?? defindex;
+    if (it?.itemClass === 'supply_crate' && crateseries !== null) {
+      const d = this.crateForSeries(defindex, crateseries);
+      if (d !== defindex || (this.hasStaticCrateSeries(defindex) && this.knownStaticSeries(defindex, crateseries))) return d;
+    }
+    const d = this.pickDefindex(twins, paintkit, quality);
+    return d !== null && twins.includes(d) ? d : defindex;
   }
 
   // ----- names -----
@@ -650,10 +761,11 @@ export class SchemaIndex {
         out.target = n;
       }
       else if (out.paintkit !== null && n > 0) {
-        // 0.7.3: a skin's priceindex is its effect, keyed as Decorated plus the effect, strange as quality2 (P2).
+        // 0.7.3: a skin's priceindex is its effect. 0.7.4 (F08/F43): keyed Unusual plus the effect, strange as
+        // quality2, as backpack.tf's buyers key it (canonicalUnusualSkin); a Decorated or Strange link alike.
         const strange = out.quality === Q_STRANGE || out.quality2 === Q_STRANGE;
         out.effect = this.canonicalEffectId(n);
-        out.quality = Q_DECORATED;
+        out.quality = Q_UNUSUAL;
         out.quality2 = strange ? Q_STRANGE : null;
       }
       else if (unusualHint || out.quality === Q_UNUSUAL || out.quality === Q_DECORATED) {
@@ -961,8 +1073,9 @@ export class SchemaIndex {
     if (quality === null) {
       if (st.effect !== null) {
         if (isSkin) {
-          // 0.7.3: an unusual skin is Decorated plus its effect, strange as quality2, as bp.tf and the import key it (P2).
-          quality = Q_DECORATED;
+          // 0.7.4 (F08/F43/F69): an unusual skin is Unusual plus its effect, strange as quality2, as backpack.tf's
+          // buyers key it (0.7.3 keyed it Decorated, a form no order uses). A "Decorated" word with an effect is the same item.
+          quality = Q_UNUSUAL;
           if (st.strange) quality2 = Q_STRANGE;
         } else if (st.effect === COMMUNITY_SPARKLE && st.quality !== null) {
           quality = st.quality;
@@ -1019,6 +1132,9 @@ export class SchemaIndex {
       if (st.number !== null && known !== null && known !== st.number) {
         warnings.push(`${it.itemName} is series #${known}, not #${st.number}`);
       }
+      // 0.7.4 (F46): a multi-series crate number in none of its series lists names no crate ("Mann Co.
+      // Supply Crate #145" or the Salvaged series #30 as a plain one).
+      if (st.number !== null && !this.knownStaticSeries(defindex, st.number)) warnings.push(`${it.itemName} has no series #${st.number}`);
     } else if (st.number !== null) {
       obj.craftnumber = st.number;
     }
@@ -1034,6 +1150,13 @@ export class SchemaIndex {
 
   private hasStaticCrateSeries(defindex: number): boolean {
     return MANN_CO_CRATE_SERIES.has(defindex) || defindex === SALVAGED_CRATE || [...MUNITION_CRATES.values()].includes(defindex);
+  }
+
+  /** 0.7.4 (F46): true unless `defindex` is a multi-series crate whose static lists have no `series` (Salvaged warns in crateByName). */
+  private knownStaticSeries(defindex: number, series: number): boolean {
+    if (MANN_CO_CRATE_SERIES.has(defindex)) return [...MANN_CO_CRATE_SERIES.values()].some((list) => list.includes(series));
+    if ([...MUNITION_CRATES.values()].includes(defindex)) return MUNITION_CRATES.has(series);
+    return true;
   }
 }
 

@@ -31,7 +31,12 @@ export interface AppContextValue {
   segments: string[];
   navigate: (path: string) => void;
   itemSku: string | null;
-  openItem: (sku: string) => void;
+  /**
+   * 0.7.4 (F66): the copy the drawer was opened on (Opportunity.copyKey, a bank_stock special key), so its
+   * scrap.tf history reads that copy; null for the SKU's own copy.
+   */
+  itemCopy: string | null;
+  openItem: (sku: string, copy?: string | null) => void;
   closeItem: () => void;
   toasts: ToastItem[];
   /**
@@ -76,6 +81,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [bridgeError, setBridgeError] = useState<string | null>(null);
   const [serviceState, setServiceState] = useState<PushContract['service.state'] | null>(null);
   const [itemSku, setItemSku] = useState<string | null>(null);
+  const [itemCopy, setItemCopy] = useState<string | null>(null);
   const [toasts, setToasts] = useState<ToastItem[]>([]);
   const [dataVersion, setDataVersion] = useState(0);
   const [lastImport, setLastImport] = useState<ImportResult | null>(null);
@@ -144,7 +150,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
   usePush('settings.changed', setSettings);
   // Notification clicks and the quick-entry window ask the dashboard to open an item.
   usePush('ui.openItem', (p) => {
-    if (p && typeof p.sku === 'string' && p.sku.trim()) setItemSku(p.sku.trim());
+    if (p && typeof p.sku === 'string' && p.sku.trim()) {
+      setItemSku(p.sku.trim());
+      setItemCopy(null);
+    }
   });
   // F21-2: the scrap.tf window toolbar's "Show flips" (main shows the dashboard first). Only a route of
   // this dashboard changes; the stock page applies the chip once and drops it from the address.
@@ -183,8 +192,15 @@ export function AppProvider({ children }: { children: ReactNode }) {
     [refreshStatus, toast],
   );
 
-  const openItem = useCallback((sku: string) => setItemSku(sku), []);
-  const closeItem = useCallback(() => setItemSku(null), []);
+  const openItem = useCallback((sku: string, copy?: string | null) => {
+    setItemSku(sku);
+    // 0.7.4 (F66): '' (a plain copy) reads like the SKU's own copy.
+    setItemCopy(typeof copy === 'string' && copy !== '' ? copy : null);
+  }, []);
+  const closeItem = useCallback(() => {
+    setItemSku(null);
+    setItemCopy(null);
+  }, []);
   const bumpData = useCallback(() => setDataVersion((v) => v + 1), []);
 
   const value = useMemo<AppContextValue>(
@@ -202,6 +218,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       segments,
       navigate,
       itemSku,
+      itemCopy,
       openItem,
       closeItem,
       toasts,
@@ -212,7 +229,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       bumpData,
       lastImport,
     }),
-    [status, settings, secrets, bridgeError, serviceState, updateSettings, refreshStatus, segments, navigate, itemSku, openItem, closeItem, toasts, toast, dismissToast, holdToast, dataVersion, bumpData, lastImport],
+    [status, settings, secrets, bridgeError, serviceState, updateSettings, refreshStatus, segments, navigate, itemSku, itemCopy, openItem, closeItem, toasts, toast, dismissToast, holdToast, dataVersion, bumpData, lastImport],
   );
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;

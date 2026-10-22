@@ -8,11 +8,13 @@
 // 0.7.1 (ACT-9): "Your price" says how old it is (knownObservedAt), and a stale one (knownStale) is not
 // counted as at or under the ceiling; rows from an older service read as before.
 
+import { buyerPresenceText } from '../shared/buyerSeen';
+import { frictionOf, reservePctOf } from '../shared/ceiling';
 import { parsePrice } from '../shared/currency';
 import { scraptfPageFor } from '../shared/links';
 import type { Category, OrderSummary, ProfitSettings, Scrap, ShoppingListResult, ShoppingQuery, ShoppingRow, UnixMs } from '../shared/types';
 import { CATEGORIES, CATEGORY_LABELS } from '../shared/types';
-import { fmtAgo, fmtDateTime, fmtInt, fmtMoney, fmtPct } from './format';
+import { fmtAgo, fmtDateTime, fmtInt, fmtMoney, ratioPctText } from './format';
 
 // ---------------------------------------------------------------------------
 // Filters
@@ -116,6 +118,8 @@ export interface ShoppingGroup {
   count: number;
   /** Static scrap.tf bank page for the category, opened in the user's browser. */
   bankPageUrl: string;
+  /** 0.7.4 (F36): the rows open more than one bank page (each its own); the header then links none. */
+  mixedBanks?: boolean;
   rows: ShoppingRow[];
 }
 
@@ -148,11 +152,14 @@ export function groupShoppingRows(rows: readonly ShoppingRow[], serverGroups?: S
   for (const category of keys) {
     const groupRows = [...(buckets.get(category) ?? [])].sort(compareShoppingRows);
     const s = server.get(category);
+    // 0.7.4 (F36): the service says when its rows open several pages; without its summary, the loaded rows do.
+    const mixedBanks = s ? s.mixedBanks === true : new Set(groupRows.map((r) => r.bankPageUrl)).size > 1;
     out.push({
       category,
       label: s?.label || CATEGORY_LABELS[category] || category,
       count: Math.max(s?.count ?? 0, groupRows.length),
       bankPageUrl: s?.bankPageUrl || groupRows[0]?.bankPageUrl || scraptfPageFor(category),
+      ...(mixedBanks ? { mixedBanks } : {}),
       rows: groupRows,
     });
   }
@@ -182,10 +189,11 @@ export function flattenShoppingGroups(groups: readonly ShoppingGroup[], collapse
   return out;
 }
 
-/** The scrap.tf bank page behind any display row (its group's page). */
+/** The scrap.tf bank page behind any display row (its group's page; none for a group whose rows open several, F36). */
 export function bankPageOf(row: ShoppingDisplayRow | undefined): string | null {
   if (!row) return null;
-  return row.type === 'item' ? row.row.bankPageUrl : row.group.bankPageUrl;
+  if (row.type === 'item') return row.row.bankPageUrl;
+  return row.group.mixedBanks ? null : row.group.bankPageUrl;
 }
 
 /** "scrap.tf/buy/hats": the page as the user will see it in their address bar. */
@@ -207,22 +215,28 @@ export function yourPriceStale(r: Partial<Pick<ShoppingRow, 'knownStale'>>): boo
   return r.knownStale === true;
 }
 
+/** 0.7.4 (F22, F70): the row's own price is flagged Variant? or Below market (ShoppingRow.knownSuspect; absent: not). */
+export function yourPriceSuspect(r: Partial<Pick<ShoppingRow, 'knownSuspect'>>): boolean {
+  return r.knownSuspect === true;
+}
+
 /**
  * Rows whose latest typed or imported price is at or under the ceiling: flips at the price already seen.
- * ACT-9: only fresh prices count; a stale one may no longer be what scrap.tf charges.
+ * ACT-9: only fresh prices count; a stale one may no longer be what scrap.tf charges. 0.7.4: nor a suspect
+ * one, which is probably another copy's price.
  */
 export function countUnderCeiling(rows: readonly ShoppingRow[]): number {
   let n = 0;
-  for (const r of rows) if (r.underCeiling === true && !yourPriceStale(r)) n++;
+  for (const r of rows) if (r.underCeiling === true && !yourPriceStale(r) && !yourPriceSuspect(r)) n++;
   return n;
 }
 
 /**
  * Colour of the "Your price" cell: green at or under the ceiling, red over it, none without a price.
- * ACT-9: a stale price at or under it gets no green (the cell says "stale" instead).
+ * ACT-9: a stale price at or under it gets no green (the cell says "stale" instead); 0.7.4: nor a suspect one.
  */
-export function yourPriceTone(r: Pick<ShoppingRow, 'underCeiling'> & Partial<Pick<ShoppingRow, 'knownStale'>>): 'good' | 'bad' | null {
-  if (r.underCeiling === true) return yourPriceStale(r) ? null : 'good';
+export function yourPriceTone(r: Pick<ShoppingRow, 'underCeiling'> & Partial<Pick<ShoppingRow, 'knownStale' | 'knownSuspect'>>): 'good' | 'bad' | null {
+  if (r.underCeiling === true) return yourPriceStale(r) || yourPriceSuspect(r) ? null : 'good';
   return r.underCeiling === false ? 'bad' : null;
 }
 
@@ -243,7 +257,7 @@ export function yourPriceAge(r: Pick<ShoppingRow, 'knownCostScrap'> & Partial<Pi
  * spelled copy can share the SKU with a plain one and sell for something else entirely.
  */
 export function yourPriceTitle(
-  r: Pick<ShoppingRow, 'knownCostScrap' | 'knownMaxCostScrap' | 'maxCostScrap'> & Partial<Pick<ShoppingRow, 'knownObservedAt' | 'knownStock' | 'knownStale'>>,
+  r: Pick<ShoppingRow, 'knownCostScrap' | 'knownMaxCostScrap' | 'maxCostScrap'> & Partial<Pick<ShoppingRow, 'knownObservedAt' | 'knownStock' | 'knownStale' | 'knownSuspect'>>,
   keyScrap: Scrap | null,
 ): string {
   if (r.knownCostScrap === null) return 'No price typed or imported for this item; only a price-sheet rule matches. Check scrap.tf.';
@@ -251,7 +265,12 @@ export function yourPriceTitle(
   const at = typeof r.knownObservedAt === 'number' && Number.isFinite(r.knownObservedAt) ? r.knownObservedAt : null;
   const stock = typeof r.knownStock === 'number' && Number.isFinite(r.knownStock) ? ` ${fmtInt(r.knownStock)} in stock then.` : '';
   const seen = at === null ? '' : ` Seen ${fmtDateTime(at)}.${stock}`;
-  const stale = yourPriceStale(r) ? ' Older than your "Price is stale after" time (Settings → Profit thresholds), so it is not counted as at or under the ceiling: check scrap.tf again.' : '';
+  const stale =
+    (yourPriceStale(r) ? ' Older than your "Price is stale after" time (Settings → Profit thresholds), so it is not counted as at or under the ceiling: check scrap.tf again.' : '') +
+    // 0.7.4 (F22, F70)
+    (yourPriceSuspect(r)
+      ? " Far under what bots pay for this item on PriceDB (flagged Variant? or Below market), so it is probably another copy's price and is not counted as at or under the ceiling: check the copy on scrap.tf."
+      : '');
   if (r.knownMaxCostScrap === null) return `No cost clears your thresholds for the copy you priced: not a flip at that price.${seen}${stale}`;
   const ceiling = r.knownMaxCostScrap === r.maxCostScrap ? 'the ceiling' : `that copy's own ceiling (${fmtMoney(r.knownMaxCostScrap, keyScrap)})`;
   const d = r.knownMaxCostScrap - r.knownCostScrap;
@@ -265,30 +284,27 @@ export function buyerKindLabel(order: Pick<OrderSummary, 'isBot'>): 'Bot' | 'Hum
   return order.isBot ? 'Bot' : 'Human';
 }
 
-/** Tooltip for the "Sells for" cell: who buys, and how many buyers there are. */
-export function sellsForTitle(r: Pick<ShoppingRow, 'revenueScrap' | 'revenueOrder' | 'buyerCount'>, keyScrap: Scrap | null): string {
+/**
+ * Tooltip for the "Sells for" cell: who buys, and how many buyers there are. 0.7.4 (F23): the buyer's
+ * online flag only while the order was seen in the last 2 h, else "last seen 4 d ago".
+ */
+export function sellsForTitle(r: Pick<ShoppingRow, 'revenueScrap' | 'revenueOrder' | 'buyerCount'>, keyScrap: Scrap | null, now: UnixMs = Date.now()): string {
   const o = r.revenueOrder;
-  const online = o ? (o.online === true ? 'online' : o.online === false ? 'offline' : 'online status unknown') : null;
-  const who = o ? ` to ${o.userName ?? o.steamid} (${buyerKindLabel(o).toLowerCase()}, ${online})` : '';
+  const who = o ? ` to ${o.userName ?? o.steamid} (${buyerKindLabel(o).toLowerCase()}, ${buyerPresenceText(o, now)})` : '';
   const buyers = `${r.buyerCount} ${r.buyerCount === 1 ? 'buyer' : 'buyers'} with eligible orders.`;
   return `Sells for ${fmtMoney(r.revenueScrap, keyScrap)}${who}. ${buyers}`;
-}
-
-/** 0.05 -> "5%", 0.125 -> "12.5%". */
-function pctText(ratio: number): string {
-  const whole = Math.abs(ratio * 100 - Math.round(ratio * 100)) < 1e-9;
-  return fmtPct(ratio, whole ? 0 : 1);
 }
 
 /**
  * The thresholds behind every ceiling, in words: "a profit of at least 1.00 ref
  * and 5% of the cost, a margin of at least 8%, against the conservative buy order".
+ * 0.8 (PC-1): the price-move reserve is named beside friction when one is set.
  */
 export function thresholdSummary(
-  p: Pick<ProfitSettings, 'minProfitScrap' | 'minProfitPctOfCost' | 'minMargin' | 'frictionScrap' | 'useOrder'>,
+  p: Pick<ProfitSettings, 'minProfitScrap' | 'minProfitPctOfCost' | 'minMargin' | 'frictionScrap' | 'useOrder'> & Partial<Pick<ProfitSettings, 'exitReservePct'>>,
   keyScrap: Scrap | null,
 ): string {
-  const pct = p.minProfitPctOfCost > 0 ? `${pctText(p.minProfitPctOfCost)} of the cost` : null;
+  const pct = p.minProfitPctOfCost > 0 ? `${ratioPctText(p.minProfitPctOfCost)} of the cost` : null;
   // With no minimum the engine still needs profit > 0, so "at least 0.00 ref" would undersell it.
   let s =
     p.minProfitScrap > 0
@@ -296,8 +312,12 @@ export function thresholdSummary(
       : pct
         ? `a profit of at least ${pct}`
         : 'any profit';
-  if (p.minMargin > 0) s += `, a margin of at least ${pctText(p.minMargin)}`;
-  if (p.frictionScrap > 0) s += `, after ${fmtMoney(p.frictionScrap, keyScrap)} friction`;
+  if (p.minMargin > 0) s += `, a margin of at least ${ratioPctText(p.minMargin)}`;
+  const friction = frictionOf(p);
+  const reserve = reservePctOf(p);
+  if (friction > 0 && reserve > 0) s += `, after ${fmtMoney(friction, keyScrap)} friction and a ${ratioPctText(reserve)} price-move reserve`;
+  else if (friction > 0) s += `, after ${fmtMoney(friction, keyScrap)} friction`;
+  else if (reserve > 0) s += `, after a ${ratioPctText(reserve)} price-move reserve`;
   return `${s}, against the ${p.useOrder} buy order`;
 }
 

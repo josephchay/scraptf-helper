@@ -23,6 +23,8 @@ function row(over: Partial<ScraptfListStored> & { sku: string }): ScraptfListSto
     stockLimit: 6,
     batchId: 1,
     observedAt: T0,
+    // 0.7.4 (V14): every stored row reads its craftability; an unmarked row is a family row.
+    craft: 'any',
     ...over,
   };
 }
@@ -153,6 +155,6 @@ describe('migration V4', () => {
       .prepare('PRAGMA table_info(scraptf_list)')
       .all()
       .map((r) => r['name']);
-    expect(cols).toEqual(['sku', 'name', 'sells_keys', 'sells_scrap', 'pays_keys', 'pays_scrap', 'stock', 'stock_limit', 'batch_id', 'observed_at']);
+    expect(cols).toEqual(['sku', 'name', 'sells_keys', 'sells_scrap', 'pays_keys', 'pays_scrap', 'stock', 'stock_limit', 'batch_id', 'observed_at', 'craft', 'page']);
   });
 });

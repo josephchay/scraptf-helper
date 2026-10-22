@@ -110,6 +110,48 @@
   stroke-width: 1.5;
 }
 
+/* 0.8 (T5): a tick under each save that showed a drop, in the good tone (cheaper is good for a buyer). */
+.stf-hist-down {
+  fill: none;
+  stroke: var(--good);
+  stroke-width: 2;
+}
+
+/* 0.8 (T5): the buy-timing verdict: its pill, its lines (each with its n) and the estimate note. */
+.stf-hist-timing {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface-2);
+}
+
+.stf-hist-timing > p {
+  margin: 0;
+  font-variant-numeric: tabular-nums;
+}
+
+.stf-hist-timing-pill {
+  cursor: help;
+}
+
+/* 0.8 (LC-3): one line per listing run, newest first; long lines wrap rather than scroll. */
+.stf-hist-runs {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0;
+}
+
+.stf-hist-run {
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+  cursor: help;
+}
+
 .stf-hist-sub {
   margin: 4px 0 0;
   color: var(--text-muted);

@@ -1,7 +1,13 @@
 // Live market index at live-book scale: about 50k base SKUs with buy orders.
 // The rebuild runs in short synchronous slices and a list() over every entry
 // (filter, verdict counts, sort, one page) stays fast. Bounds are generous for
-// CI (like test/db/perf.test.ts); the measured times are printed.
+// CI (like test/db/perf.test.ts); the measured times are printed. TIMED
+// (vitest.config.ts): the bounds assume an otherwise idle CPU; the group runs one
+// file at a time within one vitest process, but another vitest or build on the
+// same machine still shares the CPU, so each list figure is a best of several.
+// No history is wired here, so this file never times the 0.8 buy-timing join
+// (MarketRow.scraptfTiming): marketTimingPerf.test.ts bounds that at the saves'
+// design scale.
 
 import { afterEach, describe, expect, it } from 'vitest';
 import type { Repo } from '../../src/service/contracts';
@@ -121,13 +127,19 @@ describe('performance', () => {
     const times = timeLists(queries);
     console.info(`[perf] market list: cold ${coldMs.toFixed(0)} ms; ${times.map((t) => `${t.label} ${t.ms.toFixed(1)} ms (${t.total})`).join('; ')}`);
 
-    // A typed price (the common write) re-reads the user's side but keeps the rule estimates warm.
-    repo.upsertScrapPrice({ sku: '100001;6', name: 'Item', costScrap: 20, source: 'user', observedAt: T0 });
-    const tw = performance.now();
-    market.pricesChanged();
-    const afterWrite = market.list({}, clock.now());
-    const writeMs = performance.now() - tw;
-    expect(afterWrite.counts.flip + afterWrite.counts.over + afterWrite.counts['no-buyers']).toBe(1001);
+    // A typed price (the common write) re-reads the user's side but keeps the rule estimates warm. Best of 3 writes
+    // (each a new price, so each list is a fresh pass), like the queries above: one run on a busy machine decides
+    // nothing (a single run read 47-120 ms here with the CPU shared, 306 ms with other vitest runs beside it).
+    let writeMs = Number.POSITIVE_INFINITY;
+    let afterWrite = first;
+    for (let rep = 0; rep < 3; rep++) {
+      repo.upsertScrapPrice({ sku: '100001;6', name: 'Item', costScrap: 20 + rep, source: 'user', observedAt: T0 + rep });
+      const tw = performance.now();
+      market.pricesChanged();
+      afterWrite = market.list({}, clock.now());
+      writeMs = Math.min(writeMs, performance.now() - tw);
+      expect(afterWrite.counts.flip + afterWrite.counts.over + afterWrite.counts['no-buyers']).toBe(1001);
+    }
     times.push({ label: 'price write + list', ms: writeMs, total: afterWrite.total });
 
     // A live refresh of a full 2,000-row window after a change: four 500-row pages, one pass.

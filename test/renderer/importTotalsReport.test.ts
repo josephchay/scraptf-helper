@@ -87,7 +87,7 @@ describe('the parser report (P4)', () => {
     expect(IMPORT_REPORT_NOTE).toContain('item titles included. No custom names, Steam IDs, asset IDs, links or gift text.');
     expect(importReportText([])).toBeNull();
     expect(importReportText(null)).toBeNull();
-    const one = { id: 1, at: T0, origin: 'file', name: 'x.html', pageKind: 'buy', bank: 'hats', page: '/buy/hats', format: 'html', batchId: 3, counts: { dataDefindex: 1, cards: 1, rows: 0, selectedSkipped: 0, duplicates: 0, lookalikes: 0 }, headerColumns: [], warningCodes: {}, items: [] } as ImportReport;
+    const one = { id: 1, at: T0, origin: 'file', name: 'x.html', pageKind: 'buy', bank: 'hats', page: '/buy/hats', format: 'html', batchId: 3, counts: { dataDefindex: 1, cards: 1, rows: 0, selectedSkipped: 0, duplicates: 0, lookalikes: 0, reserved: 0, notTradable: 0 }, headerColumns: [], warningCodes: {}, items: [] } as ImportReport;
     expect(JSON.parse(importReportText([one])!)).toEqual([one]);
     expect(importReportToast(true, 1)).toEqual({ text: 'Copied the parser report (1 read). Nothing was sent.', tone: 'good' });
     expect(importReportToast(true, 3).text).toBe('Copied the parser report (3 reads). Nothing was sent.');

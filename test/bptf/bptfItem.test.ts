@@ -237,7 +237,8 @@ describe('websocket synthetic shapes', () => {
 
   it('maps Decorated Weapon skins and unusual strange skins', () => {
     expect(map(synthetic('synthetic-skin')).sku).toBe('15000;15;w2;pk14');
-    expect(map(synthetic('synthetic-unusual-skin')).sku).toBe('15000;15;u701;w1;pk14;strange;kt-3');
+    // 0.7.4 (F08): the synthetic Decorated-plus-effect document lands on the key the live feed's buyers use.
+    expect(map(synthetic('synthetic-unusual-skin')).sku).toBe('15000;5;u701;w1;pk14;strange;kt-3');
   });
 
   it('maps strange unusual and strange genuine through elevatedQuality', () => {
@@ -594,11 +595,22 @@ describe('IGetCurrencies v1', () => {
   const fx = loadFixture<{ objectForm: unknown; arrayForm: unknown; failure: unknown }>('igetcurrencies-v1.json');
 
   it('parses the object form', () => {
-    expect(parseIGetCurrencies(fx.objectForm, NOW)).toEqual({ source: 'bptf', buyScrap: 582, sellScrap: 584, observedAt: NOW });
+    // 0.7.4 (F71): the price's own last_update is kept as priceAt; observedAt stays the fetch.
+    expect(parseIGetCurrencies(fx.objectForm, NOW)).toEqual({ source: 'bptf', buyScrap: 582, sellScrap: 584, observedAt: NOW, priceAt: 1_791_900_000_000 });
   });
 
   it('parses the array form with string numbers', () => {
-    expect(parseIGetCurrencies(fx.arrayForm, NOW)).toEqual({ source: 'bptf', buyScrap: 586, sellScrap: 586, observedAt: NOW });
+    expect(parseIGetCurrencies(fx.arrayForm, NOW)).toEqual({ source: 'bptf', buyScrap: 586, sellScrap: 586, observedAt: NOW, priceAt: 1_791_900_000_000 });
+  });
+
+  it('0.7.4 (F71): an answer without last_update has an unknown priceAt (null), never the fetch time', () => {
+    const q = parseIGetCurrencies({ response: { success: 1, currencies: { keys: { defindex: 5021, price: { value: 64.11, value_high: 65, currency: 'metal' } } } } }, NOW);
+    expect(q).toMatchObject({ source: 'bptf', buyScrap: 577, sellScrap: 585, observedAt: NOW, priceAt: null });
+    // In milliseconds or as a string it is still read as seconds.
+    const ms = parseIGetCurrencies({ response: { success: 1, currencies: { keys: { defindex: 5021, price: { value: 64.11, currency: 'metal', last_update: '1786294413000' } } } } }, NOW);
+    expect(ms?.priceAt).toBe(1_786_294_413_000);
+    const odd = parseIGetCurrencies({ response: { success: 1, currencies: { keys: { defindex: 5021, price: { value: 64.11, currency: 'metal', last_update: { x: 1 } } } } } }, NOW);
+    expect(odd).toMatchObject({ buyScrap: 577, priceAt: null });
   });
 
   it('returns null for failures, junk and non-metal prices', () => {

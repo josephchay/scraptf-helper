@@ -10,9 +10,10 @@
 // handed to links.open or, on a click, to the user's scrap.tf window.
 
 import { SCRAPTF_BOUNDARY_SHORT } from '../shared/boundaryText';
+import { SKIP_CRAFT_UNPROVEN } from '../shared/importCodes';
 import { SCRAPTF_ITEMS_URL } from '../shared/links';
-import { SCRAPTF_LIST_FRESH_MS, WATCH_WAITING_FOR_SCHEMA, scraptfListFresh } from '../shared/scraptfList';
-import type { DeepPartial, ImportResult, MarketListResult, MarketRow, Scrap, ScraptfListStatus, Settings, UnixMs } from '../shared/types';
+import { SCRAPTF_LIST_FAMILY_LABEL, SCRAPTF_LIST_FRESH_MS, WATCH_WAITING_FOR_SCHEMA, scraptfListFresh } from '../shared/scraptfList';
+import type { DeepPartial, ImportBatch, ImportResult, MarketListResult, MarketRow, Scrap, ScraptfListStatus, Settings, UnixMs } from '../shared/types';
 import { DASH, fmtAgo, fmtDateTime, fmtInt, fmtMoney } from './format';
 import { SAVE_MODE } from './importModel';
 import { coverageChip, coverageTone, type CoverageChip, type CoverageTone } from './marketModel';
@@ -41,14 +42,19 @@ export const LIST_PICKUP_TEXT = 'Flip Desk picks it up within seconds and update
 export const LIST_OPEN_HINT = "in your own browser: scrap.tf's public price list of every item it trades.";
 
 /**
- * UX-4: what a first run is told first (the setup checklist, the empty Opportunities page): one save of
- * scrap.tf/items prices every item scrap.tf trades, far quicker than typing them.
+ * UX-4: what a first run is told first (the setup checklist, the empty Opportunities page), far quicker than
+ * typing prices. 0.7.4 (R38): the bank pages price each copy; an unmarked scrap.tf/items row is one entry for
+ * every copy at its price, so a list save prices only the rows that show which copy they are
+ * (FIRST_PRICE_LIST_NOTE), and never every item.
  */
-export const FIRST_PRICE_LEAD = 'Save scrap.tf/items once to price every item scrap.tf trades';
+export const FIRST_PRICE_LEAD = "Save scrap.tf's bank pages to price each copy they sell";
+
+/** 0.7.4 (R38): what one save of scrap.tf/items adds, after the lead. */
+export const FIRST_PRICE_LIST_NOTE = "scrap.tf/items adds what scrap.tf pays and every item's stock, and prices only the rows that show which copy they are";
 
 /** The first-run lead as a sentence; `windowOn` (scraptfWindowOn) adds the window as the other way in. */
 export function firstPriceText(windowOn: boolean): string {
-  return `${FIRST_PRICE_LEAD}${windowOn ? ', or browse it in the Flip Desk window' : ''}.`;
+  return `${FIRST_PRICE_LEAD}${windowOn ? ' (or browse them in the Flip Desk window)' : ''}; ${FIRST_PRICE_LIST_NOTE}.`;
 }
 
 /** "scrap.tf/items": the price list's page as the buttons name it. */
@@ -239,7 +245,10 @@ export async function chooseWatchFolder(
 // Live market cells and the strip's "All items" chip
 // ---------------------------------------------------------------------------
 
-type ListFields = Pick<MarketRow, 'scraptfPaysScrap' | 'scraptfStock' | 'scraptfStockLimit' | 'scraptfFull' | 'scraptfListAt'>;
+type ListFields = Pick<MarketRow, 'scraptfPaysScrap' | 'scraptfStock' | 'scraptfStockLimit' | 'scraptfFull' | 'scraptfListAt'> & Partial<Pick<MarketRow, 'scraptfListFamily'>>;
+
+/** 0.7.4: the market cells' note on a family row (MarketRow.scraptfListFamily). */
+const FAMILY_ROW_NOTE = `${SCRAPTF_LIST_FAMILY_LABEL}: its stock counts every copy (Craftable or Non-Craftable, any killstreak tier), and its price is no cost of one copy.`;
 
 function finite(v: unknown): v is number {
   return typeof v === 'number' && Number.isFinite(v);
@@ -263,11 +272,13 @@ export function stockText(stock: number | null, limit: number | null): string | 
 function stockSentence(r: ListFields): string | null {
   const text = stockText(r.scraptfStock, r.scraptfStockLimit);
   if (text === null) return null;
+  // 0.7.4: a family row's stock is every copy's, and says so.
+  const family = r.scraptfListFamily === true ? ` ${FAMILY_ROW_NOTE}` : '';
   // A 0/0 row is full and out of stock at once: scrap.tf neither buys nor sells it right now.
-  if (r.scraptfFull && r.scraptfStock === 0) return `Stock ${text}: scrap.tf is at its limit and out of stock, so it neither buys nor sells it right now.`;
-  if (r.scraptfFull) return `Stock ${text}: scrap.tf is at its limit, so it will not buy more right now. You can still buy it there.`;
-  if (r.scraptfStock === 0) return `Stock ${text}: out of stock, so you cannot buy it on scrap.tf right now. scrap.tf still buys it.`;
-  return `Stock ${text}${finite(r.scraptfStockLimit) ? ` (scrap.tf buys up to ${fmtInt(r.scraptfStockLimit)})` : ''}.`;
+  if (r.scraptfFull && r.scraptfStock === 0) return `Stock ${text}: scrap.tf is at its limit and out of stock, so it neither buys nor sells it right now.${family}`;
+  if (r.scraptfFull) return `Stock ${text}: scrap.tf is at its limit, so it will not buy more right now. You can still buy it there.${family}`;
+  if (r.scraptfStock === 0) return `Stock ${text}: out of stock, so you cannot buy it on scrap.tf right now. scrap.tf still buys it.${family}`;
+  return `Stock ${text}${finite(r.scraptfStockLimit) ? ` (scrap.tf buys up to ${fmtInt(r.scraptfStockLimit)})` : ''}.${family}`;
 }
 
 export interface ListPaysCell {
@@ -350,6 +361,27 @@ export function importListRowsText(r: Pick<ImportResult, 'pageKind' | 'listRows'
   return 'No list rows changed: a newer save of scrap.tf/items is already stored.';
 }
 
+/**
+ * 0.7.4: the Import page's note after the upgrade cleared the price list (V14: its rows were saved before
+ * each read said whether a row is the Craftable or the Non-Craftable copy): a list was read before (a list
+ * batch is on record) but no row is stored now. Null otherwise, and once a read fills the list again.
+ */
+export function listRereadNote(status: Pick<ScraptfListStatus, 'items'> | null | undefined, batches: readonly Pick<ImportBatch, 'pageKind'>[] | null | undefined): string | null {
+  if (!status || !finite(status.items) || status.items > 0) return null;
+  if (!(batches ?? []).some((b) => b.pageKind === 'items-list')) return null;
+  return 'Your price list is empty: Flip Desk 0.7.4 cleared the rows saved before it read whether a row is the Craftable or the Non-Craftable copy. Open scrap.tf/items once more (in the scrap.tf window, or save it into your watch folder) to read it again.';
+}
+
+/**
+ * The "Price list" line's 0.7.4 note: how many of the page's rows show neither Craftable nor Non-Craftable
+ * (family rows, ImportResult.skippedCounts' SKIP_CRAFT_UNPROVEN): on the list, but no cost of their own.
+ */
+export function importListFamilyText(r: Pick<ImportResult, 'pageKind' | 'skippedCounts'>): string | null {
+  const n = r.pageKind === 'items-list' ? (r.skippedCounts?.[SKIP_CRAFT_UNPROVEN] ?? 0) : 0;
+  if (!finite(n) || n <= 0) return null;
+  return `${fmtInt(n)} of them ${n === 1 ? 'is a row' : 'are rows'} for every copy at ${n === 1 ? 'its' : 'their'} price (the list does not show Craftable or Non-Craftable): kept on your price list, but no cost of their own. Your saved bank pages price each copy.`;
+}
+
 /** The toast after a manual import ("Import saved page…"). */
 export function importToastText(r: Pick<ImportResult, 'stored' | 'parsed' | 'fileName' | 'pageKind' | 'listRows'>): { text: string; tone: 'good' | 'warn' } {
   const base = `Imported ${r.stored} of ${r.parsed} items from ${r.fileName}`;
@@ -359,7 +391,7 @@ export function importToastText(r: Pick<ImportResult, 'stored' | 'parsed' | 'fil
 }
 
 /** The "All items" chip's tooltip. */
-export const ALL_ITEMS_TIP = `See your saved price list on the scrap.tf banks page: save scrap.tf/items (Ctrl+S) as '${SAVE_MODE}' into your watch folder to update every scrap.tf price at once`;
+export const ALL_ITEMS_TIP = `See your saved price list on the scrap.tf banks page: save scrap.tf/items (Ctrl+S) as '${SAVE_MODE}' into your watch folder to update every item's stock and what scrap.tf pays at once (only rows that show which copy they are become prices)`;
 
 /**
  * The strip's "All items (scrap.tf/items)" chip, beside the bank pages' (F13), or null while import is

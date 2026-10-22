@@ -95,3 +95,9 @@ fallback for `quality2` must check that the base name does not already start wit
 marketplace.tf mirrors (`currencies.usd`, `marketplace_*`), Decorated Weapon skins (quality 15),
 weapon unusual effects (701-704), Strange Unusual / Strange Genuine, RED/BLU effect pairs,
 untradable items, non-440 appids, millisecond timestamps, `killstreakTier` as an object.
+
+Unusual skins (0.7.4, F08/F43/F69): backpack.tf's live buy orders key a skin with a weapon effect as
+Unusual (quality 5) plus the effect, with Strange as `quality2` (`15000;5;u701;w1;pk14;strange`), not
+Decorated (15) plus the effect. The `synthetic-unusual-skin` payload keeps the Decorated `quality` it was
+written with; the mappers (`canonicalUnusualSkin`) give it the Unusual form, as they do the feed's
+11-primary form (`quality` 11 with the effect).

@@ -1,10 +1,11 @@
 // Clean buy-order matching (design brief §5.2) and price-sheet rule filters.
 
+import { ORDER_UNVERIFIED_AFTER_MS } from '../../shared/buyerSeen';
 import { fromObject, fromString, looksLikeSku } from '../../shared/sku';
 import type { Category, Listing, RuleFilter, Settings, SkuObject, SpecialAttrs, UnixMs } from '../../shared/types';
 
-/** Listings not seen (event or snapshot) for this long are "unverified" (brief §2.1). */
-export const UNVERIFIED_AFTER_MS = 24 * 60 * 60 * 1000;
+/** Listings not seen (event or snapshot) for this long are "unverified" (brief §2.1; 0.8: the shared ORDER_UNVERIFIED_AFTER_MS). */
+export const UNVERIFIED_AFTER_MS = ORDER_UNVERIFIED_AFTER_MS;
 
 /** Flags that exclude an order from profit. Other flags only lower confidence. */
 export const EXCLUDING_FLAGS: ReadonlySet<string> = new Set([
@@ -245,8 +246,8 @@ export function notesMatch(details: unknown, keywords: readonly string[]): boole
 // ---------------------------------------------------------------------------
 
 /**
- * Brief §5.2. Base SKU equality (including aliases) is guaranteed by the
- * listing query, so it is not re-checked here.
+ * Brief §5.2. Base SKU equality (including aliases: 0.7.4's defindex twins and unusual-skin forms, read
+ * together by domain/bookTwins.ts) is guaranteed by the book read, so it is not re-checked here.
  */
 export function classifyOrder(listing: Listing, target: MatchTarget, ctx: MatchContext): OrderClass {
   const flags: string[] = [];
@@ -326,6 +327,9 @@ export function ruleMatches(filter: RuleFilter, item: RuleSubject): boolean {
   if (nonEmpty(filter.qualities) && !filter.qualities.includes(obj.quality)) return false;
   if (typeof filter.craftable === 'boolean' && obj.craftable !== filter.craftable) return false;
   if (typeof filter.australium === 'boolean' && obj.australium !== filter.australium) return false;
+  // 0.7.4 (F79): a 'strange weapons' rule need not price Festivized or elevated-Strange copies.
+  if (typeof filter.festive === 'boolean' && (obj.festive === true) !== filter.festive) return false;
+  if (typeof filter.elevated === 'boolean' && (obj.quality2 === 11) !== filter.elevated) return false;
   if (nonEmpty(filter.killstreak) && !filter.killstreak.includes(obj.killstreak)) return false;
   if (typeof filter.hasEffect === 'boolean') {
     // A generic any-effect Unusual base (378;5) is categorised 'unusuals': it is not an effect-less item.

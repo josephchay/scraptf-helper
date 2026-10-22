@@ -352,9 +352,10 @@ describe('skip reasons and totals (P5)', () => {
     const row = (defindex: number, title: string, price: string, limits: string) =>
       `<tr data-quality="6" data-defindex="${defindex}"><td></td><td>${title}</td><td>${price}</td><td>1 refined</td><td><div title="${limits}"></div></td></tr>`;
     const rows: string[] = [];
-    // 9,000 sold-out rows (benign), then 100 rows with a price that cannot be read (refused).
-    for (let i = 0; i < 9000; i++) rows.push(row(143, 'Earbuds', '10 keys', '0/5'));
-    for (let i = 0; i < 100; i++) rows.push(row(126, "Bill's Hat", 'a lot', '1/5'));
+    // 9,000 sold-out rows (benign), then 100 rows with a price that cannot be read (refused). 0.7.4: each its
+    // own item (defindex), as an identical repeat of a row is the same row shown again and read once.
+    for (let i = 0; i < 9000; i++) rows.push(row(100_000 + i, 'Earbuds', '10 keys', '0/5'));
+    for (let i = 0; i < 100; i++) rows.push(row(200_000 + i, "Bill's Hat", 'a lot', '1/5'));
     const html = `<!DOCTYPE html>\n<!-- saved from url=(0022)https://scrap.tf/items -->\n<html><head><title>Item Trading - TF2 - Scrap.TF</title></head><body id="pid-items"><table><thead><tr><th>Icon</th><th>Item</th><th>Price to buy</th><th>Price we pay</th><th>Item Limits</th></tr></thead><tbody>${rows.join('')}</tbody></table></body></html>`;
     const r = await h.file(html, NOW - MIN, 'Item Trading - TF2 - Scrap.TF.html');
     expect(r.skippedTotal).toBe(9100);

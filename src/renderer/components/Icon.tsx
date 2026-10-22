@@ -201,6 +201,13 @@ const PATHS = {
       <path d="M16 17l5-5-5-5M21 12H9" />
     </>
   ),
+  // 0.8 (G1): Watch on scrap.tf… (a local list; nothing is fetched or bought).
+  eye: (
+    <>
+      <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z" />
+      <circle cx="12" cy="12" r="3" />
+    </>
+  ),
 } satisfies Record<string, ReactNode>;
 
 export type IconName = keyof typeof PATHS;

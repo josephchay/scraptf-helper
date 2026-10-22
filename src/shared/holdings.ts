@@ -3,14 +3,17 @@
 // order, totals and CSV cells (as market.ts does for the Live market). Pure: no
 // I/O, no network. The buy side comes from the local backpack.tf book only.
 
+import { ORDER_UNVERIFIED_AFTER_MS } from './buyerSeen';
 import { formatScrap, valueScrap } from './currency';
 import { frictionOf, profitStatus, type CeilingSettings } from './ceiling';
 import { marketSearchTokens } from './market';
-import { bestExitOf, holdingListFields } from './scraptfList';
-import { HOLDING_STATUSES } from './types';
+import { bestExitOf, holdingListFields, scraptfListFresh } from './scraptfList';
+import { HOLDING_EXIT_VENUES, HOLDING_STATUSES } from './types';
 import type {
   Category,
   ConfidenceLevel,
+  HoldingAskSide,
+  HoldingRefs,
   HoldingRow,
   HoldingStatus,
   HoldingsQuery,
@@ -18,8 +21,10 @@ import type {
   JournalLot,
   JournalPosition,
   KeyPriceState,
+  NextBuyer,
   OpportunityStatus,
   OrderSummary,
+  ReferencePrices,
   Scrap,
   ScraptfListRow,
   UnixMs,
@@ -56,11 +61,19 @@ export interface HoldingBuySide {
   confidenceLevel: ConfidenceLevel;
   flags: readonly string[];
   lastOrderChangeAt: UnixMs | null;
+  /**
+   * 0.8 (PC-2, H2): the market entry's next buyer (buyerDepthOf) and distinct buyers seen in the last 24 h.
+   * Optional: absent, the row carries no depth (holdingRow copies them only when set).
+   */
+  nextBuyer?: NextBuyer | null;
+  verifiedBuyerCount?: number;
 }
 
 /**
  * Profit if the next lot (FIFO) sold now, profit if every unit did, and the status, judged on the
  * next lot exactly as an opportunity is judged on its cost (profitStatus with settings.profit).
+ * Friction only, never the price-move reserve (0.8, PC-1, R-PC1-sell): selling into a live order
+ * (this buyer, or the next one) leaves no price move to cover.
  */
 export function holdingFigures(
   a: { revenueScrap: Scrap | null; qty: number; costScrap: Scrap; nextLotCostScrap: Scrap },
@@ -97,13 +110,22 @@ export function positionCostAt(pos: Pick<JournalPosition, 'qty' | 'costScrap' | 
   return lots.length > 0 && lots.length === pos.qty ? lots.reduce((t, l) => t + lotCostAt(l, keyScrap), 0) : pos.costScrap;
 }
 
+/** 0.8: the row's parts read beside the book (the service and the mock fill every field); typicalHold is the journal's withTypicalHold. */
+export interface HoldingRowExtras {
+  ask: HoldingAskSide | null;
+  refs: HoldingRefs | null;
+  snapshotAt: UnixMs | null;
+}
+
 /**
  * One row from an open journal position (journalSummary().open) and its buy side; `buy` null means
  * no eligible buy order. Lots are valued at `keyScrap`, today's key price (lotCostAt). A painted copy
  * is priced against its clean base, so it is flagged has-extras like a painted price on the Live market.
  * `scraptf` (F14) is the base SKU's saved scrap.tf/items row (valued at `keyScrap`) and the time it is
  * judged at: the better exit (bestExitOf) sets exitScrap, and status and profit are judged on it.
- * Omitted, backpack.tf is the only exit and the row is exactly as before F14.
+ * Omitted, backpack.tf is the only exit and the row is exactly as before F14. 0.8: `extras` (the ask side,
+ * references and last snapshot) are spread in when given; without them the row is as before plus the next
+ * lot's key price (nextLotKeyPriceScrap).
  */
 export function holdingRow(
   pos: JournalPosition,
@@ -112,6 +134,7 @@ export function holdingRow(
   p: CeilingSettings,
   keyScrap: Scrap | null = null,
   scraptf: { list: ScraptfListRow | null; now: UnixMs } | null = null,
+  extras: HoldingRowExtras | null = null,
 ): HoldingRow {
   const lots = Array.isArray(pos.lots) ? pos.lots : [];
   const qty = pos.qty;
@@ -130,6 +153,10 @@ export function holdingRow(
     qty,
     costScrap,
     nextLotCostScrap,
+    // 0.7.4 (R23): the lot's own currencies, for Record sale's backfill preview; 0.8 (H6): and its key price
+    // then, for the advice's key-exposure reason.
+    ...(next && finite(next.keys) && finite(next.scrap) ? { nextLotKeys: next.keys, nextLotScrapRaw: next.scrap } : {}),
+    ...(next && finite(next.keys) && finite(next.scrap) && finite(next.keyPriceScrap) && next.keyPriceScrap > 0 ? { nextLotKeyPriceScrap: next.keyPriceScrap } : {}),
     heldSince: next?.ts ?? 0,
     revenueScrap,
     bestScrap: buy?.bestScrap ?? null,
@@ -137,6 +164,9 @@ export function holdingRow(
     revenueOrder: buy?.revenueOrder ?? null,
     bestOrder: buy?.bestOrder ?? null,
     buyerCount: buy?.buyerCount ?? 0,
+    // 0.8 (PC-2, H2): the buy side's depth when it carries one (evaluateMarketBase and the mock always do).
+    ...(buy && buy.nextBuyer !== undefined ? { nextBuyer: buy.nextBuyer } : {}),
+    ...(buy && typeof buy.verifiedBuyerCount === 'number' ? { verifiedBuyerCount: buy.verifiedBuyerCount } : {}),
     ...holdingListFields(list),
     ...exit,
     // Judged on the better exit, so a holding can be 'sell' through scrap.tf (F14).
@@ -145,6 +175,103 @@ export function holdingRow(
     confidenceLevel: buy?.confidenceLevel ?? 'low',
     flags,
     lastOrderChangeAt: buy?.lastOrderChangeAt ?? null,
+    ...(extras ? { ask: extras.ask, refs: extras.refs, snapshotAt: extras.snapshotAt } : {}),
+  };
+}
+
+/**
+ * 0.7.4: a held row's scrap.tf exit as the row to tell, when its backpack.tf exit is held back (an unverified buyer,
+ * or one below notifications.minConfidence): the row judged on what scrap.tf's bank pays (bestExit 'scraptf') when
+ * its saved list row pays something, is not full, is fresh (scraptfListFresh) and clears the profit thresholds on
+ * its own (holdingFigures 'sell'); else null, and the backpack.tf exit waits as before. bestExitOf picks the exit
+ * by value only, so a higher order nobody has confirmed must not hide a lower, fresh and profitable bank price.
+ * Friction only, never the price-move reserve (0.8, PC-1): a sale into a live order. Moved here from the
+ * service in 0.8 so the shared advice (holdingAdvice) uses it.
+ */
+export function scraptfAlternative(r: HoldingRow, p: CeilingSettings, now: UnixMs): HoldingRow | null {
+  if (r.bestExit !== 'backpack' || !finite(r.scraptfPaysScrap) || r.scraptfFull || !finite(r.scraptfListAt)) return null;
+  if (!scraptfListFresh({ observedAt: r.scraptfListAt }, now)) return null;
+  const fig = holdingFigures({ revenueScrap: r.scraptfPaysScrap, qty: r.qty, costScrap: r.costScrap, nextLotCostScrap: r.nextLotCostScrap }, p);
+  if (fig.status !== 'sell' || !finite(fig.profitNowScrap)) return null;
+  return { ...r, bestExit: 'scraptf', exitScrap: r.scraptfPaysScrap, exitVenue: HOLDING_EXIT_VENUES.scraptf, ...fig };
+}
+
+// ---------------------------------------------------------------------------
+// 0.8 (H3, H4): the ask side and the references beside a held row
+// ---------------------------------------------------------------------------
+
+/** 0.8 (H3): one sell listing as the ask side reads it (service: a copy-matched Listing, asks.ts; mock: a book sell order). */
+export interface AskCandidate {
+  id: string;
+  steamid: string;
+  keys: number;
+  metalScrap: Scrap;
+  /** Valued at the key price the row is valued at. */
+  valueScrap: Scrap;
+  isBot: boolean;
+  lastEventAt: UnixMs;
+  /** marketplace.tf, banned or blocklisted: never counted. */
+  excluded: boolean;
+}
+
+/** Lowest value first; ties go to the most recently seen, then the id. */
+function askOrder(a: AskCandidate, b: AskCandidate): number {
+  return a.valueScrap - b.valueScrap || b.lastEventAt - a.lastEventAt || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
+}
+
+/**
+ * 0.8 (H3): HoldingAskSide over `asks`, or null when none counts. Counted: not excluded, valueScrap > 0, seen
+ * within ORDER_UNVERIFIED_AFTER_MS (a stamp ahead of `now` counts as recent; NaN never), and not one of
+ * `ownSteamIds` (counted in ownLeftOut instead). One per seller (steamid, else `id:<id>`, as buyerCountOf): their
+ * lowest. Lowest first; ties go to the most recently seen, then the id.
+ */
+export function askSideOf(asks: readonly AskCandidate[], now: UnixMs, ownSteamIds: ReadonlySet<string>): HoldingAskSide | null {
+  const bySeller = new Map<string, AskCandidate>();
+  let ownLeftOut = 0;
+  for (const a of Array.isArray(asks) ? asks : []) {
+    if (!a || a.excluded || !finite(a.valueScrap) || a.valueScrap <= 0) continue;
+    // An ask nobody has seen for a day may be gone, as an unverified buy order.
+    if (!finite(a.lastEventAt) || !(now - a.lastEventAt <= ORDER_UNVERIFIED_AFTER_MS)) continue;
+    if (a.steamid && ownSteamIds.has(a.steamid)) {
+      ownLeftOut++;
+      continue;
+    }
+    const seller = a.steamid || `id:${a.id}`;
+    const cur = bySeller.get(seller);
+    if (!cur || askOrder(a, cur) < 0) bySeller.set(seller, a);
+  }
+  const counted = [...bySeller.values()].sort(askOrder);
+  const lowest = counted[0];
+  if (!lowest) return null;
+  return {
+    lowestScrap: lowest.valueScrap,
+    lowestKeys: finite(lowest.keys) ? lowest.keys : 0,
+    lowestMetalScrap: finite(lowest.metalScrap) ? lowest.metalScrap : 0,
+    lowestIsBot: lowest.isBot === true,
+    lowestSeenAt: lowest.lastEventAt,
+    count: counted.length,
+    botCount: counted.filter((a) => a.isBot === true).length,
+    ownLeftOut,
+    mayIncludeOwn: ownSteamIds.size === 0,
+  };
+}
+
+/**
+ * 0.8 (H4): a held row's references from the age-gated ones (`usable`: stale ones already null, as the service's
+ * usableReferences returns them) and the reasons they were left out. Null when nothing is stored and nothing left out.
+ */
+export function holdingRefsOf(usable: ReferencePrices, ignored: readonly string[]): HoldingRefs | null {
+  const p = usable?.pricedb ?? null;
+  const c = usable?.community ?? null;
+  const left = Array.isArray(ignored) ? ignored : [];
+  if (p === null && c === null && left.length === 0) return null;
+  return {
+    pricedbBuyScrap: p?.buyScrap ?? null,
+    pricedbSellScrap: p?.sellScrap ?? null,
+    pricedbAgeMs: p?.ageMs ?? null,
+    communityScrap: c?.valueScrap ?? null,
+    communityHighScrap: c?.valueHighScrap ?? null,
+    ignored: [...left],
   };
 }
 
@@ -217,6 +344,10 @@ export const HOLDINGS_CSV_COLUMNS: readonly string[] = [
   'exit',
   'exit_venue',
   'scraptf_pays',
+  // 0.8 (H6, H2, H3): the advice kind, the next buyer's price and the lowest matching ask, appended as F14's were.
+  'advice',
+  'next_buyer',
+  'lowest_ask',
 ];
 
 /** One CSV line's cells, in HOLDINGS_CSV_COLUMNS order; money as keys + ref, missing values blank. */
@@ -240,5 +371,8 @@ export function holdingsCsvCells(r: HoldingRow, keyScrap: Scrap | null): (string
     money(r.exitScrap),
     r.exitVenue ?? '',
     money(r.scraptfPaysScrap),
+    r.advice?.kind ?? '',
+    money(r.nextBuyer?.valueScrap ?? null),
+    money(r.ask?.lowestScrap ?? null),
   ];
 }

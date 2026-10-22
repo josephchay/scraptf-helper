@@ -14,6 +14,7 @@ import { createScraptfHistory, type ScraptfHistory } from '../../src/service/dom
 import { DEFAULT_SETTINGS, mergeSettings } from '../../src/shared/defaults';
 import { emptyMarketCounts } from '../../src/shared/market';
 import { SCRAPTF_LONG_LISTED_MS, marketListedSideMatches, scraptfListedSinceOf } from '../../src/shared/scraptfHistory';
+import { scraptfTimingBrief } from '../../src/shared/scraptfTiming';
 import type { BankStockStored, Listing, MarketQuery, MarketRow, ScraptfBank, UnixMs } from '../../src/shared/types';
 import { FakeClock, FakeTimers, MIN, T0, createStubSchema, makeDeps, makeListing, silentLogger } from './helpers';
 
@@ -239,5 +240,77 @@ describe('MarketQuery.listedOnScraptf ("Listed on scrap.tf > 24 h")', () => {
     expect(h.rows({ listedOnScraptf: true }).map((r) => r.sku).sort()).toEqual(['126;6', '378;6']);
     h.history.refresh();
     expect(h.rows({ listedOnScraptf: true }).map((r) => r.sku)).toEqual(['378;6']);
+  });
+});
+
+describe('MarketRow.scraptfTiming (0.8, T7)', () => {
+  /** The history core wires (with deps.profit), behind the market's history dep with timingForBase. */
+  function timed(timingForBase?: (...a: Parameters<ScraptfHistory['timingForBase']>) => ReturnType<ScraptfHistory['timingForBase']>) {
+    let real!: ScraptfHistory;
+    const calls: Parameters<ScraptfHistory['timingForBase']>[] = [];
+    const h = setup({
+      listedSinceFor: (b, bank) => real.listedSinceFor(b, bank),
+      listedFor: (b, bank) => real.listedFor(b, bank),
+      version: () => real.version(),
+      timingForBase: (...a) => {
+        calls.push(a);
+        return (timingForBase ?? real.timingForBase)(...a);
+      },
+    });
+    const settings = mergeSettings(DEFAULT_SETTINGS, {});
+    real = createScraptfHistory({ clock: h.clock, log: silentLogger, repo: h.repo, market: h.market, keyPrice: () => selectKeyPrice(h.repo.keyQuotes(), settings, h.clock.now()), profit: () => settings.profit });
+    return { ...h, real, calls };
+  }
+
+  it("list() joins the listed copy's verdict from timingForBase (the row's 'seen' bank and own entry); all() never does", () => {
+    const h = timed();
+    seed(h.repo);
+    h.build();
+    const now = h.clock.now();
+    const page = h.market.list({ limit: 50 }, now).rows;
+    const tc = page.find((r) => r.sku === '378;6')!;
+    const t = h.real.timingForBase('378;6', 'hats', h.market.entryFor('378;6'), now);
+    expect(t).not.toBeNull();
+    expect(tc.scraptfTiming).toEqual(scraptfTimingBrief(t!));
+    expect(tc.scraptfTiming).toMatchObject({ bank: 'hats', key: '378;6|', verdict: expect.any(String) as unknown as string });
+    // Every row: the bank its listed time reads ('seen'), judged against its own entry at list()'s time.
+    for (const r of page) {
+      const want = h.real.timingForBase(r.sku, r.scraptfLink.source === 'seen' ? r.scraptfLink.bank : null, h.market.entryFor(r.sku), now);
+      expect(r.scraptfTiming, r.sku).toEqual(want ? scraptfTimingBrief(want) : undefined);
+    }
+    // The /items list's row for every copy (no Craftable proof) is a family row: no verdict.
+    expect(page.find((r) => r.sku === '205;6')).not.toHaveProperty('scraptfTiming');
+    // The CSV path and the banks cards ask nothing.
+    h.calls.length = 0;
+    expect(h.rows().every((r) => r.scraptfTiming === undefined)).toBe(true);
+    h.market.uncheckedBy(() => 'all', 5, now);
+    expect(h.calls).toEqual([]);
+  });
+
+  it("list() hands every row's verdict the page's own key price and profit settings (no key-price query per row)", () => {
+    const h = timed();
+    seed(h.repo);
+    h.build();
+    const now = h.clock.now();
+    const res = h.market.list({ limit: 50 }, now);
+    expect(h.calls.length).toBe(res.rows.length);
+    for (const c of h.calls) expect(c[4]).toEqual({ keyScrap: res.keyPrice!.valueScrap, profit: DEFAULT_SETTINGS.profit });
+    // The same verdicts the history gives when it reads both itself.
+    for (const r of res.rows) {
+      const want = h.real.timingForBase(r.sku, r.scraptfLink.source === 'seen' ? r.scraptfLink.bank : null, h.market.entryFor(r.sku), now);
+      expect(r.scraptfTiming, r.sku).toEqual(want ? scraptfTimingBrief(want) : undefined);
+    }
+  });
+
+  it('a failing timingForBase leaves the field out and the page reads', () => {
+    const h = timed(() => {
+      throw new Error('history down');
+    });
+    seed(h.repo);
+    h.build();
+    const page = h.market.list({ limit: 50 }, h.clock.now());
+    expect(page.rows.length).toBeGreaterThan(0);
+    expect(page.rows.every((r) => r.scraptfTiming === undefined)).toBe(true);
+    expect(h.calls.length).toBeGreaterThan(0);
   });
 });

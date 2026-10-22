@@ -300,4 +300,34 @@ describe('jobs: snapshot-watched', () => {
     await h.job('snapshot-watched').run();
     expect(h.snapshots).toHaveLength(3);
   });
+
+  it('0.7.4 (F52): does not back off a SKU for a 500, 502, 504 or Cloudflare 52x; a 400 still does', async () => {
+    const URL = 'https://api.backpack.tf/api/classifieds/listings/snapshot';
+    let fail: Error | null = null;
+    const h = jobsHarness({
+      watched: ['200;11;australium'],
+      snapshot: async () => {
+        if (fail) throw fail;
+      },
+    });
+    for (const status of [500, 502, 504, 522]) {
+      fail = new HttpStatusError(status, URL, null);
+      await expect(h.job('snapshot-watched').run()).rejects.toBeInstanceOf(HttpStatusError);
+      await h.time.advance(MIN);
+    }
+    // No 30-min cooldown was set: the next minute's run takes the same SKU again.
+    fail = null;
+    await h.job('snapshot-watched').run();
+    expect(h.snapshots).toHaveLength(5);
+    expect(h.snapshots.at(-1)).toBe('200;11;australium');
+
+    // A 400 is the SKU's own failure and still cools it down.
+    await h.time.advance(SNAPSHOT_FAIL_BASE_MS * 4);
+    fail = new HttpStatusError(400, URL, null);
+    await h.job('snapshot-watched').run().catch(() => undefined);
+    fail = null;
+    await h.time.advance(MIN);
+    await h.job('snapshot-watched').run();
+    expect(h.snapshots).toHaveLength(6);
+  });
 });

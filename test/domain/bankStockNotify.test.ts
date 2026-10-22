@@ -216,9 +216,9 @@ describe('New on scrap.tf notifications (S3)', () => {
     const stored = JSON.parse(h.repo.getMeta(BANK_STOCK_NOTIFY_META_KEY)!) as Record<string, number>;
     expect(Object.keys(stored).sort()).toEqual(['hats|101;6', 'hats|102;6', 'hats|103;6', 'hats|104;6', 'hats|105;6']);
     expect(Object.values(stored).every((t) => t === NOW)).toBe(true);
-    // The same item new on another bank is another notification.
-    const listPrev = save(h.repo, 'list', NOW - HOUR, [s('100;6', 50)]);
-    const listNew = save(h.repo, 'list', NOW - MIN, [s('100;6', 50), s('101;6', 12, { name: 'Ghastly Gibus' })]);
+    // The same item new on another bank is another notification (0.7.4: a list row proven to price its copy).
+    const listPrev = save(h.repo, 'list', NOW - HOUR, [s('100;6', 50, { craft: 'craftable' })]);
+    const listNew = save(h.repo, 'list', NOW - MIN, [s('100;6', 50, { craft: 'craftable' }), s('101;6', 12, { name: 'Ghastly Gibus', craft: 'craftable' })]);
     expect(listPrev).toBeLessThan(listNew);
     expect(h.run('list', listNew, NOW + 20 * MIN)).toBe(1);
     expect(h.sent[0]).toMatchObject({ title: 'New on scrap.tf (All items): Ghastly Gibus', sku: '101;6' });

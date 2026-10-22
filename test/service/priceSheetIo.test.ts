@@ -234,17 +234,22 @@ describe('pricesCsv', () => {
     );
     expect(csv.startsWith(CSV_BOM)).toBe(true);
     const lines = csv.slice(CSV_BOM.length).split('\r\n');
-    expect(lines[0]).toBe('id,sku,name,cost,cost_keys,cost_metal_ref,cost_ref,key_price_ref,source,observed_at,note,stock,asset_id,paint,spells,parts');
-    expect(lines[1]).toBe('2,5021;6,Mann Co. Supply Crate Key,1 key 1.00 ref,1,1,51,50,import,2026-10-14T12:00:00.000Z,"\'=HYPERLINK(""x"")",3,,,,');
+    // 0.7.4 (F81): sheen, killstreaker, the tags and the copy key are appended after the older columns.
+    expect(lines[0]).toBe(
+      'id,sku,name,cost,cost_keys,cost_metal_ref,cost_ref,key_price_ref,source,observed_at,note,stock,asset_id,paint,spells,parts,sheen,killstreaker,name_tag,description_tag,copy_key',
+    );
+    expect(lines[1]).toBe('2,5021;6,Mann Co. Supply Crate Key,1 key 1.00 ref,1,1,51,50,import,2026-10-14T12:00:00.000Z,"\'=HYPERLINK(""x"")",3,,,,,,,,,');
     // The SKU carries the paint, as the user priced it.
-    expect(lines[2]).toBe('1,378;6;p15185211,Team Captain,1.33 ref,0,1.33,1.33,50,user,2026-10-14T12:00:00.000Z,,,,15185211,Exorcism,Kills | Robots');
+    expect(lines[2]).toBe(
+      '1,378;6;p15185211,Team Captain,1.33 ref,0,1.33,1.33,50,user,2026-10-14T12:00:00.000Z,,,,15185211,Exorcism,Kills | Robots,,,false,false,"[15185211,[""Exorcism""],[""Kills"",""Robots""],null,null,false,false]"',
+    );
     expect(lines[3]).toBe('');
   });
 
   it('leaves the key-valued total empty without a key price, never guesses one', () => {
     const csv = pricesCsv([{ ...base, costKeys: 2, costScrap: 0 }], null);
     const row = csv.slice(CSV_BOM.length).split('\r\n')[1]!;
-    expect(row).toBe('1,378;6,Team Captain,2 keys,2,0,,,user,2026-10-14T12:00:00.000Z,,,,,,');
+    expect(row).toBe('1,378;6,Team Captain,2 keys,2,0,,,user,2026-10-14T12:00:00.000Z,,,,,,,,,,,');
   });
 
   it('writes a sku and cost that bulk paste reads back exactly, painted copies included', () => {
@@ -326,7 +331,8 @@ describe('rules backup', () => {
     expect(() => rulesFromJson('{"rules": 3}')).toThrow('Not a rules backup: no "rules" list found.');
     expect(() => rulesFromJson('"text"')).toThrow(/no "rules" list/);
     expect(() => rulesFromJson(JSON.stringify({ format: 'something-else', rules: [] }))).toThrow('Not a TF2 Flip Desk rules backup.');
-    expect(() => rulesFromJson(JSON.stringify({ format: RULES_BACKUP_FORMAT, version: 2, rules: [] }))).toThrow(/newer version/);
+    // 0.7.4 (F79): version 2 (the Festivized and Elevated Strange filters) is read; a later one is refused.
+    expect(() => rulesFromJson(JSON.stringify({ format: RULES_BACKUP_FORMAT, version: 3, rules: [] }))).toThrow(/newer version/);
   });
 
   it('caps what one import adds and how many reasons it lists', () => {

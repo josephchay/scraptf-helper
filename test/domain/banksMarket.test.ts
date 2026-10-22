@@ -98,9 +98,13 @@ describe('banks over the Live market', () => {
     const r = h.banks.summary(h.clock.now());
     for (const info of SCRAPTF_BANKS) {
       const b = r.banks.find((x) => x.bank === info.bank)!;
-      expect({ unchecked: b.unchecked, lookFor: b.lookFor }, info.bank).toEqual(bankLookFor(rows, info.categories));
+      // 0.7.4 (F36): a row is the bank's whose scrap.tf button opens that page.
+      expect({ unchecked: b.unchecked, lookFor: b.lookFor }, info.bank).toEqual(bankLookFor(rows, info.categories, info.bank));
     }
-    expect(r.banks.find((b) => b.bank === 'items')!.unchecked).toBe(59); // taunts and other, one taunt priced
+    // Taunts and other, one taunt priced; 0.7.4 (F36): and the 30 killstreak-category items, which carry no
+    // kit target (killstreak weapons, sold on /buy/items: /buy/killstreaks sells kits only).
+    expect(r.banks.find((b) => b.bank === 'items')!.unchecked).toBe(89);
+    expect(r.banks.find((b) => b.bank === 'killstreaks')!.unchecked).toBe(0);
     expect(r.banks.find((b) => b.bank === 'hats')!.lookFor).toHaveLength(5);
   });
 

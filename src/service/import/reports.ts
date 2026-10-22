@@ -44,6 +44,8 @@ function cleanItem(it: ImportReportItem): ImportReportItem {
     sku: scrubOrNull(it.sku, 120),
     warnings: it.warnings.slice(0, 20).map((w) => scrubReportText(w, 160)),
   };
+  // 0.8 (LC-6): the card's data-bot attribute, when the parser read one (an id-length digit run becomes '#').
+  if (it.dataBot !== undefined) out.dataBot = scrubOrNull(it.dataBot, 16);
   if (it.cells) out.cells = it.cells.slice(0, 12).map((c) => scrubReportText(c, 60));
   if (it.limitAttrs) {
     out.limitAttrs = {
@@ -74,7 +76,7 @@ export interface ImportReportInput {
   countsOnly?: boolean;
 }
 
-const ZERO_COUNTS: ImportReport['counts'] = { dataDefindex: 0, cards: 0, rows: 0, selectedSkipped: 0, duplicates: 0, lookalikes: 0 };
+const ZERO_COUNTS: ImportReport['counts'] = { dataDefindex: 0, cards: 0, rows: 0, selectedSkipped: 0, duplicates: 0, lookalikes: 0, reserved: 0, notTradable: 0 };
 
 let ring: ImportReport[] = [];
 let nextId = 1;

@@ -14,9 +14,13 @@ import type {
   SchemaItemRow,
 } from '../contracts';
 import { bankStockThinning, type BankStockThinSave } from '../../shared/bankStock';
+import { opportunityCopyKey } from '../../shared/copyExtras';
 import { cleanCategoryCounts } from '../../shared/market';
 import { SCRAPTF_CHANGES_DEFAULT_LIMIT, SCRAPTF_EVENTS_MAX_AGE_MS, SCRAPTF_ITEM_EVENTS } from '../../shared/scraptfHistory';
-import { CATEGORIES, IMPORT_ORIGINS, SCRAPTF_BANK_IDS, SCRAPTF_CHANGE_KINDS } from '../../shared/types';
+import { HOLDING_DETAIL_MAX_MARKS, HOLDING_MARKS_MAX_AGE_MS, HOLDING_MARKS_PER_BASE_MAX } from '../../shared/holdingAdvice';
+import { feePatchOf } from '../../shared/journal';
+import { WATCH_ANY_COPY_SENTINEL, WATCH_COPY_TAKEN } from '../../shared/watches';
+import { CATEGORIES, IMPORT_ORIGINS, JOURNAL_SIDES, SCRAPTF_BANK_IDS, SCRAPTF_CHANGE_KINDS, SCRAPTF_LIST_CRAFTS } from '../../shared/types';
 import type {
   BankNewestSave,
   BankStockSave,
@@ -24,13 +28,13 @@ import type {
   CommunityRow,
   ConfidenceLevel,
   GroupBy,
+  HoldingMark,
   ImportBatch,
   ImportOrigin,
   ImportPageKind,
   InputKind,
   Intent,
   JournalEntry,
-  JournalSide,
   KeyPriceQuote,
   KeyPriceSource,
   Listing,
@@ -52,6 +56,7 @@ import type {
   ScraptfChangeKind,
   ScraptfEventStored,
   ScraptfListStored,
+  ScraptfWatch,
   SpecialAttrs,
   UnixMs,
 } from '../../shared/types';
@@ -73,7 +78,6 @@ const CONFIDENCE_LEVELS: readonly ConfidenceLevel[] = ['high', 'medium', 'low'];
 const PROFIT_TIERS: readonly ProfitTier[] = ['key', 'ref10', 'ref2', 'small', 'loss', 'none'];
 const STATUSES: readonly OpportunityStatus[] = ['profitable', 'below-threshold', 'unprofitable', 'no-buyers'];
 const EVENT_KINDS: readonly OpportunityEventKind[] = ['appeared', 'changed', 'gone', 'notified'];
-const JOURNAL_SIDES: readonly JournalSide[] = ['buy', 'sell'];
 const PAGE_KINDS: readonly ImportPageKind[] = ['buy', 'unusuals', 'items-list', 'unknown'];
 const EFFECT_TYPES: readonly EffectRow['type'][] = ['cosmetic', 'weapon', 'taunt', 'other'];
 
@@ -82,6 +86,8 @@ const META_SCHEMA_ETAG = 'schema.etag';
 
 const EVENTS_DEFAULT_LIMIT = 200;
 const EVENTS_MAX_LIMIT = 5000;
+/** 0.8 (H1): Repo.holdingMarks reads at most this many runs per call. */
+const HOLDING_MARKS_MAX_LIMIT = 5000;
 const GENERIC_MAX_LIMIT = 100_000;
 
 function num(v: Out, fallback = 0): number {
@@ -167,6 +173,18 @@ function requireId(field: string, v: unknown): number {
   return v;
 }
 
+/** 0.8: a finite number of 0 or more (a journal fee part, a watch target). */
+function requireNonNeg(field: string, v: unknown): number {
+  const n = requireFinite(field, v);
+  if (n < 0) throw new TypeError(`${field} must be zero or more`);
+  return n;
+}
+
+/** 0.8 (J2): one part of a recorded fee; absent reads 0 (the other part was given). */
+function feeNum(field: string, v: unknown): number {
+  return v === undefined ? 0 : requireNonNeg(field, v);
+}
+
 function clampLimit(v: unknown, fallback: number, max: number): number {
   if (typeof v !== 'number' || !Number.isFinite(v)) return fallback;
   return Math.min(max, Math.max(0, Math.floor(v)));
@@ -245,6 +263,9 @@ const ruleFilterSchema = z.looseObject({
   qualities: z.array(z.number()).optional(),
   craftable: z.boolean().nullable().optional(),
   australium: z.boolean().nullable().optional(),
+  // 0.7.4 (F79)
+  festive: z.boolean().nullable().optional(),
+  elevated: z.boolean().nullable().optional(),
   killstreak: z.array(z.number()).optional(),
   hasEffect: z.boolean().nullable().optional(),
   defindexes: z.array(z.number()).optional(),
@@ -461,7 +482,26 @@ function oppParams(o: Opportunity): SqlValue[] {
   ];
 }
 
+/**
+ * 0.7.4 (F66): every opportunity read, with its price input's SKU and extras (one rowid seek each into
+ * scrap_prices; NULL for a rule or a price since deleted), so rowToOpportunity derives Opportunity.copyKey
+ * without a stored column. Scalar subqueries, so oppWhere / oppOrder keep their unqualified columns.
+ */
+const OPP_PRICE_ID = "(CASE WHEN opportunities.input_ref LIKE 'price:%' THEN CAST(substr(opportunities.input_ref, 7) AS INTEGER) END)";
+const OPP_SELECT =
+  `SELECT opportunities.*, (SELECT cp.sku FROM scrap_prices cp WHERE cp.id = ${OPP_PRICE_ID}) AS copy_sku, ` +
+  `(SELECT cp.special FROM scrap_prices cp WHERE cp.id = ${OPP_PRICE_ID}) AS copy_special FROM opportunities`;
+
+/** 0.7.4 (F66): Opportunity.copyKey from OPP_SELECT's price columns; absent for a plain copy, a rule or no price row. */
+function copyKeyOfRow(r: SqlRow): string {
+  const sku = r['copy_sku'];
+  if (typeof sku !== 'string' || str(r['input_kind']) === 'rule') return '';
+  const special = r['copy_special'] === null || r['copy_special'] === undefined ? null : parseSpecial(r['copy_special']);
+  return opportunityCopyKey(sku, special);
+}
+
 function rowToOpportunity(r: SqlRow): Opportunity {
+  const copyKey = copyKeyOfRow(r);
   return {
     key: str(r['key']),
     sku: str(r['sku']),
@@ -469,6 +509,7 @@ function rowToOpportunity(r: SqlRow): Opportunity {
     category: oneOf(r['category'], CATEGORIES, 'other'),
     inputRef: str(r['input_ref']),
     inputKind: oneOf(r['input_kind'], INPUT_KINDS, 'user'),
+    ...(copyKey !== '' ? { copyKey } : {}),
     costKeys: num(r['cost_keys']),
     costScrapRaw: num(r['cost_scrap_raw']),
     costScrap: num(r['cost_scrap']),
@@ -557,6 +598,8 @@ function rowToRule(r: SqlRow): PriceRule {
 }
 
 function rowToJournal(r: SqlRow): JournalEntry {
+  const feeKeys = numOrNull(r['fee_keys']);
+  const feeScrap = numOrNull(r['fee_scrap']);
   return {
     id: num(r['id']),
     ts: num(r['ts']),
@@ -568,6 +611,25 @@ function rowToJournal(r: SqlRow): JournalEntry {
     scrap: num(r['scrap']),
     keyPriceScrap: num(r['key_price_scrap']),
     note: strOrNull(r['note']),
+    // 0.8 (J2): NULL in both is not recorded, and the row then has no fee fields
+    ...(feeKeys !== null || feeScrap !== null ? { feeKeys: feeKeys ?? 0, feeScrap: feeScrap ?? 0 } : {}),
+  };
+}
+
+/** 0.8 (G1): a stored watch; remind_at (reserved for T9) is not read. */
+function rowToWatch(r: SqlRow): ScraptfWatch {
+  return {
+    id: num(r['id']),
+    sku: str(r['sku']),
+    specialKey: strOrNull(r['special_key']),
+    name: str(r['name']),
+    maxCostKeys: num(r['max_cost_keys']),
+    maxCostScrap: numOrNull(r['max_cost_scrap']),
+    minProfitScrap: numOrNull(r['min_profit_scrap']),
+    onRestock: bool(r['on_restock']),
+    enabled: bool(r['enabled']),
+    createdAt: num(r['created_at']),
+    updatedAt: num(r['updated_at']),
   };
 }
 
@@ -604,11 +666,14 @@ function rowToCommunity(r: SqlRow): CommunityRow {
 }
 
 function rowToKeyQuote(r: SqlRow): KeyPriceQuote {
+  // 0.7.4 (F71, migration V14): NULL (a quote stored before it, or a source that gave no time) reads as absent.
+  const priceAt = numOrNull(r['price_at']);
   return {
     source: oneOf(r['source'], KEY_SOURCES, 'manual'),
     buyScrap: numOrNull(r['buy_scrap']),
     sellScrap: numOrNull(r['sell_scrap']),
     observedAt: num(r['observed_at']),
+    ...(priceAt !== null ? { priceAt } : {}),
   };
 }
 
@@ -669,6 +734,10 @@ function rowToScraptfList(r: SqlRow): ScraptfListStored {
     stockLimit: numOrNull(r['stock_limit']),
     batchId: num(r['batch_id']),
     observedAt: num(r['observed_at']),
+    // 0.7.4 (V14): an unknown value (damage, a newer build's) reads as unproven.
+    craft: oneOf(r['craft'], SCRAPTF_LIST_CRAFTS, 'any'),
+    // 0.7.4 (V14, F60): the page it was read on; '' (not known) is left out.
+    ...(typeof r['page'] === 'string' && r['page'] !== '' ? { page: str(r['page']) } : {}),
   };
 }
 
@@ -688,6 +757,8 @@ function rowToBankStock(r: SqlRow): BankStockStored {
     costScrap,
     stock: numOrNull(r['stock']),
     assetId: strOrNull(r['asset_id']),
+    // 0.7.4 (V14): the /items list's rows only; a card's NULL is left out, an unknown value reads as unproven.
+    ...(r['craft'] === null || r['craft'] === undefined ? {} : { craft: oneOf(r['craft'], SCRAPTF_LIST_CRAFTS, 'any') }),
   };
 }
 
@@ -720,6 +791,53 @@ function rowToScraptfEvent(r: SqlRow): ScraptfEventStored[] {
   ];
 }
 
+/**
+ * 0.8 (H1): a stored exit run. Each price side is both or neither, as bank_stock: a side whose metal is NULL reads
+ * null for its keys too. The 0/1 flags read as booleans, NULL as null.
+ */
+function rowToHoldingMark(r: SqlRow): HoldingMark {
+  const revMetal = numOrNull(r['rev_metal_scrap']);
+  const bestMetal = numOrNull(r['best_metal_scrap']);
+  const nextMetal = numOrNull(r['next_metal_scrap']);
+  const askMetal = numOrNull(r['ask_metal_scrap']);
+  const paysScrap = numOrNull(r['scraptf_pays_scrap']);
+  return {
+    id: num(r['id']),
+    baseSku: str(r['base_sku']),
+    fromAt: num(r['from_at']),
+    toAt: num(r['to_at']),
+    revKeys: revMetal === null ? null : num(r['rev_keys']),
+    revMetalScrap: revMetal,
+    revIsBot: boolOrNull(r['rev_is_bot']),
+    revVerified: boolOrNull(r['rev_verified']),
+    bestKeys: bestMetal === null ? null : num(r['best_keys']),
+    bestMetalScrap: bestMetal,
+    nextKeys: nextMetal === null ? null : num(r['next_keys']),
+    nextMetalScrap: nextMetal,
+    buyerCount: num(r['buyer_count']),
+    verifiedBuyerCount: numOrNull(r['verified_buyer_count']),
+    askKeys: askMetal === null ? null : num(r['ask_keys']),
+    askMetalScrap: askMetal,
+    askCount: numOrNull(r['ask_count']),
+    scraptfPaysKeys: paysScrap === null ? null : num(r['scraptf_pays_keys']),
+    scraptfPaysScrap: paysScrap,
+    keyScrap: numOrNull(r['key_scrap']),
+  };
+}
+
+/** 0.8 (H1): a side's metal to bind, whole scrap; NULL when not finite (the side then had nothing). */
+function bindMetalOrNull(v: unknown): number | null {
+  return typeof v === 'number' && Number.isFinite(v) ? Math.round(v) : null;
+}
+
+const HOLDING_MARK_INSERT =
+  'INSERT INTO holding_marks (base_sku, from_at, to_at, rev_keys, rev_metal_scrap, rev_is_bot, rev_verified, best_keys, best_metal_scrap, ' +
+  'next_keys, next_metal_scrap, buyer_count, verified_buyer_count, ask_keys, ask_metal_scrap, ask_count, scraptf_pays_keys, scraptf_pays_scrap, key_scrap) ' +
+  `VALUES (${placeholders(19)})`;
+
+/** 0.8 (G1): one copy's watch; a NULL special key (every copy) compares as '*', as the unique index does. */
+const WATCH_COPY = "sku = ? AND IFNULL(special_key, '*') = IFNULL(?, '*')";
+
 function rowToRequestLog(r: SqlRow): RequestLogRow {
   return {
     ts: num(r['ts']),
@@ -743,12 +861,24 @@ const OPP_UPSERT = upsertSql('opportunities', OPP_COLS, ['key']);
 const SCRAPTF_LIST_UPSERT =
   upsertSql(
     'scraptf_list',
-    ['sku', 'name', 'sells_keys', 'sells_scrap', 'pays_keys', 'pays_scrap', 'stock', 'stock_limit', 'batch_id', 'observed_at'],
+    ['sku', 'name', 'sells_keys', 'sells_scrap', 'pays_keys', 'pays_scrap', 'stock', 'stock_limit', 'batch_id', 'observed_at', 'craft', 'page'],
     ['sku'],
   ) + ' WHERE excluded.observed_at >= scraptf_list.observed_at';
+/**
+ * 0.7.4 Repo.bankStockNewestBankOf: the bank of one SKU's newest bank stock row outside the list and
+ * /unusuals, by save time then batch id. Walks the kept saves (bank_stock_saves, one row each) with one
+ * primary-key seek (batch_id, sku) per save: bank_stock has no index on sku alone, which would slow every
+ * thinning delete (measured: the 301st-save prune of test/db/bankStockThinPerf.test.ts went from under
+ * 100 ms to about 190 ms), so importSavedPage asks once per SKU per import (homeBankOf's memo).
+ */
+const BANK_STOCK_NEWEST_BANK =
+  'SELECT s.bank AS bank, (CASE WHEN ib.file_mtime > 0 THEN ib.file_mtime ELSE ib.imported_at END) AS saved_at, s.batch_id AS batch_id ' +
+  "FROM bank_stock_saves s CROSS JOIN import_batches ib ON ib.id = s.batch_id WHERE s.bank NOT IN ('list', 'unusuals') " +
+  'AND EXISTS (SELECT 1 FROM bank_stock b WHERE b.batch_id = s.batch_id AND b.sku = ?) ' +
+  'ORDER BY saved_at DESC, s.batch_id DESC LIMIT 1';
 const BANK_STOCK_INSERT =
-  'INSERT INTO bank_stock (batch_id, bank, sku, special_key, name, cost_keys, cost_scrap, stock, asset_id, page) ' +
-  'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(batch_id, sku, special_key) DO NOTHING';
+  'INSERT INTO bank_stock (batch_id, bank, sku, special_key, name, cost_keys, cost_scrap, stock, asset_id, page, craft) ' +
+  'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(batch_id, sku, special_key) DO NOTHING';
 /** bank_stock.page longer than this is clipped (the parser clips it already: a page key is a short path). */
 const BANK_STOCK_PAGE_MAX_CHARS = 200;
 // The save queries below read bank_stock_saves first and seek each batch: CROSS JOIN keeps that order
@@ -919,6 +1049,21 @@ export function createRepo(db: SqliteDb): Repo {
     return r ? rowToRule(r) : null;
   };
 
+  const getJournal = (id: number): JournalEntry | null => {
+    const r = get('SELECT * FROM journal WHERE id = ?', bindNum(id, -1));
+    return r ? rowToJournal(r) : null;
+  };
+
+  const getWatch = (id: number): ScraptfWatch | null => {
+    const r = get('SELECT * FROM scraptf_watches WHERE id = ?', bindNum(id, -1));
+    return r ? rowToWatch(r) : null;
+  };
+
+  const findWatch = (sku: string, specialKey: string | null): ScraptfWatch | null => {
+    const r = get(`SELECT * FROM scraptf_watches WHERE ${WATCH_COPY}`, String(sku), bindStrOrNull(specialKey));
+    return r ? rowToWatch(r) : null;
+  };
+
   const repo: Repo = {
     path: db.path,
 
@@ -1063,14 +1208,28 @@ export function createRepo(db: SqliteDb): Repo {
     findSkuByBptfName(name) {
       const n = typeof name === 'string' ? name.trim() : '';
       if (!n) return null;
-      // Exact case first; the shortest SKU is the plain item (painted variants share the name).
+      // Exact case first; the shortest SKU is the plain item (painted variants share the name). 0.7.4 (F15):
+      // never by last_seen, so the answer does not move as the feed learns names.
       const r = db
         .prepare(
           'SELECT sku FROM bptf_names WHERE name = :name COLLATE NOCASE ' +
-            'ORDER BY (name = :name) DESC, length(sku) ASC, last_seen DESC, sku ASC LIMIT 1',
+            'ORDER BY (name = :name) DESC, length(sku) ASC, sku ASC LIMIT 1',
         )
         .get({ name: n });
       return r ? str(r['sku']) : null;
+    },
+
+    findSkusByBptfName(name, limit) {
+      const n = typeof name === 'string' ? name.trim() : '';
+      if (!n) return [];
+      // 0.7.4 (F15/F42/F72): every candidate, exact case first, then by SKU (schema.resolve picks among them).
+      const rows = db
+        .prepare(
+          'SELECT sku FROM bptf_names WHERE name = :name COLLATE NOCASE ' +
+            'ORDER BY (name = :name) DESC, sku ASC LIMIT :lim',
+        )
+        .all({ name: n, lim: clampLimit(limit, 16, 64) });
+      return rows.map((r) => str(r['sku'])).filter((s) => s !== '');
     },
 
     searchBptfNames(q, limit) {
@@ -1159,11 +1318,13 @@ export function createRepo(db: SqliteDb): Repo {
 
     upsertKeyQuote(q) {
       run(
-        upsertSql('key_prices', ['source', 'buy_scrap', 'sell_scrap', 'observed_at'], ['source']),
+        upsertSql('key_prices', ['source', 'buy_scrap', 'sell_scrap', 'observed_at', 'price_at'], ['source']),
         String(q.source),
         bindNumOrNull(q.buyScrap),
         bindNumOrNull(q.sellScrap),
         bindNum(q.observedAt),
+        // 0.7.4 (F71): unknown (absent) is stored as NULL, never as the fetch time.
+        bindNumOrNull(q.priceAt ?? null),
       );
     },
 
@@ -1184,6 +1345,13 @@ export function createRepo(db: SqliteDb): Repo {
 
     scrapPricesForSku(sku) {
       return all(`${PRICE_SELECT} WHERE sp.sku = ? ${PRICE_ORDER}`, sku).map(rowToScrapPrice);
+    },
+
+    importScrapPricesOfBank(bank, beforeAt) {
+      // 0.7.4: the bank's batches (V10 index on import_batches.bank), then their prices (scrap_prices_import_batch).
+      const b = bankOrNull(bank);
+      if (b === null) return [];
+      return all(`${PRICE_SELECT} WHERE sp.source = 'import' AND ib.bank = ? AND sp.observed_at < ? ${PRICE_ORDER}`, b, bindNum(beforeAt)).map(rowToScrapPrice);
     },
 
     upsertScrapPrice(input) {
@@ -1310,17 +1478,17 @@ export function createRepo(db: SqliteDb): Repo {
     },
 
     getOpportunity(key) {
-      const r = get('SELECT * FROM opportunities WHERE "key" = ?', key);
+      const r = get(`${OPP_SELECT} WHERE "key" = ?`, key);
       return r ? rowToOpportunity(r) : null;
     },
 
     allOpportunities() {
-      return all('SELECT * FROM opportunities ORDER BY "key" ASC').map(rowToOpportunity);
+      return all(`${OPP_SELECT} ORDER BY "key" ASC`).map(rowToOpportunity);
     },
 
     opportunitiesForSku(sku) {
       return all(
-        'SELECT * FROM opportunities WHERE sku = ? ORDER BY (profit_scrap IS NULL) ASC, profit_scrap DESC, "key" ASC',
+        `${OPP_SELECT} WHERE sku = ? ORDER BY (profit_scrap IS NULL) ASC, profit_scrap DESC, "key" ASC`,
         sku,
       ).map(rowToOpportunity);
     },
@@ -1339,7 +1507,7 @@ export function createRepo(db: SqliteDb): Repo {
           params.push(...group.params, ...keys);
         }
       }
-      let sql = `SELECT * FROM opportunities${w.sql} ORDER BY ${order}`;
+      let sql = `${OPP_SELECT}${w.sql} ORDER BY ${order}`;
       if (page) {
         sql += ' LIMIT ? OFFSET ?';
         params.push(pageInt(page.limit, 0), pageInt(page.offset, 0));
@@ -1352,13 +1520,26 @@ export function createRepo(db: SqliteDb): Repo {
       return num(get(`SELECT COUNT(*) AS n FROM opportunities${w.sql}`, ...w.params)?.['n']);
     },
 
-    opportunityGroupStats(q, by) {
+    opportunityGroupStats(q, by, useOrder) {
       const group = oppGroupExpr(by);
       if (!group) return [];
       const w = oppWhere(q);
+      // 0.7.4 (F27, F33; R27): copies of an item (one sku) on one revenue order (the engine's revenueOrderOf
+      // for useOrder) count once per group, at the best of the rows q matches: the stored 'shared-buyer' flag is
+      // set over every copy, so a filter hiding the best copy left the buyer counted zero times. The service
+      // stores base SKUs (priceRow), so sku is the item, as markSharedCopies groups it; rule rows are no copies
+      // (the engine flags price inputs only) and count alone.
+      const order = useOrder === 'best' || useOrder === 'instant' ? useOrder : 'conservative';
       return all(
-        `SELECT ${group.sql} AS k, COUNT(*) AS n, SUM(COALESCE(profit_scrap, 0)) AS p FROM opportunities${w.sql} GROUP BY k`,
+        `WITH f AS (SELECT ${group.sql} AS k, sku, input_kind AS ik, profit_scrap AS p, ` +
+          `CASE ? WHEN 'best' THEN best_order WHEN 'instant' THEN instant_order ELSE cons_order END AS ord FROM opportunities${w.sql}), ` +
+          `g AS (SELECT k, sku, p, CASE WHEN p IS NOT NULL AND ik <> 'rule' AND json_valid(ord) THEN json_extract(ord, '$.listingId') END AS oid FROM f) ` +
+          `SELECT k, SUM(n) AS n, SUM(p) AS p FROM (` +
+          `SELECT k, COUNT(*) AS n, MAX(p) AS p FROM g WHERE oid IS NOT NULL AND oid <> '' GROUP BY k, sku, oid ` +
+          `UNION ALL SELECT k, COUNT(*) AS n, SUM(COALESCE(p, 0)) AS p FROM g WHERE oid IS NULL OR oid = '' GROUP BY k` +
+          `) GROUP BY k`,
         ...group.params,
+        order,
         ...w.params,
       ).map((r) => ({ key: str(r['k']), count: num(r['n']), profitScrap: num(r['p']) }));
     },
@@ -1442,8 +1623,10 @@ export function createRepo(db: SqliteDb): Repo {
       const sku = requireText('sku', entry.sku);
       const scrap = requireFinite('scrap', entry.scrap);
       const keys = entry.keys === undefined ? 0 : requireFinite('keys', entry.keys);
+      // 0.8 (J2): either part given records the fee (the other 0); neither leaves both NULL (not recorded).
+      const recorded = entry.feeKeys !== undefined || entry.feeScrap !== undefined;
       const id = insertId(
-        'INSERT INTO journal (ts, side, venue, sku, name, keys, scrap, key_price_scrap, note) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+        'INSERT INTO journal (ts, side, venue, sku, name, keys, scrap, key_price_scrap, note, fee_keys, fee_scrap) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
         ts,
         entry.side,
         String(entry.venue ?? ''),
@@ -1453,14 +1636,135 @@ export function createRepo(db: SqliteDb): Repo {
         scrap,
         bindNum(entry.keyPriceScrap),
         bindStrOrNull(entry.note),
+        recorded ? feeNum('feeKeys', entry.feeKeys) : null,
+        recorded ? Math.round(feeNum('feeScrap', entry.feeScrap)) : null,
       );
       const r = get('SELECT * FROM journal WHERE id = ?', id);
       if (!r) throw new Error(`Journal entry ${id} vanished after insert`);
       return rowToJournal(r);
     },
 
+    getJournal,
+
+    updateJournal(id, patch) {
+      const sets: string[] = [];
+      const params: SqlValue[] = [];
+      if (patch.venue !== undefined) {
+        sets.push('venue = ?');
+        params.push(String(patch.venue));
+      }
+      if (patch.note !== undefined) {
+        sets.push('note = ?');
+        params.push(bindStrOrNull(patch.note));
+      }
+      // undefined leaves the fee, null clears it (not recorded), a fee sets both parts.
+      const fee = feePatchOf(patch);
+      if (fee !== undefined) {
+        sets.push('fee_keys = ?', 'fee_scrap = ?');
+        params.push(fee === null ? null : feeNum('feeKeys', fee.keys), fee === null ? null : Math.round(feeNum('feeScrap', fee.scrap)));
+      }
+      if (sets.length) run(`UPDATE journal SET ${sets.join(', ')} WHERE id = ?`, ...params, bindNum(id, -1));
+      return getJournal(id);
+    },
+
     deleteJournal(id) {
       run('DELETE FROM journal WHERE id = ?', bindNum(id, -1));
+    },
+
+    // ----- scrap.tf watches -----
+
+    listWatches() {
+      return all('SELECT * FROM scraptf_watches ORDER BY id ASC').map(rowToWatch);
+    },
+
+    getWatch,
+    findWatch,
+
+    countWatches() {
+      return count('scraptf_watches');
+    },
+
+    upsertWatch(w, now) {
+      const sku = requireText('sku', w.sku);
+      const at = requireFinite('now', now);
+      if (w.specialKey !== null && typeof w.specialKey !== 'string') throw new TypeError('specialKey must be a string or null');
+      // '*' is WATCH_COPY's every-copy stand-in: as a copy it would match (and overwrite) the base's any-copy watch.
+      if (w.specialKey === WATCH_ANY_COPY_SENTINEL) throw new TypeError("specialKey '*' is the every-copy stand-in; use null");
+      const maxCostKeys = requireNonNeg('maxCostKeys', w.maxCostKeys);
+      const maxCostScrap = w.maxCostScrap === null ? null : Math.round(requireNonNeg('maxCostScrap', w.maxCostScrap));
+      const minProfitScrap = w.minProfitScrap === null ? null : Math.round(requireNonNeg('minProfitScrap', w.minProfitScrap));
+
+      return db.transaction(() => {
+        const hasId = w.id !== undefined && w.id !== null;
+        const byId = hasId ? getWatch(requireId('id', w.id)) : null;
+        if (hasId && !byId) throw new Error(`Watch ${w.id} not found`);
+        // One watch per copy: an update may not take another watch's copy; an add of a watched copy updates it.
+        const same = findWatch(sku, w.specialKey);
+        if (byId && same && same.id !== byId.id) throw new Error(WATCH_COPY_TAKEN);
+        const target = byId ?? same;
+        const params: SqlValue[] = [sku, w.specialKey, String(w.name ?? ''), maxCostKeys, maxCostScrap, minProfitScrap, bindBool(w.onRestock), bindBool(w.enabled)];
+
+        let id: number;
+        if (target) {
+          id = target.id;
+          run(
+            'UPDATE scraptf_watches SET sku = ?, special_key = ?, name = ?, max_cost_keys = ?, max_cost_scrap = ?, min_profit_scrap = ?, on_restock = ?, enabled = ?, updated_at = ? WHERE id = ?',
+            ...params,
+            at,
+            id,
+          );
+        } else {
+          id = insertId(
+            'INSERT INTO scraptf_watches (sku, special_key, name, max_cost_keys, max_cost_scrap, min_profit_scrap, on_restock, enabled, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+            ...params,
+            at,
+            at,
+          );
+        }
+        const stored = getWatch(id);
+        if (!stored) throw new Error(`Watch ${id} vanished during upsert`);
+        return stored;
+      });
+    },
+
+    deleteWatch(id) {
+      run('DELETE FROM scraptf_watches WHERE id = ?', bindNum(id, -1));
+    },
+
+    restoreWatch(w, createdAt, updatedAt) {
+      const watchId = requireId('id', w.id);
+      const sku = requireText('sku', w.sku);
+      const created = requireFinite('createdAt', createdAt);
+      const updated = requireFinite('updatedAt', updatedAt);
+      if (w.specialKey !== null && typeof w.specialKey !== 'string') throw new TypeError('specialKey must be a string or null');
+      if (w.specialKey === WATCH_ANY_COPY_SENTINEL) throw new TypeError("specialKey '*' is the every-copy stand-in; use null");
+      const maxCostKeys = requireNonNeg('maxCostKeys', w.maxCostKeys);
+      const maxCostScrap = w.maxCostScrap === null ? null : Math.round(requireNonNeg('maxCostScrap', w.maxCostScrap));
+      const minProfitScrap = w.minProfitScrap === null ? null : Math.round(requireNonNeg('minProfitScrap', w.minProfitScrap));
+
+      return db.transaction(() => {
+        // A second Undo: the watch is back already.
+        const back = getWatch(watchId);
+        if (back) return back;
+        if (findWatch(sku, w.specialKey)) throw new Error(WATCH_COPY_TAKEN);
+        run(
+          'INSERT INTO scraptf_watches (id, sku, special_key, name, max_cost_keys, max_cost_scrap, min_profit_scrap, on_restock, enabled, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+          watchId,
+          sku,
+          w.specialKey,
+          String(w.name ?? ''),
+          maxCostKeys,
+          maxCostScrap,
+          minProfitScrap,
+          bindBool(w.onRestock),
+          bindBool(w.enabled),
+          created,
+          updated,
+        );
+        const stored = getWatch(watchId);
+        if (!stored) throw new Error(`Watch ${watchId} vanished during restore`);
+        return stored;
+      });
     },
 
     // ----- item schema -----
@@ -1604,6 +1908,10 @@ export function createRepo(db: SqliteDb): Repo {
               bindCountOrNull(r.stockLimit),
               bindNum(r.batchId),
               r.observedAt,
+              // 0.7.4: anything but a known value is stored unproven.
+              oneOf(r.craft, SCRAPTF_LIST_CRAFTS, 'any'),
+              // 0.7.4 (F60): the page it was read on, clipped as bank_stock.page ('' when not known).
+              typeof r.page === 'string' ? r.page.slice(0, BANK_STOCK_PAGE_MAX_CHARS) : '',
             ).changes,
           );
         }
@@ -1637,7 +1945,31 @@ export function createRepo(db: SqliteDb): Repo {
       return run('DELETE FROM scraptf_list WHERE observed_at < ?', bindNum(ts));
     },
 
+    deleteScraptfListRows(skus, beforeTs) {
+      const list = [...new Set((Array.isArray(skus) ? skus : []).filter((s): s is string => typeof s === 'string' && s !== ''))];
+      if (list.length === 0 || typeof beforeTs !== 'number' || !Number.isFinite(beforeTs)) return 0;
+      return db.transaction(() => {
+        let n = 0;
+        for (const part of chunk(list)) n += run(`DELETE FROM scraptf_list WHERE sku IN (${placeholders(part.length)}) AND observed_at < ?`, ...part, beforeTs);
+        return n;
+      });
+    },
+
     // ----- scrap.tf bank stock (F17) -----
+
+    bankStockNewestBankOf(skus) {
+      let best: { bank: ScraptfBank; savedAt: number; batchId: number } | null = null;
+      for (const sku of new Set(Array.isArray(skus) ? skus : [])) {
+        if (typeof sku !== 'string' || sku === '') continue;
+        const r = get(BANK_STOCK_NEWEST_BANK, sku);
+        const bank = r ? bankOrNull(r['bank']) : null;
+        if (!r || bank === null) continue;
+        const savedAt = num(r['saved_at']);
+        const batchId = num(r['batch_id']);
+        if (!best || savedAt > best.savedAt || (savedAt === best.savedAt && batchId > best.batchId)) best = { bank, savedAt, batchId };
+      }
+      return best?.bank ?? null;
+    },
 
     insertBankStock(batchId, bank, rows, page) {
       const id = requireId('batchId', batchId);
@@ -1665,6 +1997,8 @@ export function createRepo(db: SqliteDb): Repo {
               bindCountOrNull(r.stock),
               bindStrOrNull(r.assetId),
               pageKey,
+              // 0.7.4 (V14): the /items list's rows only; anything but a known value is stored unproven.
+              b === 'list' && r.craft !== undefined && r.craft !== null ? oneOf(r.craft, SCRAPTF_LIST_CRAFTS, 'any') : null,
             ).changes,
           );
         }
@@ -1820,6 +2154,88 @@ export function createRepo(db: SqliteDb): Repo {
     pruneScraptfEvents(now, maxAgeMs) {
       const maxAge = typeof maxAgeMs === 'number' && Number.isFinite(maxAgeMs) ? Math.max(0, maxAgeMs) : SCRAPTF_EVENTS_MAX_AGE_MS;
       return run('DELETE FROM scraptf_events WHERE at < ?', bindNum(now) - maxAge);
+    },
+
+    // ----- recorded exit runs (0.8 H1) -----
+
+    latestHoldingMarks(bases) {
+      const out = new Map<string, HoldingMark>();
+      for (const base of new Set(bases)) {
+        if (typeof base !== 'string' || base === '') continue;
+        // One seek on holding_marks_base_from per base.
+        const r = get('SELECT * FROM holding_marks WHERE base_sku = ? ORDER BY from_at DESC, id DESC LIMIT 1', base);
+        if (r) out.set(base, rowToHoldingMark(r));
+      }
+      return out;
+    },
+
+    insertHoldingMark(m) {
+      const base = requireText('baseSku', m.baseSku);
+      const fromAt = requireFinite('fromAt', m.fromAt);
+      const toAt = requireFinite('toAt', m.toAt);
+      // Both or neither per side: keys are bound NULL when that side's metal is not finite.
+      const side = (keys: unknown, metal: unknown): [number | null, number | null] => {
+        const metalScrap = bindMetalOrNull(metal);
+        return metalScrap === null ? [null, null] : [bindNum(keys), metalScrap];
+      };
+      return insertId(
+        HOLDING_MARK_INSERT,
+        base,
+        fromAt,
+        toAt,
+        ...side(m.revKeys, m.revMetalScrap),
+        bindBoolOrNull(m.revIsBot),
+        bindBoolOrNull(m.revVerified),
+        ...side(m.bestKeys, m.bestMetalScrap),
+        ...side(m.nextKeys, m.nextMetalScrap),
+        bindCountOrNull(m.buyerCount) ?? 0,
+        bindCountOrNull(m.verifiedBuyerCount),
+        ...side(m.askKeys, m.askMetalScrap),
+        bindCountOrNull(m.askCount),
+        ...side(m.scraptfPaysKeys, m.scraptfPaysScrap),
+        bindNumOrNull(m.keyScrap),
+      );
+    },
+
+    extendHoldingMark(id, toAt, counts) {
+      const at = requireFinite('toAt', toAt);
+      // MAX: a run's end never moves back. An existing row reports 1 change even when to_at stays.
+      if (!counts) return run('UPDATE holding_marks SET to_at = MAX(to_at, ?) WHERE id = ?', at, bindNum(id, -1)) > 0;
+      return (
+        run(
+          'UPDATE holding_marks SET to_at = MAX(to_at, ?), buyer_count = ?, verified_buyer_count = ?, ask_count = ? WHERE id = ?',
+          at,
+          bindCountOrNull(counts.buyerCount) ?? 0,
+          bindCountOrNull(counts.verifiedBuyerCount),
+          bindCountOrNull(counts.askCount),
+          bindNum(id, -1),
+        ) > 0
+      );
+    },
+
+    holdingMarks(baseSku, sinceTs, limit) {
+      if (typeof baseSku !== 'string' || baseSku === '') return [];
+      const lim = Math.max(1, clampLimit(limit, HOLDING_DETAIL_MAX_MARKS, HOLDING_MARKS_MAX_LIMIT));
+      return all(
+        'SELECT * FROM (SELECT * FROM holding_marks WHERE base_sku = ? AND to_at >= ? ORDER BY from_at DESC, id DESC LIMIT ?) ORDER BY from_at, id',
+        baseSku,
+        bindNum(sinceTs),
+        lim,
+      ).map(rowToHoldingMark);
+    },
+
+    pruneHoldingMarks(now, opts) {
+      const maxAge = typeof opts?.maxAgeMs === 'number' && Number.isFinite(opts.maxAgeMs) ? Math.max(0, opts.maxAgeMs) : HOLDING_MARKS_MAX_AGE_MS;
+      const perBase = typeof opts?.perBaseMax === 'number' && Number.isFinite(opts.perBaseMax) ? Math.max(0, Math.floor(opts.perBaseMax)) : HOLDING_MARKS_PER_BASE_MAX;
+      return db.transaction(() => {
+        const old = run('DELETE FROM holding_marks WHERE to_at < ?', bindNum(now) - maxAge);
+        // Each base's newest perBase runs are kept; the rest go, oldest first.
+        const over = run(
+          'DELETE FROM holding_marks WHERE id IN (SELECT id FROM (SELECT id, ROW_NUMBER() OVER (PARTITION BY base_sku ORDER BY from_at DESC, id DESC) AS rn FROM holding_marks) WHERE rn > ?)',
+          perBase,
+        );
+        return old + over;
+      });
     },
 
     // ----- request log -----

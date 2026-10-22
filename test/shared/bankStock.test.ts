@@ -37,7 +37,7 @@ import {
   type BankStockBankDiff,
   type BankStockBuySide,
 } from '../../src/shared/bankStock';
-import { maxCostFor } from '../../src/shared/ceiling';
+import { flipProfit, maxCostFor } from '../../src/shared/ceiling';
 import { DEFAULT_SETTINGS } from '../../src/shared/defaults';
 import type { BankStockRow, BankStockStored, OrderSummary } from '../../src/shared/types';
 
@@ -200,6 +200,24 @@ describe('bankStockRow', () => {
     expect(bankStockVerdict(null, 10, P)).toBe('no-buyers');
     expect(bankStockVerdict(-1, 10, P)).toBe('over');
   });
+
+  it('0.8 (PC-1): takes the price-move reserve off profit, and flips exactly up to Pay up to', () => {
+    const p = { ...P, exitReservePct: 0.05 };
+    const at = (cost: number, revenue: number) => {
+      const [d] = diffBankStock([s('378;6', { costScrap: cost })], null, K);
+      return bankStockRow(d!, { category: 'hats', buy: buy(revenue, { maxCostScrap: maxCostFor(revenue, p) }), keyScrap: K, profit: p })!;
+    };
+    // 100 - 40 - ceil(100 x 5%) = 55.
+    expect(at(40, 100).profitScrap).toBe(55);
+    for (const revenue of [20, 100, 333, 1200]) {
+      const ceiling = maxCostFor(revenue, p);
+      for (let cost = 1; cost <= revenue + 5; cost++) {
+        const r = at(cost, revenue);
+        expect(r.profitScrap).toBe(flipProfit(revenue, cost, p));
+        expect(r.verdict === 'flip', `revenue ${revenue} cost ${cost}`).toBe(ceiling !== null && cost <= ceiling);
+      }
+    }
+  });
 });
 
 describe('filters, counts, order and paging', () => {
@@ -225,7 +243,7 @@ describe('filters, counts, order and paging', () => {
 
   it('counts each chip over the whole bank', () => {
     const c = bankStockCounts(rows, 6);
-    expect(c).toEqual({ items: 6, inStock: 5, new: 2, gone: 1, cheaper: 1, pricier: 1, flips: rows.filter((r) => r.change !== 'gone' && r.verdict === 'flip').length, newFlips: 1, longListed: 0, dropped: 0 });
+    expect(c).toEqual({ items: 6, inStock: 5, new: 2, gone: 1, cheaper: 1, pricier: 1, flips: rows.filter((r) => r.change !== 'gone' && r.verdict === 'flip').length, newFlips: 1, longListed: 0, dropped: 0, dropping: 0, watched: 0 });
     expect(bankStockWhatsNew(c, T - HOUR)).toEqual({ new: 2, newFlips: 1, gone: 1, cheaper: 1, pricier: 1, since: T - HOUR });
     expect(bankStockWhatsNew(c, null)).toBeNull();
   });

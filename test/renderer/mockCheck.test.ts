@@ -174,6 +174,8 @@ describe('mockCheckResult agrees with the service (chooseCheckPrice, liveCheck.t
     stockLimit: 12,
     full: false,
     observedAt: T0 - 60_000,
+    // 0.7.4: proven the Craftable copy, so its price may be the check's (scraptfListCraftProven).
+    craft: 'craftable',
   };
   const stored = (over: Partial<ScrapPrice>): ScrapPrice => ({
     id: 1,
@@ -211,6 +213,12 @@ describe('mockCheckResult agrees with the service (chooseCheckPrice, liveCheck.t
     const fromList = run(parsed({ price: refPrice(18) }));
     expect(fromList.scraptfPaysScrap).toBe(25);
     expect(fromList.listAt).toBe(listRow.observedAt);
+  });
+
+  it("never takes a family row's price, as chooseCheckPrice (0.7.4): its pays and stock still show", () => {
+    const family = detail({ scraptfList: { ...listRow, craft: 'any' }, scrapPrices: [stored({ costScrap: 40 })] });
+    expect(run(parsed(), family)).toMatchObject({ price: { source: 'typed', scrapRaw: 40 }, scraptfPaysScrap: 25, stock: 3 });
+    expect(run(parsed(), detail({ scraptfList: { ...listRow, craft: 'any', match: 'family' } })).price).toBeNull();
   });
 
   it('a painted check never takes the list price (the list prices plain copies)', () => {

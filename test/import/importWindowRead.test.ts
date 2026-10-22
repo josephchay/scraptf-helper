@@ -137,9 +137,9 @@ function setup(schema: SchemaService = createStubSchema()): Harness {
   };
 }
 
-/** A result without what names or tells the save apart: its batch id, file name, origin and the window's flip counts. */
+/** A result without what names or tells the save apart: its batch id, file name, origin and the window's flip counts (0.8: droppedFlips too). */
 function sans(r: ImportResult) {
-  const { batchId: _id, fileName: _name, origin: _origin, newFlips: _flips, pageFlips: _pageFlips, topFlips: _topFlips, ...rest } = r;
+  const { batchId: _id, fileName: _name, origin: _origin, newFlips: _flips, pageFlips: _pageFlips, topFlips: _topFlips, droppedFlips: _dropped, ...rest } = r;
   return rest;
 }
 
@@ -250,8 +250,11 @@ describe('a read of the scrap.tf window imports exactly what a file save of the 
     const flips = f.stock.newFlips('hats', a.batchId).length;
     expect(flips).toBeGreaterThan(0);
     expect(b.newFlips).toBe(flips);
+    // 0.8 (G2): and the flips the read dropped under Pay up to, as bank stock says.
+    expect(b.droppedFlips).toBe(f.stock.droppedFlips('hats', a.batchId).length);
     // A file's result is as before 0.7: no flip count.
     expect('newFlips' in a).toBe(false);
+    expect('droppedFlips' in a).toBe(false);
   });
 
   it("pushes 'import.done' with the result, and 'import.batches' lists the batch with its origin", async () => {

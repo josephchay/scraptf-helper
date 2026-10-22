@@ -95,7 +95,8 @@ describe('PriceDB socket', () => {
     expect(t.prices.map((p) => p.sku)).toEqual(['5021;6', '15000;15;w1;pk14']);
     expect(t.deps.repo.getPricedb('15000;15;w1;pk14')).toMatchObject({ buyScrap: 46, sellScrap: 61 });
     expect(t.deps.repo.getPricedb('6522;255;td-25000')).toBeNull();
-    expect(t.deps.repo.keyQuotes()).toEqual([{ source: 'pricedb', buyScrap: 569, sellScrap: 581, observedAt: 1791968059 * 1000 }]);
+    // 0.7.4 (F71): with PriceDB's price time as priceAt.
+    expect(t.deps.repo.keyQuotes()).toEqual([{ source: 'pricedb', buyScrap: 569, sellScrap: 581, observedAt: 1791968059 * 1000, priceAt: 1791968059 * 1000 }]);
     const h = t.sockHealth();
     expect(h.detail).toContain('2 price updates');
     expect(h.detail).toContain('2 unreadable events');

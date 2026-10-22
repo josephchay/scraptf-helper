@@ -313,10 +313,12 @@ function withCounts(code: string, warning: string, n: number): string {
 /**
  * 0.7.1 (UX-3, ACT-5, F21-2): what the toolbar shows of an import's prices and flips: how many prices it
  * stored, the flips on sale on the page, and the best of them (its SKU, so a click opens the item; its name
- * from the app's own item data, cleaned and cut). Absent from an older service: left out.
+ * from the app's own item data, cleaned and cut). Absent from an older service: left out. 0.8 (G2): and the flips
+ * this read dropped under Pay up to (ImportResult.droppedFlips), when the service reported them.
  */
-function readFlipsOf(r: ImportResult): Pick<ScraptfWindowRead, 'stored' | 'pageFlips' | 'bestFlip'> {
-  const out: Pick<ScraptfWindowRead, 'stored' | 'pageFlips' | 'bestFlip'> = { stored: count(r.stored) };
+function readFlipsOf(r: ImportResult): Pick<ScraptfWindowRead, 'stored' | 'pageFlips' | 'bestFlip' | 'droppedFlips'> {
+  const out: Pick<ScraptfWindowRead, 'stored' | 'pageFlips' | 'bestFlip' | 'droppedFlips'> = { stored: count(r.stored) };
+  if (typeof r.droppedFlips === 'number') out.droppedFlips = count(r.droppedFlips);
   if (typeof r.pageFlips !== 'number') return out;
   out.pageFlips = count(r.pageFlips);
   const top = Array.isArray(r.topFlips) ? r.topFlips[0] : undefined;
@@ -324,6 +326,17 @@ function readFlipsOf(r: ImportResult): Pick<ScraptfWindowRead, 'stored' | 'pageF
   const ok = top !== undefined && typeof top.sku === 'string' && top.sku.length <= 200 && SKU_SHAPE.test(top.sku) && name !== '' && Number.isFinite(top.profitScrap);
   out.bestFlip = ok ? { sku: top.sku, name, profitScrap: Math.round(top.profitScrap) } : null;
   return out;
+}
+
+const STOCK_SAVES: ReadonlySet<string> = new Set(['written', 'partial', 'unsettled', 'none']);
+
+/**
+ * 0.7.4 (F53): what the import did with the page's bank stock, so the toolbar can say a look cut short stored
+ * prices but no stock save. A fixed value from the service's own result; anything else is left out.
+ */
+function readStockSaveOf(r: ImportResult): Pick<ScraptfWindowRead, 'stockSave'> {
+  const s = r.stockSave;
+  return typeof s === 'string' && STOCK_SAVES.has(s) ? { stockSave: s } : {};
 }
 
 /**
@@ -1011,6 +1024,7 @@ export function createScraptfWindowManager(deps: ScraptfWindowDeps): ScraptfWind
       newFlips: count(r.newFlips),
       warning: importWarning(r, snap.notice),
       ...readFlipsOf(r),
+      ...readStockSaveOf(r),
     };
     m.read = read;
     log.info(`scrap.tf window: read ${read.path} (${read.items} items, ${trigger}${settled ? '' : ', unsettled'})`);

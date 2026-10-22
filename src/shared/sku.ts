@@ -145,6 +145,21 @@ export function baseSku(sku: string | SkuObject): string {
   return fromObject({ ...obj, paint: null });
 }
 
+/**
+ * 0.7.4 (F08/F43/F69): an unusual skin (a paintkit and an effect) as backpack.tf's buyers key it:
+ * Unusual (5) plus the effect, strange as quality2 11 ("199;5;u702;w1;pk232", "203;5;u703;w3;pk58;strange").
+ * The live feed sent 1469 of its 1477 unusual-skin orders so; the rest came as Strange (11) plus the effect
+ * (market_name "Strange X"), the same item, and before 0.7.4 this app keyed them Decorated (15) plus the
+ * effect, a form no order uses. Those forms become this one; every other object is returned as it is.
+ */
+export function canonicalUnusualSkin(obj: SkuObject): SkuObject {
+  if (obj.paintkit === null || obj.effect === null) return obj;
+  if (obj.quality !== 5 && obj.quality !== 11 && obj.quality !== 15) return obj;
+  const strange = obj.quality === 11 || obj.quality2 === 11;
+  if (obj.quality === 5 && obj.quality2 === (strange ? 11 : null)) return obj;
+  return { ...obj, quality: 5, quality2: strange ? 11 : null };
+}
+
 /** Rough syntactic check: "<int>;<int>" followed by known-looking tokens. */
 export function looksLikeSku(text: string): boolean {
   return /^\d+;\d+(;[a-z0-9-]+)*$/i.test(text.trim());

@@ -145,12 +145,13 @@ describe("parseCheckText: scrap.tf's kit titles (real schema)", () => {
     }
   });
 
-  it('refuses a learned name that would read the kit at another tier, as the import does', async () => {
+  it('never reads the kit at another tier through a mis-tiered learned name, as the import does', async () => {
     const deps = schemaDeps(schemaRoute());
     deps.repo.upsertBptfNames([{ sku: '6526;6;uncraftable;kt-1;td-205', name: 'Non-Craftable Professional Killstreak Rocket Launcher Kit', marketName: null, lastSeen: 1 }]);
     const learned = createSchemaService(deps);
     await learned.init();
-    expect(parseWith(learned, 'Professional Rocket Launcher Kit').ok).toBe(false);
+    // 0.7.4 (F72): the schema's exact parse comes first, so the learned kt-1 row no longer decides (it was refused before).
+    expect(ok(parseWith(learned, 'Professional Rocket Launcher Kit'))).toMatchObject({ item: { sku: '6526;6;uncraftable;kt-3;td-205' } });
   });
 
   it('asks the resolver a second time only for text in the kit form, within the one budget', () => {
@@ -310,7 +311,8 @@ describe('the Live check on a kit (real schema, repo, list cache and market inde
       reason: null,
       price: { keys: 37, scrapRaw: 360, valueScrap: 37 * h.K() + 360, source: 'clipboard' },
     });
-    const row: ScraptfListStored = { sku: KIT, name: 'Professional Rocket Launcher Kit', sellsKeys: 36, sellsScrap: 0, paysKeys: 30, paysScrap: 0, stock: 1, stockLimit: 5, batchId: 1, observedAt: T0 - 3 * MIN };
+    // 0.7.4: a kit row is keyed Non-Craftable as the import keys every kit, so it is proven to price that copy.
+    const row: ScraptfListStored = { sku: KIT, name: 'Professional Rocket Launcher Kit', sellsKeys: 36, sellsScrap: 0, paysKeys: 30, paysScrap: 0, stock: 1, stockLimit: 5, batchId: 1, observedAt: T0 - 3 * MIN, craft: 'uncraftable' };
     h.repo.upsertScraptfList([row]);
     h.list.refresh();
     expect(h.check('Professional Rocket Launcher Kit')).toMatchObject({ sku: KIT, price: { keys: 36, source: 'list' }, stock: 1, stockLimit: 5, listAt: T0 - 3 * MIN, reason: null });

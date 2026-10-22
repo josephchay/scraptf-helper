@@ -2,22 +2,30 @@
 // cell text and tooltips, the Record sale prefill, the buyer's profile link and
 // the live flash; and the better exit through scrap.tf's saved price list (F14).
 // The figures themselves come from the service (or the mock) through the shared
-// rules in src/shared/holdings.ts; nothing is recomputed here.
+// rules in src/shared/holdings.ts; nothing is recomputed here. 0.8 (H3, H4, H6): the
+// advice's words (the advice itself is src/shared/holdingAdvice.ts), the ask side and the references.
 
+import { buyerPresenceText } from '../shared/buyerSeen';
 import { frictionOf } from '../shared/ceiling';
-import { SCRAPTF_LIST_FRESH_MS, scraptfListFresh } from '../shared/scraptfList';
+import { HOLDING_LIST_UNDERCUT_SCRAP } from '../shared/holdingAdvice';
+import { TYPICAL_HOLD_MIN_ITEM } from '../shared/journal';
+import { SCRAPTF_LIST_FAMILY_LABEL, SCRAPTF_LIST_FRESH_MS, scraptfListFresh } from '../shared/scraptfList';
 import { HOLDING_EXIT_VENUES } from '../shared/types';
-import type { HoldingRow, HoldingStatus, HoldingsQuery, HoldingsResult, OrderSummary, ProfitSettings, Scrap, UnixMs } from '../shared/types';
-import { DASH, fmtAge, fmtAgo, fmtDateTime, fmtInt, fmtMoney, fmtPct, fmtSignedMoney, type Tone } from './format';
+import type { HoldingAdvice, HoldingAdviceKind, HoldingAdviceReason, HoldingAskSide, HoldingRefs, HoldingRow, HoldingStatus, HoldingsQuery, HoldingsResult, OrderSummary, ProfitSettings, Scrap, TypicalHold, UnixMs } from '../shared/types';
+import { DASH, fmtAge, fmtAgo, fmtDate, fmtDateTime, fmtHold, fmtInt, fmtMoney, fmtPct, fmtRefOnly, fmtSignedMoney, type Tone } from './format';
 import { SCRAPTF_SALE_NOTE, buyerProfileUrls, scraptfSaleInit } from './itemMenuModel';
 import { splitAtKey, type RecordTradeInit } from './recordTradeModel';
 
 /** Same cap as 'holdings.list' (zod: search ≤ 200). */
 export const HOLDINGS_MAX_SEARCH_CHARS = 200;
 
+/**
+ * 0.8 (H6, D11): the status pills describe thresholds only ('Clears target', 'Below target'); whether to sell, list
+ * or hold is the Advice column's (ADVICE_LABELS), so a row never shows two answers that contradict each other.
+ */
 export const HOLDING_STATUS_LABELS: Readonly<Record<HoldingStatus, string>> = {
-  sell: 'Sell now',
-  hold: 'Hold',
+  sell: 'Clears target',
+  hold: 'Below target',
   loss: 'Loss',
   'no-buyers': 'No buyers',
 };
@@ -31,8 +39,8 @@ export const HOLDING_STATUS_TONES: Readonly<Record<HoldingStatus, Tone>> = {
 
 // Judged on the better exit (F14): a backpack.tf buyer, or scrap.tf when your saved price list pays more.
 export const HOLDING_STATUS_HELP: Readonly<Record<HoldingStatus, string>> = {
-  sell: 'Selling the oldest unit at the better exit now (this buyer, or scrap.tf when your saved price list pays more) clears your profit thresholds.',
-  hold: 'A sale now makes a profit, but less than your thresholds ask for.',
+  sell: 'Selling the oldest unit at the better exit now (this buyer, or scrap.tf when your saved price list pays more) clears your profit thresholds. The Advice column weighs it against asks and what was recorded.',
+  hold: 'A sale now makes a profit, but less than your thresholds ask for. This is not advice to hold: the Advice column says whether anything recorded points higher.',
   // 0.7.3: Loss is profit after friction ≤ 0, so an exit a little over the cost can still be one.
   loss: 'Selling the oldest unit at the best exit now (a backpack.tf buyer or scrap.tf) makes no profit: it pays no more than that unit cost you, plus your friction per trade if you set one.',
   'no-buyers': 'No eligible backpack.tf buy order for this item in the live book, and no usable scrap.tf price from your saved list.',
@@ -111,18 +119,39 @@ export function heldForText(r: Pick<HoldingRow, 'heldSince'>, now: UnixMs): stri
   return r.heldSince > 0 ? fmtAge(now - r.heldSince) : DASH;
 }
 
-export function heldForTitle(r: Pick<HoldingRow, 'heldSince'>): string | undefined {
-  return r.heldSince > 0 ? `Oldest unit bought ${fmtDateTime(r.heldSince)}` : undefined;
+/**
+ * 0.8 (H5): the user's own habit, never a forecast: the median time between a logged buy and its logged sale,
+ * over this item's sales ('item') or every sale ('all'), and how many units still held the median leaves out.
+ */
+export function typicalHoldText(t: TypicalHold): string {
+  const held = t.stillHeld > 0 ? `; ${t.stillHeld} still held ${t.stillHeld === 1 ? 'is' : 'are'} not counted` : '';
+  // fmtHold: a sale logged in its buy's own minute holds 0, which fmtAge words as "now".
+  return t.scope === 'item'
+    ? `Your sales of this item came a median ${fmtHold(t.medianMs)} after the buy (${t.count} sales${held}).`
+    : `Your sales came a median ${fmtHold(t.medianMs)} after the buy (${t.count} sales; fewer than ${TYPICAL_HOLD_MIN_ITEM} of this item${held}).`;
+}
+
+/** The Held for cell's tooltip: the oldest unit's buy and (0.8, H5) the user's typical hold when there is one. */
+export function heldForTitle(r: Pick<HoldingRow, 'heldSince'> & Partial<Pick<HoldingRow, 'typicalHold'>>): string | undefined {
+  if (!(r.heldSince > 0)) return undefined;
+  const oldest = `Oldest unit bought ${fmtDateTime(r.heldSince)}`;
+  return r.typicalHold ? `${oldest}. ${typicalHoldText(r.typicalHold)}` : oldest;
 }
 
 export function buyerName(o: Pick<OrderSummary, 'userName' | 'steamid' | 'isBot'>): string {
   return o.userName || (o.isBot ? 'Bot' : 'Human');
 }
 
-/** Tooltip for "Sells now for": the buyer you would sell to, and the other picks. */
+/**
+ * Tooltip for "Sells now for": the buyer you would sell to, and the other picks. 0.7.4 (F23): the buyer's
+ * online flag only while the order was seen in the last 2 h, else "last seen 4 d ago". 0.7.4 (F13): a buyer
+ * whose order nobody has confirmed for 24 h ('unverified') may be gone, and the service sends no "Sell:"
+ * notification on it until a snapshot or the live feed confirms it (holdings.ts check), which the tip says.
+ */
 export function holdingSellsForTitle(
   r: Pick<HoldingRow, 'revenueScrap' | 'bestScrap' | 'instantScrap' | 'revenueOrder' | 'buyerCount'> & Partial<Pick<HoldingRow, 'flags'>>,
   keyScrap: Scrap | null,
+  now: UnixMs = Date.now(),
 ): string {
   const buyers = `${fmtInt(r.buyerCount)} ${r.buyerCount === 1 ? 'buyer' : 'buyers'} with eligible orders`;
   if (r.revenueScrap === null) {
@@ -132,23 +161,55 @@ export function holdingSellsForTitle(
     return `${buyers}, but no realistic bot order, and Revenue used for profit is Instant (bot orders only), so no sale price is assumed.`;
   }
   const o = r.revenueOrder;
-  const online = o ? (o.online === true ? 'online' : o.online === false ? 'offline' : 'online status unknown') : null;
-  const who = o ? ` to ${o.userName || o.steamid} (${o.isBot ? 'bot' : 'human'}, ${online})` : '';
-  return `Sells now for ${fmtMoney(r.revenueScrap, keyScrap)}${who}. Best ${fmtMoney(r.bestScrap, keyScrap)}, instant ${fmtMoney(r.instantScrap, keyScrap)}. ${buyers}.`;
+  const who = o ? ` to ${o.userName || o.steamid} (${o.isBot ? 'bot' : 'human'}, ${buyerPresenceText(o, now)})` : '';
+  const held = o?.flags.includes('unverified') ? ` ${HOLDING_UNVERIFIED_NOTE}` : '';
+  return `Sells now for ${fmtMoney(r.revenueScrap, keyScrap)}${who}. Best ${fmtMoney(r.bestScrap, keyScrap)}, instant ${fmtMoney(r.instantScrap, keyScrap)}. ${buyers}.${held}`;
 }
 
-/** Tooltip for "Profit now": the next unit, every unit, the margin, and what the status means. */
+/**
+ * 0.8 (H2, PC-2): the Buyers cell's hover: distinct buyers, how many were seen in the last 24 h, and what the next buyer
+ * pays if the one this row sells to fills or withdraws (HoldingRow.nextBuyer). Presence, never a fill chance.
+ */
+export function holdingBuyersTitle(
+  r: Pick<HoldingRow, 'buyerCount' | 'revenueScrap' | 'revenueOrder'> & Partial<Pick<HoldingRow, 'nextBuyer' | 'verifiedBuyerCount'>>,
+  keyScrap: Scrap | null,
+  now: UnixMs = Date.now(),
+): string {
+  const n = r.buyerCount;
+  if (!(n > 0)) return 'No eligible backpack.tf buy orders in the live book.';
+  const verified = r.verifiedBuyerCount;
+  const head = `${fmtInt(n)} distinct ${n === 1 ? 'buyer' : 'buyers'} with eligible orders${verified !== undefined ? `, ${fmtInt(verified)} of them seen in the last 24 h` : ''}.`;
+  const o = r.revenueOrder;
+  const next = r.nextBuyer;
+  if (!o || r.revenueScrap === null || next === undefined) return head;
+  if (next === null) return `${head} If ${buyerName(o)} fills or withdraws, no other usable buyer is left.`;
+  const d = next.valueScrap - r.revenueScrap;
+  const diff = d < 0 ? `${fmtMoney(-d, keyScrap)} less` : d > 0 ? `${fmtMoney(d, keyScrap)} more` : 'the same';
+  return `${head} If ${buyerName(o)} fills or withdraws, the next buyer (${next.isBot ? 'bot' : 'human'}, ${buyerPresenceText(next, now)}) pays ${fmtMoney(next.valueScrap, keyScrap)} (${diff}). Buy orders show demand, not sales.`;
+}
+
+/** 0.7.4 (F13): what "Sells now for" adds for a buyer nobody has confirmed for 24 h (the service holds its "Sell:" toast). */
+export const HOLDING_UNVERIFIED_NOTE =
+  'This order was not seen for over a day and may be gone: no "Sell:" notification for this buyer until a snapshot or the live feed confirms it (Refresh from backpack.tf in the item panel). A fresh scrap.tf/items price that clears your thresholds is still notified.';
+
+/**
+ * Tooltip for "Profit now": the next unit, every unit, the margin, and what the status means. 0.8 (H4): the stored
+ * references (refsText) come before the status help when the row has any, as context, never a sale price.
+ */
 export function profitNowTitle(
-  r: Pick<HoldingRow, 'status' | 'profitNowScrap' | 'profitAllScrap' | 'margin' | 'qty'> & Partial<Pick<HoldingRow, 'bestExit' | 'buyerCount' | 'flags'>>,
+  r: Pick<HoldingRow, 'status' | 'profitNowScrap' | 'profitAllScrap' | 'margin' | 'qty'> & Partial<Pick<HoldingRow, 'bestExit' | 'buyerCount' | 'flags' | 'refs'>>,
   keyScrap: Scrap | null,
   p: Pick<ProfitSettings, 'frictionScrap'> | null,
 ): string {
   const help = holdingStatusHelp(r);
-  if (r.profitNowScrap === null) return help;
+  const refs = refsText(r.refs, keyScrap);
+  if (r.profitNowScrap === null) return refs ? `${refs} ${help}` : help;
   const friction = p ? frictionOf(p) : 0;
   const to = r.bestExit === 'scraptf' ? ' to scrap.tf' : '';
   const parts = [`Selling the oldest unit${to} now: ${fmtSignedMoney(r.profitNowScrap, keyScrap)}${r.margin !== null ? ` (${fmtPct(r.margin)} margin)` : ''}${friction ? ` after ${fmtMoney(friction, keyScrap)} friction` : ''}.`];
   if (r.qty > 1 && r.profitAllScrap !== null) parts.push(`All ${fmtInt(r.qty)} units at this price: ${fmtSignedMoney(r.profitAllScrap, keyScrap)}.`);
+  // Before the help, so the title still ends with what the status means.
+  if (refs) parts.push(refs);
   parts.push(help);
   return parts.join(' ');
 }
@@ -158,7 +219,7 @@ export function profitNowTitle(
 // ---------------------------------------------------------------------------
 
 export type HoldingExitFields = Pick<HoldingRow, 'revenueScrap' | 'bestScrap' | 'instantScrap' | 'revenueOrder' | 'buyerCount'> &
-  Partial<Pick<HoldingRow, 'bestExit' | 'exitScrap' | 'scraptfPaysScrap' | 'scraptfFull' | 'scraptfListAt' | 'flags'>>;
+  Partial<Pick<HoldingRow, 'bestExit' | 'exitScrap' | 'scraptfPaysScrap' | 'scraptfFull' | 'scraptfListAt' | 'flags' | 'scraptfListFamily' | 'ask'>>;
 
 /**
  * The service judges a scrap.tf exit fresh when it builds the rows, and no push follows when the list
@@ -203,8 +264,17 @@ function finiteScrap(v: unknown): v is Scrap {
   return typeof v === 'number' && Number.isFinite(v);
 }
 
-/** The "Sells now for" cell: the better exit, its venue, and what the other venue offers. */
+/**
+ * The "Sells now for" cell: the better exit, its venue, and what the other venue offers. 0.8 (H3): the hover ends
+ * with what other sellers ask (askSideText) when the row has a counted ask; without one it is exactly as before.
+ */
 export function holdingExitView(r: HoldingExitFields, keyScrap: Scrap | null, now: UnixMs): HoldingExitView {
+  const v = exitViewOf(r, keyScrap, now);
+  const ask = askSideText(r.ask, keyScrap, now);
+  return ask ? { ...v, title: `${v.title} ${ask}` } : v;
+}
+
+function exitViewOf(r: HoldingExitFields, keyScrap: Scrap | null, now: UnixMs): HoldingExitView {
   // A lapsed scrap.tf exit reads as the day-old list it now is (below) until the refetch lands.
   const lapsed = scraptfExitLapsed(r, now);
   const scraptf = r.bestExit === 'scraptf' && !lapsed;
@@ -227,7 +297,8 @@ export function holdingExitView(r: HoldingExitFields, keyScrap: Scrap | null, no
       priceScrap,
       scraptf,
       sub: { text: r.revenueScrap !== null ? `backpack.tf pays ${fmtMoney(r.revenueScrap, keyScrap)}` : noBuyer, tone: 'muted' },
-      title: `Sells now for ${fmtMoney(priceScrap, keyScrap)} to scrap.tf's bank (your ${saved ?? 'saved price list'}). ${bp} scrap.tf pays more, so status and profit use it; its stock may have changed since the save.`,
+      // 0.7.4: a family row's pays price is scrap.tf's for every copy that row stands for, and says so.
+      title: `Sells now for ${fmtMoney(priceScrap, keyScrap)} to scrap.tf's bank (your ${saved ?? 'saved price list'}). ${bp} scrap.tf pays more, so status and profit use it; its stock may have changed since the save.${r.scraptfListFamily ? ` ${SCRAPTF_LIST_FAMILY_LABEL}: scrap.tf pays this for any copy that row stands for.` : ''}`,
     };
   }
   const base = holdingSellsForTitle(r, keyScrap);
@@ -251,7 +322,197 @@ export function holdingExitView(r: HoldingExitFields, keyScrap: Scrap | null, no
 
 /** The status pill's hover: what the status means, naming scrap.tf when it is the exit. */
 export function holdingStatusTitle(r: Pick<HoldingRow, 'status'> & Partial<Pick<HoldingRow, 'bestExit' | 'buyerCount' | 'flags'>>): string {
-  return r.status === 'sell' && r.bestExit === 'scraptf' ? `Sell now (scrap.tf). ${HOLDING_STATUS_HELP.sell}` : holdingStatusHelp(r);
+  return r.status === 'sell' && r.bestExit === 'scraptf' ? `${HOLDING_STATUS_LABELS.sell} (scrap.tf). ${HOLDING_STATUS_HELP.sell}` : holdingStatusHelp(r);
+}
+
+// ---------------------------------------------------------------------------
+// 0.8 (H6): advice, the ask side (H3) and the references (H4)
+// ---------------------------------------------------------------------------
+
+/** 0.8 (H6): the Advice column's words for each kind (the status pills say only where the thresholds stand). */
+export const ADVICE_LABELS: Readonly<Record<HoldingAdviceKind, string>> = { 'sell-now': 'Sell now', list: 'List and wait', hold: 'Hold', unclear: 'No clear signal' };
+/** 0.8 (H6): each kind's pill tone. */
+export const ADVICE_TONES: Readonly<Record<HoldingAdviceKind, Tone>> = { 'sell-now': 'good', list: 'info', hold: 'warn', unclear: 'muted' };
+/** 0.8 (H6): what each kind means, first in the advice hover. "List and wait" says a listing's time is unknown and Flip Desk never lists. */
+export const ADVICE_HELP: Readonly<Record<HoldingAdviceKind, string>> = {
+  'sell-now': 'Selling now is what the book and your thresholds support.',
+  list: "Listing it yourself on backpack.tf at about the lowest matching ask could beat today's buyers. Flip Desk sees no completed sales, so it cannot say how long that takes, and it never lists, bumps or trades for you.",
+  hold: "An exit Flip Desk recorded while it ran (a buy order that stood for an hour or more, or scrap.tf's price from a fresh list) paid more than you would get now. Nothing says it will again.",
+  unclear: 'What Flip Desk has seen does not point either way, or it has not recorded enough yet.',
+};
+/**
+ * 0.8 (H6): adviceTitle's help when below-target decides 'sell-now' (ADVICE_HELP['sell-now'] would contradict "under
+ * your minimum"), and what holdingAdvice checked when neither a falling streak nor a stale list set a high aside: no
+ * recent high (HOLDING_RECENT_HIGH_MS, from a run of HOLDING_RECENT_HIGH_MIN_RUN_MS or more) clears the minimum.
+ */
+export const ADVICE_BELOW_TARGET_HELP =
+  'A sale now is under your minimum, and no exit Flip Desk recorded while you held it (in the last 7 days, from a run of an hour or more) would clear it.';
+/**
+ * 0.8 (H6, review): ADVICE_BELOW_TARGET_HELP when the history it checked starts where the buyer settings last changed
+ * (the below-target reason's settingsAt, which its line dates): exits recorded before then were not checked.
+ */
+export const ADVICE_BELOW_TARGET_SINCE_SETTINGS_HELP =
+  'A sale now is under your minimum, and no exit Flip Desk recorded since your buyer settings last changed (in the last 7 days, from a run of an hour or more) would clear it. Exits recorded before the change priced other buyers and were not checked.';
+/** 0.8 (H6): the below-target help beside a 'falling' reason: a higher exit may have been recorded, and the exits fell since. */
+export const ADVICE_BELOW_TARGET_FALLING_HELP =
+  'A sale now is under your minimum, and the recorded exits fell in each of the last 3 changes, so an earlier, higher one is no reason to wait.';
+/** 0.8 (H6): the below-target help beside a 'resave-list' reason: the higher exit recorded was scrap.tf's price from a list no longer fresh. */
+export const ADVICE_BELOW_TARGET_RESAVE_HELP =
+  "A sale now is under your minimum. The higher exit recorded was scrap.tf's price from your saved list, which is no longer fresh, so it is no reason to wait until you save the list again.";
+/** 0.8 (H6): the last line of every advice hover and the drawer's advice. */
+export const ADVICE_FOOTER = 'From what Flip Desk saw while it ran; never a forecast.';
+/** 0.8 (H8): the refresh mark beside the advice when the book it rests on was not confirmed for a day. */
+export const ADVICE_REFRESH_TITLE = 'Refresh from backpack.tf in the item panel first: the book this rests on was not confirmed for a day.';
+/** 0.8 (H6): the Advice column header's hover. */
+export const ADVICE_COLUMN_TITLE = 'Sell now, list and wait, or hold, from the book now and the exits Flip Desk recorded while it ran. Hover for the reasons and their dates; never a forecast.';
+
+/** "3 matching asks" (the singular for one). */
+function asksText(n: number): string {
+  return `${fmtInt(n)} matching ${n === 1 ? 'ask' : 'asks'}`;
+}
+
+/**
+ * " Your blocklist, … changed on <date>, so runs recorded before then are not compared." for a reason whose history
+ * starts where the buyer settings last changed; '' without a date.
+ */
+function settingsCutText(at: UnixMs | undefined): string {
+  return typeof at === 'number' && Number.isFinite(at)
+    ? ` Your blocklist, Revenue used for profit, outlier or notes settings changed on ${fmtDateTime(at)}, so runs recorded before then are not compared.`
+    : '';
+}
+
+/** "+1", "-0.5": a key count with its sign. */
+function signedKeys(n: number): string {
+  const v = Math.round(n * 100) / 100;
+  return v > 0 ? `+${v}` : `${v}`;
+}
+
+/**
+ * 0.8 (H6): one advice reason in words, with the date or age it rests on (dates with fmtDateTime/fmtDate, ages with
+ * fmtAge, money with fmtMoney/fmtSignedMoney at keyScrap, key prices in ref). States what was seen, never a forecast.
+ */
+export function adviceReasonText(r: HoldingAdviceReason, keyScrap: Scrap | null, now: UnixMs): string {
+  const $m = (v: Scrap | null) => fmtMoney(v, keyScrap);
+  const $s = (v: Scrap | null) => fmtSignedMoney(v, keyScrap);
+  const ownOf = (mayIncludeOwn: boolean) => (mayIncludeOwn ? ', may include yours' : '');
+  const under = `${HOLDING_LIST_UNDERCUT_SCRAP} scrap under`;
+  switch (r.code) {
+    case 'clears-target':
+      return `Selling now makes ${$s(r.profitScrap)}, ${$m(r.overScrap)} over your minimum profit${r.exit === 'scraptf' ? ' (to scrap.tf)' : ''}.`;
+    case 'scraptf-instead':
+      return `The backpack.tf buyer was not seen for a day, but scrap.tf's bank pays ${$m(r.paysScrap)} (your list saved ${fmtAgo(r.listAt, now)}): ${$s(r.profitScrap)}.`;
+    case 'unverified-exit':
+      return `The order this rests on was last seen ${r.seenAt !== null ? `${fmtAge(now - r.seenAt)} ago` : 'over a day ago'} and may be gone.`;
+    case 'list-beats-sale':
+      return `Listing at ${$m(r.listScrap)} (${under} the lowest of ${asksText(r.sellers)}${ownOf(r.mayIncludeOwn)}) would make ${$m(r.gainScrap)} more than selling now. Flip Desk sees no completed sales, so how long it takes is unknown; today's buyer stays the fallback while their order lasts.`;
+    case 'list-clears':
+      return `Listing at ${$m(r.listScrap)}, ${under} the lowest of ${asksText(r.sellers)}${ownOf(r.mayIncludeOwn)}, would clear your thresholds (${$s(r.profitScrap)}). No buyer pays that now, and how long a listing takes is unknown.`;
+    case 'list-no-buyer':
+      return `No buyer now. The lowest of ${asksText(r.sellers)} is ${$m(r.askScrap)}${ownOf(r.mayIncludeOwn)}; listing at ${$m(r.listScrap)} would make ${$s(r.profitScrap)}. How long it takes is unknown.`;
+    case 'asks-below-cost':
+      return `No buyer now, and the lowest of ${asksText(r.sellers)} (${$m(r.askScrap)}) is under what this unit cost you.`;
+    case 'no-exit':
+      return 'No buyer, no usable scrap.tf price and no matching ask to compare with.';
+    case 'recorded-high':
+      return `The best exit paid ${$m(r.exitScrap)} on ${fmtDateTime(r.at)} (${fmtInt(r.runs)} recorded runs since ${fmtDate(r.firstAt)}); nothing says it will again.`;
+    case 'reference-above':
+      return `PriceDB's bot buy price is ${$m(r.pricedbBuyScrap)}${r.ageMs !== null ? ` (${fmtAge(r.ageMs)} old)` : ''}. It is derived from backpack.tf and is no sale: no buyer pays it now.`;
+    case 'resave-list':
+      return `Save your scrap.tf price list again: the best exit recorded, ${$m(r.highScrap)} on ${fmtDateTime(r.highAt)}, was scrap.tf's price from it, and that list is ${r.listAt !== null ? `${fmtAge(now - r.listAt)} old` : 'no longer saved'} now.`;
+    case 'below-target':
+      // With settingsAt the exits it was checked against start at that change, and the line says so.
+      return `A sale now makes ${$s(r.profitScrap)}, under your minimum of ${$m(r.minScrap)}.${settingsCutText(r.settingsAt)}`;
+    case 'loss':
+      return `A sale now makes ${$s(r.profitScrap)}, a loss.`;
+    case 'refresh-first':
+      return r.why === 'unverified-order'
+        ? `Refresh from backpack.tf in the item panel first: the order was last seen ${r.seenAt !== null ? fmtAge(now - r.seenAt) : 'over a day'} ago.`
+        : `Refresh from backpack.tf in the item panel first: no order changed and no snapshot came in for ${r.seenAt !== null ? fmtAge(now - r.seenAt) : 'over a day'}.`;
+    case 'single-exit':
+      return r.nextScrap !== null
+        ? `Only this buyer clears your thresholds: the next buyer pays ${$m(r.nextScrap)} (${$s(r.nextProfitScrap)})${r.nextUnverified ? ' but was not seen in the last 24 h' : ''}.`
+        : 'Only this buyer clears your thresholds; no other buyer is in the book.';
+    case 'falling':
+      return `The best exit fell in each of the last 3 recorded changes, from ${$m(r.fromScrap)} to ${$m(r.toScrap)} since ${fmtDateTime(r.sinceAt)}.`;
+    case 'held-vs-typical': {
+      const held = r.stillHeld > 0 ? `; ${fmtInt(r.stillHeld)} still held ${r.stillHeld === 1 ? 'is' : 'are'} not counted` : '';
+      return `Held ${fmtHold(r.heldMs)}; your closed flips of ${r.scope === 'item' ? 'this item' : 'any item'} took ${fmtHold(r.typicalMs)} (median of ${fmtInt(r.count)}, between the logged buy and sale${held}).`;
+    }
+    case 'key-exposure': {
+      const n = Math.abs(Math.round(r.netKeys * 100) / 100);
+      return `This sale nets ${signedKeys(r.netKeys)} ${n === 1 ? 'key' : 'keys'} against what you paid, so each 1 ref the key moves changes this profit by about ${n} ref. A key was ${fmtRefOnly(r.boughtKeyScrap)} when you bought, ${fmtRefOnly(r.nowKeyScrap)} now.`;
+    }
+    case 'list-age':
+      return `scrap.tf's price is from your list saved ${fmtAgo(r.listAt, now)}.`;
+    case 'has-extras':
+      return 'Priced against buyers of a clean copy; the paint or extras are not valued here.';
+    case 'no-history': {
+      // The history starts at a change of the buyer settings: runs before it priced other buyers.
+      const settings = settingsCutText(r.settingsAt);
+      return r.runs === 0
+        ? `No exit history recorded for this item yet (Flip Desk records it while the live feed is on).${settings}`
+        : `Not enough recorded history yet: ${fmtInt(r.runs)} ${r.runs === 1 ? 'run' : 'runs'} over ${fmtAge(r.observedMs)} since ${fmtDate(r.firstAt)}.${settings}`;
+    }
+  }
+}
+
+/**
+ * 0.8 (H6): the advice cell's hover: "<label>: <help>", one "• reason" line each (adviceReasonText), then
+ * ADVICE_FOOTER. When below-target decides 'sell-now' the help says what set a higher recorded exit aside: a falling
+ * streak (ADVICE_BELOW_TARGET_FALLING_HELP), a stale scrap.tf list (ADVICE_BELOW_TARGET_RESAVE_HELP), else that none
+ * clears the minimum (ADVICE_BELOW_TARGET_HELP; ADVICE_BELOW_TARGET_SINCE_SETTINGS_HELP when the history checked
+ * starts where the buyer settings last changed, the reason's settingsAt), so the help never contradicts a reason below
+ * it nor claims more was checked than was.
+ */
+export function adviceTitle(a: HoldingAdvice, keyScrap: Scrap | null, now: UnixMs): string {
+  const has = (code: HoldingAdviceReason['code']): boolean => a.reasons.some((r) => r.code === code);
+  const first = a.reasons[0];
+  const help =
+    a.kind === 'sell-now' && first?.code === 'below-target'
+      ? has('falling')
+        ? ADVICE_BELOW_TARGET_FALLING_HELP
+        : has('resave-list')
+          ? ADVICE_BELOW_TARGET_RESAVE_HELP
+          : typeof first.settingsAt === 'number' && Number.isFinite(first.settingsAt)
+            ? ADVICE_BELOW_TARGET_SINCE_SETTINGS_HELP
+            : ADVICE_BELOW_TARGET_HELP
+      : ADVICE_HELP[a.kind];
+  return [`${ADVICE_LABELS[a.kind]}: ${help}`, ...a.reasons.map((r) => `• ${adviceReasonText(r, keyScrap, now)}`), ADVICE_FOOTER].join('\n');
+}
+
+/**
+ * 0.8 (H3): "Others ask from X (N sellers, M bots; may include yours), the lowest seen … ago." and that an ask is
+ * not a price paid; null without an ask. Shared by the Sells now for hover and the drawer's Sell listings.
+ */
+export function askSideText(ask: HoldingAskSide | null | undefined, keyScrap: Scrap | null, now: UnixMs): string | null {
+  if (!ask) return null;
+  const sellers = `${fmtInt(ask.count)} ${ask.count === 1 ? 'seller' : 'sellers'}`;
+  const bots = `${fmtInt(ask.botCount)} ${ask.botCount === 1 ? 'bot' : 'bots'}`;
+  const own = ask.mayIncludeOwn ? '; may include yours' : ask.ownLeftOut > 0 ? `; ${fmtInt(ask.ownLeftOut)} of yours left out` : '';
+  return `Others ask from ${fmtMoney(ask.lowestScrap, keyScrap)} (${sellers}, ${bots}${own}), the lowest seen ${fmtAgo(ask.lowestSeenAt, now)}. An ask is what a seller wants, not a price paid.`;
+}
+
+/**
+ * 0.8 (H4): "PriceDB buys at X (3 d old), sells at Y; community Z. References only, never a sale price." then each
+ * reason a reference was left out for its age; null without refs (or with nothing to say).
+ */
+export function refsText(refs: HoldingRefs | null | undefined, keyScrap: Scrap | null): string | null {
+  if (!refs) return null;
+  const $m = (v: Scrap | null) => fmtMoney(v, keyScrap);
+  const shown: string[] = [];
+  const age = refs.pricedbAgeMs !== null ? ` (${fmtAge(refs.pricedbAgeMs)} old)` : '';
+  if (finiteScrap(refs.pricedbBuyScrap) && finiteScrap(refs.pricedbSellScrap)) shown.push(`PriceDB buys at ${$m(refs.pricedbBuyScrap)}${age}, sells at ${$m(refs.pricedbSellScrap)}`);
+  else if (finiteScrap(refs.pricedbBuyScrap)) shown.push(`PriceDB buys at ${$m(refs.pricedbBuyScrap)}${age}`);
+  else if (finiteScrap(refs.pricedbSellScrap)) shown.push(`PriceDB sells at ${$m(refs.pricedbSellScrap)}${age}`);
+  if (finiteScrap(refs.communityScrap)) {
+    const high = finiteScrap(refs.communityHighScrap) && refs.communityHighScrap !== refs.communityScrap ? ` to ${$m(refs.communityHighScrap)}` : '';
+    shown.push(`community ${$m(refs.communityScrap)}${high}`);
+  }
+  const parts: string[] = [];
+  const text = shown.join('; ');
+  if (text) parts.push(`${text.charAt(0).toUpperCase()}${text.slice(1)}. References only, never a sale price.`);
+  for (const why of refs.ignored ?? []) parts.push(`${why}.`);
+  return parts.length ? parts.join(' ') : null;
 }
 
 // ---------------------------------------------------------------------------

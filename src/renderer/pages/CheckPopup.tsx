@@ -11,7 +11,7 @@
 // the note line says so. A saved price or a recorded buy ends that trip, so the popup disarms.
 
 import { useEffect, useRef, useState } from 'react';
-import { CHECK_HINT } from '../../shared/check';
+import { CHECK_HINT, checkCostSuspect, checkCraftUndecided } from '../../shared/check';
 import type { CheckResult } from '../../shared/types';
 import { rpc } from '../api';
 import {
@@ -133,8 +133,10 @@ export function CheckPopup() {
 
   const savePrice = async () => {
     const r = result;
-    const input = checkSaveInput(r, Date.now());
-    if (!r || !input || busy.current.save || checkSaveButton(saveState, r.id).disabled) return;
+    const checked = checkSaveInput(r, Date.now());
+    if (!r || !checked || busy.current.save || checkSaveButton(saveState, r.id).disabled) return;
+    // 0.7.4 (F80): updates the user's newest typed price of this copy instead of adding a second input.
+    const input = { ...checked, replaceTyped: true };
     busy.current.save = true;
     setSaveState({ id: r.id, status: 'saving' });
     try {
@@ -331,7 +333,8 @@ function CheckItemView({
   onHide: () => void;
 }) {
   const line = checkPriceLine(r, now);
-  const sells = checkSellsLine(r);
+  // 0.7.4 (F23): the buyer's presence as of the check, as the rest of the result.
+  const sells = checkSellsLine(r, Number.isFinite(r.checkedAt) ? r.checkedAt : now);
   const pay = checkPayUpTo(r);
   const category = checkCategoryText(r);
   const actions = checkActions(r);
@@ -340,6 +343,9 @@ function CheckItemView({
   const sku = r.sku ?? '';
   // F19: "Price copied, matched to the item you opened." stands in for the service's longer sentence.
   const note = checkPopupNote(r);
+  // 0.7.4 (F41): an undecided craftability is a warning, not a muted aside: Save price and Bought it are off.
+  // 0.7.4 review (R14): so is a price the cost check flagged as probably another copy's.
+  const warnNote = checkCraftUndecided(r) || checkCostSuspect(r);
   return (
     <>
       <header className="cp-head">
@@ -351,8 +357,8 @@ function CheckItemView({
       </header>
       {/* Notes (closest match, sold out…) can add up to several lines: two show, all in the tooltip. */}
       {note ? (
-        <p className={`cp-text cp-note small${line.matched ? ' cp-matched' : ' muted'}`} title={r.reason ?? note}>
-          {line.matched ? <Icon name="check" size={12} /> : null}
+        <p className={`cp-text cp-note small${warnNote ? ' cp-craft' : line.matched ? ' cp-matched' : ' muted'}`} title={r.reason ?? note}>
+          {warnNote ? <Icon name="warning" size={12} /> : line.matched ? <Icon name="check" size={12} /> : null}
           {note}
         </p>
       ) : null}
@@ -379,7 +385,8 @@ function CheckItemView({
               <span className="buyer-type small">
                 <OnlineDot online={sells.online} />
                 {sells.kind}
-                {sells.online === true ? ', online' : sells.online === false ? ', offline' : ''}
+                {/* 0.7.4 (F23): an order past 2 h since its last event says when it was seen, not "online". */}
+                {sells.online === true ? ', online' : sells.online === false ? ', offline' : sells.seen ? `, ${sells.seen}` : ''}
               </span>
             ) : null}
           </>

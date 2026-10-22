@@ -1,18 +1,32 @@
 // Live check (F16) for the browser mock: a simple take on the service's parseCheckText and its
-// evaluation, plus the fixed demo results the popup shows at '#/check?demo=flip|over|no-price|not-item'.
+// evaluation (0.7.4: and its judge, mockJudgeCheck: F44's bare number from the watcher, F41's copy of a
+// plain name), plus the fixed demo results the popup shows at '#/check?demo=flip|over|no-price|not-item'.
 // Development only: every number here is fake, and nothing reads a clipboard or leaves the page.
 
 import {
   blankCheckResult,
+  CHECK_BARE_REF_NOTE,
   CHECK_EXTRAS_NOTE,
   CHECK_NOT_ITEM_REASON,
   CHECK_SCRAPTF_LINK_REASON,
   CHECK_SOLD_OUT_NOTE,
+  checkCostNote,
+  checkCraftCopy,
+  checkCraftTwinOf,
+  checkDecideCopy,
+  checkHintedNote,
   checkHintPriceOf,
+  checkListCopyPrices,
+  checkListFamilyOnSale,
   checkTextRefusal,
+  checkTextStatesCraft,
+  type CheckCopyPrice,
 } from '../shared/check';
-import { frictionOf, maxCostFor, profitStatus } from '../shared/ceiling';
+import type { PricedbSides } from '../shared/ceiling';
+import { usableReferences } from './mockData';
+import { buyerDepthOf, exitCostsOf, exitOrdersOfSummaries, flipProfit, maxCostFor, profitStatus, singleExitOf } from '../shared/ceiling';
 import { parsePrice, refToScrap, valueScrap, type ParsedPrice } from '../shared/currency';
+import { scraptfListCraftProven } from '../shared/scraptfList';
 import { baseSku, fromString, isValidSku } from '../shared/sku';
 import { CURRENCY_SKUS } from '../shared/types';
 import type {
@@ -23,9 +37,11 @@ import type {
   ItemDetail,
   ItemRevenue,
   OrderSummary,
+  ReferencePrices,
   ResolvedItem,
   Scrap,
   ScrapPrice,
+  ScraptfListRow,
   Settings,
   UnixMs,
 } from '../shared/types';
@@ -40,6 +56,10 @@ export interface MockParsedCheck {
   stock: number | null;
   stockLimit: number | null;
   soldOut: boolean;
+  /** 0.7.4 (F41), the service's ParsedCheck.craftStated: the item part said its craftability (absent: not said). */
+  craftStated?: boolean;
+  /** 0.7.4 (F44), the service's ParsedCheck.priceAmbiguous: `price` was a bare whole number read as ref. */
+  priceAmbiguous?: boolean;
 }
 
 export type MockParseCheck = { ok: true; parsed: MockParsedCheck } | { ok: false; status: 'not-item' | 'refused'; reason: string };
@@ -76,10 +96,16 @@ function confident(r: ResolvedItem | null): ResolvedItem | null {
   return r !== null && r.match !== 'fuzzy' ? r : null;
 }
 
+/** 0.7.4 (F44): a copied price as the service keeps it: `priceAmbiguous` only for a bare whole number that is the price. */
+function ambiguousOf(price: ParsedPrice | null): boolean {
+  return price !== null && price.ambiguous === true;
+}
+
 /**
  * The service's four forms, simply: a copied /items row (tabs or runs of 2+ spaces: name, price to
  * buy or "Sold out", price we pay, n/limit), name then price on two lines, "<item> <sep> <price>",
- * or the item alone. Refusals first; reasons never quote the text.
+ * or the item alone. Refusals first; reasons never quote the text. 0.7.4: with the service's
+ * craftStated (F41, checkTextStatesCraft over the item part) and priceAmbiguous (F44).
  */
 export function mockParseCheck(text: string, resolve: (text: string) => ResolvedItem | null): MockParseCheck {
   const refusal = checkTextRefusal(text);
@@ -101,16 +127,19 @@ export function mockParseCheck(text: string, resolve: (text: string) => Resolved
         const stockField = fields.slice(2).map((f) => STOCK_PAIR.exec(f)).find((m) => m !== null) ?? null;
         // A third cell that is not n/limit is "Price we pay": a dash there means scrap.tf pays nothing now.
         const paysCopied = fields[2] !== undefined && !STOCK_PAIR.test(fields[2]);
+        const price = soldOut ? null : nonZero(parsePrice(fields[1]!, 'ref'));
         return {
           ok: true,
           parsed: {
             item,
-            price: soldOut ? null : nonZero(parsePrice(fields[1]!, 'ref')),
+            price,
             pays: paysCopied ? nonZero(parsePrice(fields[2]!, 'ref')) : null,
             paysCopied,
             stock: stockField ? Number(stockField[1]) : null,
             stockLimit: stockField ? Number(stockField[2]) : null,
             soldOut,
+            craftStated: checkTextStatesCraft(fields[0]!),
+            priceAmbiguous: ambiguousOf(price),
           },
         };
       }
@@ -120,14 +149,20 @@ export function mockParseCheck(text: string, resolve: (text: string) => Resolved
     const item = confident(resolve(lines[0]!));
     const soldOut = SOLD_OUT.test(lines[1]!);
     const price = soldOut ? null : parsePrice(lines[1]!, 'ref');
-    if (item && (price || soldOut)) return { ok: true, parsed: { item, ...none, price: nonZero(price), soldOut } };
+    if (item && (price || soldOut)) {
+      const kept = nonZero(price);
+      return { ok: true, parsed: { item, ...none, price: kept, soldOut, craftStated: checkTextStatesCraft(lines[0]!), priceAmbiguous: ambiguousOf(kept) } };
+    }
   }
   if (lines.length === 1) {
     const split = splitPriced(lines[0]!);
     const item = split ? confident(resolve(split.item)) : null;
-    if (split && item) return { ok: true, parsed: { item, ...none, price: nonZero(split.price) } };
+    if (split && item) {
+      const price = nonZero(split.price);
+      return { ok: true, parsed: { item, ...none, price, craftStated: checkTextStatesCraft(split.item), priceAmbiguous: ambiguousOf(price) } };
+    }
     const alone = confident(resolve(lines[0]!));
-    if (alone) return { ok: true, parsed: { item: alone, price: null, ...none } };
+    if (alone) return { ok: true, parsed: { item: alone, price: null, ...none, craftStated: checkTextStatesCraft(lines[0]!), priceAmbiguous: false } };
   }
   return { ok: false, status: 'not-item', reason: CHECK_NOT_ITEM_REASON };
 }
@@ -140,7 +175,8 @@ export function mockParseCheck(text: string, resolve: (text: string) => Resolved
  */
 export function mockHintedParse(text: string, item: ResolvedItem, source: CheckSource): MockParsedCheck | null {
   const price = checkHintPriceOf(text, source);
-  return price ? { item, price, pays: null, paysCopied: false, stock: null, stockLimit: null, soldOut: false } : null;
+  // 0.7.4: as the service's hintedCheck: the copy is not stated (F41), and the price already read by the source (F44).
+  return price ? { item, price, pays: null, paysCopied: false, stock: null, stockLimit: null, soldOut: false, craftStated: false, priceAmbiguous: false } : null;
 }
 
 /** A stored price the engine can use as a cost (its explicitInput): a strict SKU, not a currency, finite costs of 0 or more. */
@@ -194,13 +230,20 @@ export function mockNewestStoredPrice(prices: readonly ScrapPrice[], plain: bool
 
 const valueOf = (p: { keys: number; scrap: Scrap }, keyScrap: Scrap): Scrap => Math.round(p.keys * keyScrap) + Math.round(p.scrap);
 
+/** Highest Low score (the service's LOW_CAP, MEDIUM_CONFIDENCE - 1 in tiers.ts), for a cost-flagged check. */
+const MOCK_LOW_CAP = 44;
+
 /**
  * A parsed check judged like the service (chooseCheckPrice in src/service/domain/liveCheck.ts): a copied
  * "Sold out" or stock-0 row has no price at all (it is newer than anything stored); else the copied
  * price, else the saved list's price to buy (not sold out, not stock 0, and only for a plain copy: the
- * list prices plain copies), else the newest stored price (mockNewestStoredPrice: a clean copy first for
+ * list prices plain copies; 0.7.4: and only a row proven to price this copy, scraptfListCraftProven),
+ * else the newest stored price (mockNewestStoredPrice: a clean copy first for
  * a plain SKU, the cheapest of one look's copies, and CHECK_EXTRAS_NOTE when only a painted or spelled
  * copy is stored). Profit and verdict by profitStatus; a copied pays cell, even a dash, beats the list's.
+ * Notes in the service's order: F19's hinted note (`hinted`), 0.7.4's craft note (`craftNote`, F41), the cost
+ * check's note (R14, checkCostNote over the detail's age-gated PriceDB row and `twinReferences`, the craftability
+ * twin's: capped at Low) and CHECK_BARE_REF_NOTE (F44), sold out, extras.
  */
 export function mockCheckResult(a: {
   id: number;
@@ -211,6 +254,17 @@ export function mockCheckResult(a: {
   keyScrap: Scrap;
   settings: Settings;
   confidence: { value: number; level: ConfidenceLevel } | null;
+  /** F19: the price was copied on its own and checked as the armed item (checkHintedNote names it). */
+  hinted?: boolean;
+  /**
+   * 0.7.4: the armed item's name for the hinted note when its Non-Craftable twin answers, as the service names the
+   * item the user opened; omitted or null: this copy's own name.
+   */
+  hintedName?: string | null;
+  /** 0.7.4 (F41): CHECK_CRAFT_TWIN_NOTE or CHECK_CRAFT_UNSURE_NOTE when the saved data decided the copy (mockJudgeCheck). */
+  craftNote?: string | null;
+  /** 0.7.4 (R14): the craftability twin's references for the cost check (read only when asked); omitted: none. */
+  twinReferences?: () => ReferencePrices | null;
 }): CheckResult {
   const { parsed, detail, keyScrap, now } = a;
   const list = detail?.scraptfList ?? null;
@@ -228,7 +282,7 @@ export function mockCheckResult(a: {
     price = null;
   } else if (parsed.price && (parsed.price.keys > 0 || parsed.price.scrap > 0)) {
     price = { keys: parsed.price.keys, scrapRaw: parsed.price.scrap, valueScrap: valueOf(parsed.price, keyScrap), source: 'clipboard', observedAt: now };
-  } else if (plain && list && list.sellsScrap !== null && list.stock !== 0) {
+  } else if (plain && list && scraptfListCraftProven(list) && list.sellsScrap !== null && list.stock !== 0) {
     price = { keys: list.sellsKeys ?? 0, scrapRaw: list.sellsScrapRaw ?? 0, valueScrap: list.sellsScrap, source: 'list', observedAt: list.observedAt };
   } else {
     const p = mockNewestStoredPrice(detail?.scrapPrices ?? [], plain, keyScrap);
@@ -252,15 +306,40 @@ export function mockCheckResult(a: {
 
   const revenue = detail?.revenue ?? null;
   const rev = revenue?.revenueScrap ?? null;
-  const profitScrap = price && rev !== null ? rev - price.valueScrap - frictionOf(a.settings.profit) : null;
+  const profitScrap = price ? flipProfit(rev, price.valueScrap, a.settings.profit) : null;
   const status = price ? profitStatus(profitScrap, price.valueScrap, a.settings.profit) : null;
+  // 0.8 (PC-1): what the profit took off, for the popup's breakdown (as the service).
+  const exitCosts = rev !== null ? exitCostsOf(rev, a.settings.profit) : null;
+  const verdict = price === null ? 'no-price' : status === 'no-buyers' ? 'no-buyers' : status === 'profitable' ? 'flip' : 'over';
+  // 0.8 (PC-2): as the service, a flip only the revenue order's buyer makes, over the detail's own book.
+  const singleExit =
+    verdict === 'flip' && price !== null && revenue?.order
+      ? singleExitOf(rev, price.valueScrap, buyerDepthOf(exitOrdersOfSummaries(detail?.buyOrders ?? []), revenue.order.listingId, a.settings.profit.useOrder).nextBuyer, a.settings.profit)
+      : null;
+  const name = detail?.name ?? parsed.item.name;
+  // 0.7.4 (R14): the service's cost check, PriceDB only and age-gated (mockData's usableReferences).
+  const pricedbOf = (refs: ReferencePrices | null | undefined): PricedbSides | null => {
+    if (!refs) return null;
+    const u = usableReferences(refs, a.settings, now);
+    return { buyScrap: u.pdbBuy, sellScrap: u.pdbSell };
+  };
+  const costNote = price === null ? null : checkCostNote(price.valueScrap, pricedbOf(detail?.references), () => pricedbOf(a.twinReferences?.() ?? null));
+  const confidence = a.confidence && costNote !== null && a.confidence.value > MOCK_LOW_CAP ? { value: MOCK_LOW_CAP, level: 'low' as const } : a.confidence;
+  const notes = [
+    a.hinted ? checkHintedNote(a.hintedName ?? name ?? parsed.item.sku) : null,
+    a.craftNote ?? null,
+    costNote,
+    parsed.priceAmbiguous && price?.source === 'clipboard' ? CHECK_BARE_REF_NOTE : null,
+    soldOut ? CHECK_SOLD_OUT_NOTE : null,
+    otherCopy ? CHECK_EXTRAS_NOTE : null,
+  ].filter((n): n is string => n !== null);
   return {
     id: a.id,
     status: 'item',
     source: a.source,
-    reason: soldOut ? CHECK_SOLD_OUT_NOTE : otherCopy ? CHECK_EXTRAS_NOTE : null,
+    reason: notes.length > 0 ? notes.join(' ') : null,
     sku: parsed.item.sku,
-    name: detail?.name ?? parsed.item.name,
+    name,
     category: detail?.category ?? parsed.item.category,
     price,
     scraptfPaysScrap: pays,
@@ -270,13 +349,64 @@ export function mockCheckResult(a: {
     revenue,
     profitScrap,
     margin: profitScrap !== null && price && price.valueScrap > 0 ? profitScrap / price.valueScrap : null,
-    verdict: price === null ? 'no-price' : status === 'no-buyers' ? 'no-buyers' : status === 'profitable' ? 'flip' : 'over',
-    confidence: a.confidence?.value ?? null,
-    confidenceLevel: a.confidence?.level ?? null,
+    verdict,
+    confidence: confidence?.value ?? null,
+    confidenceLevel: confidence?.level ?? null,
     links: detail?.links ?? [],
     keyScrap,
     checkedAt: now,
+    exitCosts,
+    ...(singleExit ? { singleExit } : {}),
   };
+}
+
+/**
+ * 0.7.4, the service's judge (src/service/domain/liveCheck.ts) over the mock's data. F44: from the watcher a
+ * number without a unit is no price, so the item is checked alone. F41: a Craftable item whose text did not
+ * say its craftability is checked as the copy the saved list rows (proven for that copy, checkListCopyPrices)
+ * and the bank pages' newest saves (`bankPricesFor`, bankStockPricesOf) match (checkCraftCopy): the Craftable
+ * copy, its Non-Craftable twin with CHECK_CRAFT_TWIN_NOTE, or, undecided, the one of the two that sells for
+ * less (checkWorseCopy) with CHECK_CRAFT_UNSURE_NOTE, by the shared checkDecideCopy. R20, R21: a copied price
+ * no saved copy is at, or only a family /items row (checkListFamilyOnSale), is undecided too when the twin
+ * trades, unless every saved Craftable price is a card of a page that never lists Non-Craftable copies (0.7.4,
+ * CHECK_NONCRAFT_BANKS). `evaluate` is mockCheckResult for one copy.
+ */
+export function mockJudgeCheck(a: {
+  parsed: MockParsedCheck;
+  source: CheckSource;
+  /** The saved list row a SKU reads (the mock's listRowFor, as the service's rowFor). */
+  listRowFor(sku: string): ScraptfListRow | null;
+  /**
+   * The prices the bank pages' newest saves have this very copy on sale at, each with its bank (bankStockPricesOf):
+   * 0.7.4, a repriced card of a page that never lists Non-Craftable copies stays the Craftable copy (checkCraftCopy).
+   */
+  bankPricesFor(sku: string): readonly CheckCopyPrice[];
+  evaluate(parsed: MockParsedCheck, craftNote: string | null): CheckResult;
+}): CheckResult {
+  const parsed = a.parsed.priceAmbiguous && a.source === 'watch' ? { ...a.parsed, price: null, priceAmbiguous: false } : a.parsed;
+  const twinSku = parsed.craftStated === true ? null : checkCraftTwinOf(parsed.item.sku);
+  if (twinSku === null) return a.evaluate(parsed, null);
+  // As the service: the list prices plain copies only, so a painted copy's evidence is its bank cards.
+  const painted = (sku: string): boolean => {
+    try {
+      return (fromString(sku).paint ?? 0) > 0;
+    } catch {
+      return false;
+    }
+  };
+  const saved = (sku: string, craft: 'craftable' | 'uncraftable'): CheckCopyPrice[] => [
+    ...(painted(sku) ? [] : checkListCopyPrices(a.listRowFor(sku), craft)),
+    ...a.bankPricesFor(sku),
+  ];
+  const price = parsed.price ? { keys: parsed.price.keys, scrap: parsed.price.scrap } : null;
+  const choice = checkCraftCopy({
+    price,
+    craftable: saved(parsed.item.sku, 'craftable'),
+    twin: saved(twinSku, 'uncraftable'),
+    familyOnSale: !painted(parsed.item.sku) && checkListFamilyOnSale(a.listRowFor(parsed.item.sku)),
+  });
+  const asTwin = (): MockParsedCheck => ({ ...parsed, item: { ...parsed.item, sku: twinSku, skuObject: fromString(twinSku) } });
+  return checkDecideCopy(choice, (copy, note) => a.evaluate(copy === 'twin' ? asTwin() : parsed, note));
 }
 
 // ---------------------------------------------------------------------------
@@ -329,12 +459,11 @@ function demoRevenue(valueScrap: Scrap, keyScrap: Scrap, now: UnixMs, settings: 
 /** Fixed results for the popup in a plain browser, valued at `keyScrap` with `settings.profit`. */
 export function mockCheckDemo(kind: CheckDemo, now: UnixMs, keyScrap: Scrap, settings: Settings): CheckResult {
   if (kind === 'not-item') return blankCheckResult('not-item', CHECK_NOT_ITEM_REASON, 'hotkey', now, 9001, keyScrap);
-  const friction = frictionOf(settings.profit);
   const base = { status: 'item' as const, reason: null, links: [], keyScrap, checkedAt: now };
   if (kind === 'flip') {
     const revenue = demoRevenue(keyScrap + refToScrap(22), keyScrap, now, settings, 6, true);
     const cost = keyScrap + refToScrap(5.33);
-    const profitScrap = revenue.revenueScrap! - cost - friction;
+    const profitScrap = flipProfit(revenue.revenueScrap, cost, settings.profit)!;
     return {
       ...base,
       id: 9002,
@@ -353,12 +482,13 @@ export function mockCheckDemo(kind: CheckDemo, now: UnixMs, keyScrap: Scrap, set
       verdict: 'flip',
       confidence: 74,
       confidenceLevel: 'high',
+      exitCosts: exitCostsOf(revenue.revenueScrap, settings.profit),
     };
   }
   if (kind === 'over') {
     const revenue = demoRevenue(refToScrap(11.22), keyScrap, now, settings, 2, false);
     const cost = refToScrap(12.66);
-    const profitScrap = revenue.revenueScrap! - cost - friction;
+    const profitScrap = flipProfit(revenue.revenueScrap, cost, settings.profit)!;
     return {
       ...base,
       id: 9003,
@@ -377,6 +507,7 @@ export function mockCheckDemo(kind: CheckDemo, now: UnixMs, keyScrap: Scrap, set
       verdict: 'over',
       confidence: 51,
       confidenceLevel: 'medium',
+      exitCosts: exitCostsOf(revenue.revenueScrap, settings.profit),
     };
   }
   const revenue = demoRevenue(refToScrap(1.66), keyScrap, now, settings, 4, true);

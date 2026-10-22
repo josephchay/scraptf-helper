@@ -41,7 +41,10 @@ import { CHECK_CALL_TIMEOUT_MS, createLiveCheckMain, type LiveCheckMain } from '
 import { clip, droppedOpenUrl, handleNotificationClick, notificationContent, notificationOptions } from './notify';
 import {
   APP_USER_MODEL_ID,
+  boundChromiumLogWhileRunning,
+  CHROMIUM_LOG_CHECK_MS,
   parseLaunchArgs,
+  prepareChromiumLog,
   readFileBounded,
   resolveAppPaths,
   safeErrorMessage,
@@ -124,6 +127,22 @@ let machineLock: MachineLock | null = null;
 /** --smoke-window only: the window test, its local network installed before start(). */
 let smokeWindowRun: SmokeWindowRun | null = null;
 const liveNotifications = new Set<Notification>();
+/** 0.7.4 (F54): the chromium.log this run's Chromium writes (null: its file logging is off or the developer's own). */
+let chromiumLogFile: string | null = null;
+let chromiumLogCheckedAt = 0;
+
+/**
+ * 0.7.4 (F54): keeps chromium.log bounded during a long tray session (bootstrap's check covers each start only):
+ * a local size check, at most every CHROMIUM_LOG_CHECK_MS, on the status pushes main handles anyway. No timer of
+ * its own and nothing of the scrap.tf window or its session; logging only.
+ */
+function boundChromiumLog(now = Date.now()): void {
+  if (chromiumLogFile === null) return;
+  // A clock stepped back counts as due, so it never waits longer than its own spacing.
+  if (now >= chromiumLogCheckedAt && now - chromiumLogCheckedAt < CHROMIUM_LOG_CHECK_MS) return;
+  chromiumLogCheckedAt = now;
+  if (boundChromiumLogWhileRunning(chromiumLogFile) === 'emptied') log.info('chromium.log was over 1 MB while running: emptied');
+}
 
 function writeReport(file: string, report: unknown): void {
   try {
@@ -174,6 +193,8 @@ function showNotification(rt: Runtime, payload: unknown): void {
     void handleNotificationClick(data, {
       openExternal: (url) => shell.openExternal(url),
       openItem: (sku) => openItemInDashboard(rt, sku),
+      // 0.8 (G5): a summary's bank stock page and chip, in the dashboard (no URL).
+      openBankStock: (o) => showBankStock(rt, o.bank, o.filter),
       showDashboard: () => rt.windows.showDashboard(),
       log,
     });
@@ -267,6 +288,7 @@ function handlePush(rt: Runtime, event: keyof PushContract, payload: unknown): v
       refreshTray(rt);
       rt.windows.broadcast('status.changed', payload);
       rt.scraptfWindow?.send('status.changed', payload);
+      boundChromiumLog();
       return;
     case 'notify':
       showNotification(rt, payload);
@@ -835,6 +857,26 @@ function bootstrap(): void {
     minLevel: args.dev ? 'debug' : 'info',
     echo: !app.isPackaged,
   });
+
+  // 0.7.4 (F54): Chromium's own error lines (a page resource's TLS reset in the scrap.tf window, a GPU cache error)
+  // also go to logs/chromium.log, bounded at each start (and while running: boundChromiumLog), so they have a record beside main.log. Logging only: no
+  // network behaviour changes. Set here, before 'ready' and with the instance lock held, so the network service and
+  // the GPU process start with it. A developer's own --enable-logging (or ELECTRON_ENABLE_LOGGING) is left alone.
+  if (!app.commandLine.hasSwitch('enable-logging') && process.env['ELECTRON_ENABLE_LOGGING'] === undefined) {
+    const chromiumLog = prepareChromiumLog(resolveAppPaths(app.getAppPath(), app.getPath('userData')).logDir);
+    if (chromiumLog.ok) {
+      app.commandLine.appendSwitch('enable-logging', 'file');
+      app.commandLine.appendSwitch('log-file', chromiumLog.file);
+      // Chromium's severities: 2 is ERROR. INFO, where Chromium logs a web page's console messages, stays out.
+      app.commandLine.appendSwitch('log-level', '2');
+      if (chromiumLog.rotated) log.info(`chromium.log was over 1 MB: ${chromiumLog.rotated === 'moved' ? 'moved to chromium.log.old' : 'emptied'}`);
+      // Checked again while running (boundChromiumLog), from the next status push on.
+      chromiumLogFile = chromiumLog.file;
+      chromiumLogCheckedAt = Date.now();
+    } else {
+      log.warn(`Chromium's log file is off for this run: ${chromiumLog.reason}`);
+    }
+  }
 
   process.on('uncaughtException', (err) => log.error('uncaught exception in main', err));
   process.on('unhandledRejection', (reason) => log.error('unhandled rejection in main', reason));

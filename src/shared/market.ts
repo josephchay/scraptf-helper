@@ -5,7 +5,7 @@
 // user typed or saved (R10); nothing here fetches it.
 
 import { formatScrap } from './currency';
-import { frictionOf, type CeilingSettings } from './ceiling';
+import { flipProfit, type ExitCostSettings } from './ceiling';
 import { SCRAPTF_BANK_PAGES, isScraptfBank } from './links';
 import type {
   BankNewestSave,
@@ -51,10 +51,9 @@ export function marketVerdict(r: { buyerCount: number; maxCostScrap: Scrap | nul
   return 'unchecked';
 }
 
-/** revenue - known cost - friction (as the engine applies it), when both exist. */
-export function marketProfit(revenueScrap: Scrap | null, knownCostScrap: Scrap | null, p: Pick<CeilingSettings, 'frictionScrap'>): Scrap | null {
-  if (!finite(revenueScrap) || !finite(knownCostScrap)) return null;
-  return revenueScrap - knownCostScrap - frictionOf(p);
+/** flipProfit (friction and the price-move reserve, 0.8), when both exist. */
+export function marketProfit(revenueScrap: Scrap | null, knownCostScrap: Scrap | null, p: ExitCostSettings): Scrap | null {
+  return flipProfit(revenueScrap, knownCostScrap, p);
 }
 
 export function emptyMarketCounts(): Record<MarketVerdict, number> {

@@ -17,6 +17,7 @@ import { useDebounced, useNow } from '../hooks/useTimers';
 import { FEED_OFF_UPDATES } from '../marketModel';
 import { firstPriceText } from '../scraptfListModel';
 import { scraptfWindowOn } from '../scraptfWindowModel';
+import { oppMenuTarget } from '../watchesModel';
 import {
   DEFAULT_FILTERS,
   GROUP_BY_LABELS,
@@ -36,7 +37,10 @@ import {
   groupOpportunities,
   groupPageQuery,
   mergeLoadedRows,
+  profitableTotals,
   sanitizeFilters,
+  SHARED_BUYER_TITLE,
+  sharedBuyerNote,
   sortOpportunities,
   type EmptyListReason,
   type OppFilters,
@@ -177,21 +181,14 @@ export function OpportunitiesPage() {
   const collapsed = useMemo(() => new Set(collapsedBy[groupBy] ?? []), [collapsedBy, groupBy]);
   const loadedRows = useMemo(() => mergeLoadedRows(list.data?.rows ?? [], more.rows), [list.data, more.rows]);
   const sorted = useMemo(() => sortOpportunities(loadedRows, sort.sort, sort.dir), [loadedRows, sort]);
-  const groups = useMemo(() => groupOpportunities(sorted, groupBy, list.data?.groups), [sorted, groupBy, list.data]);
+  // 0.7.4 (F27, F33): one profit per revenue buy order (copies sharing a buyer are counted once).
+  const useOrder = settings?.profit.useOrder ?? 'conservative';
+  // 0.7.4 (R27): a group the service sent no summary for counts its rows' buyers once the same way.
+  const groups = useMemo(() => groupOpportunities(sorted, groupBy, list.data?.groups, useOrder), [sorted, groupBy, list.data, useOrder]);
   const rows = useMemo(() => flattenGroups(groups, collapsed), [groups, collapsed]);
   const filterCount = activeFilterCount(filters);
 
-  const totals = useMemo(() => {
-    let profit = 0;
-    let profitable = 0;
-    for (const o of sorted) {
-      if (o.status === 'profitable' && o.profitScrap !== null) {
-        profit += o.profitScrap;
-        profitable++;
-      }
-    }
-    return { profit, profitable };
-  }, [sorted]);
+  const totals = useMemo(() => profitableTotals(sorted, useOrder), [sorted, useOrder]);
 
   const toggleGroup = useCallback(
     (key: string) =>
@@ -211,13 +208,15 @@ export function OpportunitiesPage() {
     [setSort],
   );
 
-  const onOpen = useCallback((o: Opportunity) => openItem(o.sku), [openItem]);
+  // 0.7.4 (F66): on the row's own copy (a painted or kit copy), so the drawer's scrap.tf history is that copy's.
+  const onOpen = useCallback((o: Opportunity) => openItem(o.sku, o.copyKey ?? null), [openItem]);
 
-  // F9 item menu. Through a ref, so the memoised rows keep a stable handler.
+  // F9 item menu. Through a ref, so the memoised rows keep a stable handler. 0.8: on the row's own copy too, so
+  // Watch on scrap.tf… watches that copy (oppMenuTarget).
   const menu = useItemMenu();
   const openMenuRef = useRef(menu.open);
   openMenuRef.current = menu.open;
-  const onRowMenu = useCallback((o: Opportunity, at: { x: number; y: number }) => openMenuRef.current({ sku: o.sku, name: o.name, category: o.category }, at), []);
+  const onRowMenu = useCallback((o: Opportunity, at: { x: number; y: number }) => openMenuRef.current(oppMenuTarget(o), at), []);
 
   // "/" focuses the search box from anywhere on the page, but not from inside the item drawer.
   const drawerOpen = useRef(false);
@@ -316,6 +315,12 @@ export function OpportunitiesPage() {
               <span className="sep" aria-hidden="true" />
               <span>
                 <strong className="num">{fmtInt(totals.profitable)}</strong> profitable, together <Money scrap={totals.profit} keyScrap={keyScrap} tone="profit" signed />
+                {totals.sharedCopies > 0 ? (
+                  <span className="muted small" title={SHARED_BUYER_TITLE}>
+                    {' '}
+                    ({sharedBuyerNote(totals.sharedCopies)})
+                  </span>
+                ) : null}
               </span>
             </>
           ) : (

@@ -7,11 +7,22 @@ import { defaultTreeAdapter, parse, parseFragment } from 'parse5';
 import type { DefaultTreeAdapterMap, DefaultTreeAdapterTypes, TreeAdapter } from 'parse5';
 import { z } from 'zod';
 import { parsePrice } from '../../shared/currency';
-import { IMPORT_REFUSAL_CODES, IMPORT_REPORT_MAX_ITEMS, LAYOUT_CHANGED, NO_PRICE_COLUMN, NO_STOCK_LIMIT, UNUSUALS_INDEX, importWarningCode } from '../../shared/importCodes';
+import {
+  CRAFT_UNVERIFIED,
+  DUPLICATE_ROW,
+  IMPORT_REFUSAL_CODES,
+  IMPORT_REPORT_MAX_ITEMS,
+  LAYOUT_CHANGED,
+  NO_PRICE_COLUMN,
+  NO_STOCK_LIMIT,
+  UNUSUALS_INDEX,
+  importWarningCode,
+} from '../../shared/importCodes';
+import { scraptfListFamilyOf } from '../../shared/scraptfList';
 import { fromObject, normalizeSkuObject } from '../../shared/sku';
 import { SCRAPTF_BANK_IDS } from '../../shared/types';
 import type { ImportPageKind, ImportReport, ImportReportItem, ParsedScrapItem, ScraptfBank, SkuObject, SpecialAttrs } from '../../shared/types';
-import { SERIESLESS_CRATES } from '../connectors/schemaNames';
+import { CRAFT_NUMBER_DROPPED, SERIESLESS_CRATES } from '../connectors/schemaNames';
 import type { PaintkitRow, SchemaItemRow, SchemaService } from '../contracts';
 
 type Node = DefaultTreeAdapterTypes.Node;
@@ -100,9 +111,13 @@ export interface ParseDiagnostics {
  * sheen-mismatch, needs-target, unparsed-modifier, reserved, not-tradable,
  * series-mismatch, series-unresolved, series-inferred, price-mismatch, unparsed-price, no-price,
  * no-pays-price, unparsed-pays-price, no-stock-limit (0.7.1: an /items row whose "Item Limits"
- * could not be read), parse-error.
+ * could not be read), parse-error, duplicate-row (0.7.4: /items rows of one item that differ: no price
+ * from any of them); craft-unverified (0.7.4) notes an /items family row in the parser report only;
+ * 0.7.4: quality-inferred (an Unusual-only item keyed 5 whatever quality the page gave it), quality-conflict
+ * (refused: the Strange quality alone beside another quality word or an effect) and strange-conflict
+ * (refused: strange parts on a copy nothing marks Strange).
  * Page codes: not-scraptf, page-not-importable, page-kind-guessed,
- * page-kind-unknown, unknown-bank, schema-not-loaded, duplicate-cards, no-items,
+ * page-kind-unknown, unknown-bank, schema-not-loaded, duplicate-cards, duplicate-rows (0.7.4), no-items,
  * no-cards-saved (F18: a bank page saved without its cards), no-sku, no-pays-column,
  * layout-changed (0.7.1: item-like elements in no shape the parser knows), no-price-column (0.7.1:
  * an /items table with headers but no "Price to buy"), unusuals-index (0.7.3: scrap.tf's bare /unusuals
@@ -122,10 +137,11 @@ export function warningCode(warning: string): string {
 /**
  * True when the item has a SKU and a usable price (the importer stores only these). 0.7.1 (P1): an /items
  * row whose stock could not be read is not one either: a sold-out row would otherwise read as buyable.
+ * 0.7.4: nor are /items rows of one item that differ (DUPLICATE_ROW): which of them is which copy is unknown.
  */
 export function isImportableItem(item: ParsedScrapItem): boolean {
   if (item.sku === null) return false;
-  if (item.warnings.some((w) => warningCode(w) === NO_STOCK_LIMIT)) return false;
+  if (item.warnings.some((w) => warningCode(w) === NO_STOCK_LIMIT || warningCode(w) === DUPLICATE_ROW)) return false;
   return sellsPriceOf(item) !== null;
 }
 
@@ -217,7 +233,11 @@ const PAINT_DECIMAL_BY_NAME: Record<string, number> = {
 };
 
 // Strange counters shown on every strange item; anything else in "(Name: N)" form is a part.
-const BASE_STRANGE_COUNTERS = new Set(['kills', 'kill assists', 'ubers', 'sentry kills', 'points scored']);
+const BASE_STRANGE_COUNTERS: ReadonlySet<string> = new Set(['kills', 'kill assists', 'ubers', 'sentry kills', 'points scored']);
+/** 0.7.4 (F11): a cosmetic's only built-in counter (builtInCounters); its Kills is a strange part. */
+const COSMETIC_COUNTERS: ReadonlySet<string> = new Set(['points scored']);
+/** 0.7.4 (F11): schema slots of cosmetics (tf_wearable); wearable weapons (shields, boots) keep their slot. */
+const COSMETIC_SLOTS: ReadonlySet<string> = new Set(['misc', 'head']);
 
 // Items whose SKU needs a target / output (td-, od-, oq-) that the card does not carry.
 const NEEDS_TARGET_RE = /(?:Kit Fabricator|Strangifier|Unusualifier|Chemistry Set)$|\bKillstreak\b.*\bKit$/;
@@ -233,6 +253,12 @@ const KIT_TIER: ReadonlyMap<number, number> = new Map([
   [6523, 2],
   [6526, 3],
 ]);
+/** 0.7.4 (F17): the kit defindex of each tier (KIT_TIER reversed). */
+const KIT_BY_TIER: ReadonlyMap<number, number> = new Map([...KIT_TIER].map(([d, t]): [number, number] => [t, d]));
+/** 0.7.4 (F17): one of the schema's legacy kits ("Sniperrifle Killstreakifier Basic", item_name "Kit", 5726-5801). */
+function isLegacyKitItem(item: SchemaItemRow | null): boolean {
+  return item !== null && !KIT_TIER.has(item.defindex) && item.itemClass === 'tool' && collapse(item.itemName) === 'Kit' && /Killstreakifier/i.test(item.name);
+}
 /** 0.7.2: kit fabricators by defindex (20002 specialized, 20003 professional) and the tier of their kit. */
 const FABRICATOR_TIER: ReadonlyMap<number, number> = new Map([
   [20002, 2],
@@ -913,6 +939,9 @@ const KILLSTREAK_TOKENS: [RegExp, number][] = [
   [/^Killstreak(?:\s+|$)/, 1],
 ];
 
+/** 0.7.4 (F08): the weapon unusual effects (701-704), longest first; only skins carry them. */
+const WEAPON_EFFECT_WORDS: readonly string[] = ['Energy Orb', 'Isotope', 'Cool', 'Hot'];
+
 const QUALITY_TOKENS: [RegExp, number][] = [
   [/^Decorated Weapon(?:\s+|$)/, 15],
   [/^Decorated(?:\s+|$)/, 15],
@@ -1077,6 +1106,18 @@ function parseName(title: string, nctx: NameCtx, ctx: Ctx): NameParse {
         progress = true;
         continue;
       }
+      // 0.7.4 (F08): a skin's own effect before its paintkit ("Hot Night Owl Sniper Rifle (Factory New)"), as an
+      // /items row names it with no image to read it from; only a weapon effect, and only where no paintkit fits.
+      if (res.effect === null && nctx.effectHint === null) {
+        const word = WEAPON_EFFECT_WORDS.find((w) => rest.toLowerCase().startsWith(`${w.toLowerCase()} `));
+        const eff = word !== undefined ? safe(() => ctx.schema.effectIdByName(word), null) : null;
+        if (word !== undefined && eff !== null && eff >= 701 && eff <= 704) {
+          res.effect = eff;
+          rest = rest.slice(word.length).trim();
+          progress = true;
+          continue;
+        }
+      }
     }
   }
 
@@ -1156,7 +1197,25 @@ function reportContentLines(lines: readonly string[]): string[] {
   return out;
 }
 
-function parseContent(lines: string[]): ContentInfo {
+/**
+ * 0.7.4 (F11): the item's own strange counter, the first unbracketed "Name: N" line Steam shows under the type
+ * line ("Kills: 3021", "Points Scored: 12", "Ubers: 112"). On a cosmetic (that line is Points Scored, or with no
+ * such line `cosmetic`, a hat or misc slot) only Points Scored is built in: "Kills" and "Kill Assists" there are
+ * strange parts (TF2.GG's "Damage Dealt, Dominations, Kills" orders are all on cosmetics). On a weapon every
+ * base counter stays built in, as before.
+ */
+function builtInCounters(lines: readonly string[], cosmetic: boolean): ReadonlySet<string> {
+  for (const raw of lines) {
+    const m = /^([A-Za-z][A-Za-z .'\-]*?)\s*:\s*[\d,]+$/.exec(raw.replace(/[’‘]/g, "'").trim());
+    const name = m ? m[1]!.trim().toLowerCase() : null;
+    if (name !== null && BASE_STRANGE_COUNTERS.has(name)) return name === 'points scored' ? COSMETIC_COUNTERS : BASE_STRANGE_COUNTERS;
+  }
+  return cosmetic ? COSMETIC_COUNTERS : BASE_STRANGE_COUNTERS;
+}
+
+function parseContent(lines: string[], opts: { cosmetic?: boolean } = {}): ContentInfo {
+  const builtIn = builtInCounters(lines, opts.cosmetic === true);
+  let baseSeen = false;
   const info: ContentInfo = {
     effectName: null,
     paintName: null,
@@ -1241,10 +1300,14 @@ function parseContent(lines: string[]): ContentInfo {
     }
     if ((m = /^\(\s*([A-Za-z][A-Za-z .'\-]*?)\s*:\s*[\d,]+\s*\)$/.exec(line))) {
       const name = m[1]!.trim();
-      if (!BASE_STRANGE_COUNTERS.has(name.toLowerCase())) info.parts.push(name);
+      if (!builtIn.has(name.toLowerCase())) info.parts.push(name);
       continue;
     }
     if ((m = /^([A-Za-z][A-Za-z .'\-]*?)\s*:\s*[\d,]+$/.exec(line)) && BASE_STRANGE_COUNTERS.has(m[1]!.trim().toLowerCase())) {
+      // 0.7.4 (F11): the item's own counter once; after it, a cosmetic's other counters are parts.
+      const name = m[1]!.trim();
+      if (baseSeen && !builtIn.has(name.toLowerCase())) info.parts.push(name);
+      baseSeen = true;
       continue;
     }
     if (CUSTOM_DESC_RE.test(line) && line.length > 2) {
@@ -1296,8 +1359,9 @@ function resolveNeedsTarget(ctx: Ctx, name: string, defindex: number | null): Sk
   if (!r || r.match === 'fuzzy' || !r.skuObject) return null;
   if (defindex !== null && r.skuObject.defindex !== defindex) return null;
   const obj = normalizeSkuObject({ ...r.skuObject, paint: null });
-  // None of these tools carries a craft number: a trailing "Series #N" read as one keys no real item.
-  if (obj.craftnumber !== null) return null;
+  // None of these tools carries a craft number: a trailing "Series #N" read as one keys no real item
+  // (0.7.4, F46: the resolver now drops such a number with a warning instead of keying it).
+  if (obj.craftnumber !== null || r.warnings.some((w) => w.includes(CRAFT_NUMBER_DROPPED))) return null;
   return obj.target !== null || obj.output !== null ? obj : null;
 }
 
@@ -1597,9 +1661,10 @@ function parseCard(el: Element, ctx: Ctx): ParsedEntry & { assetId: string | nul
   const a = parts.attrs;
   const titleText = htmlAttrLines(a['data-title'] ?? '').join(' ');
   const contentLines = [...htmlAttrLines(a['data-content'] ?? ''), ...htmlAttrLines(a['data-content2'] ?? '')];
-  const content = parseContent(contentLines);
   const defindex = a['data-defindex'] ?? null;
   const item = defindex !== null ? safe(() => ctx.schema.itemByDefindex(defindex), null) : null;
+  // 0.7.4 (F11): a cosmetic counts Points Scored, so its "(Kills: N)" is a strange part.
+  const content = parseContent(contentLines, { cosmetic: item !== null && item.itemClass === 'tf_wearable' && COSMETIC_SLOTS.has(item.slot ?? '') });
 
   const q = qualityFromClasses(parts.classes);
   const effectImg = cardEffectId(parts, warnings);
@@ -1626,6 +1691,8 @@ function parseCard(el: Element, ctx: Ctx): ParsedEntry & { assetId: string | nul
 
   let elevated =
     quality !== 11 && (q.all.includes(11) || name.strange || content.strangeStatClock);
+  /** 0.7.4 (F76): set when reconcileQuality refuses the card. */
+  let qualityConflict = false;
 
   // Effect
   let effect: number | null = null;
@@ -1672,16 +1739,19 @@ function parseCard(el: Element, ctx: Ctx): ParsedEntry & { assetId: string | nul
   }
   const warPaint = warPaintCheck(defindex, paintkit, name, warnings);
   paintkit = warPaint.paintkit;
-  // Unusual skins are keyed as Decorated (15) plus the effect (DESIGN_BRIEF §4.3); NetroScript drops the
-  // Unusual quality scrap.tf puts on skins. Without an effect the card stays 5 and is refused.
-  if (quality === 5 && effect !== null && paintkit !== null && wear !== null) quality = 15;
-  // A Decorated card the title, class or tooltip calls Unusual has an effect this card does not show:
-  // the plain skin's SKU would be a guess, so it stays Unusual and buildSku refuses it.
-  else if (quality === 15 && effect === null && (name.qualities.includes(5) || q.all.includes(5) || content.effectName !== null)) quality = 5;
+  // 0.7.4 (F08): an unusual skin is Unusual (5) plus the effect, as scrap.tf's own class and the feed's buyers
+  // have it (skinQuality). A Decorated card the title, class or tooltip calls Unusual has an effect this card
+  // does not show: the plain skin's SKU would be a guess, so it stays Unusual and buildSku refuses it.
+  if (quality === 15 && effect === null && (name.qualities.includes(5) || q.all.includes(5) || content.effectName !== null)) quality = 5;
   // P2: every skin keyed the way backpack.tf buyers key it, whichever quality class the card carries.
   if (paintkit !== null && wear !== null) {
     const skin = skinQuality(quality, effect, elevated || quality === 11 || q.all.includes(11) || name.strange);
     if (skin) ({ quality, elevated } = skin);
+  } else if (!skinLike) {
+    // 0.7.4 (F05/F76): an item that exists only as an Unusual, or a Strange class naming another quality.
+    const rq = reconcileQuality(ctx, defindex, quality, elevated, name, effect, q.all.length === 1 && q.all[0] === 11, warnings);
+    if (rq === null) qualityConflict = true;
+    else ({ quality, elevated } = rq);
   }
 
   // Crate series: the title's, else the tooltip's.
@@ -1739,7 +1809,7 @@ function parseCard(el: Element, ctx: Ctx): ParsedEntry & { assetId: string | nul
   }
   if (stock === null && assetId !== null) stock = 1;
 
-  const built = buildSku(ctx, {
+  let built = buildSku(ctx, {
     defindex,
     quality,
     elevated,
@@ -1752,6 +1822,7 @@ function parseCard(el: Element, ctx: Ctx): ParsedEntry & { assetId: string | nul
     wear,
     paintkit,
     paintkitConflict: warPaint.conflict,
+    qualityConflict,
     isCrate,
     crateSeries,
     item,
@@ -1759,6 +1830,12 @@ function parseCard(el: Element, ctx: Ctx): ParsedEntry & { assetId: string | nul
     fallbackTitle: titleText,
     warnings,
   });
+  // 0.7.4 (F75): strange parts on a copy keyed neither Strange nor elevated strange name no real item: the
+  // card's strangeness is in a form the parser does not read, so it is refused, not stored as the plain item.
+  if (built.obj !== null && special.parts.length > 0 && built.obj.quality !== 11 && built.obj.quality2 !== 11 && item?.itemClass !== 'tool' && !STRANGE_TOOL_RE.test(name.plain)) {
+    warnings.push(`strange-conflict: the tooltip lists strange parts (${clip(special.parts.join(', '), 60)}) but nothing on the card says Strange`);
+    built = { sku: null, obj: null };
+  }
 
   const fallbackName = name.customName !== null ? (item?.itemName ?? name.plain) : name.plain || titleText;
   return {
@@ -1791,22 +1868,38 @@ function parseCard(el: Element, ctx: Ctx): ParsedEntry & { assetId: string | nul
   };
 }
 
-/** P4: classes a report keeps (quality, killstreak tier, sheen/killstreaker, uncraftable) and the card's own flags. */
-const REPORT_CLASS_RE = /^(?:quality\d{1,3}|killstreak\d|fx\d{1,5}|uncraft[a-z]*|item|app440|hoverable)$/;
+/**
+ * P4: classes a report keeps (quality, killstreak tier, sheen/killstreaker, uncraftable) and the card's own flags.
+ * 0.8 (LC-6): and 'reserved', the marker a reserved card may carry (LC-1 waits for real reports of it).
+ */
+const REPORT_CLASS_RE = /^(?:quality\d{1,3}|killstreak\d|fx\d{1,5}|uncraft[a-z]*|item|app440|hoverable|reserved)$/;
+/**
+ * 0.7.4 (R46): an /items row's report also keeps any class naming "craft" ('noncraftable', 'craftable-0',
+ * 'no-craft') or a bare 'nc', on the row or its icon, at most 40 characters: a family row (no "uncraft" class)
+ * then shows a marker scrap.tf may use that the parser does not read yet. Page-authored class names, never
+ * the user's data (P4).
+ */
+const REPORT_LIST_CRAFT_RE = /craft|^nc$/i;
 
-/** P4: an element's report fields from its attributes, as text (raw, clipped later by reports.ts); never its asset id. */
-function cardReportBase(el: Element, classes: readonly string[]): ImportReportItem {
+/**
+ * P4: an element's report fields from its attributes, as text (raw, clipped later by reports.ts); never its asset id.
+ * `extra`: more class tokens to keep (an /items row's REPORT_LIST_CRAFT_RE), clipped to 40 characters.
+ * 0.8 (LC-6): `dataBot` is the card's data-bot attribute (null without one); reports.ts scrubs an id-length digit
+ * run in it to '#', so a SteamID64 never reaches a report.
+ */
+function cardReportBase(el: Element, classes: readonly string[], extra?: RegExp): ImportReportItem {
   const raw = (name: string): string | null => getAttr(el, name);
   const defindex = Number(raw('data-defindex') ?? '');
   return {
     defindex: Number.isSafeInteger(defindex) && defindex >= 0 && (raw('data-defindex') ?? '').trim() !== '' ? defindex : null,
-    classTokens: classes.filter((c) => REPORT_CLASS_RE.test(c)).slice(0, 20),
+    classTokens: classes.filter((c) => REPORT_CLASS_RE.test(c) || (extra !== undefined && c.length <= 40 && extra.test(c))).slice(0, 20),
     title: null,
     contentLines: [],
     indicator: null,
     itemValue: raw('data-item-value'),
     numAvailable: raw('data-num-available'),
     numSelected: raw('data-num-selected'),
+    dataBot: raw('data-bot'),
     particleId: null,
     warpaintId: null,
     sku: null,
@@ -1815,16 +1908,55 @@ function cardReportBase(el: Element, classes: readonly string[]): ImportReportIt
 }
 
 /**
- * 0.7.1 (P2): a skin's quality as backpack.tf keys it, whatever quality class scrap.tf gives the card. An
- * unusual skin is Decorated (15) plus its effect, plus strange (quality2 11) when strange; a strange skin
- * without an effect is Strange (11) with no second quality ("11;…;w2;pk14"); any other skin is Decorated.
+ * 0.7.1 (P2): a skin's quality as backpack.tf keys it, whatever quality class scrap.tf gives the card. 0.7.4
+ * (F08/F43/F69): an unusual skin is Unusual (5) plus its effect, plus strange (quality2 11) when strange, as the
+ * live feed's buyers key it (canonicalUnusualSkin; 0.7.3 keyed it Decorated, a form no order uses); a strange
+ * skin without an effect is Strange (11) with no second quality ("11;…;w2;pk14"); any other skin is Decorated.
  * Killstreak and festive are separate SKU parts and stay. null (unchanged): an Unusual card that shows no
  * effect stays 5, so buildSku refuses it rather than guess the plain skin.
  */
 function skinQuality(quality: number, effect: number | null, strange: boolean): { quality: number; elevated: boolean } | null {
-  if (effect !== null) return { quality: 15, elevated: strange };
+  if (effect !== null) return { quality: 5, elevated: strange };
   if (quality === 5) return null;
   return strange ? { quality: 11, elevated: false } : { quality: 15, elevated: false };
+}
+
+/**
+ * 0.7.4 (F05/F76): a card's or row's quality checked against the item (not for skins: skinQuality's).
+ * - An item that exists only as an Unusual without an effect (schema item_quality 5: the Horseless Headless
+ *   Horsemann's Headtaker, Haunted Metal Scrap) is keyed 5 whatever quality the page gives it ("266;0" is a SKU
+ *   no order or price uses); a Strange one is 5 plus strange, as backpack.tf keys it. Noted quality-inferred.
+ * - `strangeOnly` (the Strange class or data-quality 11 alone) with a title naming another quality (Genuine,
+ *   Vintage, Haunted, Unusual ...) or an effect is an elevated copy the page does not say how to key: refused
+ *   with quality-conflict (null) rather than stored as the plain Strange item or an "X;11;u<effect>" no market uses.
+ * - Quality 0 (Normal) on an item whose schema quality is another one is noted quality-mismatch.
+ */
+function reconcileQuality(
+  ctx: Ctx,
+  defindex: number | null,
+  quality: number,
+  elevated: boolean,
+  name: NameParse,
+  effect: number | null,
+  strangeOnly: boolean,
+  warnings: string[],
+): { quality: number; elevated: boolean } | null {
+  const itemQuality = defindex !== null ? safe(() => ctx.schema.itemQuality(defindex), null) : null;
+  if (itemQuality === 5 && quality !== 5 && effect === null) {
+    warnings.push(`quality-inferred: scrap.tf says quality ${quality}; the item exists only as Unusual`);
+    return { quality: 5, elevated: elevated || quality === 11 || name.strange };
+  }
+  if (strangeOnly && quality === 11) {
+    const other = name.qualities.find((x) => x !== 11 && x !== 6);
+    if (other !== undefined || effect !== null) {
+      warnings.push(`quality-conflict: only the Strange quality is shown, but the ${other !== undefined ? `title says quality ${other}` : 'card shows an unusual effect'}`);
+      return null;
+    }
+  }
+  if (quality === 0 && itemQuality !== null && itemQuality !== 0) {
+    warnings.push(`quality-mismatch: scrap.tf says quality 0 (Normal) but the item is quality ${itemQuality}`);
+  }
+  return { quality, elevated };
 }
 
 function warPaintCheck(
@@ -1864,6 +1996,8 @@ interface SkuInput {
   paintkit: number | null;
   /** A War Paint whose name and defindex name different paintkits (warPaintCheck warned). */
   paintkitConflict: boolean;
+  /** 0.7.4 (F76): a quality reconcileQuality refused (quality-conflict warned). */
+  qualityConflict?: boolean;
   /** A supply crate (schema item class, or the page's own sign): priced per series. */
   isCrate: boolean;
   crateSeries: number | null;
@@ -1892,9 +2026,20 @@ function buildSku(ctx: Ctx, s: SkuInput): { sku: string | null; obj: SkuObject |
   // 0.7.2: real /buy/killstreaks titles drop "Killstreak" ("Professional Rocket Launcher Kit") and TF2's
   // schema calls every kit "Kit", so neither the title nor the schema name marked a kit: each was stored
   // as its bare defindex (every kit of a tier as one price). Kits and fabricators are found by defindex.
-  const kitTier = s.defindex !== null ? KIT_TIER.get(s.defindex) : undefined;
+  let kitTier = s.defindex !== null ? KIT_TIER.get(s.defindex) : undefined;
   const fabTier = s.defindex !== null ? FABRICATOR_TIER.get(s.defindex) : undefined;
-  if (s.defindex !== null && (kitTier !== undefined || fabTier !== undefined)) return kitSku(ctx, s, s.defindex, kitTier, fabTier);
+  let kitDefindex = s.defindex;
+  // 0.7.4 (F17): a legacy kit defindex ("X Killstreakifier Basic", item_name "Kit") is keyed as its title's
+  // tier's kit, as backpack.tf's orders on those defindexes now are (bptfItem kitIdentity).
+  if (s.defindex !== null && kitTier === undefined && fabTier === undefined && isLegacyKitItem(s.item)) {
+    const tier = kitTitleOf(s.name.plain || s.fallbackTitle)?.tier ?? null;
+    const canonical = tier !== null ? KIT_BY_TIER.get(tier) : undefined;
+    if (canonical !== undefined) {
+      kitTier = tier!;
+      kitDefindex = canonical;
+    }
+  }
+  if (kitDefindex !== null && (kitTier !== undefined || fabTier !== undefined)) return kitSku(ctx, s, kitDefindex, kitTier, fabTier);
   if (needsTarget(s.defindex, s.item, s.name.plain)) {
     const resolved = resolveNeedsTarget(ctx, s.name.plain || s.fallbackTitle, s.defindex);
     if (resolved) {
@@ -1943,7 +2088,7 @@ function buildSku(ctx: Ctx, s: SkuInput): { sku: string | null; obj: SkuObject |
     }
     w.push(`series-inferred: crate series #${crateSeries} taken from the item schema`);
   }
-  if (s.paintkitConflict) return { sku: null, obj: null };
+  if (s.paintkitConflict || s.qualityConflict === true) return { sku: null, obj: null };
 
   // Items that exist only as Unusual have no effect (schema item_quality 5): their SKU is complete without one.
   if (s.quality === 5 && s.effect === null && safe(() => ctx.schema.itemQuality(defindex), null) !== 5) {
@@ -2076,6 +2221,11 @@ interface RowColumns {
 /** P4: a report may hold this many of a row's cell texts. */
 const REPORT_MAX_CELLS = 12;
 
+/** The class tokens of a /items row and of its icon (any element inside it whose classes include "item"). */
+function rowClassTokens(row: Element): string[] {
+  return [...classesOf(row), ...descendants(row).filter((d) => classesOf(d).includes('item')).flatMap(classesOf)];
+}
+
 function parseRow(row: Element, cols: RowColumns, ctx: Ctx): ParsedEntry {
   const { price: priceColumn, name: nameColumn, pays: paysColumn } = cols;
   const warnings: string[] = [];
@@ -2127,10 +2277,31 @@ function parseRow(row: Element, cols: RowColumns, ctx: Ctx): ParsedEntry {
   const paintkit = name.paintkit?.id ?? null;
   let elevated = quality !== 11 && name.strange;
   let skuQuality = quality;
+  let qualityConflict = false;
+  const skinLike = paintkit !== null || name.wear !== null;
+  // 0.7.4 (F05): the title's quality words checked against data-quality, as parseCard checks its class
+  // (5 and 15 are one quality on a skin; 11 is the Strange word, read as `strange`).
+  const rowQuality = quality;
+  if (name.qualities.length > 0 && !name.qualities.some((y) => y === rowQuality || (skinLike && (y === 5 || y === 15) && (rowQuality === 5 || rowQuality === 15)))) {
+    warnings.push(`quality-mismatch: row says ${rowQuality} but title says ${name.qualities.join('/')}`);
+  }
   if (paintkit !== null && name.wear !== null) {
     const skin = skinQuality(quality, name.effect, elevated || quality === 11);
     if (skin) ({ quality: skuQuality, elevated } = skin);
+  } else if (!skinLike) {
+    // 0.7.4 (F05/F76): data-quality 0 on the Headtaker (266;0 names no item) or 11 beside another quality word.
+    const rq = reconcileQuality(ctx, defindex, quality, elevated, name, name.effect, quality === 11, warnings);
+    if (rq === null) qualityConflict = true;
+    else ({ quality: skuQuality, elevated } = rq);
   }
+
+  // 0.7.4: an unmarked /items row is one entry for every copy scrap.tf sells at its price (Craftable and
+  // Non-Craftable, killstreak tiers, festivized and parted copies alike), so it is keyed by its family: the
+  // plain SKU. A row is Non-Craftable only when it says so: by its name ("Non-Craftable X"), or, as the
+  // reference helper reads a card, by any class token containing "uncraft" on the row or its icon. Whether
+  // an unmarked row is the Craftable copy is the page pass's (listRowsPass): never assumed here.
+  const classes = rowClassTokens(row);
+  const classUncraft = classes.some((c) => c.toLowerCase().includes('uncraft'));
 
   const built = buildSku(ctx, {
     defindex,
@@ -2140,11 +2311,12 @@ function parseRow(row: Element, cols: RowColumns, ctx: Ctx): ParsedEntry {
     killstreak: name.killstreak,
     australium: name.australium,
     festive: name.festive,
-    uncraftable: name.uncraftable,
+    uncraftable: name.uncraftable || classUncraft,
     tradable: true,
     wear: name.wear,
     paintkit,
     paintkitConflict: false,
+    qualityConflict,
     isCrate,
     crateSeries: name.crateSeries,
     item,
@@ -2152,29 +2324,33 @@ function parseRow(row: Element, cols: RowColumns, ctx: Ctx): ParsedEntry {
     fallbackTitle: title,
     warnings,
   });
+  const out: ParsedScrapItem = {
+    title,
+    sku: built.sku,
+    skuObject: built.obj,
+    name: displayName(ctx, built.sku, name.plain || title),
+    costKeys: parsed?.keys ?? 0,
+    costScrap: parsed?.scrap ?? 0,
+    special: emptySpecial(),
+    assetId: null,
+    stock,
+    warnings,
+    pays,
+    stockLimit,
+    // Proven Non-Craftable by its name, its classes or the item (a kit, NON_CRAFTABLE_TOOLS); else not yet
+    // known (listRowsPass may prove it the Craftable copy).
+    listCraft: built.obj?.craftable === false ? 'uncraftable' : 'any',
+  };
   return {
-    item: {
-      title,
-      sku: built.sku,
-      skuObject: built.obj,
-      name: displayName(ctx, built.sku, name.plain || title),
-      costKeys: parsed?.keys ?? 0,
-      costScrap: parsed?.scrap ?? 0,
-      special: emptySpecial(),
-      assetId: null,
-      stock,
-      warnings,
-      pays,
-      stockLimit,
-    },
-    // P4: the row's cells as text, and the attributes its stock was (or was not) read from.
+    item: out,
+    // P4: the row's cells as text, and the attributes its stock was (or was not) read from. 0.7.4: a family
+    // row ('any' once the page pass ran) carries the CRAFT_UNVERIFIED note there, with its class tokens.
     report: ctx.diagnostics
       ? () => {
           const holder = limitsCell ?? cells.slice(priceColumn !== null ? priceColumn + 1 : 0).find((c) => limitsByAttr(c) !== null) ?? null;
           const attrEl = holder ? ([holder, ...descendants(holder)].find((h) => LIMIT_ATTRS.some((n) => getAttr(h, n) !== null)) ?? holder) : null;
-          const classes = [...classesOf(row), ...descendants(row).filter((d) => classesOf(d).includes('item')).flatMap(classesOf)];
           return {
-            ...cardReportBase(row, [...new Set(classes)]),
+            ...cardReportBase(row, [...new Set(classes)], REPORT_LIST_CRAFT_RE),
             title: name.customName === null ? title : null,
             cells: cells.slice(0, REPORT_MAX_CELLS).map((c, i) => (i === nameColumn && name.customName !== null ? '' : textContent(c))),
             limitAttrs: attrEl
@@ -2186,11 +2362,75 @@ function parseRow(row: Element, cols: RowColumns, ctx: Ctx): ParsedEntry {
                 }
               : { title: null, dataOriginalTitle: null, dataBsOriginalTitle: null, ariaLabel: null },
             sku: built.sku,
-            warnings: reportWarnings(warnings),
+            warnings: reportWarnings(familyRow(out) ? [...warnings, CRAFT_UNVERIFIED_NOTE] : warnings),
           };
         }
       : null,
   };
+}
+
+/** 0.7.4: the parser report's note on a family row (familyRow). */
+const CRAFT_UNVERIFIED_NOTE = `${CRAFT_UNVERIFIED}: scrap.tf/items does not show whether this row is the Craftable or the Non-Craftable copy; read as one row for every copy at its price`;
+
+/**
+ * 0.7.4: an identified /items row proven neither Non-Craftable nor Craftable (ParsedScrapItem.listCraft
+ * 'any'): one entry for every copy scrap.tf sells at its price. The parser report keeps it (CRAFT_UNVERIFIED,
+ * after every other kept item), so a read of the user's own page shows whether scrap.tf ever marks one.
+ */
+export function familyRow(item: ParsedScrapItem): boolean {
+  return item.sku !== null && item.listCraft === 'any';
+}
+
+/**
+ * 0.7.4: what each /items row prices, read from the page as a whole (rows parsed by parseRow, in page order).
+ * - An unmarked row whose family (scraptfListFamilyOf: defindex, quality, elevated strange, australium,
+ *   effect, wear and paintkit, crate series) also has a Non-Craftable row on the page is that item's
+ *   Craftable copy: scrap.tf lists the Non-Craftable copy apart only when it prices it apart (725, 490-492).
+ * - Any other unmarked row stays 'any', a family row for every copy at its price (familyRow: the parser
+ *   report keeps it, noted CRAFT_UNVERIFIED, with its row and icon class tokens).
+ * - Rows that key to one SKU: an identical repeat (title, price, pays and stock) is the same row shown
+ *   again and is dropped (`collapsed`); rows that still differ are each warned DUPLICATE_ROW (`conflicts`)
+ *   and none of them sets a price: which copy each is cannot be told, so the next save of its bank decides.
+ */
+function listRowsPass(entries: readonly ParsedEntry[]): { entries: ParsedEntry[]; collapsed: number; conflicts: number } {
+  const marked = new Set<string>();
+  for (const { item } of entries) {
+    if (item.sku === null || item.listCraft !== 'uncraftable') continue;
+    const family = scraptfListFamilyOf(item.sku);
+    if (family !== null) marked.add(family);
+  }
+  const seen = new Set<string>();
+  const bySku = new Map<string, ParsedEntry[]>();
+  const kept: ParsedEntry[] = [];
+  let collapsed = 0;
+  for (const entry of entries) {
+    const it = entry.item;
+    if (it.sku !== null) {
+      const same = JSON.stringify([it.title, it.sku, it.costKeys, it.costScrap, it.stock, it.stockLimit ?? null, it.pays ?? null]);
+      if (seen.has(same)) {
+        collapsed++;
+        continue;
+      }
+      seen.add(same);
+      const group = bySku.get(it.sku);
+      if (group) group.push(entry);
+      else bySku.set(it.sku, [entry]);
+      if (it.listCraft === 'any') {
+        const family = scraptfListFamilyOf(it.sku);
+        if (family !== null && marked.has(family)) it.listCraft = 'craftable';
+      }
+    }
+    kept.push(entry);
+  }
+  let conflicts = 0;
+  for (const group of bySku.values()) {
+    if (group.length < 2) continue;
+    conflicts += group.length;
+    for (const { item } of group) {
+      item.warnings.push(`${DUPLICATE_ROW}: ${group.length} rows on this page are this item at different prices or stock; none of them sets a price (your next save of its bank page decides)`);
+    }
+  }
+  return { entries: kept, collapsed, conflicts };
 }
 
 // ---------------------------------------------------------------------------
@@ -2295,6 +2535,9 @@ const REPORT_GUESS_CODES: ReadonlySet<string> = new Set([
   'unparsed-name',
   // 0.7.2: a kit title naming another tier than its item: how unseen kit title forms show up in a report.
   'killstreak-mismatch',
+  // 0.7.4 (F05/F76): a class or row quality the title disagrees with, and one taken from the item schema.
+  'quality-mismatch',
+  'quality-inferred',
   NO_STOCK_LIMIT,
   LAYOUT_CHANGED,
 ]);
@@ -2307,6 +2550,18 @@ function reportWorthy(item: ParsedScrapItem): boolean {
     const c = importWarningCode(w);
     return REPORT_GUESS_CODES.has(c) || (REFUSAL_CODES.has(c) && c !== 'no-defindex');
   });
+}
+
+/** 0.8 (LC-6): the warning codes of a card's lifecycle marker (reserved by another user, not tradable): report only. */
+const REPORT_LIFECYCLE_CODES: ReadonlySet<string> = new Set(['reserved', 'not-tradable']);
+
+/**
+ * 0.8 (LC-6): an item the report keeps for its lifecycle marker (any warning code in REPORT_LIFECYCLE_CODES), so the
+ * user's real report shows how scrap.tf marks a reserved or untradable card (LC-1 waits for it). Nothing stored
+ * changes: a reserved-only copy still counts as stock.
+ */
+function reportLifecycle(item: ParsedScrapItem): boolean {
+  return item.warnings.some((w) => REPORT_LIFECYCLE_CODES.has(importWarningCode(w)));
 }
 
 /** P4: the report's header texts (the price list's header row), at most 20, each short. */
@@ -2345,6 +2600,9 @@ export function parseScrapTfHtml(html: string, schema: SchemaService, opts: Pars
     selectedSkipped: scan.skippedCards,
     duplicates: 0,
     lookalikes: scan.lookalikes,
+    // 0.8 (LC-6): the items with a 'reserved' / 'not-tradable' warning code, counted before the last return.
+    reserved: 0,
+    notTradable: 0,
   };
   const reports: ImportReportItem[] = [];
   const withDiagnostics = (r: ScrapTfParseResult): ScrapTfParseResult =>
@@ -2391,9 +2649,14 @@ export function parseScrapTfHtml(html: string, schema: SchemaService, opts: Pars
   if (scan.skippedCards > 0) warnings.push(`duplicate-cards: ignored ${scan.skippedCards} selected-item copies`);
 
   const items: ParsedScrapItem[] = [];
+  // 0.8 (LC-6): a card or row kept only for its lifecycle marker goes after the refused ones, as family rows do.
+  const lifecycleReports: (() => ImportReportItem)[] = [];
   const keep = (entry: ParsedEntry) => {
     items.push(entry.item);
-    if (entry.report !== null && reports.length < IMPORT_REPORT_MAX_ITEMS && reportWorthy(entry.item)) reports.push(entry.report());
+    if (entry.report === null) return;
+    if (reportWorthy(entry.item)) {
+      if (reports.length < IMPORT_REPORT_MAX_ITEMS) reports.push(entry.report());
+    } else if (reportLifecycle(entry.item)) lifecycleReports.push(entry.report);
   };
   /** P4: a card or row that threw: its attributes only (its title could hold a custom name). */
   const failedReport = (el: Element, item: ParsedScrapItem): ParsedEntry['report'] =>
@@ -2454,13 +2717,34 @@ export function parseScrapTfHtml(html: string, schema: SchemaService, opts: Pars
     // Never guessed by position: a wrong column would read as what scrap.tf pays (Holdings' exit).
     warnings.push('no-pays-column: no "Price we pay" column found; what scrap.tf pays was not read');
   }
+  // 0.7.4: the price list as a whole decides what each row prices (listRowsPass), so every row is read first.
+  const rowEntries: ParsedEntry[] = [];
   for (const row of scan.rows) {
     try {
-      keep(parseRow(row, cols, ctx));
+      rowEntries.push(parseRow(row, cols, ctx));
     } catch (err) {
       const item = failedItem(textContent(row).slice(0, 80), `row could not be parsed (${err instanceof Error ? err.message : String(err)})`);
-      keep({ item, report: failedReport(row, item) });
+      rowEntries.push({ item, report: failedReport(row, item) });
     }
+  }
+  const pass = listRowsPass(rowEntries);
+  counts.duplicates += pass.collapsed;
+  if (pass.conflicts > 0) {
+    warnings.push(`${DUPLICATE_ROW}s: ${pass.conflicts} rows share an item with another row at a different price or stock; none of them sets a price`);
+  }
+  // A row kept only as a family row goes last in the report, so it never crowds out a refused row.
+  const familyReports: (() => ImportReportItem)[] = [];
+  for (const entry of pass.entries) {
+    items.push(entry.item);
+    if (entry.report === null) continue;
+    if (reportWorthy(entry.item)) {
+      if (reports.length < IMPORT_REPORT_MAX_ITEMS) reports.push(entry.report());
+    } else if (reportLifecycle(entry.item)) lifecycleReports.push(entry.report);
+    else if (familyRow(entry.item)) familyReports.push(entry.report);
+  }
+  for (const report of [...lifecycleReports, ...familyReports]) {
+    if (reports.length >= IMPORT_REPORT_MAX_ITEMS) break;
+    reports.push(report());
   }
 
   // 0.7.3: the bare /unusuals index (an address, not a body id) lists the unusual pages and never shows a
@@ -2486,6 +2770,10 @@ export function parseScrapTfHtml(html: string, schema: SchemaService, opts: Pars
     const noSku = items.filter((i) => i.sku === null).length;
     if (noSku > 0) warnings.push(`no-sku: ${noSku} of ${items.length} items could not be identified`);
   }
+  // 0.8 (LC-6): the lifecycle markers the reads showed, counted for the report only (nothing stored changes).
+  const marked = (code: string) => items.filter((i) => i.warnings.some((w) => importWarningCode(w) === code)).length;
+  counts.reserved = marked('reserved');
+  counts.notTradable = marked('not-tradable');
   return withDiagnostics({ pageKind, bank, page, items, warnings });
 }
 

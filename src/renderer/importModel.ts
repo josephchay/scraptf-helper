@@ -224,11 +224,18 @@ export function importReportText(reports: readonly ImportReport[] | null | undef
   return JSON.stringify(reports, null, 2);
 }
 
-/** The toast after Copy parser report. */
-export function importReportToast(copied: boolean, count: number): { text: string; tone: 'good' | 'warn' | 'bad' } {
+/**
+ * The toast after Copy parser report. 0.8 (LC-6): `markers` (the copied reports' counts.reserved / notTradable,
+ * summed) adds how many cards the reads marked reserved or not tradable, so the user knows the report shows how
+ * scrap.tf marks them (nothing stored changes).
+ */
+export function importReportToast(copied: boolean, count: number, markers?: { reserved: number; notTradable: number }): { text: string; tone: 'good' | 'warn' | 'bad' } {
   if (count === 0) return { text: 'No page read yet in this session: import or read a page first, then copy the report.', tone: 'warn' };
   if (!copied) return { text: 'Could not copy the parser report.', tone: 'bad' };
-  return { text: `Copied the parser report (${count} ${count === 1 ? 'read' : 'reads'}). Nothing was sent.`, tone: 'good' };
+  const reserved = markers && Number.isFinite(markers.reserved) && markers.reserved > 0 ? markers.reserved : 0;
+  const notTradable = markers && Number.isFinite(markers.notTradable) && markers.notTradable > 0 ? markers.notTradable : 0;
+  const marked = reserved + notTradable > 0 ? ` Your reads marked ${reserved} ${reserved === 1 ? 'card' : 'cards'} reserved and ${notTradable} not tradable; the report shows how.` : '';
+  return { text: `Copied the parser report (${count} ${count === 1 ? 'read' : 'reads'}). Nothing was sent.${marked}`, tone: 'good' };
 }
 
 /**

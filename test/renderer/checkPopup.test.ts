@@ -146,7 +146,8 @@ describe('the check popup', () => {
     await t.show(demo('flip'));
     await t.click(t.button('Save price'));
     expect(t.callsOf('prices.upsert').map((c) => c.params)).toEqual([
-      { sku: '378;6', name: 'Team Captain', costKeys: 1, costScrap: 48, source: 'user', observedAt: T0, note: 'live check' },
+      // 0.7.4 (F80): replaceTyped, so a second check's save updates this row instead of adding one.
+      { sku: '378;6', name: 'Team Captain', costKeys: 1, costScrap: 48, source: 'user', observedAt: T0, note: 'live check', replaceTyped: true },
     ]);
     expect(t.button('Saved')?.hasAttribute('disabled')).toBe(true);
     expect(t.text()).toContain('Saved Team Captain at 1 key 5.33 ref as your scrap.tf price.');

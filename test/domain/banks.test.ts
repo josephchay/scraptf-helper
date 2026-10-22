@@ -9,7 +9,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { NewImportBatch, Repo } from '../../src/service/contracts';
 import { openRepo } from '../../src/service/db';
 import { bankCards } from '../../src/renderer/banksModel';
-import { BANKS_PUSH_MS, createBanksSummary, emptyBankSummary, opportunityBank, type BanksSummaryDeps } from '../../src/service/domain/banks';
+import { BANKS_PUSH_MS, createBanksSummary, emptyBankSummary, lookForBank, opportunityBank, type BanksSummaryDeps } from '../../src/service/domain/banks';
 import { selectKeyPrice } from '../../src/service/domain/keyprice';
 import type { MarketIndex, UncheckedGroup } from '../../src/service/domain/market';
 import { createScraptfListCache } from '../../src/service/domain/scraptfList';
@@ -102,13 +102,15 @@ function listRow(sku: string, stock: number | null): ScraptfListRow {
  * per group a count and the first `top` rows with a ceiling above 0 and a revenue), over `rows`.
  */
 function fakeUncheckedBy(rows: () => readonly MarketRow[]) {
-  return <K>(groupOf: (c: Category) => K, top: number): Map<K, UncheckedGroup> => {
+  return <K>(groupOf: (c: Category, bank: Exclude<ScraptfBank, 'list'>) => K, top: number): Map<K, UncheckedGroup> => {
     const out = new Map<K, UncheckedGroup>();
     const sorted = rows()
       .filter((r) => r.verdict === 'unchecked')
       .sort(marketComparator('ceiling', 'desc'));
     for (const r of sorted) {
-      const g = groupOf(r.category);
+      // 0.7.4 (F36): with the page the row's button opens (R26: a list link, its kind's bank), as the index does.
+      const linked = r.scraptfLink.bank;
+      const g = groupOf(r.category, linked === 'list' ? (r.kindBank ?? bankForCategory(r.category)) : linked);
       let s = out.get(g);
       if (!s) out.set(g, (s = { count: 0, rows: [] }));
       s.count++;
@@ -450,7 +452,8 @@ describe('what to look for (S4)', () => {
     });
     expect(r.banks[0]!.lookFor[0]).toEqual({ sku: '1;6', name: 'Item 1;6', maxCostScrap: 50, revenueScrap: 30 });
     expect(h.uncheckedBy).toHaveBeenCalledTimes(1);
-    expect(h.uncheckedBy).toHaveBeenCalledWith(bankForCategory, BANK_LOOK_FOR, T0);
+    // 0.7.4 (F36): grouped by the page each row's scrap.tf button opens (lookForBank), not by category alone.
+    expect(h.uncheckedBy).toHaveBeenCalledWith(lookForBank, BANK_LOOK_FOR, T0);
   });
 
   it('groups by the same banks the cards list: every category is in the categories of bankForCategory(category)', () => {

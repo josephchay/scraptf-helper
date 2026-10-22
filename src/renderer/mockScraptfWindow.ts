@@ -28,6 +28,12 @@ export interface MockScraptfWindowDeps {
   itemsOn?(url: string): number;
   /** 0.7.1: the demo's best flip on a page (an item of the mock's own data), or null. */
   bestFlipOn?(url: string): ScraptfWindowRead['bestFlip'];
+  /**
+   * 0.7.4: the page's flip counts from the mock's bank stock rules (its Flips chip and the new ones among them), so
+   * a family /items row is no flip here either; null or absent: made-up counts. 0.8 (G2): `droppedFlips`, the flips
+   * a read dropped under Pay up to (bankStockDroppedIntoFlip), when given.
+   */
+  flipsOn?(url: string): { pageFlips: number; newFlips: number; droppedFlips?: number } | null;
 }
 
 export interface MockScraptfWindow {
@@ -69,9 +75,10 @@ export function createMockScraptfWindow(deps: MockScraptfWindowDeps): MockScrapt
   function takeRead(url: string): ScraptfWindowRead {
     const bank = SCRAPTF_BANKS.find((b) => b.url === url)?.bank ?? null;
     const items = deps.itemsOn?.(url) ?? (bank === null ? 0 : 24);
-    const newFlips = bank === null ? 0 : Math.min(3, Math.floor(items / 12));
-    // Made up like the rest: a few more flips on the page than new ones, and the mock's own best item.
-    const pageFlips = bank === null ? 0 : Math.min(items, newFlips + Math.floor(items / 8));
+    const counted = bank === null ? null : (deps.flipsOn?.(url) ?? null);
+    // Without the mock's bank stock: made up like the rest, a few more flips on the page than new ones.
+    const newFlips = bank === null ? 0 : counted !== null ? counted.newFlips : Math.min(3, Math.floor(items / 12));
+    const pageFlips = bank === null ? 0 : counted !== null ? counted.pageFlips : Math.min(items, newFlips + Math.floor(items / 8));
     const read: ScraptfWindowRead = {
       at: deps.now(),
       path: scraptfPathOf(url),
@@ -83,6 +90,8 @@ export function createMockScraptfWindow(deps: MockScraptfWindowDeps): MockScrapt
       pageFlips,
       bestFlip: pageFlips > 0 ? (deps.bestFlipOn?.(url) ?? null) : null,
     };
+    // 0.8 (G2): as main's readFlipsOf, only when the counts gave it.
+    if (counted !== null && typeof counted.droppedFlips === 'number') read.droppedFlips = counted.droppedFlips;
     lastRead = read;
     deps.emit('scraptfWindow.read', read);
     return read;

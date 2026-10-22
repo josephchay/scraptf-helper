@@ -64,6 +64,8 @@ const profitSchema = z.object({
   minProfitPctOfCost: z.number().min(0).max(10),
   minMargin: z.number().min(0).max(1),
   frictionScrap: scrap,
+  // 0.8 (PC-1): a share of the sale price. Missing from files before 0.8: the lenient load (parseGroup) reads 0.
+  exitReservePct: z.number().min(0).max(0.5),
   outlierVsMedian: z.number().min(1).max(100),
   outlierVsRef: z.number().min(1).max(100),
   unusualRiskKeys: z.number().min(0).max(100_000),
@@ -123,6 +125,10 @@ const notificationsSchema = z.object({
   holdings: bool,
   // F17; likewise missing from files before v0.6, so the lenient load turns it on.
   newOnScraptf: bool,
+  // 0.8 (G1); missing from files before 0.8, so the lenient load turns it on.
+  watches: bool,
+  // 0.8 (G4); missing from files before 0.8, so the lenient load reads false (off).
+  buyTiming: bool,
 });
 
 const hotkey = z
@@ -172,6 +178,8 @@ export const settingsSchema = z.object({
   scraptfWindow: scraptfWindowSchema,
   networkPaused: bool,
   blocklist: z.array(steamId64).max(10_000),
+  // 0.8 (H3): the user's own accounts, left out of "Others ask"; a filter only, never sent.
+  ownSteamIds: z.array(steamId64).max(10),
   ui: uiSchema,
 });
 
@@ -189,6 +197,7 @@ export const settingsPatchSchema = z.object({
   scraptfWindow: scraptfWindowSchema.partial().optional(),
   networkPaused: bool.optional(),
   blocklist: z.array(steamId64).max(10_000).optional(),
+  ownSteamIds: z.array(steamId64).max(10).optional(),
   ui: uiSchema.partial().optional(),
 });
 
@@ -227,6 +236,7 @@ const LENIENT_LEAVES: Record<string, z.ZodType> = {
   'notifications.inputKinds': lenientArray(inputKind, 3),
   'import.resaveBanks': lenientArray(scraptfBank, 8),
   blocklist: lenientArray(steamId64, 10_000),
+  ownSteamIds: lenientArray(steamId64, 10),
 };
 
 function parseGroup(

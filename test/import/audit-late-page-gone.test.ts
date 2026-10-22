@@ -11,7 +11,7 @@ import { openRepo } from '../../src/service/db';
 import { createScraptfHistory } from '../../src/service/domain/scraptfHistory';
 import { importSavedPage, type HandlerContext } from '../../src/service/rpcHandlers';
 import { DEFAULT_SETTINGS, mergeSettings } from '../../src/shared/defaults';
-import { SKIP_NEWER_SAVE } from '../../src/shared/importCodes';
+import { SKIP_NEWER_SAVE, SKIP_NOT_ON_SALE_NEWER } from '../../src/shared/importCodes';
 import type { ImportResult, KeyPriceState, ScrapPrice } from '../../src/shared/types';
 import { createStubSchema } from './schemaStub';
 
@@ -51,6 +51,12 @@ const ITEMS_LIST =
   '<!DOCTYPE html><html><head><title>Item Trading - TF2 - Scrap.TF</title><meta property="og:url" content="https://scrap.tf/items" /></head>' +
   '<body id="pid-items"><table><thead><tr><th>Icon</th><th>Item</th><th>Price to buy</th><th>Price we pay</th><th>Item Limits</th></tr></thead>' +
   '<tbody><tr data-quality="6" data-defindex="126"><td></td><td>Bill\'s Hat</td><td>2 refined</td><td>1 refined</td><td><div rel="tooltip" title="2/5"></div></td></tr></tbody></table></body></html>';
+
+/** 0.7.4: the same list, with Bill's Hat's Non-Craftable copy on a row of its own (sold out). */
+const ITEMS_LIST_BOTH = ITEMS_LIST.replace(
+  '</tbody>',
+  '<tr data-quality="6" data-defindex="126"><td></td><td>Non-Craftable Bill\'s Hat</td><td>1 refined</td><td>0.5 refined</td><td><div rel="tooltip" title="0/5"></div></td></tr></tbody>',
+);
 
 const captain = card(378, 'Team Captain', 14);
 const gibus = card(940, 'Ghostly Gibus', 10);
@@ -112,11 +118,15 @@ describe('an older page arriving late never brings back a card a newer save show
     expect(h.prices(BILLS)).toEqual([[NOW - 90 * MIN, 20]]);
   });
 
-  it('still fills in a card from an older page when the newer save is the first (no gone event)', () => {
+  // 0.7.4 (F31, F56): before, an older page filled in a card the newer save lacked when that save had no
+  // gone event for it (a first save); that price then outlived every later whole save of the bank.
+  it('does not fill in a card the newer whole save lacks, even when that save is the first (no gone event)', () => {
     const h = setup();
     h.run(WITHOUT, NOW - MIN);
-    h.run(WITH(), NOW - 2 * MIN, 'older.html');
-    expect(h.prices(BILLS)).toEqual([[NOW - 2 * MIN, 20]]);
+    const late = h.run(WITH(), NOW - 2 * MIN, 'older.html');
+    expect(h.prices(BILLS)).toEqual([]);
+    // 0.7.4 (R05): no newer page priced it: the newer save does not show it on sale.
+    expect(late.skipped).toContainEqual({ reason: SKIP_NOT_ON_SALE_NEWER, title: "Bill's Hat" });
   });
 
   it('a gone event at or before the page does not block it (a restock)', () => {
@@ -127,25 +137,40 @@ describe('an older page arriving late never brings back a card a newer save show
     expect(h.prices(BILLS)).toEqual([[NOW - 2 * HOUR, 18]]);
   });
 
-  it('a gone event of the plain copy does not block a painted copy in the late page', () => {
+  // 0.7.4 (F31, F56): the plain copy's gone event still blocks only the plain copy (goneAfterPage), but on a
+  // one-page bank the newer whole save decides every copy: a painted copy it does not show sold too. Before,
+  // the late page wrote the painted copy.
+  it('a painted copy the newer whole save does not show is not written either', () => {
     const h = setup();
     h.run(WITH(), NOW - 4 * HOUR);
     h.run(WITHOUT, NOW - 2 * HOUR);
-    h.run([captain, card(126, "Bill's Hat", 25, 'Painted Pink as Hell<br/>'), gibus], NOW - 3 * HOUR, 'older copy.html');
-    expect(h.imported(BILLS).map((p) => [p.special?.paint ?? null, p.costScrap, p.observedAt])).toEqual([[PINK, 25, NOW - 3 * HOUR]]);
+    const late = h.run([captain, card(126, "Bill's Hat", 25, 'Painted Pink as Hell<br/>'), gibus], NOW - 3 * HOUR, 'older copy.html');
+    expect(h.imported(BILLS)).toEqual([]);
+    expect(late.skipped).toContainEqual({ reason: SKIP_NOT_ON_SALE_NEWER, title: "Bill's Hat" });
   });
 
-  it("leaves the copy's other imported rows as they are (a list-tagged one DM-1 keeps)", () => {
+  it('a painted copy the newer whole save shows on sale keeps that save price', () => {
+    const h = setup();
+    h.run(WITH(), NOW - 4 * HOUR);
+    h.run([captain, card(126, "Bill's Hat", 30, 'Painted Pink as Hell<br/>'), gibus], NOW - 2 * HOUR);
+    h.run([captain, card(126, "Bill's Hat", 25, 'Painted Pink as Hell<br/>'), gibus], NOW - 3 * HOUR, 'older copy.html');
+    expect(h.imported(BILLS).map((p) => [p.special?.paint ?? null, p.costScrap, p.observedAt])).toEqual([[PINK, 30, NOW - 2 * HOUR]]);
+  });
+
+  it('an /items list older than a whole save of its bank that lacks the copy brings no price back either (0.7.4)', () => {
     const h = setup();
     h.run(WITH(), NOW - 4 * HOUR);
     h.run(WITHOUT, NOW - 2 * HOUR);
-    // An /items list saved before the late page, imported after the gone event.
-    h.runHtml(ITEMS_LIST, NOW - 210 * MIN, 'items.html');
-    const listRow = h.imported(BILLS);
-    expect(listRow.map((p) => [p.bank, p.observedAt])).toEqual([['list', NOW - 210 * MIN]]);
+    // An /items list saved before the gone save, imported after it. Its Bill's Hat row is proven the
+    // Craftable copy (the list shows the Non-Craftable one apart), yet the hats bank's newer whole save
+    // does not show it: the list's stock counted a copy the bank no longer offers.
+    const list = h.runHtml(ITEMS_LIST_BOTH, NOW - 210 * MIN, 'items.html');
+    expect(list.skipped).toContainEqual({ reason: SKIP_NOT_ON_SALE_NEWER, title: "Bill's Hat" });
+    expect(h.imported(BILLS)).toEqual([]);
+    expect(h.repo.scraptfListRow(BILLS)).toMatchObject({ craft: 'craftable', stock: 2 });
 
     const late = h.run(WITH(), NOW - 3 * HOUR, 'older copy.html');
     expect(late.skipped).toContainEqual({ reason: SKIP_NEWER_SAVE, title: "Bill's Hat" });
-    expect(h.imported(BILLS)).toEqual(listRow);
+    expect(h.imported(BILLS)).toEqual([]);
   });
 });

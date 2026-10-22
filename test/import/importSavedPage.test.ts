@@ -12,7 +12,7 @@ import { FakeClock, FakeTimers, makeDeps } from '../domain/helpers';
 import { openRepo } from '../../src/service/db';
 import { importSavedPage, type HandlerContext } from '../../src/service/rpcHandlers';
 import { DEFAULT_SETTINGS, mergeSettings } from '../../src/shared/defaults';
-import { SKIP_SAME_OR_CHEAPER } from '../../src/shared/importCodes';
+import { SKIP_BANK_CARD_PRICE, SKIP_CRAFT_UNPROVEN, SKIP_SAME_OR_CHEAPER } from '../../src/shared/importCodes';
 import { scraptfListKeyOf } from '../../src/shared/scraptfList';
 import { KEY_SKU, type ImportResult, type ScrapPrice } from '../../src/shared/types';
 import { createStubSchema } from './schemaStub';
@@ -108,41 +108,72 @@ describe('importSavedPage: stock on the /items price list', () => {
         { reason: 'out of stock on scrap.tf', title: 'Crocodile Dandy' },
       ]),
     );
-    // Rows in stock are still imported.
-    expect(h.imported('126;6').map((p) => [p.costKeys, p.costScrap, p.stock])).toEqual([[3, 477, 2]]);
+    // 0.7.4: a row in stock is a cost only when it is proven to price its copy (the Non-Craftable Tour of
+    // Duty Ticket says so); an unmarked row is a family row, kept on the list only.
+    expect(h.imported('725;6;uncraftable').map((p) => [p.costKeys, p.costScrap, p.stock])).toEqual([[0, 273, 44]]);
+    expect(h.imported('126;6')).toEqual([]);
+    expect(r.skipped).toContainEqual({ reason: SKIP_CRAFT_UNPROVEN, title: 'Bills Hat' });
     expect(r.stored).toBe(h.repo.listScrapPrices().filter((p) => p.source === 'import').length);
   });
 
-  it('removes the earlier plain import of a sold-out item but keeps painted copies from bank pages', () => {
+  it("removes an earlier list price of a sold-out row, never a bank page's own prices (0.7.4)", () => {
     const h = setup();
-    h.run(bankPage([plainCaptain(100), pinkCaptain(140)]), NOW - 120_000, 'hats.html');
+    h.run(bankPage([plainCaptain(100), pinkCaptain(140)]), NOW - 180_000, 'hats.html');
     expect(h.imported('378;6')).toHaveLength(2);
+    // A Non-Craftable row (named so) in stock is a cost, tagged to the list.
+    const nc = (stock: string) => itemsPage([{ defindex: 378, name: 'Non-Craftable Team Captain', price: '2 refined', stock }]);
+    h.run(nc('3/5'), NOW - 120_000, 'items.html');
+    expect(h.imported('378;6;uncraftable').map((p) => [p.bank, p.costScrap])).toEqual([['list', 18]]);
     h.dirty.length = 0;
 
-    const r = h.run(itemsPage([{ defindex: 378, name: 'Team Captain', price: '2 refined', stock: '0/5' }]), NOW - 60_000, 'items.html');
+    const r = h.run(
+      itemsPage([
+        { defindex: 378, name: 'Team Captain', price: '2 refined', stock: '0/5' },
+        { defindex: 378, name: 'Non-Craftable Team Captain', price: '2 refined', stock: '0/5' },
+      ]),
+      NOW - 60_000,
+      'items.html',
+    );
     expect(r.stored).toBe(0);
-    expect(r.skipped).toEqual([{ reason: 'out of stock on scrap.tf', title: 'Team Captain' }]);
-    const left = h.imported('378;6');
-    expect(left.map((p) => [p.special?.paint ?? null, p.costScrap])).toEqual([[PINK, 140]]);
-    expect(h.dirty).toContain('378;6');
+    expect(r.skipped).toEqual([
+      { reason: 'out of stock on scrap.tf', title: 'Team Captain' },
+      { reason: 'out of stock on scrap.tf', title: 'Non-Craftable Team Captain' },
+    ]);
+    expect(h.imported('378;6;uncraftable')).toEqual([]);
+    // The hats bank's own plain and painted prices are that bank's to remove (its next whole save).
+    const bank = h.imported('378;6').map((p) => [p.special?.paint ?? null, p.costScrap, p.bank]);
+    expect(bank).toHaveLength(2);
+    expect(bank).toEqual(expect.arrayContaining([[null, 100, 'hats'], [PINK, 140, 'hats']]));
+    expect(h.dirty).toContain('378;6;uncraftable');
   });
 });
 
 describe('importSavedPage: the /items list replaces only plain copies', () => {
-  it('updates the plain imported copy and keeps painted copies imported from a bank page', () => {
+  it("never re-tags a bank page's own price of a copy, and keeps painted copies imported from a bank page (0.7.4)", () => {
     const h = setup();
     h.run(bankPage([plainCaptain(100), pinkCaptain(140)]), NOW - 120_000, 'hats.html');
     const before = h.imported('378;6');
     const plainId = before.find((p) => p.special?.paint === null)!.id;
     const pinkId = before.find((p) => p.special?.paint === PINK)!.id;
 
-    const r = h.run(itemsPage([{ defindex: 378, name: 'Team Captain', price: '2 refined', stock: '3/5' }]), NOW - 60_000, 'items.html');
-    expect(r.stored).toBe(1);
+    // The page lists the Non-Craftable copy apart, so this row is proven the Craftable one: still the bank's.
+    const r = h.run(
+      itemsPage([
+        { defindex: 378, name: 'Team Captain', price: '2 refined', stock: '3/5' },
+        { defindex: 378, name: 'Non-Craftable Team Captain', price: '1 refined', stock: '0/5' },
+      ]),
+      NOW - 60_000,
+      'items.html',
+    );
+    expect(r.stored).toBe(0);
+    expect(r.skipped).toContainEqual({ reason: SKIP_BANK_CARD_PRICE, title: 'Team Captain' });
     const after = h.imported('378;6');
     expect(after).toHaveLength(2);
+    // Its bank, price, stock and time stay the bank page's: the list's stock counts copies the bank may not offer.
     const plain = after.find((p) => p.id === plainId);
-    expect(plain).toMatchObject({ costScrap: 18, stock: 3, importBatch: r.batchId, observedAt: NOW - 60_000 });
+    expect(plain).toMatchObject({ costScrap: 100, bank: 'hats', observedAt: NOW - 120_000 });
     expect(after.find((p) => p.id === pinkId)).toMatchObject({ costScrap: 140, special: expect.objectContaining({ paint: PINK }) });
+    expect(h.repo.scraptfListRow('378;6')).toMatchObject({ sellsScrap: 18, stock: 3, craft: 'craftable' });
   });
 
   it('keeps the painted Crocodile Dandy from the saved hats bank when the saved /items list follows', () => {
@@ -171,9 +202,12 @@ describe('importSavedPage: an older page never overwrites a newer one', () => {
 
     expect(h.imported('378;6').map((p) => [p.costScrap, p.observedAt])).toEqual([[50, NOW - 60_000]]);
     expect(r.skipped).toContainEqual({ reason: 'a newer saved page already set this price', title: 'Team Captain' });
-    // Items the newer page did not price are still taken from the older one.
-    expect(h.imported('126;6').map((p) => p.costScrap)).toEqual([20]);
-    expect(r.stored).toBe(1);
+    // 0.7.4 (F31, F56): a card the newer whole save of this one-page bank does not show sold after the older
+    // page, so it is not taken from it (before, it was, and no later save ever removed it).
+    expect(h.imported('126;6')).toEqual([]);
+    // 0.7.4 (R05): no newer page priced it; the newer save does not show it on sale.
+    expect(r.skipped).toContainEqual({ reason: 'a newer save of its bank page does not show it on sale', title: "Bill's Hat" });
+    expect(r.stored).toBe(0);
   });
 
   it('does not delete copies a newer page stored', () => {
@@ -185,9 +219,10 @@ describe('importSavedPage: an older page never overwrites a newer one', () => {
 
   it('does not let an older sold-out row remove a newer price', () => {
     const h = setup();
-    h.run(itemsPage([{ defindex: 378, name: 'Team Captain', price: '2 refined', stock: '3/5' }]), NOW - 60_000, 'new.html');
-    h.run(itemsPage([{ defindex: 378, name: 'Team Captain', price: '2 refined', stock: '0/5' }]), NOW - 120_000, 'old.html');
-    expect(h.imported('378;6').map((p) => [p.costScrap, p.stock])).toEqual([[18, 3]]);
+    // 0.7.4: a Non-Craftable row (named so) is proven to price its copy, so it is a cost.
+    h.run(itemsPage([{ defindex: 378, name: 'Non-Craftable Team Captain', price: '2 refined', stock: '3/5' }]), NOW - 60_000, 'new.html');
+    h.run(itemsPage([{ defindex: 378, name: 'Non-Craftable Team Captain', price: '2 refined', stock: '0/5' }]), NOW - 120_000, 'old.html');
+    expect(h.imported('378;6;uncraftable').map((p) => [p.costScrap, p.stock])).toEqual([[18, 3]]);
   });
 
   it('treats a newer imported price with unrecorded extras as the plain copy, not as a second one', () => {
@@ -203,7 +238,15 @@ describe('importSavedPage: an older page never overwrites a newer one', () => {
   it('updates an older imported price with unrecorded extras in place', () => {
     const h = setup();
     const old = h.repo.upsertScrapPrice({ sku: '378;6', name: 'Team Captain', costScrap: 50, source: 'import', observedAt: NOW - 120_000, special: null });
-    h.run(itemsPage([{ defindex: 378, name: 'Team Captain', price: '2 refined', stock: '3/5' }]), NOW - 60_000, 'items.html');
+    // 0.7.4: proven the Craftable copy by its Non-Craftable sibling row (an untagged price is no bank's card).
+    h.run(
+      itemsPage([
+        { defindex: 378, name: 'Team Captain', price: '2 refined', stock: '3/5' },
+        { defindex: 378, name: 'Non-Craftable Team Captain', price: '1 refined', stock: '0/5' },
+      ]),
+      NOW - 60_000,
+      'items.html',
+    );
     expect(h.imported('378;6').map((p) => [p.id, p.costScrap, p.special?.paint ?? null])).toEqual([[old.id, 18, null]]);
   });
 
@@ -231,7 +274,7 @@ describe('importSavedPage: two cards of one item on a page', () => {
 });
 
 describe('importSavedPage: a saved page keeps the bank page it was (F13 coverage)', () => {
-  it('records the categories it stored, so an /items list re-tagging its rows later does not make it read "never saved"', () => {
+  it('records the categories it stored, and a later /items list leaves its rows and its chip as they are', () => {
     const HATS = new Set([378, 126]);
     const stub = createStubSchema();
     const schema: SchemaService = { ...stub, categoryForSku: (sku) => (HATS.has(fromString(sku).defindex) ? 'hats' : 'other') };
@@ -255,8 +298,8 @@ describe('importSavedPage: a saved page keeps the bank page it was (F13 coverage
     market.pricesChanged();
     expect(hatsChip()).toMatchObject({ lastSavedAt: NOW - 10 * 60_000, items: 2 });
 
-    // The /items list lists the same two plain items: their rows are rewritten under its batch id.
-    const list = h.run(
+    // The /items list lists the same two items: 0.7.4, it never re-tags a bank page's rows (their bank decides).
+    h.run(
       itemsPage([
         { defindex: 378, name: 'Team Captain', price: '2 refined', stock: '3/5' },
         { defindex: 126, name: "Bill's Hat", price: '1 refined', stock: '2/5' },
@@ -264,7 +307,7 @@ describe('importSavedPage: a saved page keeps the bank page it was (F13 coverage
       NOW - 5 * 60_000,
       'items.html',
     );
-    expect([...h.imported('378;6'), ...h.imported('126;6')].map((p) => p.importBatch)).toEqual([list.batchId, list.batchId]);
+    expect([...h.imported('378;6'), ...h.imported('126;6')].map((p) => p.importBatch)).toEqual([page.batchId, page.batchId]);
     market.pricesChanged();
     // Still the hats page saved 10 minutes ago, not "never saved"; the list counts for no page.
     expect(hatsChip()).toMatchObject({ lastSavedAt: NOW - 10 * 60_000, items: 2 });
@@ -292,7 +335,12 @@ describe('importSavedPage: the saved scrap.tf price list (F14)', () => {
       stockLimit: 5,
       batchId: r.batchId,
       observedAt: NOW - 60_000,
+      // 0.7.4: unmarked, with no Non-Craftable row beside it: a family row.
+      craft: 'any',
+      // 0.7.4 (F60): the list page it was read on.
+      page: '/items',
     });
+    expect(h.repo.scraptfListRow('725;6;uncraftable')).toMatchObject({ craft: 'uncraftable' });
     expect(h.repo.scraptfListRow('5833;6')).toMatchObject({ stock: 49, stockLimit: 50 });
     // Out of stock: no import price (unchanged), but scrap.tf still buys it, so it is on the list.
     expect(h.imported('143;6')).toEqual([]);
@@ -300,11 +348,13 @@ describe('importSavedPage: the saved scrap.tf price list (F14)', () => {
     expect(h.repo.scraptfListRow('1015;1')).toMatchObject({ stock: 0, stockLimit: 3, paysKeys: 3, paysScrap: 180 });
     // "Sold out": no price to buy, still what scrap.tf pays.
     expect(h.repo.scraptfListRow('31193;6')).toMatchObject({ sellsKeys: null, sellsScrap: null, paysKeys: 0, paysScrap: 12, stock: 0, stockLimit: 5 });
-    // The price path is as before: the 10 rows in stock.
-    expect(r.stored).toBe(10);
+    // 0.7.4: of the 10 rows in stock only the one proven to price its copy is a cost (the Non-Craftable
+    // ticket); the 9 family rows are on the list only.
+    expect(r.stored).toBe(1);
+    expect(r.skippedCounts?.[SKIP_CRAFT_UNPROVEN]).toBe(9);
     // The result says how many list rows the save wrote, so the Import page can show the whole list.
     expect(r.listRows).toBe(13);
-    expect(h.repo.listScrapPrices().filter((p) => p.source === 'import')).toHaveLength(10);
+    expect(h.repo.listScrapPrices().filter((p) => p.source === 'import')).toHaveLength(1);
   });
 
   it('announces the list change after the price change and before import.done', () => {
@@ -334,10 +384,9 @@ describe('importSavedPage: the saved scrap.tf price list (F14)', () => {
     const h = setup();
     const p1 = h.run(itemsPage([captain('2 refined', '3/5', '1.33 refined'), { defindex: 126, name: "Bill's Hat", price: '1 refined', stock: '2/5' }]), NOW - 60_000, 'items.html');
     const p2 = h.run(itemsPage([captain('3 refined', '4/5', '2 refined')]), NOW - 30_000, 'items (2).html');
-    expect(h.repo.scraptfList().map((r) => [r.sku, r.sellsScrap, r.paysScrap, r.stock, r.batchId])).toEqual([
-      ['126;6', 9, 9, 2, p1.batchId],
-      ['378;6', 27, 18, 4, p2.batchId],
-    ]);
+    // 0.7.4 (F60, R02): the newer save is a whole save of the same page (/items), so the row it no longer
+    // lists is retired; the row it lists is the newest.
+    expect(h.repo.scraptfList().map((r) => [r.sku, r.sellsScrap, r.paysScrap, r.stock, r.batchId])).toEqual([['378;6', 27, 18, 4, p2.batchId]]);
 
     h.calls.length = 0;
     const old = h.run(itemsPage([captain('1 refined', '1/5')]), NOW - 120_000, 'old.html');
@@ -353,11 +402,21 @@ describe('importSavedPage: the saved scrap.tf price list (F14)', () => {
     expect(h.calls).toContain('scraptfListChanged');
   });
 
-  it('keeps the first row with a price to buy when the list repeats a SKU', () => {
+  it('writes no row and no price for rows of one item that differ, and says so (0.7.4)', () => {
     const h = setup();
-    h.run(itemsPage([captain('Sold out', '0/5', '1 refined'), captain('2 refined', '1/5', '1.33 refined'), captain('3 refined', '2/5', '1.66 refined')]), NOW - 60_000);
-    expect(h.repo.scraptfList()).toHaveLength(1);
+    const r = h.run(itemsPage([captain('Sold out', '0/5', '1 refined'), captain('2 refined', '1/5', '1.33 refined'), captain('3 refined', '2/5', '1.66 refined')]), NOW - 60_000);
+    expect(h.repo.scraptfList()).toHaveLength(0);
+    expect(h.imported('378;6')).toEqual([]);
+    expect(r.warnings).toContainEqual(expect.stringMatching(/^duplicate-rows: 3 rows/));
+    expect(r.skippedCounts?.['duplicate-row']).toBe(3);
+  });
+
+  it('stores an identical repeat of a row once, with no warning (0.7.4)', () => {
+    const h = setup();
+    const r = h.run(itemsPage([captain('2 refined', '1/5', '1.33 refined'), captain('2 refined', '1/5', '1.33 refined')]), NOW - 60_000);
+    expect(r.parsed).toBe(1);
     expect(h.repo.scraptfListRow('378;6')).toMatchObject({ sellsScrap: 18, paysScrap: 12, stock: 1 });
+    expect(r.warnings.some((w) => w.startsWith('duplicate-row'))).toBe(false);
   });
 
   it('skips a row that shows neither price; one with either is kept', () => {

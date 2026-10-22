@@ -12,6 +12,7 @@ import { openRepo } from '../../src/service/db';
 import { createBankStock, createNewFlipNotifier, type NewFlipNotifier } from '../../src/service/domain/bankStock';
 import { NOTIFY_META_KEY, createEngine, type EngineDeps } from '../../src/service/domain/engine';
 import type { MarketEval } from '../../src/service/domain/market';
+import { createWatchCache } from '../../src/service/domain/watches';
 import { maxCostFor } from '../../src/shared/ceiling';
 import { DEFAULT_SETTINGS, mergeSettings } from '../../src/shared/defaults';
 import type { PushContract } from '../../src/shared/rpc';
@@ -38,9 +39,10 @@ function setup(toldElsewhere?: EngineDeps['toldElsewhere'], patch: DeepPartial<S
     makeListing({ id: 'bh-h1', sku: '126;6', baseSku: '126;6', steamid: 'B2', metalScrap: 88, lastEventAt: T0 - MIN }),
     makeListing({ id: 'bh-h2', sku: '126;6', baseSku: '126;6', steamid: 'B3', metalScrap: 86, lastEventAt: T0 - MIN }),
   ]);
+  // 0.7.4: PriceDB buy prices at the costs, so neither cost is under 95% of what bots pay ('cost-below-market').
   repo.upsertPricedb([
-    { sku: '378;6', name: 'Team Captain', buyKeys: 0, buyScrap: 100, sellKeys: 0, sellScrap: 120, time: Math.floor(T0 / 1000), fetchedAt: T0 },
-    { sku: '126;6', name: "Bill's Hat", buyKeys: 0, buyScrap: 85, sellKeys: 0, sellScrap: 95, time: Math.floor(T0 / 1000), fetchedAt: T0 },
+    { sku: '378;6', name: 'Team Captain', buyKeys: 0, buyScrap: 60, sellKeys: 0, sellScrap: 120, time: Math.floor(T0 / 1000), fetchedAt: T0 },
+    { sku: '126;6', name: "Bill's Hat", buyKeys: 0, buyScrap: 50, sellKeys: 0, sellScrap: 95, time: Math.floor(T0 / 1000), fetchedAt: T0 },
   ]);
   // An imported Team Captain (a saved bank page) and a typed Bill's Hat, both flips.
   repo.upsertScrapPrice({ sku: '378;6', name: 'Team Captain', costScrap: 60, source: 'import', observedAt: T0 - MIN });
@@ -116,7 +118,8 @@ describe('the engine and the "New on scrap.tf" toast (F17)', () => {
 /** Three fresh buyers of `sku` at about `scrap`, a PriceDB price, and a price of `cost`: a flip. */
 function addFlip(repo: Repo, sku: string, scrap: number, cost: number, source: 'user' | 'import' = 'user'): void {
   repo.upsertListings([0, 1, 2].map((i) => makeListing({ id: `${sku}-${i}`, sku, baseSku: sku, steamid: `X${sku}${i}`, metalScrap: scrap - i, lastEventAt: T0 - MIN })));
-  repo.upsertPricedb([{ sku, name: sku, buyKeys: 0, buyScrap: scrap - 5, sellKeys: 0, sellScrap: scrap + 10, time: Math.floor(T0 / 1000), fetchedAt: T0 }]);
+  // 0.7.4: PriceDB buy at most the cost, so the cost is not under 95% of what bots pay ('cost-below-market').
+  repo.upsertPricedb([{ sku, name: sku, buyKeys: 0, buyScrap: Math.min(scrap - 5, cost), sellKeys: 0, sellScrap: scrap + 10, time: Math.floor(T0 / 1000), fetchedAt: T0 }]);
   repo.upsertScrapPrice({ sku, name: sku, costScrap: cost, source, observedAt: T0 - MIN });
 }
 
@@ -226,6 +229,104 @@ describe('one toast per find at start-up, wired as core wires it (F17-C3)', () =
     const all = [...h.events.notified, ...told].filter((n) => n.sku === '378;6');
     expect(all.map((n) => n.title)).toEqual(['Profit: Team Captain']);
     expect(notifier.held()).toBe(0);
+  });
+
+  /** A price watch of Team Captain at <= 70 scrap, the hats saves (Team Captain new at 60 scrap) and the notifier, wired as core wires them. */
+  function watched(opts: { unverified: boolean }) {
+    let notifier: NewFlipNotifier | null = null;
+    const h = setup(
+      (opp, at) => opp.inputKind === 'import' && notifier!.toldRecently(baseSku(opp.sku), at),
+      {},
+      (opps, at) => {
+        for (const o of opps) if (o.inputKind === 'import') notifier!.toastedElsewhere(baseSku(o.sku), at);
+      },
+    );
+    const tcOrders = (lastEventAt: number) => [
+      makeListing({ id: 'tc-bot', steamid: 'S1', metalScrap: 108, isBot: true, uaLastPulse: Math.floor(T0 / 1000), userOnline: true, lastEventAt }),
+      makeListing({ id: 'tc-h1', steamid: 'S2', metalScrap: 105, lastEventAt }),
+      makeListing({ id: 'tc-h2', steamid: 'S3', metalScrap: 102, lastEventAt }),
+    ];
+    // Team Captain's buy orders were last seen 30 h ago (unverified), common right after start-up.
+    if (opts.unverified) h.repo.upsertListings(tcOrders(T0 - 30 * 60 * MIN));
+    h.repo.upsertWatch({ sku: '378;6', specialKey: null, name: 'Team Captain', maxCostKeys: 0, maxCostScrap: 70, minProfitScrap: null, onRestock: false, enabled: true }, T0 - 3 * 60 * MIN);
+    const cache = createWatchCache({ repo: h.repo, log: h.log });
+    const batch = (at: number) => h.repo.createImportBatch({ fileName: 'hats.html', pageKind: 'buy', fileMtime: at, importedAt: T0, itemCount: 1, bank: 'hats' });
+    const row = (sku: string, costScrap: number) => ({ sku, specialKey: '', name: sku === '378;6' ? 'Team Captain' : sku, costKeys: 0, costScrap, stock: 1, assetId: null });
+    h.repo.insertBankStock(batch(T0 - 2 * 60 * MIN), 'hats', [row('126;6', 50)], '/buy/hats');
+    const newest = batch(T0 - 5 * MIN);
+    h.repo.insertBankStock(newest, 'hats', [row('126;6', 50), row('378;6', 60)], '/buy/hats');
+    const state = { unverified: opts.unverified, built: true };
+    const entry = (): MarketEval => {
+      const e = flipEntry(108, h.settings);
+      return state.unverified ? { ...e, revenueOrder: { ...e.revenueOrder!, flags: ['unverified'], lastEventAt: T0 - 30 * 60 * MIN } } : e;
+    };
+    const stock = createBankStock({
+      clock: h.clock,
+      log: h.log,
+      repo: h.repo,
+      market: { entryFor: (base) => (base === '378;6' && state.built ? entry() : null) },
+      keyPrice: () => h.engine.keyPrice(),
+      settings: () => h.settings,
+      categoryOf: () => 'hats',
+      watches: () => cache.index(),
+    });
+    const told: PushContract['notify'][] = [];
+    notifier = createNewFlipNotifier({
+      log: h.log,
+      repo: h.repo,
+      clock: h.clock,
+      stock,
+      settings: () => h.settings,
+      keyPrice: () => h.engine.keyPrice(),
+      notify: (n) => told.push(n),
+      marketBuilt: () => state.built,
+      watches: () => cache.index(),
+    });
+    const tc = () => [...h.events.notified, ...told].filter((n) => n.sku === '378;6').map((n) => `${n.title} | ${n.body}`);
+    return { h, notifier, stock, newest, state, told, tc, confirm: () => h.repo.upsertListings(tcOrders(h.clock.t)) };
+  }
+
+  it("a watch toast of an unconfirmed buy order leaves the engine's \"Profit:\" toast free once a snapshot confirms it", async () => {
+    const w = watched({ unverified: true });
+    // The engine judges the import first: an unconfirmed order is skipped, unrecorded.
+    await w.h.engine.runNow();
+    expect(w.tc()).toEqual([]);
+    w.stock.refresh();
+    w.notifier.imported({ bank: 'hats', batchId: w.newest });
+    expect(w.tc()).toEqual(['Watch (Hats): Team Captain | 6.66 ref, at or under your ≤ 7.77 ref; its buy order is unconfirmed']);
+    // That toast tells no flip, so the engine is not told to stay quiet.
+    expect(w.notifier.toldRecently('378;6', w.h.clock.t)).toBe(false);
+    // A minute later a snapshot confirms the orders: the engine tells the flip.
+    w.h.clock.advance(MIN);
+    w.confirm();
+    w.state.unverified = false;
+    w.h.clock.advance(MIN);
+    await w.h.engine.runNow();
+    expect(w.h.events.notified.filter((n) => n.sku === '378;6').map((n) => n.title)).toEqual(['Profit: Team Captain']);
+    expect(w.told.map((n) => n.title)).toEqual(['Watch (Hats): Team Captain']);
+  });
+
+  it('a watch toast of a verified flip still tells the engine (one toast per find)', async () => {
+    const w = watched({ unverified: false });
+    w.stock.refresh();
+    w.notifier.imported({ bank: 'hats', batchId: w.newest });
+    expect(w.notifier.toldRecently('378;6', w.h.clock.t)).toBe(true);
+    await w.h.engine.runNow();
+    expect(w.tc().map((t) => t.split(' | ')[0])).toEqual(['Watch (Hats): Team Captain']);
+  });
+
+  it('an import held for the market’s first build, toasted by the engine first, gets no watch toast too', async () => {
+    const w = watched({ unverified: false });
+    w.state.built = false;
+    w.stock.refresh();
+    w.notifier.imported({ bank: 'hats', batchId: w.newest });
+    expect(w.notifier.held()).toBe(1);
+    // The engine judges the imported price first (its own market evaluation) and toasts it.
+    await w.h.engine.runNow();
+    w.state.built = true;
+    w.notifier.flush();
+    expect(w.tc().map((t) => t.split(' | ')[0])).toEqual(['Profit: Team Captain']);
+    expect(w.notifier.held()).toBe(0);
   });
 
   it('is what core wires', () => {

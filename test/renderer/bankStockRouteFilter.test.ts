@@ -17,7 +17,7 @@ const T0 = Date.UTC(2026, 9, 15, 12, 0, 0);
 
 describe('the chip routes', () => {
   it('reads #/banks/<bank>/stock/<flips|new>, and nothing else', () => {
-    expect(BANK_STOCK_OPEN_FILTERS).toEqual(['flips', 'new']);
+    expect(BANK_STOCK_OPEN_FILTERS).toEqual(['flips', 'new', 'watched']);
     expect(bankStockRouteFilter(['banks', 'hats', 'stock', 'flips'])).toBe('flips');
     expect(bankStockRouteFilter(['banks', 'unusuals', 'stock', 'new'])).toBe('new');
     // The stock page is still the bank's.

@@ -157,6 +157,10 @@ describe('hintedCheck (pure)', () => {
       soldOut: false,
       fuzzy: false,
       incomplete: false,
+      // 0.7.4: the arm comes from a backpack.tf row, the price from a scrap.tf card: the copy is not stated (F41),
+      // and the price was already read by the source (F44).
+      craftStated: false,
+      priceAmbiguous: false,
     });
     // The SKU rule as 'check.text's zod: trimmed, lower case, canonical.
     expect(hintedCheck('1 ref', { sku: ` 378;6;P${PAINT} ` }, 'hotkey')?.item.sku).toBe(`378;6;p${PAINT}`);

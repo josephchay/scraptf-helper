@@ -3,7 +3,8 @@
 // or scrap.tf when the user's saved scrap.tf/items list pays more (F14).
 // Reads 'holdings.list' only (no request of its own); the buyer's profile opens
 // in the user's browser through 'links.open'. Recording a sale writes only the
-// user's journal. Nothing here trades, offers or contacts scrap.tf (R1, R4).
+// user's journal. Nothing here trades, offers or contacts scrap.tf (R1, R4). 0.8 (H6): an Advice
+// column (Sell now, List and wait, Hold, No clear signal) from what the service attached; text only.
 
 import { memo, useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent, type MouseEvent } from 'react';
 import type { HoldingRow, HoldingsResult, ProfitSettings, Scrap } from '../../shared/types';
@@ -14,14 +15,19 @@ import { Icon } from '../components/Icon';
 import { isContextMenuKey, menuPointForRect, useItemMenu } from '../components/ItemMenu';
 import { ItemName, Money } from '../components/ItemName';
 import { ROW_HEIGHT } from '../components/OppTable';
-import { ConfidenceBadge, OnlineDot } from '../components/Pills';
+import { ConfidenceBadge, OnlineDot, UnverifiedOrderMark } from '../components/Pills';
 import { useRecordTrade } from '../components/RecordTradeDialog';
 import { DASH, errorMessage, flagInfo, fmtAge, fmtDateTime, fmtInt } from '../format';
 import {
+  ADVICE_COLUMN_TITLE,
+  ADVICE_LABELS,
+  ADVICE_REFRESH_TITLE,
+  ADVICE_TONES,
   HOLDINGS_MAX_SEARCH_CHARS,
   HOLDING_FLASH_MS,
   HOLDING_STATUS_LABELS,
   HOLDING_STATUS_TONES,
+  adviceTitle,
   buyerName,
   buyerProfileUrl,
   costTitle,
@@ -29,6 +35,7 @@ import {
   emptyHoldingsReason,
   heldForText,
   heldForTitle,
+  holdingBuyersTitle,
   holdingExitView,
   holdingKeyAction,
   holdingStatusTitle,
@@ -54,6 +61,7 @@ import { useRpcQuery, useThrottled, useVisiblePush } from '../hooks/useRpc';
 import { useDebounced, useDocumentVisible, useNow } from '../hooks/useTimers';
 import { FEED_OFF_UPDATES } from '../marketModel';
 import { isMenuKeyEcho, isSearchShortcut, menuAnchorRect, moveCursor } from '../oppModel';
+import { waitingCounts, waitingSalesText } from '../recordTradeModel';
 
 type MenuPoint = { x: number; y: number };
 
@@ -128,6 +136,13 @@ export function HoldingsPage() {
   useVisiblePush('market.changed', reload);
   useVisiblePush('prices.changed', reload);
   useVisiblePush('journal.changed', reloadSoon);
+  // 0.7.4 (F38): sales with no buy before them are on no row here; a note says so (local read).
+  const journal = useRpcQuery('journal.summary', undefined);
+  const reloadJournal = useThrottled(() => void journal.reload(), 300);
+  useVisiblePush('journal.changed', reloadJournal);
+  // 0.8: write-offs with no lot wait too, and are named as write-offs.
+  const waitingN = waitingCounts(journal.data?.waitingSales);
+  const waitingNote = waitingSalesText(waitingN.sales, waitingN.writeoffs);
   // F14: a saved scrap.tf list (or maintenance dropping old rows) moves scrap.tf exits without a
   // market or price push of its own.
   useVisiblePush('scraptf.listChanged', reload);
@@ -135,12 +150,14 @@ export function HoldingsPage() {
   // main hands the service new settings before it tells this window, so a refetch sees them.
   const profitSettings = settings?.profit;
   const blocklist = settings?.blocklist;
+  // 0.8 (H3): your own accounts' listings leave the rows' asks.
+  const ownIds = settings?.ownSteamIds;
   const settingsSeen = useRef(false);
   useEffect(() => {
     if (!profitSettings) return;
     if (settingsSeen.current) reloadSoon();
     settingsSeen.current = true;
-  }, [profitSettings, blocklist, reloadSoon]);
+  }, [profitSettings, blocklist, ownIds, reloadSoon]);
 
   const data = list.data;
   useScraptfExitLapse(data?.rows, list.reload);
@@ -244,6 +261,15 @@ export function HoldingsPage() {
           The live feed is off, so {FEED_OFF_UPDATES}.{' '}
           <button type="button" className="link-btn" onClick={() => void updateSettings({ liveFeed: { enabled: true } })}>
             Turn on live feed
+          </button>
+        </Banner>
+      ) : null}
+
+      {waitingNote !== null ? (
+        <Banner tone="info" icon="journal">
+          {waitingNote}{' '}
+          <button type="button" className="link-btn" onClick={() => navigate('journal')}>
+            See them in the Journal
           </button>
         </Banner>
       ) : null}
@@ -391,6 +417,7 @@ const HEAD: readonly { cls: string; label: string; title?: string }[] = [
   { cls: 'h-sells', label: 'Sells now for', title: 'The better exit now: the buy order your settings sell to and who placed it, or scrap.tf when your saved price list pays more' },
   { cls: 'h-buyers num', label: 'Buyers', title: 'Distinct buyers with eligible orders' },
   { cls: 'h-profit', label: 'Profit now', title: 'Selling the oldest unit at the better exit now (that buyer, or scrap.tf), after friction' },
+  { cls: 'h-advice', label: 'Advice', title: ADVICE_COLUMN_TITLE },
   { cls: 'h-conf', label: 'Confidence', title: 'How far the buy side can be trusted' },
   { cls: 'h-updated num', label: 'Updated', title: 'Last change to an eligible buy order' },
   { cls: 'h-actions', label: '' },
@@ -584,6 +611,9 @@ const HoldingItemRow = memo(function HoldingItemRow({
   const profitTitle = profitNowTitle(r, keyScrap, profit);
   // F14: the better exit (a buyer, or scrap.tf by the saved list) and what the other venue offers.
   const exit = holdingExitView(r, keyScrap, now);
+  // 0.8 (H6): Sell now / List and wait / Hold / No clear signal, with its dated reasons on hover.
+  const advice = r.advice ?? null;
+  const adviceT = advice ? adviceTitle(advice, keyScrap, now) : undefined;
   const flashCls = flash ? ` flash-${flash} flash-${flashOdd ? 'b' : 'a'}` : '';
   return (
     <div
@@ -630,8 +660,10 @@ const HoldingItemRow = memo(function HoldingItemRow({
             <>
               {order ? (
                 <span className="buyer-type">
-                  <OnlineDot online={order.online} />
+                  <OnlineDot online={order.online} seenAt={order.lastEventAt} />
                   <Icon name={order.isBot ? 'bolt' : 'user'} size={12} title={order.isBot ? 'Bot' : 'Human'} />
+                  {/* 0.7.4 (F13, F63): a buyer nobody has confirmed for 24 h, so no "Sell:" toast yet (as on Opportunities). */}
+                  <UnverifiedOrderMark order={order} now={now} />
                 </span>
               ) : null}
               {order && profileUrl ? (
@@ -660,7 +692,7 @@ const HoldingItemRow = memo(function HoldingItemRow({
         </div>
         {exit.sub ? <div className={`h-sells-sub${exit.sub.tone === 'warn' ? ' tone-text-warn' : ''}`}>{exit.sub.text}</div> : null}
       </div>
-      <div role="gridcell" className={`h-buyers num${r.buyerCount === 0 ? ' muted' : ''}`}>
+      <div role="gridcell" className={`h-buyers num${r.buyerCount === 0 ? ' muted' : ''}`} title={holdingBuyersTitle(r, keyScrap, now)}>
         {fmtInt(r.buyerCount)}
       </div>
       <div role="gridcell" className="h-profit" title={profitTitle}>
@@ -669,6 +701,16 @@ const HoldingItemRow = memo(function HoldingItemRow({
         <span className={`pill holding-pill tone-${HOLDING_STATUS_TONES[r.status]}`} title={holdingStatusTitle(r)}>
           {HOLDING_STATUS_LABELS[r.status]}
         </span>
+        {/* At the narrowest width the Advice column folds in here, in place of the status pill (holdings.css). */}
+        {advice ? (
+          <span className={`pill advice-pill advice-inline tone-${ADVICE_TONES[advice.kind]}`} title={adviceT}>
+            {ADVICE_LABELS[advice.kind]}
+          </span>
+        ) : null}
+      </div>
+      <div role="gridcell" className="h-advice" title={adviceT}>
+        {advice ? <span className={`pill advice-pill tone-${ADVICE_TONES[advice.kind]}`}>{ADVICE_LABELS[advice.kind]}</span> : <span className="muted">{DASH}</span>}
+        {advice?.refreshFirst ? <Icon name="refresh" size={11} className="tone-text-warn advice-refresh" title={ADVICE_REFRESH_TITLE} /> : null}
       </div>
       <div role="gridcell" className="h-conf">
         {r.revenueScrap !== null ? <ConfidenceBadge score={r.confidence} level={r.confidenceLevel} compact /> : <span className="muted">{DASH}</span>}

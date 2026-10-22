@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { JournalEntry, Opportunity, OpportunityEvent } from '../../src/shared/types';
 import { CSV_BOM, csvCell, eventsCsv, journalCsv, opportunitiesCsv, toCsv } from '../../src/service/domain/csv';
+import { JOURNAL_CSV_COLUMNS } from '../../src/shared/journal';
 import { T0 } from './helpers';
 
 /** Minimal RFC 4180 reader for round-trip checks. */
@@ -187,7 +188,69 @@ describe('exports', () => {
     });
     const rows = parseCsv(journalCsv([j(2, T0 + 1000, { side: 'sell', keys: 1, scrap: 3, note: '@admin, "quoted"' }), j(1, T0)]));
     expect(rows.map((r) => r[0])).toEqual(['id', '1', '2']);
-    expect(rows[2]).toEqual(['2', new Date(T0 + 1000).toISOString(), 'sell', 'scrap.tf', '378;6', 'Team Captain', '1', '0.33', '63', '63.33', `'@admin, "quoted"`]);
+    expect(rows[0]).toEqual([...JOURNAL_CSV_COLUMNS]);
+    // 0.8 (J5): the earlier 11 cells unchanged, then the fee (none recorded), the FIFO state and the booked pair.
+    expect(rows[2]).toEqual([
+      '2',
+      new Date(T0 + 1000).toISOString(),
+      'sell',
+      'scrap.tf',
+      '378;6',
+      'Team Captain',
+      '1',
+      '0.33',
+      '63',
+      '63.33',
+      `'@admin, "quoted"`,
+      '',
+      '',
+      'closed',
+      '1',
+      '1.33',
+      '63.33',
+      '',
+      '62',
+      '0',
+    ]);
+    // The buy it closed carries its state and no pair.
+    expect(rows[1]!.slice(11)).toEqual(['', '', 'closed', '', '', '', '', '', '']);
+  });
+
+  it('0.8 (J5): lists a same-minute buy before its sale, marks waiting sales, and still guards text cells', () => {
+    const j = (id: number, ts: number, over: Partial<JournalEntry> = {}): JournalEntry => ({
+      id,
+      ts,
+      side: 'buy',
+      venue: 'scrap.tf',
+      sku: '378;6',
+      name: 'Team Captain',
+      keys: 0,
+      scrap: 12,
+      keyPriceScrap: 567,
+      note: null,
+      ...over,
+    });
+    const rows = parseCsv(
+      journalCsv([
+        // The sale was recorded first (lower id) at the buy's own minute: FIFO order puts the buy first.
+        j(1, T0, { side: 'sell', scrap: 10, venue: '@bp', feeKeys: 0, feeScrap: 1 }),
+        j(2, T0, { feeScrap: 2 }),
+        // A sale of an item with no buy before it waits.
+        j(3, T0 + 1000, { side: 'sell', sku: '5021;6', venue: '=venue', note: '-note' }),
+      ]),
+    );
+    expect(rows.map((r) => r[0])).toEqual(['id', '2', '1', '3']);
+    const at = (r: string[], col: string): string => r[JOURNAL_CSV_COLUMNS.indexOf(col)]!;
+    // The buy: its fee recorded, open until the sale closed it.
+    expect(at(rows[1]!, 'fee_metal_ref')).toBe('0.22');
+    expect(at(rows[1]!, 'fifo')).toBe('closed');
+    // The sale: cost 12 + 2 fee, proceeds 10 - 1 fee, a negative profit written as a plain number.
+    expect(rows[2]!.slice(11)).toEqual(['0', '0.11', 'closed', '2', '1.55', '1', '0.33', '-0.55', '0']);
+    expect(at(rows[2]!, 'venue')).toBe(`'@bp`);
+    // The waiting sale: no pair, and its venue and note keep their formula guard.
+    expect(rows[3]!.slice(11)).toEqual(['', '', 'waiting', '', '', '', '', '', '']);
+    expect(at(rows[3]!, 'venue')).toBe(`'=venue`);
+    expect(at(rows[3]!, 'note')).toBe(`'-note`);
   });
 
   it('writes a header even with no rows', () => {

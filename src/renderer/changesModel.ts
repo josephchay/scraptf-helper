@@ -12,6 +12,7 @@ import { bankStockPagePath } from '../shared/bankStock';
 import { SCRAPTF_BOUNDARY_SHORT } from '../shared/boundaryText';
 import { scraptfBankInfo, SCRAPTF_BANKS } from '../shared/links';
 import { SCRAPTF_CHANGES_DEFAULT_LIMIT, SCRAPTF_CHANGES_MAX_LIMIT } from '../shared/scraptfHistory';
+import { SCRAPTF_LIST_FAMILY_LABEL } from '../shared/scraptfList';
 import { SCRAPTF_BANK_IDS, SCRAPTF_CHANGE_KINDS } from '../shared/types';
 import type { Scrap, ScraptfBank, ScraptfChangeEvent, ScraptfChangeKind, ScraptfChangesQuery, UnixMs } from '../shared/types';
 import { DASH, errorMessage, fmtAgo, fmtDateTime, fmtInt, fmtMoney, type Tone } from './format';
@@ -290,7 +291,8 @@ function sameValues(a: ScraptfChangeEvent, b: ScraptfChangeEvent): boolean {
     a.flip === b.flip &&
     // 0.7.3: what the hovers say of a null revenue (noRevenueWhy).
     noRevenueWhy(a) === noRevenueWhy(b) &&
-    a.buyerCount === b.buyerCount
+    a.buyerCount === b.buyerCount &&
+    a.listFamily === b.listFamily
   );
 }
 
@@ -630,8 +632,15 @@ function noRevenueWhy(e: Pick<ScraptfChangeEvent, 'revenueScrap' | 'buyerCount' 
   return e.flags?.includes('all-outliers') ? 'all-outliers' : 'no-bot';
 }
 
+/**
+ * 0.7.4 (ScraptfChangeEvent.listFamily): an /items row for every copy, as the bank stock page says it: no
+ * buyer's price is set against it, so it is never a flip.
+ */
+export const CHANGE_FAMILY_TITLE = `${SCRAPTF_LIST_FAMILY_LABEL} (Craftable or Non-Craftable, any killstreak tier): the list does not show which copy it is, so no backpack.tf buyer is set against its price.`;
+
 /** Sells for without a revenue: no eligible buyer, or (0.7.3) why the buyers there are give none (as the bank stock page). */
 function noSellsTitle(e: ScraptfChangeEvent): string {
+  if (e.listFamily === true) return CHANGE_FAMILY_TITLE;
   const why = noRevenueWhy(e);
   if (why === 'all-outliers') return 'Every eligible order looks unrealistic, so no sale price is assumed.';
   if (why === 'no-bot') {
@@ -643,6 +652,7 @@ function noSellsTitle(e: ScraptfChangeEvent): string {
 
 /** Pay up to without a revenue: no ceiling, and (0.7.3) why, as the Live market's Pay up to hover. */
 function noPayTitle(e: ScraptfChangeEvent): string {
+  if (e.listFamily === true) return `No Pay up to: ${CHANGE_FAMILY_TITLE}`;
   const why = noRevenueWhy(e);
   if (why === 'all-outliers') return 'Every eligible order looks unrealistic, so there is no ceiling.';
   if (why === 'no-bot') return 'No realistic bot order, and Revenue used for profit is Instant (bot orders only), so there is no ceiling.';

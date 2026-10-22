@@ -150,7 +150,9 @@
   }
 }
 
-/* The name ellipses first; the badges after it never shrink. */
+/* The name ellipses first, but never below 64px: the tags after it (New or "↓ was X", the 0.8 Wait / Buy now tag,
+   extras, the 0.8 watch tag) sit in .bs-tags, which takes at most the cell minus 70px (64px of name and the 6px gap).
+   Tags that do not fit there ellipse, each keeping its full text in its title. A row with room for all is unchanged. */
 .bs-item {
   display: flex;
   align-items: center;
@@ -159,6 +161,31 @@
 
 .bs-item > .item-name-wrap {
   flex: 0 1 auto;
+}
+
+.bs-tags {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  max-width: calc(100% - 70px);
+  overflow: hidden;
+}
+
+/* Two classes, so it outranks each tag's own flex-shrink: 0 below (and the Wait / Buy now pill's in components.css). */
+.bs-item > .bs-tags > * {
+  flex-shrink: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* A pill is a flex box, whose text cannot ellipse; a block of the pill's height can. */
+.bs-item > .bs-tags > .pill {
+  display: block;
+  line-height: 17px;
 }
 
 .bs-row.verdict-no-buyers .bs-item .item-name {
@@ -190,6 +217,18 @@
   color: var(--text-muted);
   font-size: 10.5px;
   font-weight: 650;
+  cursor: help;
+}
+
+/* 0.8 (G1): a watched row's tag, styled like the extras tag; its tone-text-* class colours the words. */
+.bs-watch {
+  flex-shrink: 0;
+  padding: 0 4px;
+  border-radius: 3px;
+  background: var(--muted-weak);
+  font-size: 10.5px;
+  font-weight: 650;
+  white-space: nowrap;
   cursor: help;
 }
 

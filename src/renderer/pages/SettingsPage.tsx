@@ -40,6 +40,8 @@ import {
 } from '../scraptfWindowModel';
 import {
   applyBlocklistEdit,
+  BUY_TIMING_NOTIFY_LABEL,
+  buyTimingNotifyHint,
   CHECK_NOTIFY_LABEL,
   CHECK_POPUP_HINT,
   CHECK_POPUP_LABEL,
@@ -49,6 +51,8 @@ import {
   checkWatchHint,
   type CheckHotkeySave,
   daysTextToMs,
+  EXIT_RESERVE_PCT,
+  exitReserveHint,
   quickHotkeyProblem,
   HOLDINGS_NOTIFY_LABEL,
   holdingsNotifyHint,
@@ -85,6 +89,8 @@ import {
   validateKeyPriceRef,
   validateQuickEntryHotkey,
   validateResaveMinutes,
+  WATCHES_NOTIFY_LABEL,
+  watchesNotifyHint,
 } from '../settingsFields';
 
 const SECTIONS = [
@@ -98,6 +104,7 @@ const SECTIONS = [
   ['set-feed', 'Live feed'],
   ['set-connectors', 'Data sources'],
   ['set-block', 'Blocklist'],
+  ['set-own', 'Your accounts'],
   ['set-app', 'App behaviour'],
   ['set-check', 'Live check'],
   ['set-look', 'Appearance'],
@@ -140,6 +147,8 @@ export function SettingsPage() {
         <FeedSection s={settings} />
         <ConnectorsSection s={settings} />
         <BlocklistSection s={settings} />
+        {/* 0.8 (H3): your own SteamID64s, so your listings leave "Others ask". */}
+        <OwnAccountsSection s={settings} />
         <AppSection s={settings} />
         {/* F16. Main's settings load always adds the check group; the guard keeps the page up regardless. */}
         {settings.check ? <CheckSection s={settings} /> : null}
@@ -377,7 +386,7 @@ function ProfitSection({ s }: { s: Settings }) {
           onChange={(useOrder) => set({ useOrder })}
           options={[
             { value: 'conservative', label: 'Conservative', title: 'Best order that is not an outlier (recommended)' },
-            { value: 'best', label: 'Best', title: 'Highest eligible order, even if it looks like an outlier' },
+            { value: 'best', label: 'Best', title: 'Highest eligible order, even if it looks like an outlier or was not seen for a day' },
             { value: 'instant', label: 'Instant', title: 'Best non-outlier bot order' },
           ]}
         />
@@ -394,6 +403,10 @@ function ProfitSection({ s }: { s: Settings }) {
         </Field>
         <Field label="Friction per trade" htmlFor="p-friction" hint="Your time and trade-hold cost.">
           <CommitInput id="p-friction" inputMode="decimal" value={refText(p.frictionScrap)} validate={refValidator(false)} onCommit={(v) => set({ frictionScrap: parseRef(v) ?? p.frictionScrap })} suffix="ref" />
+        </Field>
+        {/* 0.8 (PC-1): the user's own allowance for a price drop, taken off every buy decision (flipProfit). */}
+        <Field label="Price-move reserve" htmlFor="p-reserve" hint={exitReserveHint(p.exitReservePct)}>
+          <CommitInput id="p-reserve" inputMode="decimal" value={ratioToPctText(p.exitReservePct)} validate={numberValidator(EXIT_RESERVE_PCT.min, EXIT_RESERVE_PCT.max)} onCommit={(v) => set({ exitReservePct: pctTextToRatio(v) })} suffix="%" />
         </Field>
         <Field label="Outlier vs median" htmlFor="p-om" hint="Best order above this multiple of the median is an outlier.">
           <CommitInput id="p-om" inputMode="decimal" value={String(p.outlierVsMedian)} validate={numberValidator(1, 10)} onCommit={(v) => set({ outlierVsMedian: Number(v) })} suffix="×" />
@@ -496,6 +509,10 @@ export function NotifySection({ s }: { s: Settings }) {
         label={NEW_ON_SCRAPTF_NOTIFY_LABEL}
         description={newOnScraptfNotifyHint({ notificationsOn: n.enabled, importKind: kinds.includes('import'), importOn: s.import.enabled && s.import.acknowledgedAt !== null })}
       />
+      {/* 0.8 (G1, G3): "Watch (<Bank>): <name>" and "Back on scrap.tf" for the items you watch. */}
+      <Toggle checked={n.watches} onChange={(watches) => void set({ watches })} label={WATCHES_NOTIFY_LABEL} description={watchesNotifyHint({ notificationsOn: n.enabled, importOn: s.import.enabled && s.import.acknowledgedAt !== null })} />
+      {/* 0.8 (G4): "Buy now (<Bank>): <name>", opt-in (D25). */}
+      <Toggle checked={n.buyTiming} onChange={(buyTiming) => void set({ buyTiming })} label={BUY_TIMING_NOTIFY_LABEL} description={buyTimingNotifyHint({ notificationsOn: n.enabled, newOnScraptfOn: n.newOnScraptf, importKind: kinds.includes('import'), importOn: s.import.enabled && s.import.acknowledgedAt !== null })} />
       <Toggle checked={n.silent} onChange={(silent) => void set({ silent })} label="Silent notifications" description="Shown without the Windows notification sound." />
     </Section>
   );
@@ -603,6 +620,71 @@ export function BlocklistSection({ s }: { s: Settings }) {
       <div className="form-actions">
         <button type="button" className="btn small primary" disabled={!dirty || parsed.invalid.length > 0} onClick={() => void save()}>
           Save blocklist
+        </button>
+        <span className="muted small">{parsed.ids.length} valid</span>
+      </div>
+    </Section>
+  );
+}
+
+/** settings.ownSteamIds holds at most this many (the settings schema's max). */
+const OWN_STEAM_IDS_MAX = 10;
+
+/**
+ * 0.8 (H3): the user's own SteamID64s (settings.ownSteamIds, at most OWN_STEAM_IDS_MAX), so their own backpack.tf
+ * sell listings are left out of "Others ask". BlocklistSection's draft / base / fresh-read pattern: Save applies only
+ * the user's own edit to a fresh read. The list only filters (R5): Flip Desk signs in to nothing. Exported for tests.
+ */
+export function OwnAccountsSection({ s }: { s: Settings }) {
+  const { updateSettings, toast } = useApp();
+  const stored = s.ownSteamIds ?? [];
+  const [draft, setDraft] = useState(() => ({ text: stored.join('\n'), base: stored }));
+  useEffect(
+    () =>
+      setDraft((d) => {
+        const p = parseSteamIdList(d.text);
+        return p.invalid.length === 0 && sameIdList(p.ids, d.base) && !sameIdList(d.base, stored) ? { text: stored.join('\n'), base: stored } : d;
+      }),
+    // Keyed on the stored array itself: `stored` is a new [] only when settings has none.
+    [s.ownSteamIds],
+  );
+  const parsed = parseSteamIdList(draft.text);
+  const dirty = !sameIdList(parsed.ids, draft.base);
+  const tooMany = parsed.ids.length > OWN_STEAM_IDS_MAX;
+  const error = parsed.invalid.length
+    ? `Not a SteamID64: ${parsed.invalid.slice(0, 3).join(', ')}${parsed.invalid.length > 3 ? '…' : ''}`
+    : tooMany
+      ? `At most ${OWN_STEAM_IDS_MAX}`
+      : null;
+  const save = async () => {
+    const submitted = draft.text;
+    let fresh: Settings;
+    try {
+      fresh = await rpc('settings.get');
+    } catch (e) {
+      toast(`Could not save settings: ${errorMessage(e)}`, 'bad');
+      return;
+    }
+    const r = await updateSettings({ ownSteamIds: applyBlocklistEdit(fresh.ownSteamIds ?? [], draft.base, parsed.ids) });
+    if (r) {
+      const saved = r.ownSteamIds ?? [];
+      // Typed again during the save: keep that text, only move the base.
+      setDraft((d) => (d.text === submitted ? { text: saved.join('\n'), base: saved } : { ...d, base: saved }));
+      toast(`Your accounts saved (${saved.length}).`, 'good');
+    }
+  };
+  return (
+    <Section
+      id="set-own"
+      title="Your accounts"
+      intro="Your own SteamID64s, optional. Your own backpack.tf sell listings are then left out of “Others ask” on Holdings and in the item panel. Flip Desk signs in to nothing and acts for no account; this list never leaves settings.json."
+    >
+      <Field label="SteamID64s, one per line" htmlFor="own-steamids" error={error}>
+        <textarea id="own-steamids" className="input mono" rows={3} value={draft.text} spellCheck={false} onChange={(e) => setDraft((d) => ({ ...d, text: e.target.value }))} placeholder="7656119..." />
+      </Field>
+      <div className="form-actions">
+        <button type="button" className="btn small primary" disabled={!dirty || parsed.invalid.length > 0 || tooMany} onClick={() => void save()}>
+          Save accounts
         </button>
         <span className="muted small">{parsed.ids.length} valid</span>
       </div>

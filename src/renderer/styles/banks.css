@@ -263,3 +263,65 @@
   align-self: flex-start;
   margin-top: 2px;
 }
+
+/* ---------- 0.8 (G1): your scrap.tf watches ---------- */
+
+.watches-card {
+  margin-top: 16px;
+}
+
+.watches-card-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.watches-card-head h2 {
+  margin: 0;
+}
+
+.watches-empty-title {
+  margin: 0 0 2px;
+  font-weight: 600;
+}
+
+.watches-empty p {
+  margin: 0;
+}
+
+.watch-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+}
+
+.watch-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 10px;
+  min-width: 0;
+}
+
+.watch-row.paused .watch-row-text {
+  opacity: 0.7;
+}
+
+.watch-row .watch-name {
+  font-weight: 600;
+}
+
+.watch-row-text {
+  flex: 1 1 260px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.watch-row-actions {
+  display: inline-flex;
+  flex-shrink: 0;
+  gap: 4px;
+}

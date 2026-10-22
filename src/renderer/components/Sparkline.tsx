@@ -116,13 +116,15 @@ export function Sparkline({ history, keyScrap }: { history: HistoryPoint[]; keyS
  * F20: a step chart of one price per save (historyModel.stepChartGeom): the price is held until the
  * next save, a save that did not list the item on sale breaks the line and leaves a tick on the
  * baseline, and each save on sale is a dot. Hovering picks the nearest save for `readout`. Dots are
- * zero-length round-capped strokes, so they stay round while the SVG stretches to the drawer.
+ * zero-length round-capped strokes, so they stay round while the SVG stretches to the drawer. 0.8 (T5): each
+ * of `geom.downs` (a save that showed a reprice-down) gets a short tick under its dot.
  */
 export function StepSparkline({ geom, ariaLabel, readout, axis }: { geom: StepGeom; ariaLabel: string; readout: (i: number | null) => ReactNode; axis?: ReactNode }) {
   const [hover, setHover] = useState<number | null>(null);
   const { w, h, padY } = STEP_BOX;
   const dots = geom.dots.map((p) => `M${p.x.toFixed(1)},${p.y.toFixed(1)}h0`).join('');
   const gaps = geom.gaps.map((g) => `M${g.x.toFixed(1)},${h - padY + 1}v6`).join('');
+  const downs = (geom.downs ?? []).map((p) => `M${p.x.toFixed(1)},${(p.y + 4).toFixed(1)}v5`).join('');
   const active = hover !== null ? geom.dots.find((p) => p.i === hover) : undefined;
   return (
     <figure className="spark stf-hist-chart">
@@ -145,6 +147,7 @@ export function StepSparkline({ geom, ariaLabel, readout, axis }: { geom: StepGe
         <line x1={0} x2={w} y1={h - padY} y2={h - padY} className="spark-grid" />
         <path d={geom.path} className="stf-hist-step" vectorEffect="non-scaling-stroke" />
         {gaps ? <path d={gaps} className="stf-hist-gap" vectorEffect="non-scaling-stroke" /> : null}
+        {downs ? <path d={downs} className="stf-hist-down" vectorEffect="non-scaling-stroke" /> : null}
         <path d={dots} className="stf-hist-dot" vectorEffect="non-scaling-stroke" />
         {hover !== null && geom.xs[hover] !== undefined ? (
           <line x1={geom.xs[hover]} x2={geom.xs[hover]} y1={padY / 2} y2={h - padY / 2} className="spark-cursor" vectorEffect="non-scaling-stroke" />

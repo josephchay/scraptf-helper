@@ -215,10 +215,18 @@ describe('snapshot', () => {
   });
 
   it('returns empty results after both name variants come back empty', async () => {
+    const h = harness({ handler: snapshotHandler({ empty: ['Team Captain', 'The Team Captain'] }) });
+    const r = await h.api.snapshot('378;6');
+    expect(r.listings).toEqual([]);
+    expect(h.http.calls).toHaveLength(2);
+  });
+
+  // 0.7.4 (F74): backpack.tf never writes "The" before a quality, effect or killstreak prefix.
+  it('spends no second call on a "The" spelling no backpack.tf name has', async () => {
     const h = harness({ handler: snapshotHandler({ empty: ['Strange Pain Train', 'The Strange Pain Train'] }) });
     const r = await h.api.snapshot('154;11');
     expect(r.listings).toEqual([]);
-    expect(h.http.calls).toHaveLength(2);
+    expect(h.http.calls.map(snapshotName)).toEqual(['Strange Pain Train']);
   });
 
   it('prefers names learned from the feed, including for painted SKUs', async () => {
@@ -411,7 +419,7 @@ describe('IGetPrices and IGetCurrencies', () => {
 
   it('reads the key price', async () => {
     const h = harness({ handler: (c) => (c.url === CURRENCIES_URL ? jsonResponse(200, currencies.objectForm) : jsonResponse(404, null)) });
-    await expect(h.api.currencies()).resolves.toEqual({ source: 'bptf', buyScrap: 582, sellScrap: 584, observedAt: T0 });
+    await expect(h.api.currencies()).resolves.toEqual({ source: 'bptf', buyScrap: 582, sellScrap: 584, observedAt: T0, priceAt: 1_791_900_000_000 });
     expect(h.http.calls[0]!.opts).toMatchObject({ budget: 'bptf-currencies', secretQuery: ['key'] });
     h.http.handler = () => jsonResponse(200, { response: { success: 1, currencies: {} } });
     await expect(h.api.currencies()).resolves.toBeNull();

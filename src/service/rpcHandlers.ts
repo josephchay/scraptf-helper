@@ -9,10 +9,38 @@ import {
   bankStockKey,
   bankStockOnSale,
   bankStockSpecialKey,
+  bankStockTargetOf,
 } from '../shared/bankStock';
 import { CHECK_MAX_CHARS } from '../shared/check';
 import {
+  JOURNAL_ENTRY_GONE,
+  JOURNAL_MAX_FEE_KEYS,
+  JOURNAL_MAX_FEE_SCRAP,
+  JOURNAL_WRITE_OFF_NOTHING,
+  feeOf,
+  feePatchOf,
+} from '../shared/journal';
+import {
+  WATCHES_FULL,
+  WATCHES_MAX,
+  WATCH_ANY_COPY_SENTINEL,
+  WATCH_COPY_TAKEN,
+  WATCH_GONE,
+  WATCH_MAX_KEYS,
+  WATCH_MAX_SCRAP,
+  WATCH_NAME_MAX,
+  WATCH_NOT_A_COPY,
+  WATCH_SPECIAL_MAX,
+  watchRestoreOf,
+  watchViewsOf,
+  watchWriteOf,
+} from '../shared/watches';
+import {
   BENIGN_SKIP_REASONS,
+  CRAFT_UNVERIFIED,
+  DUPLICATE_ROW,
+  FUTURE_MTIME,
+  FUTURE_MTIME_SLACK_MS,
   IMPORT_REFUSAL_CODES,
   IMPORT_REPORT_RING,
   IMPORT_SCHEMA_LOADING_CODE,
@@ -23,7 +51,10 @@ import {
   PARTIAL_READ_MAX_AGE_MS,
   PARTIAL_READ_MIN_KEYS,
   PARTIAL_READ_RATIO,
+  SKIP_BANK_CARD_PRICE,
+  SKIP_CRAFT_UNPROVEN,
   SKIP_NEWER_SAVE,
+  SKIP_NOT_ON_SALE_NEWER,
   SKIP_OUT_OF_STOCK,
   SKIP_SAME_OR_CHEAPER,
   UNUSUALS_INDEX,
@@ -36,6 +67,7 @@ import type { PushContract, PushEvent } from '../shared/rpc';
 import { SERVICE_METHODS } from '../shared/rpc';
 import { MARKET_MAX_LIMIT, MARKET_MAX_SEARCH_CHARS, MARKET_SORTS, countCategories, marketSearchTokens } from '../shared/market';
 import { EVENTS_EXPORT_MAX, eventMatches } from '../shared/opportunityEvents';
+import { newestTypedPriceFor } from '../shared/priceCopy';
 import { baseSku as toBaseSku, canonical, fromObject, fromString, isValidSku, looksLikeSku } from '../shared/sku';
 import {
   BANK_STOCK_FILTERS,
@@ -43,6 +75,7 @@ import {
   CHECK_SOURCES,
   EMPTY_SPECIAL,
   IMPORT_ORIGINS,
+  JOURNAL_SIDES,
   MARKET_SOURCES,
   MARKET_VERDICTS,
   SCRAPTF_BANK_IDS,
@@ -61,10 +94,12 @@ import {
   type CheckSource,
   type HealthReport,
   type HistoryPoint,
+  type HoldingDetail,
   type ImportOrigin,
   type ImportReport,
   type ImportResult,
   type ImportTopFlip,
+  type JournalSide,
   type MarketSort,
   type MarketSource,
   type MarketVerdict,
@@ -77,8 +112,11 @@ import {
   type ScraptfChangeKind,
   type ScraptfChangesQuery,
   type ScraptfItemHistory,
+  type ScraptfListCraft,
   type ScraptfListStatus,
   type ScraptfListStored,
+  type ScraptfWatch,
+  type ScraptfWatchView,
   type SecretName,
   type Settings,
   type SpecialAttrs,
@@ -97,9 +135,10 @@ import {
 import type { BanksSummary } from './domain/banks';
 import { bankStockCsv, type BankStock } from './domain/bankStock';
 import type { ScraptfHistory } from './domain/scraptfHistory';
+import type { WatchCache } from './domain/watches';
 import { holdingsCsv, type Holdings } from './domain/holdings';
 import type { LiveCheck } from './domain/liveCheck';
-import { marketCategoryOf, marketCsv, type MarketIndex } from './domain/market';
+import { marketBankOfSku, marketCategoryOf, marketCsv, type MarketIndex } from './domain/market';
 import type { ScraptfListCache } from './domain/scraptfList';
 import { buildShoppingList, shoppingCsv } from './domain/shopping';
 import { createBuyerChecker } from './buyerCheck';
@@ -135,9 +174,14 @@ export interface HandlerContext {
   /**
    * F17: each bank's newest pair of saves, diffed and joined to the Live market per read ('scraptf.bankStock'); no network.
    * F21: importSavedPage counts a window read's new flips with newFlips (ImportResult.newFlips); 0.7.1: and
-   * the flips on its page with pageFlips (ImportResult.pageFlips, topFlips).
+   * the flips on its page with pageFlips (ImportResult.pageFlips, topFlips). 0.8: droppedFlips
+   * (ImportResult.droppedFlips) and watchRows ('watches.list').
    */
-  bankStock: Pick<BankStock, 'list' | 'all' | 'detailFor' | 'newFlips' | 'pageFlips'>;
+  bankStock: Pick<BankStock, 'list' | 'all' | 'detailFor' | 'newFlips' | 'pageFlips' | 'droppedFlips' | 'watchRows'>;
+  /** 0.8 (G1): the user's scrap.tf watches in memory (domain/watches.ts); 'watches.list' reads them, writes go through repo. */
+  watches: Pick<WatchCache, 'all'>;
+  /** 0.8: a watch was added, changed or removed: core re-reads the cache, drops the watch list (watchedSet), tells holdings (H1) and pushes 'watches.changed'. */
+  watchesChanged(): void;
   /**
    * F17: bank_stock rows were written (an import of a recognised page: `imported` names its bank and batch)
    * or pruned (no argument). Called before pricesChanged, so pages refetching on its pushes read the new
@@ -148,9 +192,10 @@ export interface HandlerContext {
   /**
    * F20: the history of the user's saves (runs index, change feed); in memory plus scraptf_events; no
    * network. importSavedPage calls onImport(batchId) inside its transaction after insertBankStock and
-   * pushes 'scraptf.changed' after the commit when it wrote events.
+   * pushes 'scraptf.changed' after the commit when it wrote events. 0.8 (T4/T7): timingForCopy (optional, so test
+   * stubs compile) joins 'opps.list' rows' timing from the cached saves.
    */
-  scraptfHistory: Pick<ScraptfHistory, 'onImport' | 'itemHistory' | 'changes' | 'csv'>;
+  scraptfHistory: Pick<ScraptfHistory, 'onImport' | 'itemHistory' | 'changes' | 'csv'> & Partial<Pick<ScraptfHistory, 'timingForCopy'>>;
   /** F16 live check: copied or typed text against the local book and the saved list, plus the recent ring; no network. */
   liveCheck: Pick<LiveCheck, 'check' | 'recent'>;
   /** The saved-page folder watch as it runs (a missing folder or a failed OS watch is not active) and its last error. */
@@ -162,7 +207,7 @@ export interface HandlerContext {
   health(): HealthReport;
   /** The scrap.tf price list changed (watchlist cache, setup checklist). */
   pricesChanged(): void;
-  /** A journal row was added or deleted: held SKUs (watch list), holdings, and the 'journal.changed' push. */
+  /** A journal row was added, edited or deleted: held SKUs (watch list), holdings, and the 'journal.changed' push. */
   journalChanged(): void;
   /** Queue a background snapshot for a base SKU (served by the scheduler within the budget). */
   queueSnapshot(baseSku: string): void;
@@ -255,6 +300,8 @@ const priceInput = z.object({
   special: specialSchema.nullable().optional(),
   assetId: z.string().max(40).nullable().optional(),
   stock: z.number().int().min(0).nullable().optional(),
+  // 0.7.4 (F80): 'prices.upsert' with no id updates the newest typed price of the copy (ScrapPriceInput).
+  replaceTyped: z.boolean().optional(),
 });
 
 const ruleInput = ruleInputSchema;
@@ -327,6 +374,30 @@ const scraptfItemHistoryParams = z.object({
   special: z.string().max(2000).nullable().optional(),
 });
 
+// 0.8 (G1). `special` is a bank_stock special key: a lookup key only, bounded, and never the copy index's every-copy
+// stand-in '*' (WATCH_ANY_COPY_SENTINEL; every copy is copies 'any'). Targets: keys as typed, metal and profit whole
+// scrap. watchWriteOf (shared with the mock) applies the rest.
+const watchInput = z.object({
+  id: id.optional(),
+  sku: skuText,
+  copies: z.enum(['one', 'any']).optional(),
+  special: z
+    .string()
+    .max(WATCH_SPECIAL_MAX)
+    .refine((s) => s !== WATCH_ANY_COPY_SENTINEL, WATCH_NOT_A_COPY)
+    .nullable()
+    .optional(),
+  name: z.string().max(WATCH_NAME_MAX).optional(),
+  maxCostKeys: z.number().min(0).max(WATCH_MAX_KEYS).optional(),
+  maxCostScrap: z.number().int().min(0).max(WATCH_MAX_SCRAP).nullable().optional(),
+  minProfitScrap: z.number().int().min(0).max(WATCH_MAX_SCRAP).nullable().optional(),
+  onRestock: z.boolean().optional(),
+  enabled: z.boolean().optional(),
+});
+// 0.8 (G1): Undo of a removal: the removed watch's params, id and times (watchRestoreOf clamps the times to now).
+const watchRestore = watchInput.extend({ id, createdAt: z.number().int().min(0), updatedAt: z.number().int().min(0) });
+const watchesListParams = z.object({ sku: skuText.optional() }).nullish();
+
 const steamId64 = z.string().trim().regex(/^\d{17}$/, 'expected a 17-digit SteamID64');
 
 /** Bulk paste preview: the helper enforces the 100 KB / 500-line limits with a friendly refusal; this only bounds memory. */
@@ -337,15 +408,38 @@ const MAX_RULES_JSON_CHARS = 5_000_000;
 const MAX_RULE_SKIP_LINES = 400;
 export const SCHEMA_LOADING_MESSAGE = 'The item list is still loading, so names cannot be matched yet. Preview again in a moment.';
 
-const journalInput = z.object({
-  ts: finite.optional(),
-  side: z.enum(['buy', 'sell']),
-  venue: z.string().trim().min(1, 'venue is required').max(100),
-  sku: skuText,
-  name: z.string().max(300).optional(),
-  keys: nonNeg.optional(),
-  scrap: nonNeg,
-  note: z.string().max(500).nullable().optional(),
+// 0.8 (J2): a fee per row, keys and metal apart; absent (both) is "not recorded", 0 is "none".
+const journalFeeKeys = nonNeg.refine((n) => n <= JOURNAL_MAX_FEE_KEYS, 'fee is too high');
+const journalFeeScrap = nonNeg.refine((n) => n <= JOURNAL_MAX_FEE_SCRAP, 'fee is too high');
+const journalVenue = z.string().trim().min(1, 'venue is required').max(100);
+const journalNote = z.string().max(500).nullable();
+// 0.7.4 (F39): a backfill's key price then (JournalInput.keyPriceScrap): at least 1 ref, at most 100,000 scrap.
+const journalKeyPrice = z.number().int('key price must be whole scrap').min(9, 'key price must be at least 1 ref').max(100_000, 'key price is too high');
+
+const journalInput = z
+  .object({
+    ts: finite.optional(),
+    side: z.enum(JOURNAL_SIDES as unknown as [JournalSide, ...JournalSide[]]),
+    venue: journalVenue,
+    sku: skuText,
+    name: z.string().max(300).optional(),
+    keys: nonNeg.optional(),
+    scrap: nonNeg,
+    note: journalNote.optional(),
+    keyPriceScrap: journalKeyPrice.optional(),
+    feeKeys: journalFeeKeys.optional(),
+    feeScrap: journalFeeScrap.optional(),
+  })
+  // 0.8: a write-off receives nothing, so it has no price and no fee.
+  .refine((p) => p.side !== 'writeoff' || ((p.keys ?? 0) === 0 && p.scrap === 0 && p.feeKeys === undefined && p.feeScrap === undefined), { error: JOURNAL_WRITE_OFF_NOTHING, path: ['scrap'] });
+
+// 0.8 (J6): one row's venue, note and fee; side, item, price and time stay (delete and log again to change them).
+const journalPatchParams = z.object({
+  id,
+  venue: journalVenue.optional(),
+  note: journalNote.optional(),
+  feeKeys: journalFeeKeys.nullable().optional(),
+  feeScrap: journalFeeScrap.nullable().optional(),
 });
 
 const importParams = z.object({
@@ -459,16 +553,22 @@ function specialKey(s: SpecialAttrs): string {
  * Every row with a SKU counts, in stock or not: scrap.tf still buys an item it has none of, and a
  * "Sold out" row keeps what scrap.tf pays with no price to buy. A row with neither price says nothing.
  * A SKU listed twice keeps its first row with a price to buy, else its first row (the repo alone would
- * keep the last one, since the whole page shares one time).
+ * keep the last one, since the whole page shares one time). 0.7.4: each row keeps what it is proven to
+ * price (ParsedScrapItem.listCraft; an unmarked row is a family row, 'any'), and rows of one item that
+ * differ (DUPLICATE_ROW) write none: which is which copy is unknown, so the stored row stays as it was.
+ * 0.7.4 (F60): and the list page it was read on (`page`), so a whole save of that page retires it once the
+ * page no longer shows it.
  */
 function listRowsOf(
   schema: SchemaService,
   items: readonly ParsedScrapItem[],
   observedAt: UnixMs,
+  page: string,
 ): Omit<ScraptfListStored, 'batchId'>[] {
   const bySku = new Map<string, Omit<ScraptfListStored, 'batchId'>>();
   for (const item of items) {
     if (item.sku === null || !looksLikeSku(item.sku)) continue;
+    if (hasWarningCode(item, DUPLICATE_ROW)) continue;
     const sells = sellsPriceOf(item);
     const pays = item.pays ?? null;
     if (sells === null && pays === null) continue;
@@ -498,9 +598,16 @@ function listRowsOf(
       stock: item.stock,
       stockLimit: item.stockLimit ?? null,
       observedAt,
+      craft: item.listCraft ?? 'any',
+      ...(page !== '' ? { page } : {}),
     });
   }
   return [...bySku.values()];
+}
+
+/** 0.7.4: the item carries a warning of this code. */
+function hasWarningCode(item: ParsedScrapItem, code: string): boolean {
+  return item.warnings.some((w) => importWarningCode(w) === code);
 }
 
 /**
@@ -511,10 +618,13 @@ function listRowsOf(
  * price, and the copies on sale of all those cards for the stock: scrap.tf stacks identical copies as
  * one "3x" card but shows a reserved or differently made copy on a card of its own (the parser already
  * dropped the selected-item duplicates), so one card's count would undersell the bank, by card order.
+ * 0.7.4: an /items list row (`list`) carries its craftability (BankStockStored.craft: listCraft, 'any' for
+ * rows of one item that differ, DUPLICATE_ROW, and for a key whose rows disagree), so the stock page, page
+ * flips, "New on scrap.tf" and the change feed join a family row to no Craftable buyer (bankStockListFamily).
  */
-function bankStockRowsOf(schema: SchemaService, items: readonly ParsedScrapItem[], keyScrap: number): BankStockStored[] {
+function bankStockRowsOf(schema: SchemaService, items: readonly ParsedScrapItem[], keyScrap: number, list = false): BankStockStored[] {
   /** `onSaleStock`: the summed counts of the key's cards on sale (null: none yet); `unknown`: one of them showed no count. */
-  const byKey = new Map<string, { row: BankStockStored; onSale: boolean; total: number; onSaleStock: number | null; unknown: boolean }>();
+  const byKey = new Map<string, { row: BankStockStored; onSale: boolean; total: number; onSaleStock: number | null; unknown: boolean; craft: ScraptfListCraft }>();
   for (const item of items) {
     if (item.sku === null || !looksLikeSku(item.sku)) continue;
     let base: string;
@@ -548,11 +658,14 @@ function bankStockRowsOf(schema: SchemaService, items: readonly ParsedScrapItem[
     const key = bankStockKey(base, specialKey);
     // A card on sale with no count (no asset id, no stack size) leaves the key's stock unknown.
     const counted = typeof item.stock === 'number' && Number.isFinite(item.stock) ? item.stock : null;
+    const craft: ScraptfListCraft = hasWarningCode(item, DUPLICATE_ROW) ? 'any' : (item.listCraft ?? 'any');
     const prev = byKey.get(key);
     if (!prev) {
-      byKey.set(key, { row, onSale, total, onSaleStock: onSale ? counted : null, unknown: onSale && counted === null });
+      byKey.set(key, { row, onSale, total, onSaleStock: onSale ? counted : null, unknown: onSale && counted === null, craft });
       continue;
     }
+    // Rows of one key that disagree on their copy prove none of them.
+    if (prev.craft !== craft) prev.craft = 'any';
     if (onSale) {
       if (counted === null) prev.unknown = true;
       else prev.onSaleStock = (prev.onSaleStock ?? 0) + counted;
@@ -563,7 +676,10 @@ function bankStockRowsOf(schema: SchemaService, items: readonly ParsedScrapItem[
       prev.total = total;
     }
   }
-  return [...byKey.values()].map((v) => (v.onSale ? { ...v.row, stock: v.unknown ? null : v.onSaleStock } : v.row));
+  return [...byKey.values()].map((v) => {
+    const row = v.onSale ? { ...v.row, stock: v.unknown ? null : v.onSaleStock } : v.row;
+    return list ? { ...row, craft: v.craft } : row;
+  });
 }
 
 /**
@@ -630,37 +746,148 @@ function partialLookWarning(ctx: HandlerContext, bank: ScraptfBank, page: string
   return `${PARTIAL_READ}: ${onSale} of ~${was} items on screen; read the page again once every card shows`;
 }
 
+/** 0.7.4: an /items look is whole when it shows at least this share of the rows of the page's previous save. */
+const LIST_WHOLE_RATIO = 0.9;
+
+/**
+ * 0.7.4 (F82): an .mhtml file's own save time (its Date header) dates the page instead of the file's modified
+ * time only when it is this much older: a normal save writes its Date seconds before the file's mtime.
+ */
+export const PAGE_DATE_SLACK_MS = 5 * 60_000;
+
+/**
+ * 0.7.4 (F06, F60): an /items look short of rows, as {was} (the previous save's rows; 0: none), or null when
+ * whole. The list is one server-rendered table, so its row count (sold out included: a row that sells out
+ * stays listed) is steady: a look with fewer than LIST_WHOLE_RATIO of the rows of the newest stored save of
+ * the same page caught only part of it. A settled look is only compared with a save at most
+ * PARTIAL_READ_MAX_AGE_MS older (past that a drop is taken as scrap.tf's own) of at least PARTIAL_READ_MIN_KEYS
+ * rows; an unsettled window snapshot (ACT-4) always, and with no save to compare it is whole only from
+ * PARTIAL_READ_MIN_KEYS rows.
+ */
+function listLookShort(ctx: HandlerContext, page: string, rows: number, mtime: UnixMs, unsettled: boolean): { was: number } | null {
+  const before = ctx.repo.bankStockSaves('list', 1000, { perPage: 1 }).find((sv) => sv.page === page);
+  if (!before || before.savedAt > mtime) return unsettled && rows < PARTIAL_READ_MIN_KEYS ? { was: 0 } : null;
+  if (!unsettled && (mtime - before.savedAt >= PARTIAL_READ_MAX_AGE_MS || before.items < PARTIAL_READ_MIN_KEYS)) return null;
+  return rows >= Math.ceil(before.items * LIST_WHOLE_RATIO) ? null : { was: before.items };
+}
+
 /** DC-1: the banks scrap.tf shows on one page (/unusuals has a page per effect; 'list' is the price list). */
 const SINGLE_PAGE_BANKS: ReadonlySet<ScraptfBank> = new Set<ScraptfBank>(['hats', 'weapons', 'stranges', 'killstreaks', 'skins', 'items']);
 
+/**
+ * 0.7.4 (DM-3): the one-page bank whose saves decide an /items price of `sku`: the bank of the newest bank
+ * stock row of the SKU, else of its craftability twin (the list's Non-Craftable row is often a bank's card
+ * of the other craftability, and the reverse), outside the list and /unusuals; else the bank scrap.tf sells
+ * that kind of item on (F36 `marketBankOfSku`: a strange cosmetic on /buy/hats, a killstreak or australium
+ * weapon on /buy/items) when that is one page. null: none, so no bank save removes the price. Never the
+ * category first: real saves show stranges, weapons and hats on /buy/items. 0.7.4 (R04): `memo` keeps each
+ * SKU's newest bank for one import (Repo.bankStockNewestBankOf walks every kept save), so DM-3 and the list's
+ * homeSaveLacks ask once per SKU or twin.
+ */
+function homeBankOf(ctx: HandlerContext, sku: string, memo: Map<string, ScraptfBank | null> = new Map()): ScraptfBank | null {
+  let twin: string;
+  try {
+    const obj = fromString(sku);
+    twin = fromObject({ ...obj, craftable: !obj.craftable });
+  } catch {
+    return null;
+  }
+  const newestBankOf = (s: string): ScraptfBank | null => {
+    let bank = memo.get(s);
+    if (bank === undefined) memo.set(s, (bank = ctx.repo.bankStockNewestBankOf([s])));
+    return bank;
+  };
+  const seen = newestBankOf(sku) ?? newestBankOf(twin);
+  if (seen !== null) return SINGLE_PAGE_BANKS.has(seen) ? seen : null;
+  try {
+    const bank = marketBankOfSku(ctx.schema, marketCategoryOf(ctx.schema, sku), sku);
+    return SINGLE_PAGE_BANKS.has(bank) ? bank : null;
+  } catch {
+    return null;
+  }
+}
+
 /** DC-1: the bank's newest look that stored prices, whole or not (Repo.bankNewestSaves), or null. */
-function newestLookOf(ctx: HandlerContext, bank: ScraptfBank): { batchId: number; savedAt: UnixMs } | null {
+function newestLookOf(ctx: HandlerContext, bank: ScraptfBank): { batchId: number; savedAt: UnixMs; itemCount: number } | null {
   return ctx.repo.bankNewestSaves().find((s) => s.bank === bank) ?? null;
 }
 
+/** 0.7.4 (F31): the copies a bank stock save shows on sale, as `${sku}|${specialKey}` (an import price's key by bankStockSpecialKey). */
+function onSaleKeys(rows: readonly BankStockStored[]): Set<string> {
+  return new Set(rows.filter(bankStockOnSale).map((r) => `${r.sku}|${r.specialKey}`));
+}
+
+/** 0.7.4 (F31): an imported price's copy, in onSaleKeys' form. */
+function priceCopyKey(sp: Pick<ScrapPrice, 'sku' | 'special'>): string {
+  return `${sp.sku}|${bankStockSpecialKey(sp.special)}`;
+}
+
 /**
- * DC-1: imported prices of `bank` set after the page's previous stored save by a look that stored none
- * (only such a look can have set one then), of cards whole save `batchId` does not show on sale. [] unless
- * `batchId` is the page's newest save, it has a previous one (a first save removes nothing) and a look
- * with prices came after that one (`lookBefore`, read before this batch: else the table is not scanned).
+ * 0.7.4 (F37): whether a page's first stored save is whole enough to retire prices by. DM-2 compares a save
+ * with the page's previous one, which a first save lacks, so it is compared with the bank's newest look before
+ * it that stored prices (`lookBefore`, often an unsettled first window read) by DM-2's thresholds: a save with
+ * fewer than PARTIAL_READ_RATIO of that look's copies is taken as cut short and retires nothing. A look of
+ * fewer than PARTIAL_READ_MIN_KEYS copies, or none, says nothing either way.
  */
-function noSaveLookPricesGone(
+function firstSaveWhole(onSale: number, lookBefore: { itemCount: number } | null): boolean {
+  if (lookBefore === null || lookBefore.itemCount < PARTIAL_READ_MIN_KEYS) return true;
+  return onSale >= lookBefore.itemCount * PARTIAL_READ_RATIO;
+}
+
+/**
+ * 0.7.4 (F31, F37, F56, F62; DC-1 widened): the imported prices of one-page bank `bank` that whole save
+ * `batchId`, the newest of its page, shows are gone: tagged to that bank, observed before the save (`mtime`),
+ * of a copy (SKU and bankStockSpecialKey) it does not show on sale. scrap.tf shows these banks on one page,
+ * so a whole look without a card means it sold, however its price got there: a look that stored no save
+ * (DC-1), a 'gone' event no build acted on (pre-0.7.1, DM-1), an older page arriving late. [] for any other
+ * bank (/unusuals: a page per effect; the list) or save, and for a first save of its page that looks cut short
+ * (firstSaveWhole against `lookBefore`, read before this batch existed). One read per bank, never a scan.
+ */
+function pricesGoneFromSave(
   ctx: HandlerContext,
   bank: ScraptfBank,
   page: string,
   batchId: number,
   mtime: UnixMs,
-  lookBefore: { batchId: number; savedAt: UnixMs } | null,
+  lookBefore: { itemCount: number } | null,
   rows: readonly BankStockStored[],
 ): ScrapPrice[] {
-  if (lookBefore === null) return [];
+  if (!SINGLE_PAGE_BANKS.has(bank)) return [];
   const [newest, prev] = ctx.repo.bankStockSaves(bank, 1000, { perPage: 2 }).filter((sv) => sv.page === page);
-  if (newest?.batchId !== batchId || prev === undefined) return [];
-  if (lookBefore.batchId === prev.batchId || !(lookBefore.savedAt > prev.savedAt)) return [];
-  const onSale = new Set(rows.filter(bankStockOnSale).map((r) => `${r.sku}|${r.specialKey}`));
-  return ctx.repo
-    .listScrapPrices()
-    .filter((sp) => sp.source === 'import' && sp.bank === bank && sp.observedAt > prev.savedAt && sp.observedAt < mtime && !onSale.has(`${sp.sku}|${bankStockSpecialKey(sp.special)}`));
+  if (newest?.batchId !== batchId) return [];
+  const onSale = onSaleKeys(rows);
+  if (prev === undefined && !firstSaveWhole(onSale.size, lookBefore)) return [];
+  return ctx.repo.importScrapPricesOfBank(bank, mtime).filter((sp) => !onSale.has(priceCopyKey(sp)));
+}
+
+/** 0.7.4 (F31): meta key set once reconcileBankPrices has run (core start). */
+export const META_BANK_PRICES_RECONCILED = 'import.bankPricesReconciled.v1';
+
+/**
+ * 0.7.4 (F31, F62): a one-time pass over the prices older builds left (The Classified Coif: a 'gone' event a
+ * 0.7.0 build recorded and never acted on). Per one-page bank whose newest stored save has a previous save of
+ * its page (a whole save the import's own rule could have retired by), the bank's imported prices observed
+ * before that save of a copy it does not show on sale are deleted, as pricesGoneFromSave does at import. In JS,
+ * not SQL: bankStockSpecialKey normalises the stored extras. Idempotent; typed prices, list-tagged prices and
+ * /unusuals are never touched. Returns the base SKUs whose prices went (for the engine).
+ */
+export function reconcileBankPrices(repo: Repo): string[] {
+  const affected = new Set<string>();
+  repo.transaction(() => {
+    for (const bank of SINGLE_PAGE_BANKS) {
+      const newest = repo.bankStockSaves(bank, 1)[0];
+      if (!newest) continue;
+      const [head, prev] = repo.bankStockSaves(bank, 1000, { perPage: 2 }).filter((sv) => sv.page === newest.page);
+      if (head?.batchId !== newest.batchId || prev === undefined) continue;
+      const onSale = onSaleKeys(repo.bankStockRows(newest.batchId));
+      for (const sp of repo.importScrapPricesOfBank(bank, newest.savedAt)) {
+        if (onSale.has(priceCopyKey(sp))) continue;
+        repo.deleteScrapPrice(sp.id);
+        affected.add(sp.sku);
+      }
+    }
+  });
+  return [...affected];
 }
 
 /** UX-3 ImportResult.topFlips: a page flip with its name from the app's item data (never the page's text). */
@@ -687,7 +914,8 @@ function reportOf(base: Pick<ImportReportInput, 'at' | 'origin' | 'name' | 'form
     batchId,
     diagnostics: parsed.diagnostics ?? null,
     warnings,
-    itemWarnings: parsed.items.map((i) => i.warnings),
+    // 0.7.4: an /items family row counts as CRAFT_UNVERIFIED there, as the parser report notes it.
+    itemWarnings: parsed.items.map((i) => (i.sku !== null && i.listCraft === 'any' ? [...i.warnings, CRAFT_UNVERIFIED] : i.warnings)),
     countsOnly,
   };
 }
@@ -723,7 +951,18 @@ function tryReport(ctx: HandlerContext, input: ImportReportInput): void {
  * save (DM-2) and an /items list whose stock cannot be read (P1) store their prices but no save, and
  * read no copy as gone: they replace only the copies they show (0.7.3). A save
  * that was stored removes the imported price of every card it shows gone from the bank (DM-1), so a
- * card scrap.tf sold stops reading as a flip everywhere. Each parse leaves a sanitized parser report (P4).
+ * card scrap.tf sold stops reading as a flip everywhere. 0.7.4 (F31): a whole save of a one-page bank, the
+ * newest of its page, removes every older imported price of that bank it does not show on sale, however it
+ * got there (pricesGoneFromSave; a first save only when not cut short), and an older page arriving late
+ * writes no copy the bank's newer whole save lacks. 0.7.4 (F82): a file dated ahead of the clock stores no
+ * bank stock save (FUTURE_MTIME), and an .mhtml file is dated by its own Date header when that is clearly
+ * older than its modified time. Each parse leaves a sanitized parser report (P4).
+ * 0.7.4: an /items row is a cost only when it is proven to price the copy (Non-Craftable by name or class,
+ * Craftable beside the item's Non-Craftable row; never a family row, ParsedScrapItem.listCraft 'any'), its
+ * stock was read, no bank page's own price of the copy is stored (the list never re-tags one) and no
+ * newer whole save of its home bank lacks it; a whole save of that bank later removes it (DM-3), and a
+ * whole /items save retires the list prices and rows it shows gone. An /items window snapshot is a whole
+ * save when it read every row's stock and about every row of the page's last save (F06).
  * Refused unless the user enabled import and acknowledged the ToS note (R10); a window read also needs
  * the window itself on (settings.scraptfWindow.enabled, behind its own risk acknowledgement).
  */
@@ -743,7 +982,9 @@ export function importSavedPage(ctx: HandlerContext, p: ImportSavedPageParams): 
   const baseName = p.fileName.replace(/^.*[\\/]/, '');
   // A window read is named after its page ('scrap.tf window /buy/hats'), which the basename would cut to 'hats'.
   const fileName = origin === 'window' ? windowReadName(p.fileName) || 'scrap.tf window' : baseName.slice(0, 200) || 'saved page';
-  const mtime = Number.isFinite(p.mtimeMs) && p.mtimeMs > 0 ? Math.min(Math.round(p.mtimeMs), now) : now;
+  const fileTime = Number.isFinite(p.mtimeMs) && p.mtimeMs > 0 ? Math.min(Math.round(p.mtimeMs), now) : now;
+  // 0.7.4 (F82): a file dated ahead of this computer's clock (clamped to now above) stores no bank stock save.
+  const futureFile = origin === 'file' && Number.isFinite(p.mtimeMs) && p.mtimeMs > now + FUTURE_MTIME_SLACK_MS;
   // ACT-4: only a window read can be unsettled, and only an explicit false says so.
   const unsettled = origin === 'window' && p.settled === false;
   const reportBase = { at: now, origin, name: fileName, format: origin === 'window' ? 'window' : isMhtmlFileName(baseName) ? 'mhtml' : 'html' } as const;
@@ -775,6 +1016,11 @@ export function importSavedPage(ctx: HandlerContext, p: ImportSavedPageParams): 
     throw err;
   }
   const format = origin === 'window' ? 'window' : parsed.format;
+  // 0.7.4 (F82): the page's time. A copy, sync or editor resets a file's modified time: an .mhtml file's own
+  // save time (its Date header) wins when it is clearly older (PAGE_DATE_SLACK_MS: a normal save writes its
+  // Date seconds before the file's mtime). A window read is dated by its read.
+  const savedAt = origin === 'file' && typeof parsed.savedAt === 'number' && Number.isFinite(parsed.savedAt) ? parsed.savedAt : null;
+  const mtime = savedAt !== null && savedAt > 0 && savedAt < fileTime - PAGE_DATE_SLACK_MS ? savedAt : fileTime;
   if (origin === 'window' && parsed.items.length === 0) {
     // F21: the user browses scrap.tf's front page, a profile or a bank whose cards have not arrived yet
     // (the settle read gets them). Such a read stores nothing either way, so it records no batch and
@@ -819,9 +1065,20 @@ export function importSavedPage(ctx: HandlerContext, p: ImportSavedPageParams): 
     set.add(specialKey(special));
   };
   const keyScrap = ctx.engine.keyPrice().valueScrap;
+  const isList = parsed.pageKind === 'items-list';
+  /** 0.7.4 (R04): homeBankOf's newest bank per SKU, for this import (its saves change only at the end of it). */
+  const homeMemo = new Map<string, ScraptfBank | null>();
+  /** 0.7.4: base SKUs of /items family rows ('any'): shown, but never a cost, so a list price stored for them goes. */
+  const listUnproven = new Set<string>();
   for (const item of parsed.items) {
     const title = item.title || item.name;
     const sku = item.sku !== null && looksLikeSku(item.sku) ? item.sku : null;
+    // 0.7.4: /items rows of one item that differ change nothing (no price, nothing sold out): the next save
+    // of its bank page decides.
+    if (isList && sku !== null && hasWarningCode(item, DUPLICATE_ROW)) {
+      skipped.push({ reason: item.warnings.find((w) => importWarningCode(w) === DUPLICATE_ROW) ?? DUPLICATE_ROW, title });
+      continue;
+    }
     // "0/5" on the /items list (priced or "Sold out"): the price to buy cannot be paid right now.
     if (sku !== null && item.stock === 0) {
       skipped.push({ reason: SKIP_OUT_OF_STOCK, title });
@@ -833,6 +1090,22 @@ export function importSavedPage(ctx: HandlerContext, p: ImportSavedPageParams): 
     if (sku === null || !isImportableItem(item)) {
       skipped.push({ reason: skipReasonOf(item), title });
       continue;
+    }
+    if (isList) {
+      // 0.7.4: an /items row is a cost only when its stock was read (P1, header or not: a sold-out row
+      // would read as buyable) and it is proven to price this copy. A family row ('any': every copy at its
+      // price, Craftable or not) is kept on the price list only; a price an older read stored for it goes.
+      if (item.stock === null) {
+        skipped.push({ reason: `${NO_STOCK_LIMIT}: the list shows no stock for this row`, title });
+        continue;
+      }
+      if (item.listCraft !== 'craftable' && item.listCraft !== 'uncraftable') {
+        skipped.push({ reason: SKIP_CRAFT_UNPROVEN, title });
+        const fam = splitSku(sku);
+        listUnproven.add(fam.base);
+        show(fam.base, { ...item.special, paint: item.special.paint ?? fam.paint });
+        continue;
+      }
     }
     const { base, paint } = splitSku(sku);
     const special: SpecialAttrs = { ...item.special, paint: item.special.paint ?? paint };
@@ -849,29 +1122,48 @@ export function importSavedPage(ctx: HandlerContext, p: ImportSavedPageParams): 
     }
   }
 
-  // The /items list shows plain copies only, so it cannot speak for painted, spelled or named
-  // copies imported from bank pages. Rows whose extras were never recorded (null) count as plain.
+  // The /items list writes plain copies only, so it cannot speak for painted, spelled or named copies
+  // imported from bank pages. Rows whose extras were never recorded (null) count as plain. 0.7.4: nor for a
+  // bank page's own price of a copy (bankCard), which keeps its bank, asset id and stock: that bank's saves
+  // decide it (DM-1, DC-1). The list replaces only what a list read wrote (or an untagged pre-0.5 row).
   const plainKey = specialKey(emptySpecial());
   const extrasKey = (sp: ScrapPrice): string => (sp.special === null ? plainKey : specialKey(sp.special));
-  const replaceable = (sp: ScrapPrice): boolean => sp.source === 'import' && (parsed.pageKind !== 'items-list' || extrasKey(sp) === plainKey);
+  const bankCard = (sp: ScrapPrice): boolean => sp.source === 'import' && sp.bank !== null && sp.bank !== 'list';
+  const replaceable = (sp: ScrapPrice): boolean => sp.source === 'import' && (!isList || (extrasKey(sp) === plainKey && !bankCard(sp)));
   // Catch-up scans and old pages copied into the watch folder can arrive after a newer page.
   const newerThanPage = (sp: ScrapPrice): boolean => sp.observedAt > mtime;
   // F14: bank pages have no "Price we pay" column, so only an /items list feeds the stored list.
-  const listRows = parsed.pageKind === 'items-list' ? listRowsOf(ctx.schema, parsed.items, mtime) : [];
+  const listRows = parsed.pageKind === 'items-list' ? listRowsOf(ctx.schema, parsed.items, mtime, typeof parsed.page === 'string' ? parsed.page : '') : [];
   // F17: what a recognised page (a /buy bank, /unusuals or the /items list) had in stock at that moment.
-  const stockRows = parsed.bank !== null ? bankStockRowsOf(ctx.schema, parsed.items, keyScrap) : [];
+  const stockRows = parsed.bank !== null ? bankStockRowsOf(ctx.schema, parsed.items, keyScrap, isList) : [];
 
   // 0.7.1: whether this look is stored as a bank stock save. Only a whole look is: anything else would
   // read as items gone (then restocked and new) on the next one. Its prices are stored either way.
   const pageWarnings: string[] = [];
   let stockSave: NonNullable<ImportResult['stockSave']> = parsed.bank !== null && stockRows.length > 0 ? 'written' : 'none';
   if (stockSave === 'written' && parsed.bank !== null) {
-    // P1: an /items row whose stock cannot be read would read as on sale whatever it shows.
-    const noStock = parsed.items.filter((i) => i.sku !== null && sellsPriceOf(i) !== null && i.warnings.some((w) => importWarningCode(w) === NO_STOCK_LIMIT)).length;
-    if (unsettled) stockSave = 'unsettled';
-    else if (noStock > 0) {
+    const listBank = parsed.bank === 'list';
+    // P1: an /items row whose stock cannot be read would read as on sale whatever it shows. 0.7.4: header or
+    // not (a list without an "Item Limits" column reads no stock either; the list always shows one).
+    const noStock = parsed.items.filter((i) => i.sku !== null && sellsPriceOf(i) !== null && (hasWarningCode(i, NO_STOCK_LIMIT) || (listBank && i.stock === null))).length;
+    // 0.7.4 (F06): the /items list is one server-rendered table, so a window snapshot cut before its settle
+    // read is whole when every row's stock was read and it shows (about) every row of the page's last save:
+    // stored as a save, not left unsettled (ACT-4 stands for the bank pages, whose cards arrive late).
+    const short = listBank ? listLookShort(ctx, parsed.page, stockRows.length, mtime, unsettled) : null;
+    if (unsettled && !(listBank && noStock === 0 && short === null)) stockSave = 'unsettled';
+    else if (futureFile) {
+      // 0.7.4 (F82): an old page whose time was reset ahead of the clock would become the newest whole save,
+      // read cards on sale as gone and sold ones as restocked, and (dated now) do so again at every start.
+      stockSave = 'partial';
+      pageWarnings.push(`${FUTURE_MTIME}: the file's modified time is ahead of this computer's clock, so this look stores no bank stock save`);
+    } else if (noStock > 0) {
       stockSave = 'partial';
       pageWarnings.push(`${NO_STOCK_LIMIT}: ${noStock} rows with no readable stock, so this look stores no bank stock save`);
+    } else if (listBank) {
+      if (short !== null) {
+        stockSave = 'partial';
+        pageWarnings.push(`${PARTIAL_READ}: ${stockRows.length} of ~${short.was} rows on screen; read the page again once every row shows`);
+      }
     } else {
       const partial = partialLookWarning(ctx, parsed.bank, parsed.page, stockRows, mtime);
       if (partial !== null) {
@@ -881,30 +1173,53 @@ export function importSavedPage(ctx: HandlerContext, p: ImportSavedPageParams): 
     }
   }
   // 0.7.3: a look known to be missing cards (ACT-4 unsettled, DM-2 or P1 partial) reads no copy as gone
-  // (F18 deviation 11): it replaces only the copies it shows, never another copy of the same item.
-  const noSaveLook = unsettled || stockSave === 'partial';
+  // (F18 deviation 11): it replaces only the copies it shows, never another copy of the same item. 0.7.4: an
+  // unsettled /items snapshot stored as a whole save (above) is a whole look.
+  const noSaveLook = (unsettled && stockSave !== 'written') || stockSave === 'partial';
 
   const affected = new Set<string>();
   let batchId = 0;
   let stored = 0;
   let listWritten = 0;
+  let listRemoved = 0;
   let stockWritten = 0;
   let eventsWritten = 0;
   try {
     ctx.repo.transaction(() => {
       const previous = new Map<string, ScrapPrice[]>();
-      for (const sku of [...[...best.values()].map((b) => b.sku), ...soldOut]) {
+      for (const sku of [...[...best.values()].map((b) => b.sku), ...soldOut, ...listUnproven]) {
         if (!previous.has(sku)) previous.set(sku, ctx.repo.scrapPricesForSku(sku).filter(replaceable));
       }
       const kept = new Set<number>();
       // 0.7.3: a later save of this bank showed a copy gone (DM-1 removed its price): an older page arriving
-      // late must not bring it back, as no later save would remove it again. Never the /items list (as DM-1).
+      // late must not bring it back, as no later save would remove it again. Never the /items list: 0.7.4, its
+      // rows answer to their home bank's newer save instead (homeSaveLacks below).
       const goneBank = parsed.bank !== null && parsed.bank !== 'list' ? parsed.bank : null;
       const anyGoneAfter = goneBank !== null && ctx.repo.scraptfEvents({ bank: goneBank, kinds: ['gone'], sinceAt: mtime + 1, limit: 1 }).length > 0;
       const goneAfterPage = (sku: string, special: SpecialAttrs): boolean =>
         anyGoneAfter &&
         goneBank !== null &&
         ctx.repo.scraptfEvents({ bank: goneBank, kinds: ['gone'], sku, specialKey: bankStockSpecialKey(special), sinceAt: mtime + 1, limit: 1 }).length > 0;
+      // 0.7.4 (F31, F56): for a one-page bank, the copies on sale in its newest whole save when that save is
+      // newer than this page (a save of any of its pages is a look at the whole bank), else null.
+      const lateBank = parsed.bank !== null && SINGLE_PAGE_BANKS.has(parsed.bank) ? parsed.bank : null;
+      const newestOfBank = lateBank !== null ? ctx.repo.bankStockSaves(lateBank, 1)[0] : undefined;
+      const newerOnSale = newestOfBank !== undefined && newestOfBank.savedAt > mtime ? onSaleKeys(ctx.repo.bankStockRows(newestOfBank.batchId)) : null;
+      const newerSaveLacks = (sku: string, special: SpecialAttrs): boolean => newerOnSale !== null && !newerOnSale.has(priceCopyKey({ sku, special }));
+      // 0.7.4: per home bank, the SKUs on sale (any extras) in its newest whole save when that save is newer
+      // than this list, else null (nothing newer says otherwise).
+      const homeOnSale = new Map<ScraptfBank, Set<string> | null>();
+      const homeSaveLacks = (sku: string): boolean => {
+        const bank = homeBankOf(ctx, sku, homeMemo);
+        if (bank === null) return false;
+        let onSale = homeOnSale.get(bank);
+        if (onSale === undefined) {
+          const newest = ctx.repo.bankStockSaves(bank, 1)[0];
+          onSale = newest && newest.savedAt > mtime ? new Set(ctx.repo.bankStockRows(newest.batchId).filter(bankStockOnSale).map((r) => r.sku)) : null;
+          homeOnSale.set(bank, onSale);
+        }
+        return onSale !== null && !onSale.has(sku);
+      };
       const writes: { id: number | null; sku: string; item: Item }[] = [];
       for (const { sku, item } of best.values()) {
         const key = specialKey(item.special);
@@ -923,15 +1238,38 @@ export function importSavedPage(ctx: HandlerContext, p: ImportSavedPageParams): 
           skipped.push({ reason: SKIP_NEWER_SAVE, title: item.title || item.name });
           continue;
         }
+        // 0.7.4 (F31, F56): the bank's newer whole save does not show the copy on sale, so it sold after this
+        // page (with no 'gone' event when no stored save had listed it): an older page arriving late does not
+        // write it, as goneAfterPage above. Its other rows stay as they are. No newer page priced it (R05).
+        if (newerSaveLacks(sku, item.special)) {
+          for (const o of same) kept.add(o.id);
+          skipped.push({ reason: SKIP_NOT_ON_SALE_NEWER, title: item.title || item.name });
+          continue;
+        }
+        if (isList) {
+          // 0.7.4: a bank page's own price of the copy stays as it is (its bank, asset id and card stock):
+          // the list's stock counts copies that bank may not offer. An older list price beside it goes.
+          if (ctx.repo.scrapPricesForSku(sku).some((o) => bankCard(o) && extrasKey(o) === key)) {
+            skipped.push({ reason: SKIP_BANK_CARD_PRICE, title: item.title || item.name });
+            continue;
+          }
+          // The copy's home bank was saved whole after this list and does not show it on sale: scrap.tf's
+          // list counted a copy its bank does not offer (or sold since), so it sets no cost (DM-3 likewise).
+          if (homeSaveLacks(sku)) {
+            skipped.push({ reason: SKIP_NOT_ON_SALE_NEWER, title: item.title || item.name });
+            continue;
+          }
+        }
         const target = same[0] ?? null;
         if (target) kept.add(target.id);
         writes.push({ id: target?.id ?? null, sku, item });
       }
 
-      // Classified now, from what this page stores: a later import (an /items list) re-tags the rows it
-      // shares with this one, and the coverage strip must still know which bank page this was (F13).
+      // Classified now, from what this page stores: a later look of the bank re-tags the rows it shares with
+      // this one, and the coverage strip must still know which bank page this was (F13).
       const categories = storedCategories(ctx.schema, writes.map((w) => w.sku));
-      // DC-1: the bank's newest look with prices before this one, whole or not (read before this batch exists).
+      // DC-1: the bank's newest look with prices before this one, whole or not (read before this batch exists);
+      // 0.7.4 (F37): what a page's first save is checked against before it retires prices (firstSaveWhole).
       const lookBefore = stockSave === 'written' && parsed.bank !== null && SINGLE_PAGE_BANKS.has(parsed.bank) ? newestLookOf(ctx, parsed.bank) : null;
       // F15: the page as the parser recognised it, fixed now for the same reason as the categories.
       // F21: and how it came in, so the Import page can label a window read.
@@ -997,14 +1335,68 @@ export function importSavedPage(ctx: HandlerContext, p: ImportSavedPageParams): 
             affected.add(sp.sku);
           }
         }
-        // DC-1: a card only a look that stored no save caught (partial or unsettled) has no gone event,
-        // since no stored save ever listed it. scrap.tf shows these banks on one page, so a whole look
-        // without it means it sold. Never /unusuals: such a look's page is not recorded.
-        for (const sp of noSaveLookPricesGone(ctx, bank, parsed.page, batchId, mtime, lookBefore, stockRows)) {
+        // DC-1, widened in 0.7.4 (F31, F37, F56, F62): a card with no gone event of this save (only a look
+        // that stored no save caught it, its event was recorded by a build that never acted on it, or an
+        // older page arriving late wrote it) still sold when a whole look of a one-page bank lacks it: this
+        // save, the page's newest, retires every imported price of its bank from before it of a copy it does
+        // not show on sale (a page's first save only when it is not cut short, firstSaveWhole). Never
+        // /unusuals: a page per effect, and such a look's page is not recorded.
+        for (const sp of pricesGoneFromSave(ctx, bank, parsed.page, batchId, mtime, lookBefore, stockRows)) {
           if (!replaceable(sp) || kept.has(sp.id)) continue;
           ctx.repo.deleteScrapPrice(sp.id);
           affected.add(sp.sku);
         }
+        // DM-3 (0.7.4): an /items price (list-tagged) of a copy whose home bank is this one (homeBankOf), and
+        // that this whole save, the page's newest, shows nowhere on sale: scrap.tf's list counts copies its
+        // bank does not offer, and sold ones until its next read, so the price goes, as DM-1 removes a card
+        // shown gone. Only prices from before this save; never a typed price, never one this import kept.
+        const newestOfPage = ctx.repo.bankStockSaves(bank, 1000, { perPage: 1 }).find((sv) => sv.page === parsed.page);
+        if (SINGLE_PAGE_BANKS.has(bank) && newestOfPage?.batchId === batchId) {
+          const onSale = new Set(stockRows.filter(bankStockOnSale).map((r) => r.sku));
+          // 0.7.4 (R04): the list's imported prices from before this save only (indexed by batch bank), never
+          // a read of every price; homeBankOf asks once per SKU or twin for the whole import (homeMemo).
+          for (const sp of ctx.repo.importScrapPricesOfBank('list', mtime)) {
+            if (extrasKey(sp) !== plainKey || kept.has(sp.id)) continue;
+            if (onSale.has(sp.sku) || homeBankOf(ctx, sp.sku, homeMemo) !== bank) continue;
+            ctx.repo.deleteScrapPrice(sp.id);
+            affected.add(sp.sku);
+          }
+        }
+      }
+      // 0.7.4 (F60): a whole /items save retires what its own 'gone' events show gone (per page, so /items/2
+      // never retires an /items row): the list price of that copy, and the list row of a copy the page no
+      // longer lists at all (a row listed sold out stays: scrap.tf still buys it). And, when it is the newest
+      // save of its page, by set difference: every list row read on this page (scraptf_list.page) before it
+      // that it does not list in any state, so a row last listed sold out, or written by a look that stored no
+      // save (partial, unsettled, a future-dated file), goes too, with its list prices; never a row another
+      // list page's newest save lists (one row per SKU), and never a row whose page is not known.
+      if (stockWritten > 0 && parsed.bank === 'list') {
+        const gone = ctx.repo.scraptfEvents({ bank: 'list', kinds: ['gone'], sinceAt: mtime, limit: 5000 }).filter((e) => e.batchId === batchId);
+        const absent = new Set<string>();
+        const retireListPrices = (sku: string, specialKeyOf: string | null): void => {
+          for (const sp of ctx.repo.scrapPricesForSku(sku)) {
+            if (!replaceable(sp) || sp.bank !== 'list' || !(sp.observedAt < mtime) || kept.has(sp.id)) continue;
+            if (specialKeyOf !== null && bankStockSpecialKey(sp.special) !== specialKeyOf) continue;
+            ctx.repo.deleteScrapPrice(sp.id);
+            affected.add(sp.sku);
+          }
+        };
+        for (const e of gone) {
+          retireListPrices(e.sku, e.specialKey);
+          if (e.toStock === null) absent.add(e.sku);
+        }
+        const listSaves = parsed.page !== '' ? ctx.repo.bankStockSaves('list', 1000, { perPage: 1 }) : [];
+        if (listSaves.find((sv) => sv.page === parsed.page)?.batchId === batchId) {
+          const shown = new Set(stockRows.map((r) => r.sku));
+          const elsewhere = new Set<string>();
+          for (const sv of listSaves) if (sv.page !== parsed.page) for (const r of ctx.repo.bankStockRows(sv.batchId)) elsewhere.add(r.sku);
+          for (const row of ctx.repo.scraptfList()) {
+            if (row.page !== parsed.page || !(row.observedAt < mtime) || shown.has(row.sku) || elsewhere.has(row.sku) || absent.has(row.sku)) continue;
+            absent.add(row.sku);
+            retireListPrices(row.sku, null);
+          }
+        }
+        if (absent.size > 0) listRemoved = ctx.repo.deleteScraptfListRows([...absent], mtime);
       }
     });
   } catch (err) {
@@ -1032,6 +1424,8 @@ export function importSavedPage(ctx: HandlerContext, p: ImportSavedPageParams): 
   // F21: the window's status line ("2 new flips"), read after the refresh above. Window reads only, so
   // a file's result is unchanged; absent when this read wrote no bank stock.
   let newFlips: number | undefined;
+  // 0.8 (G2): and the flips this read dropped under Pay up to, for "(1 cheaper)".
+  let droppedFlips: number | undefined;
   // 0.7.1 (UX-3): and every flip on the page now, with the best three, for "10 flips on this page".
   let flips: { pageFlips: number; topFlips: ImportTopFlip[] } | undefined;
   if (origin === 'window' && stockWritten > 0 && parsed.bank !== null) {
@@ -1039,6 +1433,11 @@ export function importSavedPage(ctx: HandlerContext, p: ImportSavedPageParams): 
       newFlips = ctx.bankStock.newFlips(parsed.bank, batchId).length;
     } catch (err) {
       ctx.log.warn(`bank stock new flips failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    try {
+      droppedFlips = ctx.bankStock.droppedFlips(parsed.bank, batchId).length;
+    } catch (err) {
+      ctx.log.warn(`bank stock dropped flips failed: ${err instanceof Error ? err.message : String(err)}`);
     }
     try {
       const rows = ctx.bankStock.pageFlips(parsed.bank, batchId);
@@ -1072,6 +1471,7 @@ export function importSavedPage(ctx: HandlerContext, p: ImportSavedPageParams): 
     ...(parsed.pageKind === 'items-list' ? { listRows: listWritten, listRowsRead: listRows.length } : {}),
     origin,
     ...(newFlips !== undefined ? { newFlips } : {}),
+    ...(droppedFlips !== undefined ? { droppedFlips } : {}),
     skippedTotal: skipped.length,
     skippedCounts,
     stockSave,
@@ -1083,11 +1483,11 @@ export function importSavedPage(ctx: HandlerContext, p: ImportSavedPageParams): 
   ctx.pricesChanged();
   // Before 'import.done', so a page refetching on it already reads the new list. Core refreshes the
   // cache, re-checks the key price and holdings and pushes 'scraptf.listChanged'. An older list that
-  // changed no row (a newer one is stored) pushes nothing.
-  if (listWritten > 0) ctx.scraptfListChanged();
+  // changed no row (a newer one is stored) pushes nothing. 0.7.4: rows a whole save retired (F60) are a change too.
+  if (listWritten > 0 || listRemoved > 0) ctx.scraptfListChanged();
   if (affected.size > 0) ctx.engine.markDirty(affected);
   ctx.push('import.done', result);
-  const listNote = parsed.pageKind === 'items-list' ? `, ${listWritten} of ${listRows.length} scrap.tf list rows` : '';
+  const listNote = parsed.pageKind === 'items-list' ? `, ${listWritten} of ${listRows.length} scrap.tf list rows${listRemoved > 0 ? `, ${listRemoved} no longer listed` : ''}` : '';
   const stockNote = stockSave === 'partial' || stockSave === 'unsettled' ? `, no bank stock save (${stockSave} look)` : '';
   ctx.log.info(`imported ${fileName}: ${result.stored} prices from ${result.parsed} items (${parsed.pageKind})${listNote}${stockNote}`);
   return result;
@@ -1229,7 +1629,16 @@ export function createRpcHandlers(ctx: HandlerContext): RpcHandler {
   const handlers: Record<string, (params: unknown, method: string) => unknown> = {
     'status.get': () => ctx.status(),
 
-    'opps.list': (params, m) => listOpportunities(repo, parse(oppQuery, params, m) ?? {}, engine.keyPrice(), clock.now()),
+    'opps.list': (params, m) => {
+      const now = clock.now();
+      const h = ctx.scraptfHistory;
+      // 0.8 (T4/T7): each 'import' row's buy timing, from the history's cached saves (no query, no request), at the
+      // page's key price and profit settings: read once here, not once per row.
+      const kp = engine.keyPrice();
+      const profit = ctx.settings().profit;
+      const inputs = { keyScrap: kp.valueScrap, profit };
+      return listOpportunities(repo, parse(oppQuery, params, m) ?? {}, kp, now, profit.useOrder, h.timingForCopy ? { timingForCopy: (b, s, buy, at) => h.timingForCopy!(b, s, buy, at, inputs) } : undefined);
+    },
 
     'opps.events': (params, m) => repo.listEvents(withoutUndefined(parse(eventQuery, params, m) ?? {})),
 
@@ -1273,7 +1682,8 @@ export function createRpcHandlers(ctx: HandlerContext): RpcHandler {
         // Every matching row: paging does not apply to the file.
         const kp = engine.keyPrice();
         const { limit: _limit, offset: _offset, ...filters } = shopping ?? {};
-        const list = buildShoppingList(repo.allOpportunities(), withoutUndefined(filters), kp, clock.now());
+        // 0.7.4 (F36): the same bank pages as the list (in memory, MarketIndex.bankFor).
+        const list = buildShoppingList(repo.allOpportunities(), withoutUndefined(filters), kp, clock.now(), { bankOf: (sku) => ctx.market.bankFor(sku) });
         return { csv: shoppingCsv(list.rows, kp.valueScrap), suggestedName: `flipdesk-shopping-${stamp}.csv` };
       }
       if (kind === 'market') {
@@ -1299,6 +1709,8 @@ export function createRpcHandlers(ctx: HandlerContext): RpcHandler {
           const id = /^price:(\d+)$/.exec(ref);
           return id ? (repo.getScrapPrice(Number(id[1]))?.stock ?? null) : null;
         },
+        // 0.7.4 (F36): where a save last listed the item, else its kind's bank (in memory, no read per row).
+        bankOf: (sku) => ctx.market.bankFor(sku),
       }),
 
     // In memory only: the index reads the local book the live feed fills, with no request of its own.
@@ -1306,6 +1718,12 @@ export function createRpcHandlers(ctx: HandlerContext): RpcHandler {
 
     // Also local only: the journal's open lots against the same book the market index reads.
     'holdings.list': (params, m) => ctx.holdings.list(withoutUndefined(parse(holdingsQuery, params, m) ?? {}), clock.now()),
+
+    // 0.8 (H7): local only: the journal, the stored exit runs and the same book (H7).
+    'holdings.detail': (params, m): HoldingDetail => {
+      const { sku } = parse(skuOnly, params, m);
+      return ctx.holdings.detail(splitSku(sku).full, clock.now());
+    },
 
     'item.detail': async (params, m) => {
       const { sku, history: withHistory, target } = parse(
@@ -1339,6 +1757,14 @@ export function createRpcHandlers(ctx: HandlerContext): RpcHandler {
       const { base } = splitSku(sku);
       const s = ctx.settings();
       const no = (reason: string, etaMs: number | null = null) => ({ queued: false, reason, etaMs });
+      // 0.7.4 (F74): a kit or tool without its target names no listed item, so there is nothing to snapshot.
+      let targetless = false;
+      try {
+        targetless = schema.isTargetlessTool?.(base) === true;
+      } catch {
+        // An unreadable SKU is refused by the snapshot itself.
+      }
+      if (targetless) return no('This tool names no target item; backpack.tf has no listings for it.');
       if (!ctx.secret('bptfAccessToken')) return no('Refreshing needs your backpack.tf access token (Settings).');
       if (!s.connectors.bptfApi) return no('The backpack.tf API is turned off in Settings.');
       if (s.networkPaused || http.isPaused()) return no('The network is paused. Resume it from the top bar first.');
@@ -1416,8 +1842,28 @@ export function createRpcHandlers(ctx: HandlerContext): RpcHandler {
     },
 
     'prices.upsert': (params, m) => {
-      const { input, base, previousBase } = priceRow(parse(priceInput, params, m), clock.now());
-      const saved = repo.upsertScrapPrice(input);
+      const p = parse(priceInput, params, m);
+      const now = clock.now();
+      // 0.7.4 (F80): Quick entry and the check popup re-type a price the user may have typed before. With
+      // replaceTyped (and no id) the newest typed price of the same copy (priceIsForSku) is updated, keeping
+      // its stored extras, asset id and stock as the drawer's form does, so an older typed price never stays
+      // a second input of its own (a stale false flip). Its price, time and note become this one's: the time
+      // is the price's own (a list price keeps its list date), even when older. Found and written in one
+      // transaction, so two quick saves cannot both add a row; no typed price of the copy adds one.
+      const { saved, base, previousBase } = repo.transaction(() => {
+        const replaces = p.replaceTyped === true && p.id === undefined && (p.source ?? 'user') === 'user';
+        const { full, base: target } = splitSku(p.sku);
+        const typed = replaces ? newestTypedPriceFor(repo.scrapPricesForSku(target), full) : null;
+        // The stored base SKU and no extras: the row's own paint and extras stay (Repo.upsertScrapPrice keeps
+        // omitted fields). A whole price: no keys means 0 keys, never the old row's.
+        const row = priceRow(
+          typed
+            ? { ...p, id: typed.id, sku: typed.sku, name: p.name ?? typed.name, costKeys: p.costKeys ?? 0, special: undefined, assetId: undefined, stock: undefined, importBatch: undefined }
+            : p,
+          now,
+        );
+        return { saved: repo.upsertScrapPrice(row.input), base: row.base, previousBase: row.previousBase };
+      });
       ctx.pricesChanged();
       // 0.7.3: a row moved to another item leaves its old item's opportunity, as 'prices.delete' does.
       engine.markDirty(previousBase !== null ? [base, previousBase] : [base]);
@@ -1561,6 +2007,8 @@ export function createRpcHandlers(ctx: HandlerContext): RpcHandler {
     'journal.add': (params, m) => {
       const p = parse(journalInput, params, m);
       const { full } = splitSku(p.sku);
+      // 0.8 (J2): either part given records the fee (the other then 0); neither leaves it not recorded.
+      const fee = feeOf(p);
       const row = repo.addJournal({
         ts: p.ts ?? clock.now(),
         side: p.side,
@@ -1569,8 +2017,10 @@ export function createRpcHandlers(ctx: HandlerContext): RpcHandler {
         name: p.name?.trim() || schema.nameForSku(full),
         keys: p.keys ?? 0,
         scrap: Math.round(p.scrap),
-        keyPriceScrap: engine.keyPrice().valueScrap,
+        // 0.7.4 (F39): a backfilled trade's key price then, as the user gave it; else today's.
+        keyPriceScrap: p.keyPriceScrap ?? engine.keyPrice().valueScrap,
         note: p.note?.trim() || null,
+        ...(fee ? { feeKeys: fee.keys, feeScrap: Math.round(fee.scrap) } : {}),
       });
       ctx.journalChanged();
       return row;
@@ -1582,6 +2032,26 @@ export function createRpcHandlers(ctx: HandlerContext): RpcHandler {
       repo.deleteJournal(entryId);
       ctx.journalChanged();
       return { ok: true };
+    },
+
+    // 0.8 (J6): venue, note and fee only; a write-off never takes a fee. Also the edit's Undo (the row's old values).
+    'journal.update': (params, m) => {
+      const p = parse(journalPatchParams, params, m);
+      const before = repo.getJournal(p.id);
+      if (!before) throw new Error(JOURNAL_ENTRY_GONE);
+      const fee = feePatchOf(p);
+      if (before.side === 'writeoff' && fee) throw new Error(`Invalid parameters for ${m}: feeKeys: ${JOURNAL_WRITE_OFF_NOTHING}`);
+      const row = repo.updateJournal(
+        p.id,
+        withoutUndefined({
+          venue: p.venue,
+          note: p.note === undefined ? undefined : p.note?.trim() || null,
+          ...(fee === undefined ? {} : fee === null ? { feeKeys: null, feeScrap: null } : { feeKeys: fee.keys, feeScrap: Math.round(fee.scrap) }),
+        }),
+      );
+      if (!row) throw new Error(JOURNAL_ENTRY_GONE);
+      ctx.journalChanged();
+      return row;
     },
 
     'journal.summary': () => journalSummary(repo.listJournal()),
@@ -1639,6 +2109,45 @@ export function createRpcHandlers(ctx: HandlerContext): RpcHandler {
     // F20: the change feed, valued now and joined to the Live market; nothing is fetched (R1).
     'scraptf.changes': (params, m): ScraptfChangeEvent[] =>
       ctx.scraptfHistory.changes(withoutUndefined(parse(scraptfChangesQuery, params, m) ?? {}) as ScraptfChangesQuery, clock.now()),
+
+    // 0.8 (G1): from memory (the watch cache, the kept saves, the market index); nothing is fetched (R1).
+    'watches.list': (params, m): ScraptfWatchView[] => {
+      const p = parse(watchesListParams, params, m);
+      // Any SKU of the item lists its base's watches (a painted SKU's paint is a copy, not another item).
+      const base = p?.sku !== undefined ? (bankStockTargetOf(p.sku)?.base ?? p.sku) : null;
+      const list = ctx.watches.all().filter((w) => base === null || w.sku === base);
+      const pages = list.length > 0 ? ctx.bankStock.watchRows(new Set(list.map((w) => w.sku))) : [];
+      return watchViewsOf(list, pages, engine.keyPrice().valueScrap, ctx.settings().notifications.minConfidence);
+    },
+    'watches.upsert': (params, m): ScraptfWatch => {
+      const p = parse(watchInput, params, m);
+      const existing = p.id !== undefined ? repo.getWatch(p.id) : null;
+      if (p.id !== undefined && existing === null) throw new Error(WATCH_GONE);
+      const write = watchWriteOf(withoutUndefined(p), existing, (b) => schema.nameForSku(b));
+      // A new copy past the cap; an update, or the same copy again, never counts.
+      if (existing === null && repo.findWatch(write.sku, write.specialKey) === null && repo.countWatches() >= WATCHES_MAX) throw new Error(WATCHES_FULL);
+      const saved = repo.upsertWatch(write, clock.now());
+      ctx.watchesChanged();
+      return saved;
+    },
+    'watches.delete': (params, m) => {
+      const { id: watchId } = parse(idOnly, params, m);
+      repo.deleteWatch(watchId);
+      ctx.watchesChanged();
+      return { ok: true };
+    },
+    // Undo of a removal: the same watch back (its id and times), so its notification dedupe still holds.
+    'watches.restore': (params, m): ScraptfWatch => {
+      const p = parse(watchRestore, params, m);
+      const back = repo.getWatch(p.id);
+      if (back !== null) return back;
+      const r = watchRestoreOf(withoutUndefined(p), (b) => schema.nameForSku(b), clock.now());
+      if (repo.findWatch(r.write.sku, r.write.specialKey) !== null) throw new Error(WATCH_COPY_TAKEN);
+      if (repo.countWatches() >= WATCHES_MAX) throw new Error(WATCHES_FULL);
+      const saved = repo.restoreWatch(r.write, r.createdAt, r.updatedAt);
+      ctx.watchesChanged();
+      return saved;
+    },
 
     // F16 live check: local only (no request), and the text is never logged, stored or put in an error.
     'check.text': (params, m): CheckResult => {

@@ -113,6 +113,12 @@ describe('every saved scrap.tf page reaches the banks summary (F15, real parser 
     let seq = 0;
     for (const [bank] of PAGES) {
       const p = heldPlainPrice(h.repo, results.get(bank)!.batchId);
+      // 0.7.4: the list holds no cost here: its unmarked rows are family rows (never a cost), and the items
+      // bank's later whole save, which lists the Non-Craftable ticket too, took that one proven row over.
+      if (bank === 'list') {
+        expect(p, 'the list page').toBeUndefined();
+        continue;
+      }
       expect(p, `a plain price still held by the ${bank} page`).toBeDefined();
       flipOf.set(bank, p!);
       h.repo.upsertListings(
@@ -142,6 +148,8 @@ describe('every saved scrap.tf page reaches the banks summary (F15, real parser 
         // Every card a bank page stores is on sale (the import skips none in stock).
         expect([c.pages, c.items, c.inStock], bank).toEqual([1, res.stored, res.stored]);
       }
+      // 0.7.4: no flip comes from the list page (no cost of its own, above).
+      if (bank === 'list') return;
       const flip = flipOf.get(bank)!;
       expect(c.flips, bank).toBeGreaterThanOrEqual(1);
       expect(c.flipProfitScrap, bank).toBeGreaterThan(0);

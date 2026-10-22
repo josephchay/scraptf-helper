@@ -126,7 +126,7 @@ const checkArmParams = z
 const showBankStockParams = z.object(
   {
     bank: z.custom<ScraptfBank>((v) => isScraptfBank(v), { error: 'not a scrap.tf bank' }),
-    filter: z.enum(BANK_STOCK_OPEN_FILTERS as unknown as [BankStockOpenFilter, ...BankStockOpenFilter[]], { error: 'must be flips or new' }),
+    filter: z.enum(BANK_STOCK_OPEN_FILTERS as unknown as [BankStockOpenFilter, ...BankStockOpenFilter[]], { error: 'must be flips, new or watched' }),
   },
   { error: 'expected { bank, filter }' },
 );

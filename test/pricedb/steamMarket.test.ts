@@ -5,6 +5,7 @@ import {
   SCM_LOCKOUT_MS,
   SCM_PRICEOVERVIEW_URL,
   createSteamMarket,
+  unknownItemAnswer,
 } from '../../src/service/connectors/steamMarket';
 import { openRepo } from '../../src/service/db';
 import { HostBlockedError, RateLimitedError } from '../../src/service/net';
@@ -35,6 +36,8 @@ describe('SteamMarket.priceOverview', () => {
         budget: 'scm',
         priority: 'user',
         maxWaitMs: 15_000,
+        // 0.7.4 (F52, package G2): Steam's 500 {"success":false} is an answer, not an outage.
+        isAnswer: unknownItemAnswer,
       },
     });
     clock.advance(SCM_CACHE_MS - 1);

@@ -96,8 +96,11 @@ describe('migration V13 keeps the counts of older killstreaks looks', () => {
     const raw = new DatabaseSync(file);
     // The later save took the rows over: nothing is tagged to the unsettled look any more.
     expect((raw.prepare('SELECT COUNT(*) AS n FROM scrap_prices WHERE import_batch = ?').get(unsettled.batchId) as { n: number }).n).toBe(0);
-    // What the 0.7.3 upgrade does: V13 runs on a database at V12.
+    // What the 0.7.3 upgrade does: V13 runs on a database at V12. V13 alone: the file already has the
+    // columns later versions add (0.7.4's V14), which cannot be added twice.
     raw.exec('PRAGMA user_version = 12');
+    migrate(raw, MIGRATIONS.slice(0, 13));
+    raw.exec(`PRAGMA user_version = ${MIGRATIONS.length}`);
     raw.close();
     const again = openRepo(file);
     cleanups.push(() => again.close());
@@ -112,7 +115,7 @@ describe('migration V13 keeps the counts of older killstreaks looks', () => {
     batch(db, 61, 5);
     price(db, 61, '6526;6;kt-3;td-205');
     batch(db, 62, 9);
-    expect(migrate(db).applied).toEqual([13]);
+    expect(migrate(db, MIGRATIONS.slice(0, 13)).applied).toEqual([13]);
     expect([60, 61, 62].map((id) => itemCount(db, id))).toEqual([5, 5, 0]);
   });
 
@@ -123,7 +126,7 @@ describe('migration V13 keeps the counts of older killstreaks looks', () => {
     price(db, 70, '6526;6;uncraftable;kt-3;td-205');
     // A newer look with no save and no price (its rows re-tagged, sold or removed).
     batch(db, 71, 3);
-    expect(migrate(db).applied).toEqual([13]);
+    expect(migrate(db, MIGRATIONS.slice(0, 13)).applied).toEqual([13]);
     expect([70, 71].map((id) => itemCount(db, id))).toEqual([1, 3]);
   });
 
@@ -133,7 +136,7 @@ describe('migration V13 keeps the counts of older killstreaks looks', () => {
     batch(db, 61, 1);
     price(db, 61, '6526;6;kt-3;td-205');
     save(db, 61, '6526;6;kt-3;td-205');
-    expect(migrate(db).applied).toEqual([13]);
+    expect(migrate(db, MIGRATIONS.slice(0, 13)).applied).toEqual([13]);
     expect([60, 61].map((id) => itemCount(db, id))).toEqual([1, 1]);
     expect(importBatchItemsRemoved({ itemCount: itemCount(db, 60), categories: { killstreaks: 1 } })).toBe(false);
   });

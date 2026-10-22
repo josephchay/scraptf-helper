@@ -102,9 +102,16 @@ html[data-window='check'] body {
   color: var(--info);
 }
 
-.cp-note.cp-matched > .icon {
+.cp-note.cp-matched > .icon,
+.cp-note.cp-craft > .icon {
   margin-right: 4px;
   vertical-align: -2px;
+}
+
+/* 0.7.4 (F41): the copied text did not say whether the item is Craftable and the saved scrap.tf data does not
+   tell the copies apart: the numbers are the copy that sells for less, and Save price and Bought it are off. */
+.cp-note.cp-craft {
+  color: var(--warn);
 }
 
 .cp-line {

@@ -89,11 +89,20 @@ describe('line 1: the scrap.tf price', () => {
 
 describe('line 2: what it sells for', () => {
   it('names the revenue, the buyer, bot or human, online, and the buyer count', () => {
-    const s = checkSellsLine(demo('flip'));
-    expect(s).toMatchObject({ buyer: 'Demo Trading Bot', kind: 'bot', online: true, count: '6 buyers' });
+    // 0.7.4: presence is judged at `now` (the popup passes the check time); the demo order is 4 min old.
+    const s = checkSellsLine(demo('flip'), NOW);
+    expect(s).toMatchObject({ buyer: 'Demo Trading Bot', kind: 'bot', online: true, seen: null, count: '6 buyers' });
     expect(s.revenue).toBe('1 key 22.00 ref');
     expect(s.title).toMatch(/^Best .* conservative .* instant/);
-    expect(checkSellsLine(demo('over'))).toMatchObject({ kind: 'human', count: '2 buyers' });
+    expect(checkSellsLine(demo('over'), NOW)).toMatchObject({ kind: 'human', count: '2 buyers' });
+  });
+
+  it('0.7.4 (F23): says when an order past 2 h was last seen instead of a stale online flag', () => {
+    const later = checkSellsLine(demo('flip'), NOW + 5 * 24 * 3_600_000);
+    expect(later).toMatchObject({ kind: 'bot', online: null, seen: 'last seen 5 d ago' });
+    expect(later.seenAt).toBe(NOW - 4 * 60_000);
+    // Exactly 2 h after the order's event it still counts as recent.
+    expect(checkSellsLine(demo('flip'), NOW - 4 * 60_000 + 2 * 3_600_000)).toMatchObject({ online: true, seen: null });
   });
 
   it('says so when nobody buys', () => {

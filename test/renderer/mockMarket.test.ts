@@ -88,13 +88,16 @@ describe('market.list rows', () => {
 
   it('gives a rule estimate and a rule flip when there is no known cost', async () => {
     const b = make();
-    await b.rpc('rules.upsert', { name: 'Cheap killstreaks', filter: { killstreak: [1] }, costScrap: 1 });
+    // 0.7.4 (F78): every tier, since the mock's bank saves show most Killstreak (tier 1) weapons at more than 1 scrap.
+    await b.rpc('rules.upsert', { name: 'Cheap killstreaks', filter: { killstreak: [1, 2, 3] }, costScrap: 1 });
     const rows = (await everything(b, { verdicts: ['rule-flip'] })).rows;
     expect(rows.length).toBeGreaterThan(0);
     for (const r of rows) {
       expect(r.knownSource).toBe('none');
       expect(r.ruleCostScrap).not.toBeNull();
       expect(r.ruleCostScrap!).toBeLessThanOrEqual(r.maxCostScrap!);
+      // A rule never undercuts what a save showed: such a row is priced at it, and says so.
+      expect(r.ruleCostScrap === 1 || r.flags.includes('rule-under-scraptf')).toBe(true);
     }
     expect(rows.some((r) => r.ruleCostScrap === 1)).toBe(true);
   });

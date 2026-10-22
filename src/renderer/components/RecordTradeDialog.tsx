@@ -3,35 +3,55 @@
 // sale against the next FIFO lot), then offers Undo in the confirmation toast
 // ('journal.delete'). It only writes the user's own journal; nothing is bought,
 // sold or offered (R4), and both lookups are local ('item.detail' without
-// history, 'holdings.list').
+// history, 'holdings.list'). 0.8: a fee per row (J2), a write-off (closes the
+// oldest lot at a loss; nothing is sold), and an edit mode (J6) that changes a
+// row's venue, note and fee only ('journal.update', its Undo the same call with
+// the old values).
 
 import { useCallback, useEffect, useId, useMemo, useRef, useState, type KeyboardEvent, type ReactNode, type SyntheticEvent } from 'react';
 import { createPortal } from 'react-dom';
-import type { HoldingRow, ItemDetail, JournalSide, OrderSummary, ProfitSettings, Scrap } from '../../shared/types';
+import type { HoldingRow, ItemDetail, JournalEntry, JournalSide, OrderSummary, ProfitSettings, Scrap } from '../../shared/types';
 import { rpc } from '../api';
-import { errorMessage, fmtDateTime, fmtInt, fmtMoney, toDateTimeLocal } from '../format';
+import { errorMessage, fmtDateTime, fmtInt, fmtMoney, fmtRefOnly, fromDateTimeLocal, toDateTimeLocal } from '../format';
 import { useApp, type ToastOptions, type ToastTone } from '../hooks/appContext';
 import { inToastStack, modalHostOf } from '../itemMenuModel';
+import { JOURNAL_SIDE_LABELS, JOURNAL_SIDE_TONES } from '../journalModel';
 import {
   MAX_NOTE_CHARS,
   MAX_VENUE_CHARS,
   VENUE_SUGGESTIONS,
   afterDialogClose,
+  backfillKeyPrice,
+  bookedValue,
   buyComparison,
+  checkEdit,
   checkTrade,
   compareTextClass,
   detailParams,
   dialogTitle,
+  editComparison,
+  editLockedText,
+  editTitle,
+  editUndoneText,
+  editedText,
+  feeHint,
   holdingFor,
   initialTradeForm,
+  isBackfill,
+  journalUndoPatch,
+  readFee,
   recordedText,
+  saleAtKeyPrice,
+  saleAtLessFee,
   sellComparison,
   tabbablesWithin,
   typedPrice,
   undoneText,
   venueForSide,
+  writeoffComparison,
   type CompareTone,
   type RecordTradeInit,
+  type SellComparison,
   type TradeField,
   type TradeForm,
 } from '../recordTradeModel';
@@ -91,7 +111,19 @@ export interface RecordTradeFormProps {
 /** The modal itself (exported for tests): fields, live comparison, save with Undo, focus trap and Esc. */
 export function RecordTradeForm({ init, opener = null, onClose, keyScrap, profit, toast, now = Date.now }: RecordTradeFormProps) {
   const uid = useId();
-  const ids = { title: `${uid}-title`, venue: `${uid}-venue`, venues: `${uid}-venues`, price: `${uid}-price`, when: `${uid}-when`, note: `${uid}-note`, compare: `${uid}-compare` };
+  const ids = {
+    title: `${uid}-title`,
+    venue: `${uid}-venue`,
+    venues: `${uid}-venues`,
+    price: `${uid}-price`,
+    when: `${uid}-when`,
+    note: `${uid}-note`,
+    compare: `${uid}-compare`,
+    key: `${uid}-key`,
+    fee: `${uid}-fee`,
+  };
+  // 0.8 (J6): the row being edited, or null when adding one.
+  const editing: JournalEntry | null = init.editOf ?? null;
   const [form, setForm] = useState<TradeForm>(() => initialTradeForm(init, now()));
   const [error, setError] = useState<{ field: TradeField | 'save'; text: string } | null>(null);
   const [saving, setSaving] = useState(false);
@@ -99,6 +131,7 @@ export function RecordTradeForm({ init, opener = null, onClose, keyScrap, profit
   const [held, setHeld] = useState<Lookup<HoldingRow | null> | null>(null);
   const panel = useRef<HTMLDivElement>(null);
   const priceRef = useRef<HTMLInputElement>(null);
+  const feeRef = useRef<HTMLInputElement>(null);
   // Inside the item drawer (aria-modal) the dialog must stay in it, or assistive tech treats it as inert.
   const [host] = useState<Element | null>(() => modalHostOf(opener) ?? (typeof document !== 'undefined' ? document.body : null));
   const alive = useRef(true);
@@ -108,30 +141,32 @@ export function RecordTradeForm({ init, opener = null, onClose, keyScrap, profit
 
   const set = <K extends keyof TradeForm>(k: K, v: TradeForm[K]) => {
     setForm((f) => ({ ...f, [k]: v }));
-    if (error && (error.field === 'save' || (k === 'text' ? 'price' : k) === error.field)) setError(null);
+    if (error && (error.field === 'save' || (k === 'text' ? 'price' : k === 'keyText' ? 'key' : k === 'feeText' ? 'fee' : k) === error.field)) setError(null);
   };
 
-  // Each lookup runs once, the first time its side is shown; both are local reads.
+  // Each lookup runs once, the first time its side is shown; both are local reads. An edit compares the
+  // booked pair instead (editComparison), so it reads neither. A write-off reads the open lots, as a sale.
   const side = form.side;
   useEffect(() => {
-    if (side !== 'buy' || detail !== null) return;
+    if (editing || side !== 'buy' || detail !== null) return;
     setDetail({ status: 'loading' });
     rpc('item.detail', detailParams(init.sku))
       .then((d) => alive.current && setDetail({ status: 'ready', value: d }))
       .catch((e: unknown) => alive.current && setDetail({ status: 'error', message: errorMessage(e) }));
-  }, [side, detail, init.sku]);
+  }, [editing, side, detail, init.sku]);
   useEffect(() => {
-    if (side !== 'sell' || held !== null) return;
+    if (editing || side === 'buy' || held !== null) return;
     setHeld({ status: 'loading' });
     rpc('holdings.list', { search: init.sku.trim().slice(0, 200) })
       .then((r) => alive.current && setHeld({ status: 'ready', value: holdingFor(r.rows, init.sku) }))
       .catch((e: unknown) => alive.current && setHeld({ status: 'error', message: errorMessage(e) }));
-  }, [side, held, init.sku]);
+  }, [editing, side, held, init.sku]);
 
-  // Focus the price (selected, so typing replaces a prefill and Enter saves it); give focus back on close.
+  // Focus the price (selected, so typing replaces a prefill and Enter saves it), else the fee (an edit), else the
+  // dialog itself (a write-off has neither); give focus back on close.
   useEffect(() => {
     alive.current = true;
-    const el = priceRef.current ?? panel.current;
+    const el = priceRef.current ?? feeRef.current ?? panel.current;
     el?.focus({ preventScroll: true });
     if (el && 'select' in el && typeof el.select === 'function') el.select();
     return () => {
@@ -141,14 +176,54 @@ export function RecordTradeForm({ init, opener = null, onClose, keyScrap, profit
     };
   }, [opener]);
 
+  /** Shows a check's error on its field and moves focus there. */
+  const refuse = (field: TradeField, text: string) => {
+    setError({ field, text });
+    if (field === 'price') priceRef.current?.focus();
+    else if (field === 'fee') feeRef.current?.focus();
+    else document.getElementById(field === 'venue' ? ids.venue : field === 'key' ? ids.key : ids.when)?.focus();
+  };
+
+  // 0.8 (J6): an edit saves the changed venue, note and fee only; its Undo writes the old values back.
+  const saveEdit = async (before: JournalEntry) => {
+    const check = checkEdit(form, before);
+    if (!check.ok) {
+      refuse(check.field, check.error);
+      return;
+    }
+    // Nothing changed: nothing to write, and no toast.
+    if (Object.keys(check.patch).length === 0) {
+      onCloseRef.current();
+      return;
+    }
+    inFlight.current = true;
+    setSaving(true);
+    setError(null);
+    try {
+      const after = await rpc('journal.update', { id: before.id, ...check.patch });
+      const undoEdit = () => {
+        rpc('journal.update', { id: before.id, ...journalUndoPatch(before) })
+          .then(() => toast(editUndoneText(before), 'info'))
+          .catch((err: unknown) => toast(`Could not undo: ${errorMessage(err)}`, 'bad'));
+      };
+      toast(editedText(after), 'good', { action: { label: 'Undo', onClick: undoEdit } });
+      onCloseRef.current();
+    } catch (err) {
+      inFlight.current = false;
+      if (!alive.current) return;
+      setError({ field: 'save', text: `Not saved: ${errorMessage(err)}` });
+      setSaving(false);
+    }
+  };
+
   const save = async () => {
     // A ref, not the state: two quick Ctrl+Enter presses land before a re-render.
     if (inFlight.current) return;
-    const check = checkTrade(form, { sku: init.sku, name: init.name }, now());
+    if (editing) return saveEdit(editing);
+    // 0.7.4 (F39): a backfill carries the key price then (typed, else today's).
+    const check = checkTrade(form, { sku: init.sku, name: init.name }, now(), keyScrap);
     if (!check.ok) {
-      setError({ field: check.field, text: check.error });
-      if (check.field === 'price') priceRef.current?.focus();
-      else document.getElementById(check.field === 'venue' ? ids.venue : ids.when)?.focus();
+      refuse(check.field, check.error);
       return;
     }
     inFlight.current = true;
@@ -187,7 +262,7 @@ export function RecordTradeForm({ init, opener = null, onClose, keyScrap, profit
       const el = live();
       const t = e.target as Node | null;
       if (!el || !t || el.contains(t) || inToastStack(t)) return;
-      (priceRef.current ?? el).focus({ preventScroll: true });
+      (priceRef.current ?? feeRef.current ?? el).focus({ preventScroll: true });
     };
     // Capture on the document runs before the drawer's window listener. Only while focus is outside
     // the dialog (on <body> or a toast): inside it, its own onKeyDown and the fields get every key.
@@ -248,7 +323,26 @@ export function RecordTradeForm({ init, opener = null, onClose, keyScrap, profit
   };
 
   if (!host) return null;
-  const title = dialogTitle(form.side);
+  const title = editing ? editTitle(editing.side) : dialogTitle(form.side);
+  const writeoff = form.side === 'writeoff';
+  const fieldError = (field: TradeField) => (error?.field === field ? error.text : null);
+  // 0.8 (J2): a buy or sale's fee, in both modes; a write-off receives nothing, so it has none.
+  const feeField = writeoff ? null : (
+    <Field label="Fees (optional)" htmlFor={ids.fee} error={fieldError('fee')} hint={feeHint(form.venue, form.side)}>
+      <PriceInput
+        ref={feeRef}
+        id={ids.fee}
+        compact
+        text={form.feeText ?? ''}
+        onText={(t) => set('feeText', t)}
+        unit={form.feeUnit ?? 'ref'}
+        onUnit={(u) => set('feeUnit', u)}
+        keyScrap={keyScrap}
+        placeholder="0 for none"
+      />
+    </Field>
+  );
+  const editCompare = editing ? editComparison(editing, form, init.editPair ?? null, init.editPairUnknown === true) : null;
   // A portal still bubbles React events up the component tree: a row or form around the
   // opener (the drawer's price form, a table row) must not see the dialog's clicks or submit.
   return createPortal(
@@ -281,57 +375,101 @@ export function RecordTradeForm({ init, opener = null, onClose, keyScrap, profit
           <div className="rt-body">
             <div className="rt-row">
               <Field label="Side">
-                <Segmented
-                  ariaLabel="Bought or sold"
-                  value={form.side}
-                  onChange={changeSide}
-                  options={[
-                    { value: 'buy', label: 'Bought' },
-                    { value: 'sell', label: 'Sold' },
-                  ]}
-                />
+                {/* Only a new buy or sale can switch side; an edit keeps it, and a write-off is opened as one. */}
+                {!editing && !writeoff ? (
+                  <Segmented
+                    ariaLabel="Bought or sold"
+                    value={form.side}
+                    onChange={changeSide}
+                    options={[
+                      { value: 'buy', label: 'Bought' },
+                      { value: 'sell', label: 'Sold' },
+                    ]}
+                  />
+                ) : (
+                  <span className={`pill tone-${JOURNAL_SIDE_TONES[form.side]}`}>{JOURNAL_SIDE_LABELS[form.side]}</span>
+                )}
               </Field>
-              <Field label="Venue" htmlFor={ids.venue} error={error?.field === 'venue' ? error.text : null}>
-                <input
-                  id={ids.venue}
-                  className={`input${error?.field === 'venue' ? ' invalid' : ''}`}
-                  list={ids.venues}
-                  value={form.venue}
-                  maxLength={MAX_VENUE_CHARS}
-                  autoComplete="off"
-                  aria-invalid={error?.field === 'venue' ? true : undefined}
-                  onChange={(e) => set('venue', e.target.value)}
-                />
-                <datalist id={ids.venues}>
-                  {VENUE_SUGGESTIONS.map((v) => (
-                    <option key={v} value={v} />
-                  ))}
-                </datalist>
-              </Field>
+              {/* A write-off has no counterparty, so no venue to type. */}
+              {!writeoff ? (
+                <Field label="Venue" htmlFor={ids.venue} error={fieldError('venue')}>
+                  <input
+                    id={ids.venue}
+                    className={`input${error?.field === 'venue' ? ' invalid' : ''}`}
+                    list={ids.venues}
+                    value={form.venue}
+                    maxLength={MAX_VENUE_CHARS}
+                    autoComplete="off"
+                    aria-invalid={error?.field === 'venue' ? true : undefined}
+                    onChange={(e) => set('venue', e.target.value)}
+                  />
+                  <datalist id={ids.venues}>
+                    {VENUE_SUGGESTIONS.map((v) => (
+                      <option key={v} value={v} />
+                    ))}
+                  </datalist>
+                </Field>
+              ) : null}
             </div>
 
-            <Field label={form.side === 'buy' ? 'Price you paid' : 'Price you sold for'} htmlFor={ids.price} error={error?.field === 'price' ? error.text : null}>
-              <PriceInput ref={priceRef} id={ids.price} text={form.text} onText={(t) => set('text', t)} unit={form.unit} onUnit={(u) => set('unit', u)} keyScrap={keyScrap} />
-            </Field>
+            {editing ? (
+              // 0.8 (J6): side, item, price and time stay: an edit never changes which buy a sale closes.
+              <p className="muted small rt-locked">{editLockedText(editing)}</p>
+            ) : !writeoff ? (
+              <Field label={form.side === 'buy' ? 'Price you paid' : 'Price you sold for'} htmlFor={ids.price} error={fieldError('price')}>
+                <PriceInput ref={priceRef} id={ids.price} text={form.text} onText={(t) => set('text', t)} unit={form.unit} onUnit={(u) => set('unit', u)} keyScrap={keyScrap} />
+              </Field>
+            ) : null}
 
-            <Comparison form={form} keyScrap={keyScrap} profit={profit} detail={detail} held={held} now={now()} id={ids.compare} />
+            {feeField}
+
+            {editCompare ? (
+              <section id={ids.compare} className={`rt-compare tone-${editCompare.tone}`} aria-label="Comparison" aria-live="polite">
+                <div className={`rt-verdict ${compareTextClass(editCompare.tone)}`}>{editCompare.text}</div>
+              </section>
+            ) : (
+              <Comparison form={form} keyScrap={keyScrap} profit={profit} detail={detail} held={held} now={now()} id={ids.compare} />
+            )}
 
             <div className="rt-row">
-              <Field label="When" htmlFor={ids.when} error={error?.field === 'when' ? error.text : null}>
-                <input
-                  id={ids.when}
-                  className={`input${error?.field === 'when' ? ' invalid' : ''}`}
-                  type="datetime-local"
-                  value={form.when}
-                  max={toDateTimeLocal(now())}
-                  aria-invalid={error?.field === 'when' ? true : undefined}
-                  onChange={(e) => set('when', e.target.value)}
-                />
-              </Field>
-              <Field label="Note (optional)" htmlFor={ids.note}>
+              {!editing ? (
+                <Field label="When" htmlFor={ids.when} error={fieldError('when')}>
+                  <input
+                    id={ids.when}
+                    className={`input${error?.field === 'when' ? ' invalid' : ''}`}
+                    type="datetime-local"
+                    value={form.when}
+                    max={toDateTimeLocal(now())}
+                    aria-invalid={error?.field === 'when' ? true : undefined}
+                    onChange={(e) => set('when', e.target.value)}
+                  />
+                </Field>
+              ) : null}
+              <Field label={writeoff ? 'Reason (optional)' : 'Note (optional)'} htmlFor={ids.note}>
                 <input id={ids.note} className="input" value={form.note} maxLength={MAX_NOTE_CHARS} autoComplete="off" onChange={(e) => set('note', e.target.value)} />
               </Field>
             </div>
+
+            {/* 0.7.4 (F39): a backfill values its keys at the key price then; empty is today's. Adding only. */}
+            {!editing && isBackfill(form.when, now()) ? (
+              <Field
+                label="Key price then"
+                htmlFor={ids.key}
+                error={error?.field === 'key' ? error.text : null}
+                hint="What a key cost when this trade happened, in ref. Empty uses today's key price."
+              >
+                <input
+                  id={ids.key}
+                  className={`input${error?.field === 'key' ? ' invalid' : ''}`}
+                  inputMode="decimal"
+                  autoComplete="off"
+                  value={form.keyText ?? ''}
+                  placeholder={keyScrap && keyScrap > 0 ? `${fmtRefOnly(keyScrap)} (today's)` : 'in ref'}
+                  aria-invalid={error?.field === 'key' ? true : undefined}
+                  onChange={(e) => set('keyText', e.target.value)}
+                />
+              </Field>
+            ) : null}
 
             {error?.field === 'save' ? (
               <div className="field-error" role="alert">
@@ -346,7 +484,7 @@ export function RecordTradeForm({ init, opener = null, onClose, keyScrap, profit
               Cancel
             </button>
             <button type="submit" className="btn primary" disabled={saving}>
-              <Icon name="check" size={14} /> {saving ? 'Saving…' : title}
+              <Icon name="check" size={14} /> {saving ? 'Saving…' : editing ? 'Save changes' : title}
             </button>
           </footer>
         </form>
@@ -356,7 +494,10 @@ export function RecordTradeForm({ init, opener = null, onClose, keyScrap, profit
   );
 }
 
-/** The live comparison under the price: Pay up to and profit for a buy, the next FIFO lot for a sale. */
+/**
+ * The live comparison under the price: Pay up to and profit for a buy, the next FIFO lot for a sale or a
+ * write-off. 0.8 (J2): a typed fee is booked into the figures as the journal books it (bookedValue).
+ */
 function Comparison({
   form,
   keyScrap,
@@ -376,6 +517,8 @@ function Comparison({
 }) {
   const { value, state: typed } = typedPrice(form, keyScrap);
   const lookup = form.side === 'buy' ? detail : held;
+  const fee = readFee(form.feeText, form.feeUnit);
+  const whenTs = form.when.trim() ? fromDateTimeLocal(form.when) : null;
   let body: ReactNode;
   let tone: CompareTone = 'muted';
   if (!profit || !lookup || lookup.status === 'loading') {
@@ -383,8 +526,28 @@ function Comparison({
   } else if (lookup.status === 'error') {
     tone = 'bad';
     body = <div className="tone-text-bad">Could not compare: {lookup.message}</div>;
+  } else if (form.side !== 'writeoff' && fee.error !== null) {
+    body = <div className="muted">Can&apos;t read that fee yet, so there is nothing to compare.</div>;
+  } else if (form.side === 'writeoff') {
+    // 0.8: the lot it closes is the loss; "Sells now" stays whenever someone buys the item today.
+    const c = writeoffComparison(lookup.value as HoldingRow | null, profit, keyScrap, now, whenTs, isBackfill(form.when, now) ? backfillKeyPrice(form.keyText, keyScrap).value : null);
+    tone = c.tone;
+    body = (
+      <>
+        <NextLot c={c} keyScrap={keyScrap} />
+        <div className={`rt-verdict ${compareTextClass(c.tone)}`}>{c.text}</div>
+        {c.bestNowOrder && c.bestNowScrap !== null ? (
+          <div className="rt-line">
+            <span className="rt-label">Sells now</span>
+            <Buyer order={c.bestNowOrder} keyScrap={keyScrap} value={c.bestNowScrap} />
+          </div>
+        ) : null}
+      </>
+    );
   } else if (form.side === 'buy') {
-    const c = buyComparison(value, lookup.value as ItemDetail | null, profit, keyScrap, typed);
+    const cost = bookedValue('buy', value, fee.fee, keyScrap);
+    // A fee in keys before a key price arrives: the price was typed, it just can't be valued yet.
+    const c = buyComparison(cost, lookup.value as ItemDetail | null, profit, keyScrap, value !== null && cost === null ? 'no-key-price' : typed);
     tone = c.tone;
     body = (
       <>
@@ -403,19 +566,17 @@ function Comparison({
       </>
     );
   } else {
-    const c = sellComparison(value, lookup.value as HoldingRow | null, profit, keyScrap, now, typed);
+    // 0.7.4 (F38): a sale dated before the open lot closes none of it. 0.7.4 (R23): a backfill is
+    // previewed at its key price then, as the journal books it; "Sells now" stays a live, today's price.
+    // 0.8 (J2): the fee comes off the proceeds, per currency for a backfill, as the journal books it.
+    const sale = saleAtKeyPrice(form, keyScrap, now);
+    const proceeds = bookedValue('sell', sale.value, fee.fee, sale.saleAt?.keyScrap ?? keyScrap);
+    const typedSale = sale.value !== null && proceeds === null ? 'no-key-price' : sale.typed;
+    const c = sellComparison(proceeds, lookup.value as HoldingRow | null, profit, keyScrap, now, typedSale, whenTs, saleAtLessFee(sale.saleAt, fee.fee));
     tone = c.tone;
     body = (
       <>
-        {c.heldQty > 0 ? (
-          <div className="rt-line">
-            <span className="rt-label">Next lot</span>
-            <span className="money rt-strong">{fmtMoney(c.lotCostScrap, keyScrap)}</span>
-            <span className="muted small" title={c.lotTs !== null ? `Bought ${fmtDateTime(c.lotTs)}` : undefined}>
-              {c.heldQty === 1 ? 'your only open unit' : `oldest of ${fmtInt(c.heldQty)} open units`}
-            </span>
-          </div>
-        ) : null}
+        <NextLot c={c} keyScrap={keyScrap} />
         <div className={`rt-verdict ${compareTextClass(c.tone)}`}>{c.text}</div>
         {/* Typed less than the buyer your settings sell to pays now: worth a second look before saving. */}
         {c.bestNowOrder && c.bestNowScrap !== null && (value === null || value < c.bestNowScrap) ? (
@@ -434,13 +595,27 @@ function Comparison({
   );
 }
 
+/** "Next lot 4.44 ref · oldest of 2 open units": the FIFO lot a sale or write-off closes; nothing with none open. */
+function NextLot({ c, keyScrap }: { c: SellComparison; keyScrap: Scrap | null }) {
+  if (c.heldQty <= 0) return null;
+  return (
+    <div className="rt-line">
+      <span className="rt-label">Next lot</span>
+      <span className="money rt-strong">{fmtMoney(c.lotCostScrap, c.atKeyScrap ?? keyScrap)}</span>
+      <span className="muted small" title={c.lotTs !== null ? `Bought ${fmtDateTime(c.lotTs)}` : undefined}>
+        {c.heldQty === 1 ? 'your only open unit' : `oldest of ${fmtInt(c.heldQty)} open units`}
+      </span>
+    </div>
+  );
+}
+
 /** "1.77 ref · ● ⚡ Bot name": what a buyer pays, and who. */
 function Buyer({ order, keyScrap, value }: { order: OrderSummary; keyScrap: Scrap | null; value: Scrap | null }) {
   const who = order.userName || order.steamid;
   return (
     <span className="rt-buyer" title={`${who} (${order.isBot ? 'bot' : 'human'}) pays ${fmtMoney(value, keyScrap)}`}>
       <span className="money">{fmtMoney(value, keyScrap)}</span>
-      <OnlineDot online={order.online} />
+      <OnlineDot online={order.online} seenAt={order.lastEventAt} />
       <Icon name={order.isBot ? 'bolt' : 'user'} size={12} title={order.isBot ? 'Bot' : 'Human'} />
       <span className="buyer-name muted small">{order.userName || (order.isBot ? 'Bot' : 'Human')}</span>
     </span>

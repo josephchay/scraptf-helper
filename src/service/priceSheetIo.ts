@@ -4,6 +4,7 @@
 // Bulk paste must never become a path around the opt-in saved-page import
 // (R10): pasted page content ("<" or a scrap.tf link) is refused as a whole.
 
+import { opportunityCopyKey } from '../shared/copyExtras';
 import { formatKeysMetal, parsePrice, scrapToRef, valueScrap, type ParsedPrice } from '../shared/currency';
 import { fromObject, fromString } from '../shared/sku';
 import type { BulkPriceRow, PriceRule, PriceRuleInput, ResolvedItem, Scrap, ScrapPrice, UnixMs } from '../shared/types';
@@ -23,7 +24,17 @@ export const MAX_BULK_LINE_CHARS = 600;
 /** Rules one backup may add. More would slow every engine run for no real use. */
 export const MAX_IMPORT_RULES = 1000;
 export const RULES_BACKUP_FORMAT = 'tf2-flip-desk-rules';
-export const RULES_BACKUP_VERSION = 1;
+/**
+ * The newest backup version this build reads. 0.7.4 (F79): 2 is written only when a rule uses the Festivized or
+ * Elevated Strange filter, so a build before them refuses the file rather than drop the filter and import a
+ * broader rule; a backup without them is still version 1, readable by every build.
+ */
+export const RULES_BACKUP_VERSION = 2;
+
+/** 0.7.4 (F79): the backup version a set of rules needs (rulesToJson, the mock's mockRulesToJson). */
+export function rulesBackupVersion(rules: readonly { filter: PriceRule['filter'] }[]): 1 | 2 {
+  return rules.some((r) => typeof r.filter?.festive === 'boolean' || typeof r.filter?.elevated === 'boolean') ? 2 : 1;
+}
 /** Reasons listed one by one; the rest are counted, so a broken file cannot flood the dashboard. */
 export const MAX_SKIP_REASONS = 200;
 
@@ -241,11 +252,14 @@ function pricedSku(p: ScrapPrice): string {
 }
 
 /**
- * The price sheet as CSV (csv.ts conventions: BOM, CRLF, formula-safe cells).
- * `cost` is written the way parsePrice reads it ("2 keys 5.11 ref") and `sku`
- * includes the paint, so the sku and cost columns pasted back into bulk paste
- * restore the sheet. `cost_ref` values keys at `keyScrap`; it is empty when
- * keys are involved and no key price is known.
+ * The price sheet as CSV (csv.ts conventions: BOM, CRLF, formula-safe cells): a record of every stored price,
+ * not a backup. `cost` is written the way parsePrice reads it ("2 keys 5.11 ref") and `sku` includes the paint,
+ * so the sku and cost columns pasted into bulk paste read back exactly, but as new typed prices dated now: the
+ * source, the date and the extras below are not restored, and copies of one SKU (a kit's sheen combos) collapse
+ * into one line per SKU. 0.7.4 (F81): every copy's extras are written, sheen, killstreaker and tags included,
+ * with its copy_key (bankStockSpecialKey, as the bank stock and Opportunity.copyKey name copies), appended after
+ * the older columns. `cost_ref` values keys at `keyScrap`; it is empty when keys are involved and no key price
+ * is known.
  */
 export function pricesCsv(prices: readonly ScrapPrice[], keyScrap: Scrap | null): string {
   const key = typeof keyScrap === 'number' && Number.isFinite(keyScrap) && keyScrap > 0 ? keyScrap : null;
@@ -267,6 +281,12 @@ export function pricesCsv(prices: readonly ScrapPrice[], keyScrap: Scrap | null)
       'paint',
       'spells',
       'parts',
+      // 0.7.4 (F81): appended, so a sheet read by column position keeps its meaning.
+      'sheen',
+      'killstreaker',
+      'name_tag',
+      'description_tag',
+      'copy_key',
     ],
   ];
   const sorted = [...prices].sort((a, b) => a.name.localeCompare(b.name) || a.sku.localeCompare(b.sku) || a.id - b.id);
@@ -290,6 +310,11 @@ export function pricesCsv(prices: readonly ScrapPrice[], keyScrap: Scrap | null)
       p.special?.paint ?? null,
       p.special?.spells.join(' | ') ?? null,
       p.special?.parts.join(' | ') ?? null,
+      p.special?.sheen ?? null,
+      p.special?.killstreaker ?? null,
+      p.special ? p.special.customName === true : null,
+      p.special ? p.special.customDesc === true : null,
+      opportunityCopyKey(p.sku, p.special),
     ]);
   }
   return toCsv(out);
@@ -304,7 +329,7 @@ export function rulesToJson(rules: readonly PriceRule[], exportedAt: UnixMs = Da
   const list = [...rules]
     .sort((a, b) => a.id - b.id)
     .map(({ name, filter, costKeys, costScrap, observedAt, enabled }) => ({ name, filter, costKeys, costScrap, observedAt, enabled }));
-  return JSON.stringify({ format: RULES_BACKUP_FORMAT, version: RULES_BACKUP_VERSION, exportedAt, rules: list }, null, 2);
+  return JSON.stringify({ format: RULES_BACKUP_FORMAT, version: rulesBackupVersion(rules), exportedAt, rules: list }, null, 2);
 }
 
 function isRecord(v: unknown): v is Record<string, unknown> {

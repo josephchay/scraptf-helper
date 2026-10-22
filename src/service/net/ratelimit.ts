@@ -304,13 +304,16 @@ export class BudgetScheduler {
     return { pauseMs, until, consecutive429: this.n429, longPause };
   }
 
-  /** A 503 (or similar) arrived: same delay rules as 429 but no consecutive-429 escalation. */
-  recordUnavailable(retryAfterMs: number | null, now: UnixMs = this.clock.now()): PauseResult {
+  /**
+   * A 503 (or similar) arrived: same delay rules as 429 but no consecutive-429 escalation. 0.7.4 (F52): `status`
+   * names the answer (502, 504...) in the pause reason; 503 by default, the reason saved pauses already carry.
+   */
+  recordUnavailable(retryAfterMs: number | null, now: UnixMs = this.clock.now(), status = 503): PauseResult {
     this.nBackoff++;
     const raw = retryAfterMs !== null && Number.isFinite(retryAfterMs) ? retryAfterMs : backoffMs(this.nBackoff);
     const pauseMs = clampPause(raw);
     const until = now + pauseMs;
-    this.pause(until, 'HTTP 503');
+    this.pause(until, `HTTP ${Number.isInteger(status) ? status : 503}`);
     return { pauseMs, until, consecutive429: this.n429, longPause: false };
   }
 

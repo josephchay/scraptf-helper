@@ -7,6 +7,7 @@ import {
   clip,
   droppedOpenUrl,
   handleNotificationClick,
+  notificationBankStock,
   notificationContent,
   notificationOpenUrl,
   notificationOptions,
@@ -15,7 +16,7 @@ import {
 import { DEFAULT_SETTINGS } from '../../src/shared/defaults';
 import { SCRAPTF_BANKS, STATIC_EXTERNAL_URLS } from '../../src/shared/links';
 import { scraptfResaveNotice } from '../../src/shared/scraptfHistory';
-import { SCRAPTF_BANK_IDS } from '../../src/shared/types';
+import { BANK_STOCK_OPEN_FILTERS, SCRAPTF_BANK_IDS } from '../../src/shared/types';
 
 describe('notificationContent', () => {
   it('keeps a valid push and its SKU', () => {
@@ -245,6 +246,80 @@ describe('handleNotificationClick (F20)', () => {
   });
 });
 
+// 0.8 (G5): a scrap.tf summary toast carries openBankStock, an in-app route (a known bank and chip), never a URL.
+describe('openBankStock (0.8, G5)', () => {
+  const SUMMARY = { title: '+2 more on scrap.tf/buy/hats: 1 new, 1 watched', body: 'b', sku: null, openBankStock: { bank: 'hats', filter: 'watched' } };
+
+  function withBankStock(openFails = false) {
+    const f = fakeClick(openFails);
+    f.deps.openBankStock = (o) => f.calls.push(`openBankStock ${o.bank} ${o.filter}`);
+    return f;
+  }
+
+  it('keeps a valid openBankStock, and the click shows that bank stock page and chip', async () => {
+    for (const bank of SCRAPTF_BANK_IDS) {
+      for (const filter of BANK_STOCK_OPEN_FILTERS) {
+        const data = notificationContent({ ...SUMMARY, openBankStock: { bank, filter } })!;
+        expect(data).toEqual({ ...SUMMARY, openBankStock: { bank, filter } });
+        const { deps, calls, warnings } = withBankStock();
+        await expect(handleNotificationClick(data, deps)).resolves.toBe('bankStock');
+        expect(calls).toEqual([`openBankStock ${bank} ${filter}`]);
+        expect(warnings).toEqual([]);
+      }
+    }
+  });
+
+  it('drops a bad bank or chip (the key itself) while the toast still shows', () => {
+    const bad: unknown[] = [
+      { bank: 'HATS', filter: 'new' },
+      { bank: '__proto__', filter: 'new' },
+      { bank: 'hats', filter: 'gone' },
+      { bank: 'hats' },
+      { filter: 'new' },
+      'hats',
+      ['hats', 'new'],
+      42,
+      null,
+      { bank: 'https://scrap.tf/buy/hats', filter: 'new' },
+    ];
+    for (const openBankStock of bad) {
+      const out = notificationContent({ title: 'Summary', body: 'b', sku: null, openBankStock });
+      expect(out, JSON.stringify(openBankStock)).toEqual({ title: 'Summary', body: 'b', sku: null });
+      expect(out !== null && 'openBankStock' in out).toBe(false);
+      expect(notificationBankStock(openBankStock)).toBeNull();
+    }
+    // Extra keys are not carried along: a fresh { bank, filter }.
+    const extra = notificationContent({ ...SUMMARY, openBankStock: { bank: 'hats', filter: 'new', url: 'https://example.com/' } })!;
+    expect(extra.openBankStock).toEqual({ bank: 'hats', filter: 'new' });
+  });
+
+  it('lets a static bank page openUrl win, and falls back to the SKU without the dependency', async () => {
+    const both = withBankStock();
+    await expect(handleNotificationClick({ title: 't', body: 'b', sku: null, openUrl: HATS, openBankStock: { bank: 'hats', filter: 'new' } }, both.deps)).resolves.toBe('url');
+    expect(both.calls).toEqual([`openExternal ${HATS}`]);
+    // A refused openUrl goes on to the bank stock page.
+    const refused = withBankStock();
+    await expect(handleNotificationClick({ title: 't', body: 'b', sku: null, openUrl: 'javascript:alert(1)', openBankStock: { bank: 'hats', filter: 'new' } }, refused.deps)).resolves.toBe('bankStock');
+    expect(refused.calls).toEqual(['openBankStock hats new']);
+    // A main without openBankStock: the item, else the dashboard, as before.
+    const item = fakeClick();
+    await expect(handleNotificationClick({ title: 't', body: 'b', sku: '378;6', openBankStock: { bank: 'hats', filter: 'new' } }, item.deps)).resolves.toBe('item');
+    expect(item.calls).toEqual(['openItem 378;6']);
+    const dash = fakeClick();
+    await expect(handleNotificationClick({ title: 't', body: 'b', sku: null, openBankStock: { bank: 'hats', filter: 'new' } }, dash.deps)).resolves.toBe('dashboard');
+    expect(dash.calls).toEqual(['showDashboard']);
+  });
+
+  it('re-checks at click time a payload altered after receipt', async () => {
+    const data = notificationContent({ ...SUMMARY, sku: '378;6' })!;
+    (data as { openBankStock: unknown }).openBankStock = { bank: 'hats', filter: 'gone' };
+    const { deps, calls } = withBankStock();
+    await expect(handleNotificationClick(data, deps)).resolves.toBe('item');
+    expect(calls).toEqual(['openItem 378;6']);
+    expect(notificationBankStock({ bank: 'stranges', filter: 'flips' })).toEqual({ bank: 'stranges', filter: 'flips' });
+  });
+});
+
 describe('main.ts notification click wiring (F20)', () => {
   // main.ts imports Electron, so it is read, not run (as in liveCheckWiring.test.ts).
   const MAIN = readFileSync(new URL('../../src/main/main.ts', import.meta.url), 'utf8')
@@ -261,6 +336,10 @@ describe('main.ts notification click wiring (F20)', () => {
     expect(click).toContain('openItem: (sku) => openItemInDashboard(rt, sku),');
     expect(click).toContain('showDashboard: () => rt.windows.showDashboard(),');
     expect(click.match(/openExternal\(/g)).toHaveLength(1);
+    // 0.8 (G5): a summary's bank stock page, through the same showBankStock as the toolbar's "Show flips"; the
+    // browser opener stays the first dependency.
+    expect(click).toContain('openBankStock: (o) => showBankStock(rt, o.bank, o.filter),');
+    expect(click.indexOf('openExternal:')).toBeLessThan(click.indexOf('openBankStock:'));
   });
 
   it('opens a URL from main only through links.open, the notification click and the scrap.tf window', () => {

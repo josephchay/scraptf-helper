@@ -2,9 +2,13 @@
 // Development only: none of these prices, buyers or listings are real.
 
 import { bankStockSpecialKey, marketNewSideMatches } from '../shared/bankStock';
-import { frictionOf, maxCostFor } from '../shared/ceiling';
+import { ORDER_UNVERIFIED_AFTER_MS, orderSeenRecently } from '../shared/buyerSeen';
+import { scraptfBankForItem } from '../shared/categories';
+import { opportunityCopyKey } from '../shared/copyExtras';
+import { boundRuleCost, type ScraptfSeenPrice } from '../shared/ruleEvidence';
+import { buyerDepthOf, costSanity, costSanityReason, costSuspectFlagged, exitOrdersOfSummaries, flipProfit, maxCostFor, singleExitOf, singleExitReason } from '../shared/ceiling';
 import { parsePrice, refToScrap, formatScrap, type ParsedPrice } from '../shared/currency';
-import { bankForCategory, scraptfLinkFor, scraptfPageFor, type ScraptfSeen } from '../shared/links';
+import { bankForCategory, scraptfBankInfo, scraptfLinkFor, scraptfPageFor, type ScraptfSeen } from '../shared/links';
 import {
   emptyMarketCounts,
   marketBuySideMatches,
@@ -16,23 +20,32 @@ import {
   marketVerdict,
 } from '../shared/market';
 import type { HoldingBuySide } from '../shared/holdings';
+import { askSideOf, holdingRefsOf, type AskCandidate } from '../shared/holdings';
+import { holdingMarkValuesOf } from '../shared/holdingAdvice';
 import { BENIGN_SKIP_REASONS, importWarningCode } from '../shared/importCodes';
 import { communityMaxAgeMs } from '../shared/referenceAge';
 import { marketListedSideMatches } from '../shared/scraptfHistory';
 import { marketListFields, marketListSideMatches } from '../shared/scraptfList';
 import { baseSku, fromString } from '../shared/sku';
+import { journalSummary } from '../shared/journal';
+import { watchRowSpecialKey } from '../shared/watches';
 import { CATEGORIES, CATEGORY_LABELS, CURRENCY_SKUS, KEY_SKU } from '../shared/types';
 import type {
+  BankStockRow,
   BankStockStored,
   BulkPriceRow,
   Category,
   ConfidenceLevel,
   HistoryPoint,
+  HoldingAskSide,
+  HoldingMark,
+  HoldingRefs,
   ImportReport,
   ImportResult,
   InputKind,
   ItemRevenue,
   JournalEntry,
+  JournalPosition,
   JournalSummary,
   KeyPriceState,
   LinkSpec,
@@ -51,6 +64,7 @@ import type {
   ScraptfBank,
   ScraptfListRow,
   ScraptfListStored,
+  ScraptfWatch,
   Settings,
   ShoppingListResult,
   ShoppingQuery,
@@ -180,7 +194,8 @@ export const CATALOG: readonly CatalogItem[] = [
   { sku: '15013;15;w4;pk166', name: 'Night Terror Scattergun (Well-Worn)', category: 'skins', value: r(3.22) },
   { sku: '15089;15;w3;pk214', name: 'Balloonicorn Flame Thrower (Field-Tested)', category: 'skins', value: r(5.77) },
   { sku: '15151;15;w2;pk200;kt-3', name: 'Professional Killstreak Iron Wood Minigun (Minimal Wear)', category: 'skins', value: k(1, 5) },
-  { sku: '15141;15;u701;w1;pk300;strange', name: 'Strange Hot Warhawk Rocket Launcher (Factory New)', category: 'skins', value: k(41) },
+  // 0.7.4 (F08): an unusual skin is Unusual plus its effect, as backpack.tf's buyers (and the service) key it.
+  { sku: '15141;5;u701;w1;pk300;strange', name: 'Strange Hot Warhawk Rocket Launcher (Factory New)', category: 'skins', value: k(41) },
   // taunts
   { sku: '1118;6', name: 'Taunt: Conga', category: 'taunts', value: r(12.11) },
   { sku: '1157;6', name: 'Taunt: Kazotsky Kick', category: 'taunts', value: r(5.44) },
@@ -309,6 +324,9 @@ export function ruleMatches(filter: RuleFilter, item: Pick<CatalogItem, 'sku' | 
   if (filter.qualities?.length && !filter.qualities.includes(o.quality)) return false;
   if (filter.craftable !== undefined && filter.craftable !== null && o.craftable !== filter.craftable) return false;
   if (filter.australium !== undefined && filter.australium !== null && o.australium !== filter.australium) return false;
+  // 0.7.4 (F79): as the service's ruleMatches.
+  if (typeof filter.festive === 'boolean' && (o.festive === true) !== filter.festive) return false;
+  if (typeof filter.elevated === 'boolean' && (o.quality2 === 11) !== filter.elevated) return false;
   if (filter.killstreak?.length && !filter.killstreak.includes(o.killstreak)) return false;
   if (filter.hasEffect !== undefined && filter.hasEffect !== null && (o.effect !== null) !== filter.hasEffect) return false;
   if (filter.defindexes?.length && !filter.defindexes.includes(o.defindex)) return false;
@@ -373,7 +391,8 @@ function makeOrder(rng: Rng, idx: number, value: Scrap, now: UnixMs, opts: { isB
     valueScrap: value,
     isBot: opts.isBot,
     online: opts.isBot ? true : rng.chance(0.15) ? null : rng.chance(0.55),
-    lastEventAt: now - rng.int(30_000, opts.flags.includes('unverified') ? 40 * 3_600_000 : 5 * 3_600_000),
+    // 0.7.4 (R31): an 'unverified' order is one unseen for over 24 h, as the service's classifyOrder says.
+    lastEventAt: opts.flags.includes('unverified') ? now - rng.int(25 * 3_600_000, 40 * 3_600_000) : now - rng.int(30_000, 5 * 3_600_000),
     bumpedAt: Math.floor((now - rng.int(60_000, 6 * 3_600_000)) / 1000),
     details,
     flags: opts.flags,
@@ -478,6 +497,8 @@ export interface MockInput {
   costScrapRaw: Scrap;
   observedAt: UnixMs;
   special: SpecialAttrs | null;
+  /** 0.7.4 (F78): a rule input priced at what scrap.tf showed (boundRuleCost): the row's reason. */
+  ruleUnderScraptf?: string;
 }
 
 function median(xs: number[]): number {
@@ -525,30 +546,60 @@ function hasUsableReference(refs: ReturnType<typeof usableReferences>): boolean 
   return [refs.pdbBuy, refs.pdbSell, refs.community, refs.communityHigh].some((v) => v !== null && v > 0);
 }
 
+/** 0.7.4 (R31): as the service's UNVERIFIED_AFTER_MS (matcher.ts): an order unseen for longer is 'unverified' (0.8: the shared constant). */
+export const MOCK_UNVERIFIED_AFTER_MS = ORDER_UNVERIFIED_AFTER_MS;
+
+/**
+ * 0.7.4 (R31): an order's flags at `now` with 'unverified' set from its age, as the service's classifyOrder
+ * sets it on every read, so a feed tick or item.refresh that stamps lastEventAt clears it.
+ */
+export function mockOrderFlags(o: Pick<OrderSummary, 'flags' | 'lastEventAt'>, now: UnixMs): string[] {
+  const rest = o.flags.filter((f) => f !== 'unverified');
+  return !Number.isFinite(o.lastEventAt) || now - o.lastEventAt > MOCK_UNVERIFIED_AFTER_MS ? [...rest, 'unverified'] : rest;
+}
+
 /** The mock's pricing of one book: eligible orders valued with the key price, then best, conservative and instant. */
 export function mockPrices(
   book: MockBook,
   settings: Settings,
   keyScrap: Scrap,
   now: UnixMs,
-): { eligible: OrderSummary[]; best: OrderSummary | null; cons: OrderSummary | null; instant: OrderSummary | null; refs: ReturnType<typeof usableReferences> } {
+): {
+  eligible: OrderSummary[];
+  best: OrderSummary | null;
+  cons: OrderSummary | null;
+  instant: OrderSummary | null;
+  refs: ReturnType<typeof usableReferences>;
+  /** 0.8: the eligible orders the pricing calls outliers, as the service's PriceResult.outlierIds. */
+  outlierIds: Set<string>;
+} {
   const blocked = new Set(settings.blocklist);
   const eligible = book.buy
     .filter((o) => o.eligible && !blocked.has(o.steamid))
-    .map((o) => ({ ...o, valueScrap: Math.round(o.keys * keyScrap) + o.metalScrap }))
+    .map((o) => ({ ...o, valueScrap: Math.round(o.keys * keyScrap) + o.metalScrap, flags: mockOrderFlags(o, now) }))
     .sort((a, b) => b.valueScrap - a.valueScrap);
   const refs = usableReferences(book.references, settings, now);
-  const med = median(eligible.slice(0, 5).map((o) => o.valueScrap));
+  // 0.7.4, as the service's computePrices: with any verified order, conservative and the median come from
+  // the verified ones (best stays the top order); instant never takes an unverified bot; zero-valued
+  // orders are out of the median and never outliers.
+  const unverified = (o: OrderSummary): boolean => o.flags.includes('unverified');
+  const anyVerified = eligible.some((o) => !unverified(o));
+  const pool = eligible.filter((o) => !anyVerified || !unverified(o));
+  const sample = pool.filter((o) => o.valueScrap > 0);
+  const med = median(sample.slice(0, 5).map((o) => o.valueScrap));
   const isOutlier = (o: OrderSummary) =>
-    o.flags.includes('outlier') ||
-    (eligible.length >= 3 && o.valueScrap > settings.profit.outlierVsMedian * med) ||
-    (refs.pdbSell !== null && o.valueScrap > settings.profit.outlierVsRef * refs.pdbSell);
+    o.valueScrap > 0 &&
+    (o.flags.includes('outlier') ||
+      (sample.length >= 3 && o.valueScrap > settings.profit.outlierVsMedian * med) ||
+      (refs.pdbSell !== null && o.valueScrap > settings.profit.outlierVsRef * refs.pdbSell));
   return {
     eligible,
     best: eligible[0] ?? null,
-    cons: eligible.find((o) => !isOutlier(o)) ?? null,
-    instant: eligible.find((o) => !isOutlier(o) && o.isBot) ?? null,
+    // Verified orders preferred, not exclusive: every verified one an outlier, the top non-outlier unverified one.
+    cons: pool.find((o) => !isOutlier(o)) ?? eligible.find((o) => !isOutlier(o)) ?? null,
+    instant: pool.find((o) => !isOutlier(o) && o.isBot && !unverified(o)) ?? null,
     refs,
+    outlierIds: new Set(eligible.filter(isOutlier).map((o) => o.listingId)),
   };
 }
 
@@ -577,9 +628,11 @@ export function evaluateOpportunity(
   keyScrap: Scrap,
   now: UnixMs,
   prev: Opportunity | null,
+  /** 0.7.4 (F70): the craftability twin's book (craftabilityTwin(sku)), for the cost check; omitted: none. */
+  twin?: MockBook | null,
 ): Opportunity {
   const sku = book.item.sku;
-  const { eligible, best, cons, instant, refs } = mockPrices(book, settings, keyScrap, now);
+  const { eligible, best, cons, instant, refs, outlierIds } = mockPrices(book, settings, keyScrap, now);
 
   const flags: string[] = [];
   const reasons: string[] = [];
@@ -600,22 +653,26 @@ export function evaluateOpportunity(
 
   const chosen = settings.profit.useOrder === 'best' ? best : settings.profit.useOrder === 'instant' ? instant : cons;
   const revenue = chosen ? chosen.valueScrap : null;
-  const profit = revenue === null ? null : revenue - costScrap - frictionOf(settings.profit);
+  const profit = flipProfit(revenue, costScrap, settings.profit);
   const margin = profit === null || costScrap <= 0 ? null : profit / costScrap;
   const refVal = refs.pdbBuy ?? refs.community;
 
   if (cons) {
     const pulse = book.meta.get(cons.listingId)?.pulseAgeMs ?? null;
     if (cons.isBot && pulse !== null && pulse <= 30 * 60_000) add(20, `Buyer is a bot that pulsed ${Math.round(pulse / 60_000)} min ago`);
-    if (cons.online === true) add(5, 'Buyer is online');
+    // 0.7.4: the online flag counts only while the order was seen in the last 2 h, as the service.
+    if (cons.online === true && orderSeenRecently(cons.lastEventAt, now)) add(5, 'Buyer is online');
     const confirmedAge = now - cons.lastEventAt;
     if (confirmedAge <= 2 * 3_600_000) add(10, 'Order confirmed by the live feed in the last 2 h');
     else if (confirmedAge > 24 * 3_600_000) {
       add(-15, 'Order not confirmed for over 24 h');
       flags.push('unverified-orders');
     }
-    const near = eligible.filter((o) => o.valueScrap >= cons.valueScrap * 0.9 && o.valueScrap <= cons.valueScrap * 1.1);
-    if (new Set(near.map((o) => o.steamid)).size >= 2) add(10, `${near.length} buyers within 10% of the conservative price`);
+    // 0.7.4: verified neighbours only (the order itself always), never around a zero price.
+    const near = eligible.filter(
+      (o) => o.valueScrap > 0 && (o.listingId === cons.listingId || !o.flags.includes('unverified')) && o.valueScrap >= cons.valueScrap * 0.9 && o.valueScrap <= cons.valueScrap * 1.1,
+    );
+    if (cons.valueScrap > 0 && new Set(near.map((o) => o.steamid)).size >= 2) add(10, `${near.length} buyers within 10% of the conservative price`);
     if (refVal === null) {
       add(-10, 'No reference price to compare with');
       flags.push('no-reference');
@@ -658,9 +715,36 @@ export function evaluateOpportunity(
     reasons.push(`Margin over ${Math.round(suspect * 100)}% with no reference and few buyers. Check the variant and units`);
     score = Math.min(score, LOW_CAP);
   }
+  // 0.7.4 (F22, F70): the cost against the item's own PriceDB price and its craftability twin's (shared rule).
+  if (input.kind !== 'rule') {
+    const own = refs.pdbBuy !== null || refs.pdbSell !== null ? { buyScrap: refs.pdbBuy, sellScrap: refs.pdbSell } : null;
+    const sanity = costSanity(costScrap, own, () => {
+      if (!twin) return null;
+      const t = usableReferences(twin.references, settings, now);
+      return t.pdbBuy !== null || t.pdbSell !== null ? { buyScrap: t.pdbBuy, sellScrap: t.pdbSell } : null;
+    });
+    if (sanity) {
+      flags.push(sanity.flag);
+      reasons.push(costSanityReason(sanity, !fromSku.craftable, (v) => formatScrap(v, keyScrap)));
+      score = Math.min(score, LOW_CAP);
+    }
+  }
+  // 0.7.4 (F78): as the engine, a rule row priced at what scrap.tf showed, above the rule's own cost.
+  if (input.kind === 'rule' && input.ruleUnderScraptf) {
+    flags.push('rule-under-scraptf');
+    reasons.push(input.ruleUnderScraptf);
+  }
+  // 0.8 (PC-2): as the engine, a flip only the revenue order's buyer makes: a warning and a 0-delta reason, last.
+  const single = singleExitOf(revenue, costScrap, buyerDepthOf(exitOrdersOfSummaries(eligible, outlierIds), chosen?.listingId ?? null, settings.profit.useOrder).nextBuyer, settings.profit);
+  if (single) {
+    flags.push('single-exit');
+    reasons.push(singleExitReason(single, (v) => formatScrap(v, keyScrap > 0 ? keyScrap : null)));
+  }
   const level: ConfidenceLevel = confidenceLevelOf(score);
 
   const key = `${sku}|${input.ref}`;
+  // 0.7.4 (F66): as the repo derives it, the copy a price input is for ('' and absent for rules and plain copies).
+  const copyKey = input.kind === 'rule' ? '' : opportunityCopyKey(sku, input.special);
   return {
     key,
     sku,
@@ -668,6 +752,7 @@ export function evaluateOpportunity(
     category: book.item.category,
     inputRef: input.ref,
     inputKind: input.kind,
+    ...(copyKey !== '' ? { copyKey } : {}),
     costKeys: input.costKeys,
     costScrapRaw: input.costScrapRaw,
     costScrap,
@@ -723,7 +808,7 @@ export function mockShoppingList(
   useOrder: Settings['profit']['useOrder'],
   keyPrice: KeyPriceState | null,
   now: UnixMs,
-  fresh?: { staleMs: number; stockOf(o: Opportunity): number | null },
+  fresh?: { staleMs: number; stockOf(o: Opportunity): number | null; bankOf?(sku: string, category: Category): ScraptfBank | null },
 ): ShoppingListResult {
   const bySku = new Map<string, Opportunity[]>();
   for (const o of opps) {
@@ -731,6 +816,11 @@ export function mockShoppingList(
     if (list) list.push(o);
     else bySku.set(o.sku, [o]);
   }
+  // 0.7.4 (F36): as the service's bankPageFor, the row's own bank page when known, else its category's.
+  const pageOf = (sku: string, category: Category): string => {
+    const info = scraptfBankInfo(fresh?.bankOf?.(sku, category) ?? null);
+    return info && info.bank !== 'list' ? info.url : scraptfPageFor(category);
+  };
   const all: ShoppingRow[] = [];
   for (const list of bySku.values()) {
     const top = list
@@ -747,7 +837,7 @@ export function mockShoppingList(
       sku: top.sku,
       name: top.name,
       category: top.category,
-      bankPageUrl: scraptfPageFor(top.category),
+      bankPageUrl: pageOf(top.sku, top.category),
       maxCostScrap,
       revenueScrap: top.revenueScrap!,
       revenueOrder: revenueOrderOf(top, useOrder),
@@ -760,6 +850,8 @@ export function mockShoppingList(
       inputKinds: INPUT_KINDS.filter((k) => list.some((o) => o.inputKind === k)),
       flags: top.flags,
       updatedAt: top.updatedAt,
+      // 0.7.4 (F22, F70): as the service, a suspect known price is not counted as at or under the ceiling.
+      ...(known && costSuspectFlagged(known.flags) ? { knownSuspect: true } : {}),
       ...(fresh
         ? {
             knownObservedAt,
@@ -775,12 +867,17 @@ export function mockShoppingList(
     .filter((r) => q.minCeilingScrap === undefined || r.maxCostScrap >= q.minCeilingScrap)
     .filter((r) => !q.onlyBotBuyers || r.revenueOrder?.isBot === true)
     .sort((a, b) => CATEGORIES.indexOf(a.category) - CATEGORIES.indexOf(b.category) || b.maxCostScrap - a.maxCostScrap || a.name.localeCompare(b.name));
-  const groups = CATEGORIES.map((category) => ({
-    category,
-    label: CATEGORY_LABELS[category],
-    count: rows.filter((r) => r.category === category).length,
-    bankPageUrl: scraptfPageFor(category),
-  })).filter((g) => g.count > 0);
+  const groups = CATEGORIES.map((category) => {
+    const pages = new Set(rows.filter((r) => r.category === category).map((r) => r.bankPageUrl));
+    const one = pages.size === 1 ? [...pages][0]! : null;
+    return {
+      category,
+      label: CATEGORY_LABELS[category],
+      count: rows.filter((r) => r.category === category).length,
+      bankPageUrl: one ?? scraptfPageFor(category),
+      ...(pages.size > 1 ? { mixedBanks: true } : {}),
+    };
+  }).filter((g) => g.count > 0);
   const offset = Math.max(0, q.offset ?? 0);
   const page = q.limit === undefined ? rows.slice(offset) : rows.slice(offset, offset + Math.max(1, q.limit));
   return { rows: page, total: rows.length, groups, keyPrice, generatedAt: now };
@@ -829,15 +926,16 @@ export function mockKnownPrices(prices: readonly ScrapPrice[]): Map<string, Mock
 
 /**
  * The price a base's row shows at `keyScrap` (the service's knownAt, market.ts): its newest, and of several
- * seen at that time the cheapest, equal costs keeping the higher id. 0.7.2: before, the highest id won such
- * a tie, which is the copy stored last, so a cheap kit copy could hide behind a dear one of the same look.
+ * seen at that time the cheapest; equal costs go to a copy without extras, then the higher id (0.7.4, F40).
+ * 0.7.2: before, the highest id won such a tie, which is the copy stored last, so a cheap kit copy could hide
+ * behind a dear one of the same look.
  */
 export function mockKnownAt(known: MockKnown | undefined, keyScrap: Scrap): ScrapPrice | null {
   let best: ScrapPrice | null = null;
   let bestCost = 0;
   for (const p of known?.newest ?? []) {
     const cost = costOf(p, keyScrap);
-    if (best === null || cost < bestCost || (cost === bestCost && p.id > best.id)) {
+    if (best === null || cost < bestCost || (cost === bestCost && (hasExtras(p) !== hasExtras(best) ? !hasExtras(p) : p.id > best.id))) {
       best = p;
       bestCost = cost;
     }
@@ -867,6 +965,19 @@ function costOf(p: { costKeys: number; costScrap: Scrap }, keyScrap: Scrap): Scr
 }
 
 /**
+ * 0.7.4 (F36): the bank page an item of this kind is sold on, as the service's marketBankOf with no schema
+ * entry (the mock has none): an australium on items, a killstreak weapon on items, a kit on killstreaks,
+ * else its category's page.
+ */
+export function mockBankOf(sku: string, category: Category): Exclude<ScraptfBank, 'list'> {
+  try {
+    return scraptfBankForItem(category, fromString(sku), null);
+  } catch {
+    return bankForCategory(category);
+  }
+}
+
+/**
  * One Live market row: the book priced like mockRevenue, buy-side confidence from a neutral input
  * (fresh, free, so only buyers and references count), and the user's side joined in, with the saved
  * scrap.tf/items list row (F14) when given. Null when the item has no eligible buyers and no price of
@@ -889,6 +1000,8 @@ export function mockMarketRow(args: {
   listedSince?: UnixMs | null;
   /** 0.7.1 (DM-5): MarketRow.scraptfLastSeenAt, that run's newest sighting on sale; absent when not given. */
   lastSeenAt?: UnixMs | null;
+  /** 0.7.4 (F78): what scrap.tf showed the plain copy at (scraptfSeenPriceOf), read only when a rule matches. */
+  seenPriceOf?: () => ScraptfSeenPrice | null;
 }): MarketRow | null {
   const { item, book, known, settings, keyScrap, now } = args;
   if (MARKET_CURRENCY.has(item.sku)) return null;
@@ -909,7 +1022,8 @@ export function mockMarketRow(args: {
     const neutral: MockInput = { kind: 'user', ref: 'market', costKeys: 0, costScrapRaw: 0, observedAt: now, special: null };
     const o = evaluateOpportunity(book, neutral, settings, keyScrap, now, null);
     confidence = o.confidence;
-    flags = o.flags.filter((f) => f !== 'stale-input' && f !== 'rule-estimate' && f !== 'suspect-margin');
+    // 'single-exit' judges a real cost, never this neutral cost-0 input: the service's MarketEval has no such flag.
+    flags = o.flags.filter((f) => f !== 'stale-input' && f !== 'rule-estimate' && f !== 'suspect-margin' && f !== 'single-exit');
   }
   // The ceiling is for a clean copy; a price for a painted or spelled copy is still shown, but marked.
   if (knownPrice && hasExtras(knownPrice) && !flags.includes('has-extras')) flags.push('has-extras');
@@ -920,11 +1034,20 @@ export function mockMarketRow(args: {
     const c = costOf(rule, keyScrap);
     if (ruleCostScrap === null || c < ruleCostScrap) ruleCostScrap = c;
   }
+  // 0.7.4 (F78): as the service's ruleEstimateOf, never under a price scrap.tf showed the plain copy at.
+  if (ruleCostScrap !== null && args.seenPriceOf) {
+    const bound = boundRuleCost({ costKeys: 0, costScrap: ruleCostScrap }, args.seenPriceOf(), keyScrap);
+    ruleCostScrap = bound.costScrap;
+    if (bound.underScraptf && !flags.includes('rule-under-scraptf')) flags.push('rule-under-scraptf');
+  }
 
   const knownCostScrap = knownPrice ? costOf(knownPrice, keyScrap) : null;
   let lastOrderChangeAt: UnixMs | null = null;
   for (const o of eligible) if (lastOrderChangeAt === null || o.lastEventAt > lastOrderChangeAt) lastOrderChangeAt = o.lastEventAt;
   const verdict: MarketVerdict = marketVerdict({ buyerCount, maxCostScrap, knownCostScrap, ruleCostScrap });
+  // 0.7.4 (F36): as the service, an item no save showed links the bank its kind is sold on.
+  const kindBank = mockBankOf(item.sku, item.category);
+  const scraptfLink = scraptfLinkFor(item.category, args.seen ?? null, kindBank);
   return {
     sku: item.sku,
     name: item.name,
@@ -950,7 +1073,9 @@ export function mockMarketRow(args: {
     evaluatedAt: now,
     ...marketListFields(args.list ?? null),
     scraptfNewAt: args.newAt ?? null,
-    scraptfLink: scraptfLinkFor(item.category, args.seen ?? null),
+    scraptfLink,
+    // 0.7.4 (R26): as the service, a row seen only on the /items list carries its kind's bank (bankLookFor).
+    ...(scraptfLink.bank === 'list' ? { kindBank } : {}),
     scraptfListedSince: args.listedSince ?? null,
     ...(args.listedSince != null && args.lastSeenAt != null ? { scraptfLastSeenAt: args.lastSeenAt } : {}),
   };
@@ -992,13 +1117,18 @@ export function marketSignature(r: MarketRow): string {
 export function mockHoldingBuySide(book: MockBook, settings: Settings, keyScrap: Scrap, now: UnixMs): HoldingBuySide | null {
   const row = mockMarketRow({ item: book.item, book, known: undefined, rules: [], settings, keyScrap, now });
   if (!row || row.buyerCount === 0) return null;
+  const priced = mockPrices(book, settings, keyScrap, now);
+  // 0.8 (PC-2, H2): as evaluateMarketBase, the next buyer after the revenue order's and the buyers seen in 24 h.
+  const depth = buyerDepthOf(exitOrdersOfSummaries(priced.eligible, priced.outlierIds), row.revenueOrder?.listingId ?? null, settings.profit.useOrder);
   return {
     revenueScrap: row.revenueScrap,
     bestScrap: row.bestScrap,
     instantScrap: row.instantScrap,
     revenueOrder: row.revenueOrder,
-    bestOrder: mockPrices(book, settings, keyScrap, now).best,
+    bestOrder: priced.best,
     buyerCount: row.buyerCount,
+    nextBuyer: depth.nextBuyer,
+    verifiedBuyerCount: depth.verifiedBuyerCount,
     confidence: row.confidence,
     confidenceLevel: row.confidenceLevel,
     flags: row.flags,
@@ -1052,10 +1182,14 @@ export function seedScraptfList(now: UnixMs): ScraptfListStored[] {
     if (/;p\d/.test(item.sku) || MARKET_CURRENCY.has(item.sku)) continue;
     const h = hashOf(`list:${item.sku}`);
     const o = LIST_OVERRIDES[item.sku];
+    // 0.7.4: what each row is proven to price, as the parser reads it: a Non-Craftable SKU is marked so; of
+    // the rest the hand-set rows and most others show a Non-Craftable sibling (Craftable), and a third are
+    // family rows ('any': shown, never a cost or "Use as my price").
+    const craft = item.sku.includes(';uncraftable') ? 'uncraftable' : !o && (h >>> 4) % 3 === 0 ? 'any' : 'craftable';
     if (o) {
       const s = splitPrice(o.sells);
       const p = o.pays === null ? null : splitPrice(o.pays);
-      out.push({ sku: item.sku, name: item.name, sellsKeys: s.keys, sellsScrap: s.scrap, paysKeys: p?.keys ?? null, paysScrap: p?.scrap ?? null, stock: o.stock, stockLimit: o.limit, batchId: batch(o.page), observedAt: at(o.page) });
+      out.push({ sku: item.sku, name: item.name, sellsKeys: s.keys, sellsScrap: s.scrap, paysKeys: p?.keys ?? null, paysScrap: p?.scrap ?? null, stock: o.stock, stockLimit: o.limit, batchId: batch(o.page), observedAt: at(o.page), craft });
       continue;
     }
     // Not every item is on scrap.tf's list.
@@ -1071,9 +1205,9 @@ export function seedScraptfList(now: UnixMs): ScraptfListStored[] {
     const page = (h >>> 24) % MOCK_LIST_PAGES.length;
     const s = splitPrice(sells);
     const p = pays === null ? null : splitPrice(pays);
-    out.push({ sku: item.sku, name: item.name, sellsKeys: s.keys, sellsScrap: s.scrap, paysKeys: p?.keys ?? null, paysScrap: p?.scrap ?? null, stock, stockLimit: limit, batchId: batch(page), observedAt: at(page) });
+    out.push({ sku: item.sku, name: item.name, sellsKeys: s.keys, sellsScrap: s.scrap, paysKeys: p?.keys ?? null, paysScrap: p?.scrap ?? null, stock, stockLimit: limit, batchId: batch(page), observedAt: at(page), craft });
   }
-  out.push({ sku: KEY_SKU, name: 'Mann Co. Supply Crate Key', sellsKeys: 0, sellsScrap: K + 15, paysKeys: 0, paysScrap: K + 6, stock: 140, stockLimit: 400, batchId: batch(0), observedAt: at(0) });
+  out.push({ sku: KEY_SKU, name: 'Mann Co. Supply Crate Key', sellsKeys: 0, sellsScrap: K + 15, paysKeys: 0, paysScrap: K + 6, stock: 140, stockLimit: 400, batchId: batch(0), observedAt: at(0), craft: 'any' });
   return out.sort((a, b) => (a.sku < b.sku ? -1 : a.sku > b.sku ? 1 : 0));
 }
 
@@ -1187,8 +1321,12 @@ export function seedBankStock(args: {
           previous.push(now);
       }
     });
-    out.push({ bank: s.bank, batchId: s.batchId, savedAt: s.savedAt, rows: newest });
-    if (s.previous) out.push({ bank: s.bank, batchId: s.previous.batchId, savedAt: s.previous.savedAt, rows: previous });
+    // 0.7.4, as the service writes the list's rows: each with its row's craftability (bank_stock.craft), so a
+    // family row ('any') meets no buyer on the stock page, in What's new and the change feed.
+    const craftOf = s.bank === 'list' ? new Map(args.listRows.map((r) => [r.sku, r.craft ?? 'any'] as const)) : null;
+    const withCraft = (rows: BankStockStored[]): BankStockStored[] => (craftOf ? rows.map((r) => ({ ...r, craft: craftOf.get(r.sku) ?? 'any' })) : rows);
+    out.push({ bank: s.bank, batchId: s.batchId, savedAt: s.savedAt, rows: withCraft(newest) });
+    if (s.previous) out.push({ bank: s.bank, batchId: s.previous.batchId, savedAt: s.previous.savedAt, rows: withCraft(previous) });
   }
   return out;
 }
@@ -1296,7 +1434,7 @@ export function mockImportReport(now: UnixMs): ImportReport {
     page: '/buy/hats',
     format: 'html',
     batchId: 6,
-    counts: { dataDefindex: 50, cards: 50, rows: 0, selectedSkipped: 0, duplicates: 0, lookalikes: 0 },
+    counts: { dataDefindex: 50, cards: 50, rows: 0, selectedSkipped: 0, duplicates: 0, lookalikes: 0, reserved: 0, notTradable: 0 },
     headerColumns: [],
     warningCodes: { 'unknown-quality': 1, 'unusual-without-effect': 1 },
     items: [
@@ -1402,7 +1540,9 @@ export const RULES_BACKUP_FORMAT = 'tf2-flip-desk-rules';
 
 export function mockRulesToJson(rules: readonly PriceRule[], now: UnixMs): string {
   const out = rules.map(({ name, filter, costKeys, costScrap, observedAt, enabled }) => ({ name, filter, costKeys, costScrap, observedAt, enabled }));
-  return JSON.stringify({ format: RULES_BACKUP_FORMAT, version: 1, exportedAt: now, rules: out }, null, 2);
+  // 0.7.4 (F79): as the service, version 2 only when a rule uses the Festivized or Elevated Strange filter.
+  const version = rules.some((r) => typeof r.filter.festive === 'boolean' || typeof r.filter.elevated === 'boolean') ? 2 : 1;
+  return JSON.stringify({ format: RULES_BACKUP_FORMAT, version, exportedAt: now, rules: out }, null, 2);
 }
 
 /** Lenient: a bare array of rules is accepted too. Each invalid rule is skipped with a reason. */
@@ -1456,44 +1596,11 @@ export function mockLinks(sku: string, name: string, assetId: string | null): Li
 }
 
 // ---------------------------------------------------------------------------
-// Journal FIFO (mock only; the service has its own implementation)
+// Journal FIFO: 0.8 (J1) the shared rules themselves (src/shared/journal.ts); the name stays for mock.ts and the tests.
 // ---------------------------------------------------------------------------
 
-export function mockJournalSummary(entries: readonly JournalEntry[]): JournalSummary {
-  const sorted = [...entries].sort((a, b) => a.ts - b.ts || a.id - b.id);
-  const lots = new Map<string, { cost: Scrap; name: string; id: number; ts: UnixMs; keys: number; scrap: Scrap; k: Scrap }[]>();
-  const bySku = new Map<string, { sku: string; name: string; realizedProfitScrap: Scrap; trades: number }>();
-  let realized = 0;
-  let trades = 0;
-  for (const e of sorted) {
-    const value = Math.round(e.keys * e.keyPriceScrap) + e.scrap;
-    const queue = lots.get(e.sku) ?? [];
-    lots.set(e.sku, queue);
-    if (e.side === 'buy') {
-      queue.push({ cost: value, name: e.name, id: e.id, ts: e.ts, keys: e.keys, scrap: e.scrap, k: e.keyPriceScrap });
-    } else {
-      const lot = queue.shift();
-      if (!lot) continue;
-      const p = value - lot.cost;
-      realized += p;
-      trades++;
-      const s = bySku.get(e.sku) ?? { sku: e.sku, name: e.name, realizedProfitScrap: 0, trades: 0 };
-      s.realizedProfitScrap += p;
-      s.trades++;
-      bySku.set(e.sku, s);
-    }
-  }
-  const open = [...lots.entries()]
-    .filter(([, q]) => q.length > 0)
-    .map(([sku, q]) => ({
-      sku,
-      name: q[0]!.name,
-      qty: q.length,
-      costScrap: q.reduce((t, l) => t + l.cost, 0),
-      lots: q.map((l) => ({ id: l.id, ts: l.ts, costScrap: l.cost, keys: l.keys, scrap: l.scrap, keyPriceScrap: l.k })),
-    }));
-  return { realizedProfitScrap: realized, realizedTrades: trades, open, bySku: [...bySku.values()] };
-}
+/** The service's journalSummary, so the mock books fees, write-offs and the closed ledger with the same function. */
+export const mockJournalSummary: (entries: readonly JournalEntry[]) => JournalSummary = journalSummary;
 
 // ---------------------------------------------------------------------------
 // Seed state
@@ -1582,6 +1689,154 @@ export function seedJournal(now: UnixMs): JournalEntry[] {
     { ts: now - 36 * 3_600_000, side: 'buy', venue: 'scrap.tf', sku: '30359;6', name: 'Juggernaut Jacket', keys: 0, scrap: r(1.33), keyPriceScrap: 568, note: null },
     { ts: now - 20 * 3_600_000, side: 'buy', venue: 'scrap.tf', sku: '194;11', name: 'Strange Knife', keys: 0, scrap: r(4.88), keyPriceScrap: 568, note: null },
     { ts: now - 19 * 3_600_000, side: 'buy', venue: 'scrap.tf', sku: '194;11', name: 'Strange Knife', keys: 0, scrap: r(5.11), keyPriceScrap: 568, note: null },
+    // 0.8 (J2, write-offs): a flip with both fees recorded, and a write-off, so the preview's Results show rates
+    // (5 closed flips). Both SKUs end closed and appear in no other mock data, so Holdings is unchanged.
+    { ts: now - 12 * day, side: 'buy', venue: 'scrap.tf', sku: '261;6', name: 'Mann Co. Cap', keys: 0, scrap: r(1.55), keyPriceScrap: 564, note: null, feeKeys: 0, feeScrap: 0 },
+    { ts: now - 10 * day, side: 'sell', venue: 'marketplace.tf', sku: '261;6', name: 'Mann Co. Cap', keys: 0, scrap: r(2.33), keyPriceScrap: 565, note: 'cashed out', feeKeys: 0, feeScrap: 2 },
+    { ts: now - 11 * day, side: 'buy', venue: 'scrap.tf', sku: '116;6', name: 'Ghastly Gibus', keys: 0, scrap: r(1), keyPriceScrap: 564, note: null },
+    { ts: now - 2 * day, side: 'writeoff', venue: 'Written off', sku: '116;6', name: 'Ghastly Gibus', keys: 0, scrap: 0, keyPriceScrap: 568, note: 'nobody buys it' },
   ];
   return rows.map((row, i) => ({ id: i + 1, ...row }));
+}
+
+// ---------------------------------------------------------------------------
+// 0.8 Holdings: asks, references and recorded exit runs (H1, H3, H4)
+// ---------------------------------------------------------------------------
+
+/**
+ * 0.8 (H3): as the service's askCandidatesOf + askSideOf over a mock book's sell orders, which are all clean copies:
+ * a painted SKU gets null. Excluded as the service excludes a listing: not eligible, blocklisted, marketplace.tf or banned.
+ */
+export function mockHoldingAsk(book: MockBook | null, sku: string, settings: Settings, keyScrap: Scrap, now: UnixMs): HoldingAskSide | null {
+  if (!book || /;p\d/.test(sku)) return null;
+  const blocked = new Set(settings.blocklist);
+  const asks: AskCandidate[] = book.sell.map((o) => ({
+    id: o.listingId,
+    steamid: o.steamid,
+    keys: o.keys,
+    metalScrap: o.metalScrap,
+    valueScrap: Math.round(o.keys * keyScrap) + o.metalScrap,
+    isBot: o.isBot,
+    lastEventAt: o.lastEventAt,
+    excluded: !o.eligible || blocked.has(o.steamid) || o.flags.some((f) => f === 'marketplace' || f === 'banned' || f === 'blocklisted'),
+  }));
+  return askSideOf(asks, now, new Set(settings.ownSteamIds ?? []));
+}
+
+/** 0.8 (H4): holdingRefsOf over the mock's own age gate (usableReferences): a stale reference left out with its reason. */
+export function mockHoldingRefs(book: MockBook | null, settings: Settings, now: UnixMs): HoldingRefs | null {
+  if (!book) return null;
+  const u = usableReferences(book.references, settings, now);
+  return holdingRefsOf(
+    {
+      pricedb: u.pdbBuy !== null || u.pdbSell !== null ? book.references.pricedb : null,
+      community: u.community !== null || u.communityHigh !== null ? book.references.community : null,
+    },
+    u.stale,
+  );
+}
+
+/** Each held base's seeded runs scale the newest revenue by one of these rows (i % 3), oldest first: falling, a past high, flat. */
+const SEED_MARK_FACTORS: readonly (readonly number[])[] = [
+  [1.12, 1.1, 1.08, 1.08, 1.06, 1.04, 1.03, 1.02, 1.02, 1.01, 1.0, 1.0],
+  [1.0, 1.0, 1.02, 1.15, 1.15, 1.05, 1.02, 1.0, 1.0, 1.0, 1.0, 1.0],
+  [1.0, 0.98, 1.0, 1.02, 1.0, 0.99, 1.0, 1.01, 1.0, 1.0, 1.0, 1.0],
+];
+const SEED_MARK_RUN_MS = 5.5 * 3_600_000;
+const SEED_MARK_GAP_MS = 30 * 60_000;
+/** Before the 4th-newest run: longer than HOLDING_MARK_GAP_MS, so the chart shows an 'unwatched' gap. */
+const SEED_MARK_SILENCE_MS = 10 * 3_600_000;
+
+/**
+ * 0.8 (H1): seeded exit runs for the mock journal's held bases, deterministic and drawn from no RNG, so every other
+ * seeded value is unchanged. Per held base i (journal open order, currencies left out): 12 runs of 5 h 30 min, 30 min
+ * apart, ending at `now`, with a 10 h silence before the 4th-newest; the newest is holdingMarkValuesOf(sideOf(base))
+ * and the older ones scale its revenue by SEED_MARK_FACTORS[i % 3] (split into keys and metal at `keyScrap`). A base
+ * with no buyer keeps a null revenue.
+ */
+export function seedHoldingMarks(positions: readonly JournalPosition[], sideOf: (base: string) => HoldingBuySide | null, keyScrap: Scrap, now: UnixMs): HoldingMark[] {
+  const bases: string[] = [];
+  for (const p of positions) {
+    let base: string;
+    try {
+      base = baseSku(p.sku);
+    } catch {
+      continue;
+    }
+    if (!CURRENCY_SKUS.includes(base) && !bases.includes(base)) bases.push(base);
+  }
+  const out: HoldingMark[] = [];
+  let id = 1;
+  bases.forEach((base, i) => {
+    const newest = holdingMarkValuesOf(sideOf(base), null, null, now);
+    const factors = SEED_MARK_FACTORS[i % SEED_MARK_FACTORS.length]!;
+    const runs: Omit<HoldingMark, 'id'>[] = [];
+    let toAt = now;
+    // Newest first, then reversed: the silence sits before the 4th-newest run.
+    for (let j = factors.length - 1; j >= 0; j--) {
+      const fromAt = toAt - SEED_MARK_RUN_MS;
+      runs.push({ baseSku: base, fromAt, toAt, keyScrap, ...newest, ...scaledRevenue(newest, factors[j]!, keyScrap) });
+      toAt = fromAt - (j === factors.length - 4 ? SEED_MARK_SILENCE_MS : SEED_MARK_GAP_MS);
+    }
+    for (const m of runs.reverse()) out.push({ id: id++, ...m });
+  });
+  return out;
+}
+
+/** The revenue side of `v` scaled by `f`, split into whole keys and metal at `keyScrap` (null stays null). */
+function scaledRevenue(v: Pick<HoldingMark, 'revKeys' | 'revMetalScrap'>, f: number, keyScrap: Scrap): Pick<HoldingMark, 'revKeys' | 'revMetalScrap'> {
+  if (v.revMetalScrap === null) return { revKeys: null, revMetalScrap: null };
+  const value = Math.round(((v.revKeys ?? 0) * keyScrap + v.revMetalScrap) * f);
+  const keys = value >= keyScrap ? Math.floor(value / keyScrap) : 0;
+  return { revKeys: keys, revMetalScrap: value - keys * keyScrap };
+}
+
+// ---------------------------------------------------------------------------
+// 0.8 (G1): the preview's seeded scrap.tf watches
+// ---------------------------------------------------------------------------
+
+/**
+ * The preview's two watches, from the hats page's rows as the mock shows them (bankStockAll('hats')): id 1, every copy
+ * of the second on-sale row's item, priced 2 scrap over its listed price with "back on sale" (so the page shows the
+ * Watched chip and an 'At target' tag), made two days ago; id 2, a paused watch of the next on-sale row's copy with a
+ * profit target of 18 scrap. Fewer than two on-sale rows: fewer watches.
+ */
+export function mockSeedWatches(hatsRows: readonly BankStockRow[], now: UnixMs): ScraptfWatch[] {
+  const onSale = hatsRows.filter((r) => r.change !== 'gone' && r.listFamily !== true);
+  const at = now - 2 * 86_400_000;
+  const out: ScraptfWatch[] = [];
+  const first = onSale[1];
+  if (first) {
+    out.push({
+      id: 1,
+      sku: first.sku,
+      specialKey: null,
+      name: first.name,
+      maxCostKeys: first.costKeys,
+      maxCostScrap: first.costScrapRaw + 2,
+      minProfitScrap: null,
+      onRestock: true,
+      enabled: true,
+      createdAt: at,
+      updatedAt: at,
+    });
+  }
+  // Another item than id 1's, so the paused watch never shares its base.
+  const second = onSale.find((r, i) => i > 1 && r.sku !== first?.sku);
+  if (second) {
+    out.push({
+      id: 2,
+      sku: second.sku,
+      specialKey: watchRowSpecialKey(second),
+      name: second.name,
+      maxCostKeys: 0,
+      maxCostScrap: null,
+      minProfitScrap: 18,
+      onRestock: false,
+      enabled: false,
+      createdAt: at,
+      updatedAt: at,
+    });
+  }
+  return out;
 }

@@ -26,7 +26,7 @@ import { formatScrap } from '../../src/shared/currency';
 import { DEFAULT_SETTINGS, mergeSettings } from '../../src/shared/defaults';
 import { HOLDINGS_CSV_COLUMNS, holdingRow, holdingsTotals, type HoldingBuySide } from '../../src/shared/holdings';
 import type { PushContract } from '../../src/shared/rpc';
-import type { DeepPartial, HoldingRow, JournalEntry, KeyPriceState, Listing, Settings, UnixMs } from '../../src/shared/types';
+import type { DeepPartial, HoldingRow, JournalEntry, KeyPriceState, Listing, ScraptfListCraft, Settings, UnixMs } from '../../src/shared/types';
 import { FakeClock, FakeTimers, HOUR, MIN, T0, createStubSchema, makeDeps, makeListing, recordingLogger } from './helpers';
 
 const openRepos: Repo[] = [];
@@ -73,10 +73,13 @@ function rec(repo: Repo, side: JournalEntry['side'], sku: string, scrap: number,
   });
 }
 
-/** One row of a saved scrap.tf/items page, stored as importSavedPage stores it. */
+/**
+ * One row of a saved scrap.tf/items page, stored as importSavedPage stores it. 0.7.4 (F01): rows are proven
+ * Craftable rows by default; an unmarked ('any') row is a family row, which the "Sell:" toast labels.
+ */
 function saveList(
   repo: Repo,
-  rows: readonly { sku: string; pays: number | null; paysKeys?: number; stock?: number | null; limit?: number | null }[],
+  rows: readonly { sku: string; pays: number | null; paysKeys?: number; stock?: number | null; limit?: number | null; craft?: ScraptfListCraft }[],
   at: UnixMs,
 ): void {
   const batchId = repo.createImportBatch({ fileName: 'items.html', pageKind: 'items-list', fileMtime: at, importedAt: at, itemCount: rows.length, categories: null });
@@ -92,6 +95,7 @@ function saveList(
       stockLimit: r.limit === undefined ? 10 : r.limit,
       batchId,
       observedAt: at,
+      craft: r.craft ?? 'craftable',
     })),
   );
 }
@@ -222,6 +226,9 @@ function sideOf(market: MarketIndex, base: string): HoldingBuySide | null {
     confidenceLevel: e.confidenceLevel,
     flags: e.flags,
     lastOrderChangeAt: e.lastOrderChangeAt,
+    // 0.8 (PC-2, H2): the entry's depth, as buySideOf copies it.
+    ...(e.nextBuyer !== undefined ? { nextBuyer: e.nextBuyer } : {}),
+    ...(e.verifiedBuyerCount !== undefined ? { verifiedBuyerCount: e.verifiedBuyerCount } : {}),
   };
 }
 
@@ -272,7 +279,9 @@ describe('holdings rows with the saved scrap.tf list (F14)', () => {
     for (const r of res.rows) {
       const pos = open.find((p) => p.sku === r.sku)!;
       const expected = holdingRow(pos, r.category, sideOf(h.market, r.sku), h.settings.current.profit, K, { list: h.list.rowFor(r.sku, K), now: T0 });
-      expect(r).toEqual(expected);
+      // 0.8: holdings' own extras (ask, refs, snapshot, typical hold, advice) have tests of their own.
+      const { ask: _a, refs: _r, snapshotAt: _s, typicalHold: _t, advice: _v, ...core } = r;
+      expect(core).toEqual(expected);
     }
     // Totals: worth at the better exit.
     expect(res.totals).toEqual(holdingsTotals(res.rows));
@@ -298,6 +307,16 @@ describe('holdings rows with the saved scrap.tf list (F14)', () => {
     expect(h.row('15000;6')).toMatchObject({ buyerCount: 0, revenueScrap: null, confidence: 0, bestExit: 'scraptf', exitScrap: 45, profitNowScrap: 15, status: 'sell' });
     expect(h.row('378;6')).toMatchObject({ bestExit: 'backpack', status: 'sell' });
     expect(h.notes).toEqual([{ title: 'Sell: Sniper Rifle', body: sellBody(45, 15, h.K(), '3 min ago'), sku: '15000;6' }]);
+  });
+
+  it('0.7.4 (F01): labels the toast of a scrap.tf exit read from a family row', () => {
+    const repo = newRepo();
+    rec(repo, 'buy', '15000;6', 30);
+    saveList(repo, [{ sku: '15000;6', pays: 45, stock: 0, limit: 5, craft: 'any' }], T0 - 3 * MIN);
+    const h = setup({ repo });
+    h.start();
+    expect(h.row('15000;6')).toMatchObject({ bestExit: 'scraptf', scraptfListFamily: true, status: 'sell' });
+    expect(h.notes.map((n) => n.body)).toEqual([sellBody(45, 15, h.K(), '3 min ago; one list row for every copy')]);
   });
 
   it('checks held items on the list once at start (no market build reports them), deduped across restarts', () => {
@@ -585,6 +604,13 @@ describe('holdingNotification (F14 wording)', () => {
     expect(holdingNotification(r, 568).body).toBe("scrap.tf's bank pays 8.33 ref (from your saved price list), +2.22 ref over your cost");
     // Never the buyer's name for a scrap.tf exit.
     expect(holdingNotification(r, 568, T0).body).not.toContain('Bob');
+  });
+
+  it('0.7.4 (F01): says when the scrap.tf exit is a family row (one /items row for every copy)', () => {
+    const r = base({ bestExit: 'scraptf', exitScrap: 75, exitVenue: 'scrap.tf', scraptfPaysScrap: 75, scraptfListAt: T0 - 12 * MIN, scraptfListFamily: true });
+    expect(holdingNotification(r, 568, T0).body).toBe("scrap.tf's bank pays 8.33 ref (price list saved 12 min ago; one list row for every copy), +2.22 ref over your cost");
+    // A backpack.tf exit never mentions the list.
+    expect(holdingNotification(base({ scraptfListFamily: true }), 568, T0).body).toBe('Bob pays 6.66 ref (human), +2.22 ref over your cost');
   });
 
   it('says how old the list is in plain words', () => {

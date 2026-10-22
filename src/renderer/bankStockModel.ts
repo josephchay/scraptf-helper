@@ -21,17 +21,22 @@ import {
   BANK_STOCK_SESSION_GAP_MS,
   SCRAPTF_LONG_LISTED_MS,
   bankStockDefaultDir,
+  bankStockRunDrops,
 } from '../shared/bankStock';
 import { SCRAPTF_BOUNDARY_SHORT } from '../shared/boundaryText';
+import { buyerPresenceText } from '../shared/buyerSeen';
 import { scraptfBankInfo } from '../shared/links';
 import { scraptfAgoText } from '../shared/scraptfHistory';
+import { SCRAPTF_LIST_FAMILY_LABEL } from '../shared/scraptfList';
+import { SCRAPTF_TIMING_MIN_ENDED } from '../shared/scraptfTiming';
 import { fromObject, fromString } from '../shared/sku';
 import { BANK_STOCK_FILTERS, BANK_STOCK_SORTS } from '../shared/types';
-import type { BankStockCounts, BankStockFilter, BankStockQuery, BankStockResult, BankStockRow, BankStockSort, BankStockVerdict, ProfitSettings, Scrap, ScraptfBank, UnixMs } from '../shared/types';
+import type { BankStockCounts, BankStockFilter, BankStockQuery, BankStockResult, BankStockRow, BankStockSort, BankStockVerdict, ProfitSettings, Scrap, ScraptfBank, ScraptfTurnover, UnixMs } from '../shared/types';
 import { BANK_SAVE_TIP, LIST_SAVE_TIP, bankFreshness, bankPath, type BankFreshness } from './banksModel';
-import { changePctText } from './changesModel';
+import { changePctText, fmtSaveTime } from './changesModel';
 import { SAVE_MODE } from './importModel';
 import type { RecordBuyCopy } from './itemMenuModel';
+import { exitCostsWords } from './oppModel';
 import { buyerCountLabel, noRevenueText } from './quickModel';
 import { DASH, PAINT_NAMES, errorMessage, fmtAgo, fmtDateTime, fmtInt, fmtKeysMetal, fmtMoney, fmtPct, fmtSignedMoney, paintHex, type Tone } from './format';
 
@@ -46,6 +51,12 @@ export const BANK_STOCK_SNAPSHOT_NOTE = 'Each save is a snapshot of the page at 
 
 export const BANK_STOCK_EXTRAS_TITLE =
   'A painted, spelled or otherwise special copy (paint, spells, parts, sheen, killstreaker or a name tag). Pay up to and the verdict are for a clean copy: buyers rarely pay for extras.';
+
+/**
+ * 0.7.4 (BankStockRow.listFamily): an /items list row not proven to price one copy, as the Verdict, Sells for
+ * and Pay up to cells say it: no buyer's price is set against it, so it is never a flip.
+ */
+export const BANK_STOCK_FAMILY_TITLE = `${SCRAPTF_LIST_FAMILY_LABEL} (Craftable or Non-Craftable, any killstreak tier): the list does not show which copy it is, so no backpack.tf buyer is set against its price. Check the bank page for the copy you want.`;
 
 /**
  * What a row's copy carries, read back from its key (`${sku}|${specialKey}`, the import's extras JSON:
@@ -81,6 +92,14 @@ function specialOf(key: string): unknown[] | null {
   }
 }
 
+/**
+ * 0.7.4 (F66): the copy a row is (its special key, the form Opportunity.copyKey has), so the item panel opened
+ * from it shows that copy's scrap.tf history; null for a plain copy or an unreadable key.
+ */
+export function bankStockRowCopyKey(r: Pick<BankStockRow, 'key'>): string | null {
+  return specialOf(r.key) !== null ? r.key.slice(r.key.indexOf('|') + 1) : null;
+}
+
 /** The paint a row's copy has (the extras' first entry), or null. */
 export function bankStockPaintOf(key: string): number | null {
   const paint = specialOf(key)?.[0];
@@ -91,9 +110,10 @@ export function bankStockPaintOf(key: string): number | null {
  * ACT-11: what Record buy books for a row: its exact copy (a painted copy under its painted SKU, as the
  * journal and Holdings key it) at the price the save listed (keys and metal as listed), noted "from your
  * save of scrap.tf/buy/hats" with its extras. A gone row is no longer on sale: no price is prefilled, and
- * the note gives its last one.
+ * the note gives its last one. 0.7.4: nor for an /items row for every copy (listFamily): its price is no
+ * price of the copy its SKU names, so the note gives it and asks which copy was bought (F03's rule).
  */
-export function bankStockBuyCopy(r: Pick<BankStockRow, 'sku' | 'key' | 'costKeys' | 'costScrapRaw' | 'change'>, bank: ScraptfBank): RecordBuyCopy {
+export function bankStockBuyCopy(r: Pick<BankStockRow, 'sku' | 'key' | 'costKeys' | 'costScrapRaw' | 'change' | 'listFamily'>, bank: ScraptfBank): RecordBuyCopy {
   const info = scraptfBankInfo(bank);
   const path = info ? bankPath(info.url) : 'scrap.tf';
   const paint = bankStockPaintOf(r.key);
@@ -110,6 +130,7 @@ export function bankStockBuyCopy(r: Pick<BankStockRow, 'sku' | 'key' | 'costKeys
   const keys = finite(r.costKeys) && r.costKeys > 0 ? Math.floor(r.costKeys) : 0;
   const scrap = finite(r.costScrapRaw) ? Math.max(0, Math.round(r.costScrapRaw)) : 0;
   if (r.change === 'gone') return { sku, note: `last price ${fmtKeysMetal(keys, scrap)} in your save of ${path}, gone from your newest save${tail}` };
+  if (r.listFamily === true) return { sku, note: `${fmtKeysMetal(keys, scrap)} on a ${path} row for every copy (Craftable or Non-Craftable): check which copy you bought and its price` };
   return { sku, keys, scrap, note: `from your save of ${path}${tail}` };
 }
 
@@ -243,6 +264,9 @@ export const BANK_STOCK_FILTER_LABELS: Readonly<Record<BankStockFilter, string>>
   // F20: from the run of the user's saves that list an item on sale (BankStockRow.listedSince).
   'long-listed': 'Listed > 24 h',
   dropped: 'Dropped since listed',
+  // 0.8 (T6, G1): from the row's buy timing and its watch.
+  dropping: 'Dropping',
+  watched: 'Watched',
 };
 
 export const BANK_STOCK_FILTER_HELP: Readonly<Record<BankStockFilter, string>> = {
@@ -254,10 +278,12 @@ export const BANK_STOCK_FILTER_HELP: Readonly<Record<BankStockFilter, string>> =
   // DM-5: measured to the newest save that lists it, so a page saved once long ago counts no time.
   'long-listed': 'On sale in every one of your saves of this page for at least a day, up to the newest one that lists it: listed since then without a break.',
   dropped: 'On sale now, and cheaper than when your saves first listed it in its current run.',
+  dropping: 'On sale now and repriced down at least twice in its current run of your saves (a lower bound: several drops between two saves read as one).',
+  watched: "On sale now and on your watch list (Watch on scrap.tf… in an item's menu). The tag shows where its price is against your target.",
 };
 
-/** The chips the page shows: F17's, then F20's Listed > 24 h and Dropped since listed. */
-export const BANK_STOCK_CHIP_FILTERS: readonly BankStockFilter[] = ['all', 'new', 'flips', 'changed', 'gone', 'long-listed', 'dropped'];
+/** The chips the page shows: F17's, then F20's Listed > 24 h and Dropped since listed, then 0.8's Dropping and Watched. */
+export const BANK_STOCK_CHIP_FILTERS: readonly BankStockFilter[] = ['all', 'new', 'flips', 'changed', 'gone', 'long-listed', 'dropped', 'dropping', 'watched'];
 
 const CHANGE_FILTERS: ReadonlySet<BankStockFilter> = new Set<BankStockFilter>(['new', 'changed', 'gone']);
 
@@ -276,7 +302,17 @@ export interface BankStockChip {
   tone: Tone;
 }
 
-const CHIP_TONES: Readonly<Record<BankStockFilter, Tone>> = { all: 'info', new: 'good', flips: 'good', changed: 'warn', gone: 'muted', 'long-listed': 'info', dropped: 'good' };
+const CHIP_TONES: Readonly<Record<BankStockFilter, Tone>> = {
+  all: 'info',
+  new: 'good',
+  flips: 'good',
+  changed: 'warn',
+  gone: 'muted',
+  'long-listed': 'info',
+  dropped: 'good',
+  dropping: 'good',
+  watched: 'info',
+};
 
 function chipCount(c: BankStockCounts, f: BankStockFilter): number {
   switch (f) {
@@ -294,6 +330,10 @@ function chipCount(c: BankStockCounts, f: BankStockFilter): number {
       return c.longListed;
     case 'dropped':
       return c.dropped;
+    case 'dropping':
+      return c.dropping;
+    case 'watched':
+      return c.watched;
   }
 }
 
@@ -566,20 +606,90 @@ export function bankStockListedCell(r: Pick<BankStockRow, 'listedSince' | 'first
 /**
  * F20 Since listed: the price now against the first save of the current run (raw keys + metal, both at
  * today's key price), "↓ 8 %" (cheaper, good for a buyer), "↑ 5 %" or "0 %"; a dash without a run.
+ * 0.8 (T6): with at least one reprice-down in the run (the row's timing), the text adds " · 2×" and the title
+ * dates each drop at the save that showed it, a lower bound (several drops between two saves read as one).
  */
-export function bankStockSinceListedCell(r: Pick<BankStockRow, 'changeSinceListed'>, keyScrap: Scrap | null): { text: string; title: string; tone: Tone } {
+export function bankStockSinceListedCell(r: Pick<BankStockRow, 'changeSinceListed'> & Partial<Pick<BankStockRow, 'timing'>>, keyScrap: Scrap | null): { text: string; title: string; tone: Tone } {
   const c = r.changeSinceListed;
   if (!c || !finite(c.deltaScrap)) return { text: DASH, title: 'Not on sale in a run of your saves, so there is nothing to compare.', tone: 'muted' };
+  const drops = sinceListedDrops(r.timing, c.since);
   const then = `${fmtMoney(c.fromScrap, keyScrap)} when your saves began listing it (${fmtDateTime(c.since)})`;
-  if (c.deltaScrap === 0) return { text: '0 %', title: `Same price as ${then}.`, tone: 'muted' };
+  if (c.deltaScrap === 0) return { text: `0 %${drops.suffix}`, title: `Same price as ${then}.${drops.title}`, tone: 'muted' };
   const down = c.deltaScrap < 0;
   const pct = changePctText(c.pct);
   const by = fmtMoney(Math.abs(c.deltaScrap), keyScrap);
   // The arrow carries the sign; a move under 0.05 % shows its amount instead of "0 %".
   return {
-    text: `${down ? '↓' : '↑'} ${pct && pct !== '0 %' ? pct.slice(1) : by}`,
-    title: `${then}, ${fmtMoney(c.toScrap, keyScrap)} now: ${down ? 'cheaper' : 'pricier'} by ${by}${pct ? ` (${pct})` : ''}, both at today's key price.`,
+    text: `${down ? '↓' : '↑'} ${pct && pct !== '0 %' ? pct.slice(1) : by}${drops.suffix}`,
+    title: `${then}, ${fmtMoney(c.toScrap, keyScrap)} now: ${down ? 'cheaper' : 'pricier'} by ${by}${pct ? ` (${pct})` : ''}, both at today's key price.${drops.title}`,
     tone: down ? 'good' : 'bad',
+  };
+}
+
+/**
+ * 0.8 (T6): the since-listed cell's drop count (" · 2×") and its dated steps, from the row's timing; empty without a
+ * drop. Only the drops since `since`, the save its baseline is (bankStockRunDrops): a flap restarts the row's listing,
+ * so drops from before it never sit beside "0 %" against the price it came back at.
+ */
+function sinceListedDrops(t: BankStockRow['timing'] | undefined, since: UnixMs): { suffix: string; title: string } {
+  const n = bankStockRunDrops({ timing: t });
+  if (n < 1) return { suffix: '', title: '' };
+  const steps = (t?.steps ?? []).filter((s) => !finite(since) || s.at > since).map((s) => `${fmtSaveDay(s.at)}${changePctText(s.pct) ? ` ${changePctText(s.pct)}` : ''}`);
+  const listed = steps.length ? `: ${n > steps.length ? 'the newest ' : ''}${steps.join(', ')}` : '';
+  return {
+    suffix: ` · ${fmtInt(n)}×`,
+    title: ` ${fmtInt(n)} price ${n === 1 ? 'drop' : 'drops'} in this run in your saves${listed} (a lower bound: several drops between two saves read as one).`,
+  };
+}
+
+/** "Oct 12": a save's day (fmtSaveTime without the time). */
+function fmtSaveDay(ts: UnixMs): string {
+  return fmtSaveTime(ts).split(' ').slice(0, 2).join(' ');
+}
+
+/** A span with its trailing zero unit dropped: "1 d 4 h", "2 h", "45 m" (scraptfAgoText). */
+function spanText(ms: number): string {
+  return scraptfAgoText(ms).replace(/ 0+ [mh]$/, '');
+}
+
+/**
+ * 0.8 (LC-4): the bank stock header's turnover line (BankStockResult.turnover), Kaplan-Meier over the bank's listings
+ * in the user's saves: the median time listed before going, with the listings it rests on, ± the resolution and how
+ * many are still listed; when the curve never reaches half, "no median yet" with the estimated share still listed at
+ * its last event time (an estimate, not a count: censored listings leave the risk set early); below
+ * SCRAPTF_TIMING_MIN_ENDED ended listings, "not enough of your saves yet" with the count. Null without a turnover.
+ */
+export function bankStockTurnoverText(t: ScraptfTurnover | null | undefined, path: string): { text: string; title: string } | null {
+  if (!t) return null;
+  const listings = t.ended + t.open + t.wideGap;
+  const quart = (label: string, ms: number | null) => `${label} ${finite(ms) ? spanText(ms) : 'not reached'}`;
+  const left = t.imprecise > 0 ? ` ${fmtInt(t.imprecise)} ${t.imprecise === 1 ? 'listing was' : 'listings were'} left out (on sale at your first save of the page, or first seen after a gap in your saves wider than your usual ones, or over a day).` : '';
+  const cut = t.wideGap > 0 ? ` ${fmtInt(t.wideGap)} ${t.wideGap === 1 ? 'was' : 'were'} followed only to your last save before a gap in your saves wider than your usual ones (or over a day).` : '';
+  const caveat = " 'Gone' can be a sale, a reservation or a move; a return at the same price within the hour is the same listing.";
+  if (t.reason === 'not-enough-data') {
+    return {
+      text: `Not enough of your saves yet to say how long items stay listed here (${fmtInt(t.ended)} of ${SCRAPTF_TIMING_MIN_ENDED} ended listings)`,
+      title: `How long items stay listed on ${path} is estimated (Kaplan-Meier) once ${SCRAPTF_TIMING_MIN_ENDED} listings have ended in your saves; ${fmtInt(t.ended)} have, ${fmtInt(t.open)} are still listed.${left}${cut}${caveat}`,
+    };
+  }
+  const pm = finite(t.resolutionMs) ? `, ±${spanText(t.resolutionMs)}` : '';
+  const still = `${fmtInt(t.open)} still listed`;
+  const last = t.curve[t.curve.length - 1];
+  // Past the median the line is an estimated share (Kaplan-Meier: a listing still on sale or cut by a gap leaves the
+  // count when the saves stop following it), never a count of the listings themselves.
+  const share = last && finite(last.stillListed) ? `${Math.round(last.stillListed * 100)} %` : 'more than half';
+  const text = finite(t.medianMs)
+    ? `In your saves, items here stayed listed a median ${spanText(t.medianMs)} before going (${fmtInt(listings)} listings${pm}; ${still})`
+    : `In your saves, no median yet: an estimated ${share} of listings here were still listed after ${spanText(last?.atMs ?? 0)} (${fmtInt(listings)} listings; ${still})`;
+  const estimate = finite(t.medianMs)
+    ? ''
+    : ' The share is an estimate, not a count of the listings: one still on sale, or cut by a gap in your saves, counts only for as long as your saves followed it.';
+  return {
+    text,
+    title:
+      `Kaplan-Meier over your saves of ${path}: each listing runs from the first save showing it on sale to the first save without it; one still listed counts until its newest save. ` +
+      `Quartiles: ${quart('25 % gone by', t.p25Ms)}, ${quart('half by', t.medianMs)}, ${quart('75 % by', t.p75Ms)}. ${fmtInt(t.ended)} ended, ${still}.${estimate}${left}${cut}` +
+      `${finite(t.droppedBeforeGoneShare) ? ` ${Math.round(t.droppedBeforeGoneShare * 100)} % of the ended listings dropped at least once first.` : ''}${caveat} What happened between two saves is unknown.`,
   };
 }
 
@@ -614,10 +724,12 @@ function buyerOf(o: NonNullable<BankStockRow['revenueOrder']>): string {
  * order is an outlier, Instant when none is a realistic bot order; unknown (or Best) says neither.
  */
 export function bankStockSellsTitle(
-  r: Pick<BankStockRow, 'revenueScrap' | 'revenueOrder' | 'buyerCount'>,
+  r: Pick<BankStockRow, 'revenueScrap' | 'revenueOrder' | 'buyerCount' | 'listFamily'>,
   keyScrap: Scrap | null,
   useOrder?: ProfitSettings['useOrder'] | null,
+  now: UnixMs = Date.now(),
 ): string {
+  if (r.listFamily === true) return BANK_STOCK_FAMILY_TITLE;
   const buyers = `${fmtInt(r.buyerCount)} ${r.buyerCount === 1 ? 'buyer' : 'buyers'} with eligible orders`;
   if (!finite(r.revenueScrap)) {
     if (!(r.buyerCount > 0)) return 'No eligible backpack.tf buy orders for this item in the live book.';
@@ -626,8 +738,8 @@ export function bankStockSellsTitle(
     return `${buyers}, but none is usable for Revenue used for profit, so no sale price is assumed.`;
   }
   const o = r.revenueOrder;
-  const online = o ? (o.online === true ? 'online' : o.online === false ? 'offline' : 'online status unknown') : null;
-  const who = o ? ` to ${o.userName || o.steamid} (${o.isBot ? 'bot' : 'human'}, ${online})` : '';
+  // 0.7.4 (F23): the online flag only while the order was seen in the last 2 h, else "last seen 4 d ago".
+  const who = o ? ` to ${o.userName || o.steamid} (${o.isBot ? 'bot' : 'human'}, ${buyerPresenceText(o, now)})` : '';
   return `Sells for ${fmtMoney(r.revenueScrap, keyScrap)}${who} on backpack.tf. ${buyers}.`;
 }
 
@@ -642,10 +754,11 @@ export function bankStockBuyer(r: Pick<BankStockRow, 'revenueOrder'>): string | 
  * market's Pay up to hover says, not "No eligible buy orders".
  */
 export function bankStockPayTitle(
-  r: Pick<BankStockRow, 'maxCostScrap' | 'revenueScrap' | 'costScrap' | 'hasExtras' | 'buyerCount'>,
+  r: Pick<BankStockRow, 'maxCostScrap' | 'revenueScrap' | 'costScrap' | 'hasExtras' | 'buyerCount' | 'listFamily'>,
   keyScrap: Scrap | null,
   useOrder?: ProfitSettings['useOrder'] | null,
 ): string {
+  if (r.listFamily === true) return `No Pay up to: ${BANK_STOCK_FAMILY_TITLE}`;
   const extras = r.hasExtras ? ' The ceiling is for a clean copy; this one has extras.' : '';
   if (!finite(r.maxCostScrap)) {
     if (finite(r.revenueScrap)) return 'No scrap.tf price clears your thresholds against these buyers.' + extras;
@@ -673,12 +786,17 @@ export interface BankStockVerdictPill {
  * The Verdict cell: Flip +X (m%), Over by Y, or No buyers (a gone row is judged at its last price). 0.7.3: as
  * the check popup's pill, "No usable buyer" when there are buyers none of which is usable, saying why by
  * `useOrder` (quickModel's noRevenueText) as bankStockSellsTitle does; unknown (or Best) names neither reason.
+ * 0.8 (PC-1): a Flip's hover names the price-move reserve only when `reservePct` (settings.profit.exitReservePct)
+ * applies one (exitCostsWords); absent or 0 is the 0.7.4 text.
  */
 export function bankStockVerdictPill(
-  r: Pick<BankStockRow, 'verdict' | 'profitScrap' | 'margin' | 'costScrap' | 'maxCostScrap' | 'hasExtras' | 'change' | 'buyerCount'>,
+  r: Pick<BankStockRow, 'verdict' | 'profitScrap' | 'margin' | 'costScrap' | 'maxCostScrap' | 'hasExtras' | 'change' | 'buyerCount' | 'listFamily'>,
   keyScrap: Scrap | null,
   useOrder?: ProfitSettings['useOrder'] | null,
+  reservePct?: number | null,
 ): BankStockVerdictPill {
+  // 0.7.4: an /items row for every copy is judged against no buyer (BankStockRow.listFamily).
+  if (r.listFamily === true) return { tone: 'muted', text: 'Every copy', title: BANK_STOCK_FAMILY_TITLE };
   const tone = BANK_STOCK_VERDICT_TONES[r.verdict] ?? 'muted';
   const at = r.change === 'gone' ? 'At its last price: ' : '';
   const extras = r.hasExtras ? ' Judged as a clean copy: this one has extras.' : '';
@@ -690,7 +808,7 @@ export function bankStockVerdictPill(
       return {
         tone,
         text: `Flip ${profit}${pct ? ` (${pct})` : ''}`,
-        title: `${at}buy it on scrap.tf for ${cost}, sell it to the backpack.tf buyer: ${profit} after friction${pct ? `, a ${pct} margin` : ''}.${finite(r.maxCostScrap) ? ` Pay up to ${fmtMoney(r.maxCostScrap, keyScrap)}.` : ''}${extras}`,
+        title: `${at}buy it on scrap.tf for ${cost}, sell it to the backpack.tf buyer: ${profit} after ${exitCostsWords(reservePct)}${pct ?`, a ${pct} margin` : ''}.${finite(r.maxCostScrap) ? ` Pay up to ${fmtMoney(r.maxCostScrap, keyScrap)}.` : ''}${extras}`,
       };
     }
     case 'over': {
@@ -750,6 +868,18 @@ export function bankStockFilterEmpty(filter: BankStockFilter): { title: string; 
       return { title: 'Nothing listed for over a day', body: 'No item on sale has been in every one of your saves of this page for a day or more. Saving the page regularly fills in its history.' };
     case 'dropped':
       return { title: 'Nothing dropped since listed', body: 'No item on sale is cheaper now than when your saves first listed it in its current run.' };
+    // 0.8 (T6): from the row's buy timing (reprice-downs in its current run).
+    case 'dropping':
+      return {
+        title: 'Nothing dropping',
+        body: 'No item on sale has been repriced down twice or more in its current run of your saves. Saving the page regularly fills in its history.',
+      };
+    // 0.8 (G1): from the watches joined to the rows.
+    case 'watched':
+      return {
+        title: 'Nothing you watch is on sale here',
+        body: "None of your watched items is on sale in your newest save of this page. Watch one from its menu or its details panel; you'll be told when a page you read shows it at your price.",
+      };
     case 'all':
       return {
         title: 'Nothing on sale in your newest save',
@@ -848,4 +978,31 @@ export function createBankStockLoader(
       disposed = true;
     },
   };
+}
+
+// ---------------------------------------------------------------------------
+// 0.8 (G1): a watched row's tag in the Item cell
+// ---------------------------------------------------------------------------
+
+/**
+ * The Item cell's watch tag (BankStockRow.watch): null without a watch and for a gone row; 'At target' (good) when the
+ * row's cost is at or under the price target, 'Profit target' (good) when its profit meets the profit target, "<n>
+ * over" (warn) when it costs more than the price target, else 'Watched' (muted). The title names the watch's scope,
+ * its targets (valued at the row's key price) and the state; nothing is bought for the user (R4).
+ */
+export function bankStockWatchTag(r: Pick<BankStockRow, 'watch' | 'change'>, keyScrap: Scrap | null): { text: string; title: string; tone: Tone } | null {
+  const w = r.watch;
+  if (!w || r.change === 'gone') return null;
+  const targets: string[] = [];
+  if (w.maxCostScrap !== null) targets.push(`≤ ${fmtMoney(w.maxCostScrap, keyScrap)}`);
+  if (w.minProfitScrap !== null) targets.push(`profit ≥ ${fmtMoney(w.minProfitScrap, keyScrap)}`);
+  if (w.onRestock) targets.push('back on sale');
+  const head = `On your watch list (${w.anyCopy ? 'any copy' : 'this copy'}): ${targets.join(' · ')}.`;
+  const over = w.overTargetScrap;
+  let tag: { text: string; tone: Tone; state: string };
+  if (w.met === 'price') tag = { text: 'At target', tone: 'good', state: 'Its price is at or under your target.' };
+  else if (w.met === 'profit') tag = { text: 'Profit target', tone: 'good', state: "It makes at least your profit target at today's buy orders." };
+  else if (over !== null && finite(over) && over > 0) tag = { text: `${fmtMoney(over, keyScrap)} over`, tone: 'warn', state: `It costs ${fmtMoney(over, keyScrap)} more than your price target.` };
+  else tag = { text: 'Watched', tone: 'muted', state: w.maxCostScrap === null && w.minProfitScrap === null ? 'You asked to be told when it is back on sale.' : 'It meets neither target now.' };
+  return { text: tag.text, title: `${head} ${tag.state} Told when a page you read or save shows it; nothing is bought for you.`, tone: tag.tone };
 }

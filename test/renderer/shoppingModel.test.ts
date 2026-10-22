@@ -27,6 +27,7 @@ import {
   thresholdSummary,
   yourPriceAge,
   yourPriceStale,
+  yourPriceSuspect,
   yourPriceTitle,
   yourPriceTone,
 } from '../../src/renderer/shoppingModel';
@@ -220,6 +221,20 @@ describe('cells', () => {
     expect(countUnderCeiling([row({ sku: 'a', underCeiling: true }), row({ sku: 'b', underCeiling: false }), row({ sku: 'c' })])).toBe(1);
   });
 
+  it('0.7.4 (F22, F70): does not count or colour a suspect price as at or under the ceiling, and says why', () => {
+    const suspect = row({ sku: 'a', underCeiling: true, knownCostScrap: 91, knownSuspect: true });
+    const plain = row({ sku: 'b', underCeiling: true, knownCostScrap: 91 });
+    expect(yourPriceSuspect(suspect)).toBe(true);
+    expect(yourPriceSuspect(plain)).toBe(false);
+    expect(countUnderCeiling([suspect, plain])).toBe(1);
+    expect(yourPriceTone(suspect)).toBeNull();
+    expect(yourPriceTone({ underCeiling: false, knownSuspect: true })).toBe('bad');
+    const t = yourPriceTitle({ ...suspect, knownMaxCostScrap: 100, maxCostScrap: 100 }, KEY);
+    expect(t).toContain('1.00 ref under the ceiling');
+    expect(t).toContain("probably another copy's price and is not counted as at or under the ceiling");
+    expect(yourPriceTitle({ ...plain, knownMaxCostScrap: 100, maxCostScrap: 100 }, KEY)).not.toContain('another copy');
+  });
+
   it('counts only fresh prices as at or under the ceiling, and says how old each is (ACT-9)', () => {
     const NOW = Date.UTC(2026, 9, 15, 12, 0, 0);
     const H = 3_600_000;
@@ -269,9 +284,11 @@ describe('cells', () => {
   it('describes the buyer behind the revenue', () => {
     expect(buyerKindLabel({ isBot: true })).toBe('Bot');
     expect(buyerKindLabel({ isBot: false })).toBe('Human');
-    const bot = sellsForTitle(row({ sku: 'a', revenueScrap: 18, buyerCount: 1 }), KEY);
+    // 0.7.4: presence as of `now` (the fixture order's event is at 0); past 2 h it says when it was last seen.
+    const bot = sellsForTitle(row({ sku: 'a', revenueScrap: 18, buyerCount: 1 }), KEY, 60_000);
     expect(bot).toBe('Sells for 2.00 ref to BuyBot (bot, online). 1 buyer with eligible orders.');
-    const human = sellsForTitle(row({ sku: 'a', revenueOrder: order({ isBot: false, online: null, userName: null }), buyerCount: 4 }), KEY);
+    expect(sellsForTitle(row({ sku: 'a', revenueScrap: 18, buyerCount: 1 }), KEY, 3 * 24 * 3_600_000)).toBe('Sells for 2.00 ref to BuyBot (bot, last seen 3 d ago). 1 buyer with eligible orders.');
+    const human = sellsForTitle(row({ sku: 'a', revenueOrder: order({ isBot: false, online: null, userName: null }), buyerCount: 4 }), KEY, 60_000);
     expect(human).toContain('to 76561198000000001 (human, online status unknown)');
     expect(human).toContain('4 buyers');
     expect(sellsForTitle(row({ sku: 'a', revenueOrder: null }), KEY)).toMatch(/^Sells for [\d.]+ ref\. 3 buyers/);
@@ -291,5 +308,19 @@ describe('cells', () => {
     expect(thresholdSummary({ minProfitScrap: 0, minProfitPctOfCost: 0, minMargin: 0, frictionScrap: 0, useOrder: 'conservative' }, KEY)).toBe(
       'any profit, against the conservative buy order',
     );
+  });
+
+  it('0.8 (PC-1): names the price-move reserve beside friction when one is set', () => {
+    const p = { minProfitScrap: 18, minProfitPctOfCost: 0, minMargin: 0.125, useOrder: 'instant' as const, exitReservePct: 0.05 };
+    expect(thresholdSummary({ ...p, frictionScrap: 2 }, KEY)).toBe(
+      'a profit of at least 2.00 ref, a margin of at least 12.5%, after 0.22 ref friction and a 5% price-move reserve, against the instant buy order',
+    );
+    expect(thresholdSummary({ ...p, frictionScrap: 0 }, KEY)).toBe('a profit of at least 2.00 ref, a margin of at least 12.5%, after a 5% price-move reserve, against the instant buy order');
+    expect(thresholdSummary({ ...p, frictionScrap: 0, exitReservePct: 0.125 }, KEY)).toContain('after a 12.5% price-move reserve');
+    // At 0 (the default) or out of range, the 0.7.4 text.
+    expect(thresholdSummary({ ...p, frictionScrap: 2, exitReservePct: 0 }, KEY)).toBe(
+      'a profit of at least 2.00 ref, a margin of at least 12.5%, after 0.22 ref friction, against the instant buy order',
+    );
+    expect(thresholdSummary({ ...p, frictionScrap: 0, exitReservePct: 0.6 }, KEY)).toBe('a profit of at least 2.00 ref, a margin of at least 12.5%, against the instant buy order');
   });
 });

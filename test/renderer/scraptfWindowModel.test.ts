@@ -310,6 +310,19 @@ describe('the toolbar', () => {
     expect(readStatusView(null, T0, false).title).toMatch(/^Reading on load is off: press Read page now/);
     expect(readStatusText(null, T0)).toBe('Not read yet');
   });
+
+  it('0.7.4 (F53): says a bank page left before it settled stored prices but no stock save', () => {
+    const read: ScraptfWindowRead = { at: T0 - 3_000, path: '/buy/hats', items: 48, bank: 'hats', newFlips: 0, warning: null, stored: 48, stockSave: 'unsettled' };
+    const v = readStatusView(read, T0);
+    expect(v.main).toBe('Read 48 items from /buy/hats · no stock save');
+    expect(v.title).toContain('Prices stored, but no stock save: the page was left before it finished loading');
+    expect(v.title).toContain('press Read page now.');
+    // A whole save, an older service (absent) and a page with no bank say nothing of it.
+    for (const r of [{ ...read, stockSave: 'written' as const }, { ...read, stockSave: undefined }, { ...read, bank: null }]) {
+      expect(readStatusView(r, T0).main).toBe('Read 48 items from /buy/hats');
+      expect(readStatusView(r, T0).title).not.toContain('no stock save');
+    }
+  });
 });
 
 describe('the toolbar, 0.7.1 (UX-3, ACT-5, F21-2, F21-3, F21-4, F21-10)', () => {
@@ -334,6 +347,24 @@ describe('the toolbar, 0.7.1 (UX-3, ACT-5, F21-2, F21-3, F21-4, F21-10)', () => 
     const warned = readStatusView({ ...full, warning: 'no-sku: 3 48' }, T0);
     expect(warned.main).toBe('Read 48 items from /buy/hats · stored 46 · 10 flips (2 new) · best Team Captain +0.44 ref · 3 of 48 items not recognised');
     expect(warned).toMatchObject({ tone: 'warn', tail: ' · 3 of 48 items not recognised' });
+  });
+
+  it('0.8 (G2): says how many flips this read dropped under Pay up to, and nothing new without them', () => {
+    const full: ScraptfWindowRead = { ...read, stored: 46, pageFlips: 10, droppedFlips: 1 };
+    expect(readStatusView(full, T0).lead).toBe('Read 48 items from /buy/hats · stored 46 · 10 flips (2 new, 1 cheaper)');
+    expect(readStatusView(full, T0).title).toContain('10 flips on sale on this page now, 2 of them new since your previous save. 1 of them dropped under your Pay up to on this read.');
+    expect(readStatusView({ ...full, newFlips: 0 }, T0).lead).toBe('Read 48 items from /buy/hats · stored 46 · 10 flips (1 cheaper)');
+    // The page counts at least the flips the read told of.
+    expect(readStatusView({ ...full, newFlips: 0, pageFlips: 0, droppedFlips: 3 }, T0)).toMatchObject({ lead: 'Read 48 items from /buy/hats · stored 46 · 3 flips (3 cheaper)', tone: 'good' });
+    // An older main (no pageFlips) still names them.
+    expect(readStatusView({ ...read, droppedFlips: 1 }, T0).lead).toBe('Read 48 items from /buy/hats · 2 new, 1 cheaper flips');
+    expect(readStatusView({ ...read, newFlips: 0, droppedFlips: 1 }, T0).lead).toBe('Read 48 items from /buy/hats · 1 cheaper flip');
+    // Zero, absent or junk: the words of 0.7.4.
+    for (const droppedFlips of [0, undefined, Number.NaN, -2]) {
+      const r = { ...read, stored: 46, pageFlips: 10, ...(droppedFlips !== undefined ? { droppedFlips } : {}) };
+      expect(readStatusView(r, T0).lead).toBe('Read 48 items from /buy/hats · stored 46 · 10 flips (2 new)');
+      expect(readStatusView(r, T0).title).not.toContain('dropped under');
+    }
   });
 
   it('offers Show flips once a read found flips on a bank page, always on the Flips chip', () => {

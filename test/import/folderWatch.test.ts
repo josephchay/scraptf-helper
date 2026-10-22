@@ -199,7 +199,9 @@ describe('createFolderWatcher', () => {
   it('uses the injected clock for the start time', async () => {
     await writeFile(join(dir, 'hats.html'), PAGE);
     const fw = fakeWatch();
-    const { delivered } = start({ factory: fw.factory, now: () => 0 });
+    // A minute behind the real clock: the start time (since) is then before the file's mtime. 0.7.4 (F82): not
+    // the epoch, as a file modified after the injected clock's now (by more than the slack) is in the future.
+    const { delivered } = start({ factory: fw.factory, now: () => Date.now() - 60_000 });
     await vi.waitFor(() => expect(delivered).toHaveLength(1), { timeout: 3000, interval: 20 });
   });
 

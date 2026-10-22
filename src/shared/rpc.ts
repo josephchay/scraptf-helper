@@ -20,6 +20,7 @@ import type {
   EventQuery,
   EventsExportQuery,
   HealthReport,
+  HoldingDetail,
   HoldingsQuery,
   HoldingsResult,
   ImportBatch,
@@ -30,6 +31,7 @@ import type {
   ItemSuggestion,
   JournalEntry,
   JournalInput,
+  JournalPatch,
   JournalSummary,
   LinkSpec,
   MarketListResult,
@@ -48,6 +50,9 @@ import type {
   ScraptfItemHistory,
   ScraptfListStatus,
   ScraptfReadOutcome,
+  ScraptfWatch,
+  ScraptfWatchInput,
+  ScraptfWatchView,
   ScraptfWindowNav,
   ScraptfWindowRead,
   ScraptfWindowState,
@@ -58,6 +63,7 @@ import type {
   ShoppingQuery,
   UnixMs,
 } from './types';
+import type { ScraptfWatchRestore } from './watches';
 
 export interface AppInfo {
   version: string;
@@ -132,6 +138,12 @@ export interface RpcContract {
    */
   'holdings.list': { params: HoldingsQuery; result: HoldingsResult };
   /**
+   * 0.8 (H7): one SKU's holding for the item drawer: its Holdings row (advice included), open lots, closed trades
+   * and typical hold from the journal, and the exit runs recorded while the live feed was up. Local reads only;
+   * nothing is fetched.
+   */
+  'holdings.detail': { params: { sku: string }; result: HoldingDetail };
+  /**
    * `history: false` skips the PriceDB history fetch (local only, fast); default true.
    * `target: 'plain'` classifies the book against a clean copy of `sku` (the row quick
    * entry saves) instead of the newest stored copy's extras (the drawer, default).
@@ -164,6 +176,8 @@ export interface RpcContract {
   'journal.list': { params: { limit?: number }; result: JournalEntry[] };
   'journal.add': { params: JournalInput; result: JournalEntry };
   'journal.delete': { params: { id: number }; result: { ok: true } };
+  /** 0.8 (J6): one row's venue, note and fee (JournalPatch); side, item, price and time stay. Pushes 'journal.changed'. */
+  'journal.update': { params: { id: number } & JournalPatch; result: JournalEntry };
   'journal.summary': { params: void; result: JournalSummary };
   'journal.exportCsv': { params: void; result: { csv: string; suggestedName: string } };
   /**
@@ -216,6 +230,21 @@ export interface RpcContract {
    * `beforeId`; `limit` 1..500 (default 100). Local only (R1).
    */
   'scraptf.changes': { params: ScraptfChangesQuery; result: ScraptfChangeEvent[] };
+  /**
+   * 0.8 (G1): the user's scrap.tf watches by name, each with the cheapest copy it covers on sale on the newest saves of
+   * the banks' pages, valued now (ScraptfWatchView.now); `sku` (any SKU of the item) keeps its base's only. From memory
+   * and the watches table; nothing is fetched (R1).
+   */
+  'watches.list': { params: { sku?: string } | void; result: ScraptfWatchView[] };
+  /** 0.8 (G1): adds or updates one watch (at most WATCHES_MAX); pushes 'watches.changed'. Nothing is fetched or bought. */
+  'watches.upsert': { params: ScraptfWatchInput; result: ScraptfWatch };
+  /** 0.8 (G1): pushes 'watches.changed'. */
+  'watches.delete': { params: { id: number }; result: { ok: true } };
+  /**
+   * 0.8 (G1): Undo of a removal: the removed watch back with its id and times (watchRestoreOf), so its notification
+   * dedupe still holds and a same-price read tells nothing again. Pushes 'watches.changed'. Local only.
+   */
+  'watches.restore': { params: ScraptfWatchRestore; result: ScraptfWatch };
   /**
    * Live check (F16): one piece of text the user copied or typed (at most CHECK_MAX_CHARS, zod), checked
    * as a TF2 item against the local order book (item.detail {history:false} semantics) and the saved
@@ -350,6 +379,7 @@ export const SERVICE_METHODS: readonly RpcMethod[] = [
   'shopping.list',
   'market.list',
   'holdings.list',
+  'holdings.detail',
   'item.detail',
   'buyer.check',
   'item.refresh',
@@ -372,6 +402,7 @@ export const SERVICE_METHODS: readonly RpcMethod[] = [
   'journal.list',
   'journal.add',
   'journal.delete',
+  'journal.update',
   'journal.summary',
   'journal.exportCsv',
   'import.html',
@@ -382,6 +413,10 @@ export const SERVICE_METHODS: readonly RpcMethod[] = [
   'scraptf.bankStock',
   'scraptf.itemHistory',
   'scraptf.changes',
+  'watches.list',
+  'watches.upsert',
+  'watches.delete',
+  'watches.restore',
   'check.text',
   'check.recent',
   'health.get',
@@ -399,7 +434,7 @@ export interface PushContract {
   'import.done': ImportResult;
   /** The price sheet (scrap.tf prices or rules) changed, from any window or an import. */
   'prices.changed': { at: number };
-  /** The trade journal changed ('journal.add', 'journal.delete'): the Journal and Holdings pages refresh. */
+  /** The trade journal changed ('journal.add', 'journal.update', 'journal.delete'): the Journal and Holdings pages refresh. */
   'journal.changed': { at: number };
   /** F14: rows of the saved scrap.tf/items list were written (an import) or purged; `items` is the new row count. */
   'scraptf.listChanged': { at: number; items: number };
@@ -413,13 +448,18 @@ export interface PushContract {
    * and an open drawer's history refetch on it. Not sent for an import that wrote none.
    */
   'scraptf.changed': { at: UnixMs; count: number };
+  /** 0.8 (G1): a watch was added, changed or removed (the drawer, the Watches card and the Bank stock page refetch). */
+  'watches.changed': { at: UnixMs };
   /**
    * Service asks main to show a desktop notification. `sku` opens that item on a click. F20: `openUrl`
    * (re-save reminders) is a static scrap.tf bank page: main opens it in the user's browser on a click
    * only if isAllowedExternalUrl accepts it and it is one of the SCRAPTF_BANKS URLs, checked again at
-   * click time; anything else is ignored (the click then just shows the dashboard).
+   * click time; anything else is ignored (the click then just shows the dashboard). 0.8 (G5): `openBankStock`
+   * (a summary of a read's toasts) shows that bank's stock page on that chip in the dashboard; main checks it
+   * (a known bank and chip) and a bad one only costs the link. A click tries openUrl, then openBankStock, then
+   * sku, then the dashboard.
    */
-  'notify': { title: string; body: string; sku: string | null; openUrl?: string };
+  'notify': { title: string; body: string; sku: string | null; openUrl?: string; openBankStock?: BankStockOpen };
   'settings.changed': Settings;
   /** Main asks the dashboard to open an item (notification click, quick entry). */
   'ui.openItem': { sku: string };
@@ -467,6 +507,7 @@ export const PUSH_EVENTS: readonly PushEvent[] = [
   'scraptf.listChanged',
   'scraptf.banksChanged',
   'scraptf.changed',
+  'watches.changed',
   'check.done',
   'notify',
   'settings.changed',

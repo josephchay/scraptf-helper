@@ -590,23 +590,30 @@ const GroupRow = memo(function GroupRow({
         <span className="count-badge" title={g.rows.length < g.count ? `${g.rows.length} loaded of ${g.count}` : undefined}>
           {g.count}
         </span>
-        <button
-          type="button"
-          className="link-btn shop-bank"
-          // 0.7.3: out of the Tab order (keyboard users press o), and a click leaves the focus on the
-          // grid, so j/k, Enter and o go on working.
-          tabIndex={-1}
-          title={`Open ${page} in your browser (o). ${SCRAPTF_BOUNDARY_SHORT}`}
-          onMouseDown={(e) => e.preventDefault()}
-          onClick={(e) => {
-            e.stopPropagation();
-            onSelect(row.id);
-            onOpenBank(g.bankPageUrl);
-          }}
-        >
-          {page}
-          <Icon name="external" size={12} />
-        </button>
+        {g.mixedBanks ? (
+          // 0.7.4 (F36): e.g. strange cosmetics are sold on /buy/hats, strange weapons on /buy/stranges.
+          <span className="muted small shop-bank" title="These items are sold on more than one scrap.tf page; each row opens its own (o on a row).">
+            on several pages
+          </span>
+        ) : (
+          <button
+            type="button"
+            className="link-btn shop-bank"
+            // 0.7.3: out of the Tab order (keyboard users press o), and a click leaves the focus on the
+            // grid, so j/k, Enter and o go on working.
+            tabIndex={-1}
+            title={`Open ${page} in your browser (o). ${SCRAPTF_BOUNDARY_SHORT}`}
+            onMouseDown={(e) => e.preventDefault()}
+            onClick={(e) => {
+              e.stopPropagation();
+              onSelect(row.id);
+              onOpenBank(g.bankPageUrl);
+            }}
+          >
+            {page}
+            <Icon name="external" size={12} />
+          </button>
+        )}
       </div>
     </div>
   );
@@ -699,7 +706,7 @@ const ItemRow = memo(function ItemRow({
         <Money scrap={r.revenueScrap} keyScrap={keyScrap} />
         {order ? (
           <span className="buyer-type">
-            <OnlineDot online={order.online} />
+            <OnlineDot online={order.online} seenAt={order.lastEventAt} />
             <Icon name={order.isBot ? 'bolt' : 'user'} size={12} /> {buyerKindLabel(order)}
           </span>
         ) : null}

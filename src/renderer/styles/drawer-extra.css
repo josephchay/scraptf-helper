@@ -164,6 +164,74 @@
   }
 }
 
+/* ---------- 0.8 (G1): scrap.tf watch section and form ---------- */
+
+.watch-lines {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0 0 10px;
+}
+
+.watch-line {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+}
+
+.watch-line.paused .watch-line-text {
+  opacity: 0.7;
+}
+
+.watch-line-text {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.watch-line-actions {
+  display: inline-flex;
+  flex-shrink: 0;
+  gap: 4px;
+}
+
+.watch-paused {
+  margin-left: 6px;
+  height: 17px;
+  padding: 0 6px;
+  font-size: 10.5px;
+}
+
+.watch-form {
+  display: grid;
+  grid-template-columns: minmax(0, 1.6fr) minmax(0, 1fr);
+  align-items: start;
+  gap: 10px 12px;
+}
+
+.watch-form > .field:first-child,
+.watch-form > .toggle-row,
+.watch-form > .field-error,
+.watch-form > .form-actions,
+.watch-form > .watch-note {
+  grid-column: 1 / -1;
+}
+
+.watch-form > .form-actions {
+  gap: 10px;
+}
+
+.watch-note {
+  margin: 0;
+}
+
+@media (max-width: 560px) {
+  .watch-form {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
 /* ---------- order book buyer actions ---------- */
 
 .icon-btn.buyer-menu-btn {

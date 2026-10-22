@@ -16,6 +16,7 @@
 
 import { bankStockPagePath } from '../shared/bankStock';
 import { SCRAPTF_BOUNDARY_SHORT, scraptfDataSourcesText } from '../shared/boundaryText';
+import { buyerPresenceText } from '../shared/buyerSeen';
 import { parsePrice } from '../shared/currency';
 import { SCRAPTF_BANKS, bankForCategory, scraptfBankInfo, type ScraptfBankInfo } from '../shared/links';
 import { MARKET_DEFAULT_LIMIT, MARKET_MAX_LIMIT, MARKET_MAX_SEARCH_CHARS, MARKET_SORTS } from '../shared/market';
@@ -39,6 +40,7 @@ import { CATEGORIES, MARKET_SOURCES, MARKET_VERDICTS } from '../shared/types';
 import { CONN_STATE_LABELS, errorMessage, fmtAge, fmtAgo, fmtCountdown, fmtDateTime, fmtInt, fmtMoney, fmtSignedMoney, type Tone } from './format';
 import { SAVE_MODE } from './importModel';
 import { scraptfSearchName } from './itemMenuModel';
+import { exitCostsWords } from './oppModel';
 
 // ---------------------------------------------------------------------------
 // Filters and sort
@@ -673,11 +675,13 @@ export interface VerdictPill {
 /**
  * The Verdict cell: "Flip +1.33 ref", "Over by 2 ref", "Rule flip", "Not checked", "No buyers". 0.7.3: an Over
  * or Not checked row whose buyers give no revenue says why there is no Pay up to (noRevenueReason, as the Pay
- * up to hover), not that no price clears your thresholds.
+ * up to hover), not that no price clears your thresholds. 0.8 (PC-1): a Flip's hover names the price-move reserve only
+ * when `reservePct` (settings.profit.exitReservePct) applies one (exitCostsWords); absent or 0 is the 0.7.4 text.
  */
 export function verdictPill(
   r: Pick<MarketRow, 'verdict' | 'profitScrap' | 'knownCostScrap' | 'maxCostScrap' | 'ruleCostScrap' | 'revenueScrap' | 'buyerCount' | 'flags'>,
   keyScrap: Scrap | null,
+  reservePct?: number | null,
 ): VerdictPill {
   const tone = VERDICT_TONES[r.verdict];
   const ceiling = r.maxCostScrap;
@@ -695,7 +699,7 @@ export function verdictPill(
         text: r.profitScrap !== null ? `Flip ${fmtSignedMoney(r.profitScrap, keyScrap)}` : 'Flip',
         title:
           `Your scrap.tf price ${fmtMoney(r.knownCostScrap, keyScrap)} is at or under Pay up to ${fmtMoney(ceiling, keyScrap)}.` +
-          (r.profitScrap !== null ? ` Profit ${fmtSignedMoney(r.profitScrap, keyScrap)} after friction.` : ''),
+          (r.profitScrap !== null ? ` Profit ${fmtSignedMoney(r.profitScrap, keyScrap)} after ${exitCostsWords(reservePct)}.` : ''),
       };
     case 'over':
       if (ceiling !== null && r.knownCostScrap !== null) {
@@ -806,16 +810,22 @@ function noRevenueReason(r: Pick<MarketRow, 'revenueScrap' | 'buyerCount' | 'fla
   return r.flags.includes('all-outliers') ? 'all-outliers' : 'no-bot';
 }
 
-/** Tooltip for "Sells for": the buyer, the three prices and how many buyers there are. */
-export function marketSellsForTitle(r: Pick<MarketRow, 'revenueScrap' | 'bestScrap' | 'consScrap' | 'instantScrap' | 'revenueOrder' | 'buyerCount' | 'flags'>, keyScrap: Scrap | null): string {
+/**
+ * Tooltip for "Sells for": the buyer, the three prices and how many buyers there are. 0.7.4 (F23): the
+ * buyer's online flag only while the order was seen in the last 2 h, else "last seen 4 d ago".
+ */
+export function marketSellsForTitle(
+  r: Pick<MarketRow, 'revenueScrap' | 'bestScrap' | 'consScrap' | 'instantScrap' | 'revenueOrder' | 'buyerCount' | 'flags'>,
+  keyScrap: Scrap | null,
+  now: UnixMs = Date.now(),
+): string {
   const buyers = `${fmtInt(r.buyerCount)} ${r.buyerCount === 1 ? 'buyer' : 'buyers'} with eligible orders`;
   const why = noRevenueReason(r);
   if (why === 'none') return 'No eligible backpack.tf buy orders in the live book.';
   if (why === 'all-outliers') return 'Every eligible order looks unrealistic, so no revenue is assumed.';
   if (why === 'no-bot') return `${buyers}, but no realistic bot order, and Revenue used for profit is Instant (bot orders only), so no revenue is assumed.`;
   const o = r.revenueOrder;
-  const online = o ? (o.online === true ? 'online' : o.online === false ? 'offline' : 'online status unknown') : null;
-  const who = o ? ` to ${o.userName || o.steamid} (${o.isBot ? 'bot' : 'human'}, ${online})` : '';
+  const who = o ? ` to ${o.userName || o.steamid} (${o.isBot ? 'bot' : 'human'}, ${buyerPresenceText(o, now)})` : '';
   const best = `${fmtMoney(r.bestScrap, keyScrap)}${r.flags.includes('outlier-best') ? ' (outlier)' : ''}`;
   return `Sells for ${fmtMoney(r.revenueScrap, keyScrap)}${who}. Conservative ${fmtMoney(r.consScrap, keyScrap)}, best ${best}, instant ${fmtMoney(r.instantScrap, keyScrap)}. ${buyers}.`;
 }

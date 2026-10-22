@@ -1,17 +1,20 @@
 // Confidence score 0–100 (design brief §5.7). Every adjustment adds a reason of
 // the form "<signed delta> <plain English>", which the dashboard renders.
 
+import { ORDER_CONFIRMED_MS, orderSeenRecently } from '../../shared/buyerSeen';
+import { costSanity, costSanityReason } from '../../shared/ceiling';
+import { formatScrap } from '../../shared/currency';
 import type { ConfidenceLevel, InputKind, ProfitSettings, ReferencePrices, Scrap, UnixMs } from '../../shared/types';
 import { UNVERIFIED_AFTER_MS } from './matcher';
-import { hasReferenceValue, usableReferences } from './pricing';
+import { hasReferenceValue, isUnverifiedOrder, usableReferences } from './pricing';
 import type { ValuedOrderLike } from './pricing';
 import { LOW_CAP, MEDIUM_CAP, confidenceLevel } from './tiers';
 
 export const BASE_SCORE = 50;
 /** Bot considered active when its userAgent pulsed within this window. */
 export const BOT_PULSE_MS = 30 * 60 * 1000;
-/** Order counts as recently confirmed (event or snapshot) within this window. */
-export const CONFIRMED_MS = 2 * 60 * 60 * 1000;
+/** Order counts as recently confirmed (event or snapshot) within this window (shared with the renderer's online lines). */
+export const CONFIRMED_MS = ORDER_CONFIRMED_MS;
 /** scrap.tf price counts as fresh within this window. */
 export const FRESH_INPUT_MS = 15 * 60 * 1000;
 /** With this many eligible orders the median outlier rule can sanity-check the price, so the suspect-margin guard stays off. */
@@ -35,6 +38,16 @@ export interface ConfidenceInput {
    * suspect-margin guard; omitted or null skips the guard.
    */
   margin?: number | null;
+  /**
+   * 0.7.4 (F22, F70): the scrap.tf cost in scrap, for the cost checks against PriceDB (costSanity);
+   * omitted or null skips them (the Live market's buy side has no cost).
+   */
+  costScrap?: Scrap | null;
+  /**
+   * 0.7.4 (F70): the item's craftability twin (5040;6 for 5040;6;uncraftable and the other way round):
+   * its craftability and its references, read only when the cost is far under this item's PriceDB band.
+   */
+  twin?: { craftable: boolean; references(): ReferencePrices | null } | null;
   keyScrap: Scrap;
   now: UnixMs;
   profit: Pick<ProfitSettings, 'inputStaleMs' | 'unusualRiskKeys' | 'referenceMaxAgeMs' | 'suspectMargin'>;
@@ -83,7 +96,8 @@ export function scoreConfidence(input: ConfidenceInput): ConfidenceResult {
     const l = order.listing;
     const pulse = typeof l.uaLastPulse === 'number' && Number.isFinite(l.uaLastPulse) ? l.uaLastPulse * 1000 : null;
     if (l.isBot && pulse !== null && now - pulse <= BOT_PULSE_MS) add(20, 'Buyer is a bot that was active in the last 30 min');
-    if (l.userOnline === true) add(5, 'Buyer is online');
+    // 0.7.4 (F23): the online flag is as old as the order's last event, so it counts only while that is recent.
+    if (l.userOnline === true && orderSeenRecently(l.lastEventAt, now)) add(5, 'Buyer is online');
 
     const age = now - l.lastEventAt;
     if (age <= CONFIRMED_MS) add(10, 'Order confirmed by the live feed or a snapshot in the last 2 h');
@@ -93,12 +107,19 @@ export function scoreConfidence(input: ConfidenceInput): ConfidenceResult {
       unverified = true;
     }
 
+    // 0.7.4 (F29): only verified orders count as buyers near this price (a neighbour nobody has confirmed
+    // for a day is as doubtful as the order), the order itself always. F19: never around a zero price
+    // ("0.05 ref" orders round to 0 scrap), and zero-valued orders are no buyers near anything.
     const v = order.valueScrap;
-    const near = new Set<string>();
-    for (const o of input.eligible) {
-      if (o.valueScrap >= v * 0.9 && o.valueScrap <= v * 1.1) near.add(o.listing.steamid || o.listing.id);
+    const doubtful = (o: ValuedOrderLike): boolean => isUnverifiedOrder(o) || !(now - o.listing.lastEventAt <= UNVERIFIED_AFTER_MS);
+    if (v > 0) {
+      const near = new Set<string>();
+      for (const o of input.eligible) {
+        if (!(o.valueScrap > 0) || (o.listing.id !== l.id && doubtful(o))) continue;
+        if (o.valueScrap >= v * 0.9 && o.valueScrap <= v * 1.1) near.add(o.listing.steamid || o.listing.id);
+      }
+      if (near.size >= 2) add(10, `${near.size} buyers within 10% of this price`);
     }
-    if (near.size >= 2) add(10, `${near.size} buyers within 10% of this price`);
 
     const pdbBuy = positive(refs.pricedb?.buyScrap);
     const comm = positive(refs.community?.valueScrap);
@@ -165,6 +186,24 @@ export function scoreConfidence(input: ConfidenceInput): ConfidenceResult {
     flag('suspect-margin');
     score = Math.min(score, LOW_CAP);
     reasons.push(`Margin over ${Math.round(suspectMarginOf(input.profit.suspectMargin) * 100)}% with no reference and few buyers. Check the variant and units`);
+  }
+
+  // 0.7.4 (F22, F70): the references above check the buy order, nothing checked the cost. scrap.tf charging
+  // well under what bots pay for this exact item is implausible: usually the price of another copy
+  // (Non-Craftable, another quality or kit tier) stored under this SKU. PriceDB only, age-gated like every
+  // reference (the twin too); rule estimates are cheap by design and skipped. Kept visible at Low, never notified.
+  if (input.inputKind !== 'rule' && input.costScrap !== null && input.costScrap !== undefined) {
+    const twin = input.twin ?? null;
+    const twinPricedb = () => {
+      const t = twin?.references() ?? null;
+      return t ? usableReferences(t, input.profit.referenceMaxAgeMs, now).references.pricedb : null;
+    };
+    const sanity = costSanity(input.costScrap, refs.pricedb, twinPricedb);
+    if (sanity) {
+      flag(sanity.flag);
+      score = Math.min(score, LOW_CAP);
+      reasons.push(costSanityReason(sanity, twin?.craftable === true, (v) => formatScrap(v, input.keyScrap > 0 ? input.keyScrap : null)));
+    }
   }
   return { score, level: confidenceLevel(score), reasons, flags };
 }

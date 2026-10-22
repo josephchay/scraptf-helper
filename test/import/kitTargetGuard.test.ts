@@ -205,11 +205,12 @@ describe('killstreak kits as /buy/killstreaks shows them', () => {
 
   it('keeps the tier of the item whatever a name learned from backpack.tf says (one mis-tiered listing)', async () => {
     const deps = makeDeps(schemaRoute());
-    // The resolver reads learned names first; one listing filed the craftable kit's name under tier 1.
+    // One listing filed the craftable kit's name under tier 1. 0.7.4 (F15/F42/F72): the resolver reads the
+    // schema's exact parse first, so the mis-tiered learned row no longer decides the name.
     deps.repo.upsertBptfNames([{ sku: '6526;6;kt-1;td-205', name: 'Professional Killstreak Rocket Launcher Kit', marketName: null, lastSeen: 1 }]);
     const learned = createSchemaService(deps);
     await learned.init();
-    expect(learned.resolve('Professional Killstreak Rocket Launcher Kit')?.sku).toBe('6526;6;kt-1;td-205');
+    expect(learned.resolve('Professional Killstreak Rocket Launcher Kit')?.sku).toBe('6526;6;kt-3;td-205');
     expect(parseOne({ title: 'Professional Rocket Launcher Kit' }, learned).sku).toBe('6526;6;uncraftable;kt-3;td-205');
   });
 

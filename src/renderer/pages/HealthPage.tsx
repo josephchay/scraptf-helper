@@ -16,12 +16,14 @@ import {
   fmtInt,
   fmtRefOnly,
   fmtTime,
+  keyPriceNotes,
   visibleBudgets,
 } from '../format';
 import { useApp } from '../hooks/appContext';
 import { scraptfKeyHealthRows } from '../settingsFields';
 import { useRpcQuery } from '../hooks/useRpc';
 import { useDocumentVisible, useInterval, useNow } from '../hooks/useTimers';
+import { assetIdsLines } from '../timingModel';
 
 export function HealthPage() {
   const { toast } = useApp();
@@ -245,6 +247,8 @@ export function HealthPage() {
 
       <KeyPriceCard kp={h.keyPrice} now={now} />
 
+      <ScraptfSavesCard list={h.scraptfAssetIds} />
+
       <RequestLog rows={h.recentRequests} now={now} />
     </div>
   );
@@ -279,6 +283,26 @@ function ReenableHostButton({ host, onDone }: { host: string; onDone: () => void
   );
 }
 
+/**
+ * 0.8 (LC-5): how stable scrap.tf's item ids were between the user's looks, per saved bank (assetIdsLines): the gate
+ * behind "the same item came back" and "turned untradable". Hidden when the report has none (an older service, or
+ * no bank saved yet).
+ */
+function ScraptfSavesCard({ list }: { list: HealthReport['scraptfAssetIds'] }) {
+  const lines = assetIdsLines(list);
+  if (lines.length === 0) return null;
+  return (
+    <section className="card" aria-labelledby="h-stf">
+      <h2 id="h-stf">scrap.tf saves</h2>
+      {lines.map((l, i) => (
+        <p key={i} className={`small${l.tone === 'muted' ? ' muted' : ` tone-text-${l.tone}`}`} title={l.title}>
+          {l.text}
+        </p>
+      ))}
+    </section>
+  );
+}
+
 function KeyPriceCard({ kp, now }: { kp: KeyPriceState | null; now: number }) {
   const { settings } = useApp();
   return (
@@ -296,12 +320,16 @@ function KeyPriceCard({ kp, now }: { kp: KeyPriceState | null; now: number }) {
  */
 export function KeyPriceTable({ kp, typed, now }: { kp: KeyPriceState; typed: Settings['keyPrice'] | null; now: number }) {
   const stf = typed ? scraptfKeyHealthRows(kp.scraptfFromList, typed) : [];
+  // 0.7.4 (F71): Age is when the quote was checked; Price set is when its source last changed the price.
+  const notes = keyPriceNotes(kp, now);
   return (
     <>
       <p>
         Using <strong className="money">{fmtRefOnly(kp.valueScrap)}</strong> from {KEY_SOURCE_LABELS[kp.source] ?? kp.source}
-        {kp.observedAt ? `, ${fmtAge(now - kp.observedAt)} old` : ''}.
+        {kp.observedAt ? `, ${fmtAge(now - kp.observedAt)} old` : ''}
+        {notes.priceSet ? <span title={notes.priceSetTitle ?? undefined}>, price {notes.priceSet}</span> : null}.
         {kp.stale ? <span className="tone-text-warn"> Stale: no fresh quote in 6 h.</span> : null}
+        {notes.divergence ? <span className="tone-text-warn"> {notes.divergence}</span> : null}
       </p>
       <table className="table">
         <thead>
@@ -309,7 +337,8 @@ export function KeyPriceTable({ kp, typed, now }: { kp: KeyPriceState; typed: Se
             <th>Source</th>
             <th className="num">Buy</th>
             <th className="num">Sell</th>
-            <th className="num">Age</th>
+            <th className="num" title="When the quote was last checked">Age</th>
+            <th className="num" title="When the source last changed the price">Price set</th>
           </tr>
         </thead>
         <tbody>
@@ -319,6 +348,9 @@ export function KeyPriceTable({ kp, typed, now }: { kp: KeyPriceState; typed: Se
               <td className="num money">{fmtRefOnly(q.buyScrap)}</td>
               <td className="num money">{fmtRefOnly(q.sellScrap)}</td>
               <td className={`num${now - q.observedAt > 6 * 3_600_000 ? ' tone-text-warn' : ''}`}>{fmtAge(now - q.observedAt)}</td>
+              <td className="num" title={typeof q.priceAt === 'number' ? fmtDateTime(q.priceAt) : 'Not known for this quote'}>
+                {typeof q.priceAt === 'number' && Number.isFinite(q.priceAt) ? fmtAgo(q.priceAt, now) : '—'}
+              </td>
             </tr>
           ))}
           {stf.map((r) => (
@@ -327,6 +359,7 @@ export function KeyPriceTable({ kp, typed, now }: { kp: KeyPriceState; typed: Se
               <td className="num money">{fmtRefOnly(r.buyScrap)}</td>
               <td className="num money">{fmtRefOnly(r.sellScrap)}</td>
               <td className="num">{r.observedAt ? fmtAge(now - r.observedAt) : '—'}</td>
+              <td className="num">—</td>
             </tr>
           ))}
         </tbody>

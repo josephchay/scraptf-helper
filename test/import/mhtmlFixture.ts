@@ -83,7 +83,15 @@ export interface MhtmlSpec {
   unterminated?: boolean;
   /** Line break between lines of the MIME structure (CRLF, as Chromium writes). */
   eol?: string;
+  /**
+   * 0.7.4 (F82): the file's Date header value (Chromium writes the save time); null leaves it out. Default
+   * MHTML_FIXTURE_DATE: tests that import the file at another time give the date their mtime implies.
+   */
+  date?: string | null;
 }
+
+/** The default Date header of a built file (MhtmlSpec.date). */
+export const MHTML_FIXTURE_DATE = 'Fri, 16 Oct 2026 12:00:00 -0000';
 
 export function buildMhtml(spec: MhtmlSpec): string {
   const eol = spec.eol ?? CRLF;
@@ -92,7 +100,7 @@ export function buildMhtml(spec: MhtmlSpec): string {
     'From: <Saved by Blink>',
     ...(spec.snapshot === null ? [] : [`Snapshot-Content-Location: ${spec.snapshot ?? 'https://scrap.tf/buy/hats'}`]),
     `Subject: ${spec.subject ?? 'Hat Trading - TF2 - Scrap.TF'}`,
-    'Date: Fri, 16 Oct 2026 12:00:00 -0000',
+    ...(spec.date === null ? [] : [`Date: ${spec.date ?? MHTML_FIXTURE_DATE}`]),
     'MIME-Version: 1.0',
     spec.contentType ?? `Content-Type: multipart/related;${eol}\ttype="text/html";${eol}\tboundary="${boundary}"`,
   ];
@@ -136,13 +144,17 @@ export function resourceParts(): MhtmlPartSpec[] {
  * `html` as Chromium's "Webpage, Single File" would hold it: the page first (quoted-printable, its
  * Content-Location `location`), then resourceParts().
  */
-export function mhtmlOf(html: string, opts: { location?: string | null; encoding?: 'quoted-printable' | 'base64'; snapshot?: string | null; eol?: string } = {}): string {
+export function mhtmlOf(
+  html: string,
+  opts: { location?: string | null; encoding?: 'quoted-printable' | 'base64'; snapshot?: string | null; eol?: string; date?: string | null } = {},
+): string {
   const encoding = opts.encoding ?? 'quoted-printable';
   const body = encoding === 'base64' ? encodeBase64(Buffer.from(html, 'utf8')) : encodeQuotedPrintable(html);
   const location = opts.location === undefined ? 'https://scrap.tf/buy/hats' : opts.location;
   return buildMhtml({
     snapshot: opts.snapshot === undefined ? location : opts.snapshot,
     ...(opts.eol ? { eol: opts.eol } : {}),
+    ...(opts.date !== undefined ? { date: opts.date } : {}),
     parts: [{ type: 'text/html', encoding, id: 'frame-1@mhtml.blink', ...(location ? { location } : {}), body }, ...resourceParts()],
   });
 }

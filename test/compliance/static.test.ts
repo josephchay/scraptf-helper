@@ -661,7 +661,9 @@ describe("the Live market's scrap.tf link opens only static pages (F19, R1)", ()
 /**
  * The F20 modules: history, feed and reminders (service, shared rules, dashboard helpers and blocks: the
  * drawer's history and its step chart, the Live log's changes tab (U3, which shows each event's untrusted
- * `page` as text only), and Settings' reminder fields (U4)).
+ * `page` as text only), and Settings' reminder fields (U4)). From 0.8 also the buy timing built on the history
+ * (cycles), the holdings advice, its recorded exits and the ask side (holdings), and the watches and their notifier
+ * (alerts).
  */
 const F20_FILES = [
   'service/domain/scraptfHistory.ts',
@@ -673,6 +675,21 @@ const F20_FILES = [
   'renderer/components/Sparkline.tsx',
   'renderer/pages/LogPage.tsx',
   'renderer/settingsFields.ts',
+  'shared/scraptfTiming.ts',
+  'renderer/timingModel.ts',
+  'service/domain/holdingMarks.ts',
+  'service/domain/asks.ts',
+  'shared/holdingAdvice.ts',
+  'renderer/holdingDetailModel.ts',
+  'renderer/components/HoldingSection.tsx',
+  'shared/watches.ts',
+  'shared/bankStockNotify.ts',
+  'service/domain/watches.ts',
+  'renderer/watchesModel.ts',
+  'renderer/components/WatchForm.tsx',
+  'renderer/components/WatchSection.tsx',
+  'renderer/components/WatchDialog.tsx',
+  'renderer/components/WatchesCard.tsx',
 ];
 /**
  * U4's reminder fields sit in the whole Settings page, whose help text names http://localhost (the request
@@ -681,6 +698,22 @@ const F20_FILES = [
 const F20_OPENER_FREE_FILES = [...F20_FILES, 'renderer/pages/SettingsPage.tsx'];
 /** F20 views that do open a page (the bank stock page's "Open on scrap.tf"): only a traced static one. */
 const F20_OPENING_FILES = ['renderer/pages/BankStockPage.tsx'];
+/**
+ * The service domain and shared modules 0.7.4 shipped, frozen. A module added to either folder since then
+ * (0.8's history, holdings, alerts and journal rounds onward) is held to a scoped scan: F20_FILES, or
+ * JOURNAL_FILES for the journal's shared rules. Never add a new module here; one that needs a request
+ * belongs in service/net or a connector, not the domain.
+ */
+const DOMAIN_AND_SHARED_BEFORE_080 = [
+  ...['bankStock', 'banks', 'bookTwins', 'confidence', 'csv', 'engine', 'holdings', 'index', 'journal', 'keyprice'],
+  ...['liveCheck', 'market', 'matcher', 'pricing', 'resaveReminders', 'scraptfHistory', 'scraptfList', 'shopping', 'tiers', 'views'],
+].map((m) => `service/domain/${m}.ts`).concat(
+  [
+    ...['accelerator', 'bankStock', 'banks', 'boundaryText', 'buyerSeen', 'categories', 'ceiling', 'check', 'contact', 'copyExtras'],
+    ...['currency', 'defaults', 'holdings', 'htmlDecode', 'importCodes', 'itemUrl', 'links', 'market', 'opportunityEvents', 'priceCopy'],
+    ...['referenceAge', 'rpc', 'ruleEvidence', 'scraptfHistory', 'scraptfList', 'scraptfPaths', 'scraptfWindowPolicy', 'settingsSchema', 'sku', 'types'],
+  ].map((m) => `shared/${m}.ts`),
+);
 /**
  * Anything that opens or loads a URL, from the dashboard or main: links.open and its wrappers included,
  * and a JSX or DOM href / src (a local `const src = …` declares a name and loads nothing).
@@ -805,6 +838,17 @@ describe('scrap.tf history and re-save reminders send nothing and open only stat
     const showing = FILES.filter((f) => f.rel.startsWith('renderer/') && f.rel !== 'renderer/mock.ts' && /\b(?:ScraptfChangeEvent|ScraptfItemHistory|StepSparkline)\b/.test(f.code)).map((f) => f.rel);
     expect(showing).toEqual(expect.arrayContaining(['renderer/pages/LogPage.tsx', 'renderer/components/Sparkline.tsx']));
     expect(showing.filter((rel) => !F20_FILES.includes(rel))).toEqual([]);
+  });
+
+  it('scans every service domain and shared module added since 0.7.4 (asks.ts, the ask side, among them)', () => {
+    const added = FILES.map((f) => f.rel).filter((rel) => /^(?:service\/domain|shared)\/[^/]+\.tsx?$/.test(rel) && !DOMAIN_AND_SHARED_BEFORE_080.includes(rel));
+    // The 0.8 rounds added some, so the check has something to see.
+    expect(added).toEqual(expect.arrayContaining(['service/domain/asks.ts', 'service/domain/holdingMarks.ts', 'service/domain/watches.ts', 'shared/journal.ts']));
+    // A service domain module could import the HTTP client: only F20's scan checks imports.
+    expect(added.filter((rel) => rel.startsWith('service/') && !F20_FILES.includes(rel))).toEqual([]);
+    expect(added.filter((rel) => !F20_FILES.includes(rel) && !JOURNAL_FILES.includes(rel))).toEqual([]);
+    // The frozen list names only modules that exist (none was renamed under it).
+    expect(DOMAIN_AND_SHARED_BEFORE_080.filter((rel) => !FILES.some((f) => f.rel === rel))).toEqual([]);
   });
 
   it('lets the F20 views that open a page open only a static one, traced (not only what looks like scrap.tf)', () => {
@@ -1841,7 +1885,19 @@ describe('the window test (--smoke-window) is diagnostics-only and answers every
     // same condition.
     expect(main).toContain("if (args.smokeWindow !== null && smokeWindowRefused === null) app.commandLine.appendSwitch('host-resolver-rules', SMOKE_WINDOW_HOST_RULES);");
     expect(main).toContain('if (args.smokeWindow !== null && smokeWindowRefused === null) app.commandLine.appendSwitch(SMOKE_WINDOW_NO_PROXY);');
-    expect([...main.matchAll(/appendSwitch\(/g)]).toHaveLength(2);
+    // 0.7.4 (F54): the only other switches send Chromium's own log lines (ERROR and up) to the logs folder. They
+    // change no network behaviour; these five are every switch main adds.
+    expect(main).toContain("app.commandLine.appendSwitch('enable-logging', 'file');");
+    expect(main).toContain("app.commandLine.appendSwitch('log-file', chromiumLog.file);");
+    expect(main).toContain("app.commandLine.appendSwitch('log-level', '2');");
+    expect([...main.matchAll(/appendSwitch\(\s*([^,)]+)/g)].map((m) => m[1]!.trim())).toEqual([
+      "'host-resolver-rules'",
+      'SMOKE_WINDOW_NO_PROXY',
+      "'enable-logging'",
+      "'log-file'",
+      "'log-level'",
+    ]);
+    expect(main).not.toMatch(/appendArgument\(/);
     // A refusal exits before the instance lock and bootstrap, which run only in the branches after it.
     const REFUSED = 'if (smokeWindowRefused !== null) {';
     const refusal = main.indexOf(REFUSED);
@@ -1912,5 +1968,17 @@ describe('the window test (--smoke-window) is diagnostics-only and answers every
       // main.ts may import a type and import() the harness, never its code statically.
       'main/main.ts:1',
     ]);
+  });
+});
+
+/** 0.8: the journal modules (FIFO ledger, venues, report, Record trade dialog): the user's own records, read and written locally. */
+const JOURNAL_FILES = ['shared/journal.ts', 'shared/venues.ts', 'renderer/journalModel.ts', 'renderer/recordTradeModel.ts', 'renderer/pages/JournalPage.tsx', 'renderer/components/RecordTradeDialog.tsx'];
+describe('0.8 journal (J1-J6, write-offs)', () => {
+  const scoped = () => JOURNAL_FILES.map((rel) => FILES.find((f) => f.rel === rel)!);
+  it('opens and loads nothing and names no web address (fee hints are text from brief §5.4)', () => {
+    expect(scoped().every((f) => f !== undefined)).toBe(true);
+    expect(offenders(URL_OPENERS, () => false, scoped())).toEqual([]);
+    expect(offenders(LOADERS, () => false, scoped())).toEqual([]);
+    expect(offenders(/\b(?:https?|wss?):\/\//i, () => false, scoped())).toEqual([]);
   });
 });

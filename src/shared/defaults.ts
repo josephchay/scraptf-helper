@@ -31,6 +31,8 @@ export const DEFAULT_SETTINGS: Settings = {
     minProfitPctOfCost: 0.05,
     minMargin: 0.08,
     frictionScrap: 0,
+    // 0.8 (PC-1): no price-move reserve, so profit and Pay up to are exactly as before.
+    exitReservePct: 0,
     outlierVsMedian: 1.3,
     outlierVsRef: 1.5,
     unusualRiskKeys: 10,
@@ -58,6 +60,9 @@ export const DEFAULT_SETTINGS: Settings = {
     silent: false,
     holdings: true,
     newOnScraptf: true,
+    watches: true,
+    // 0.8 (G4): "Buy now" toasts are opt-in; 0.7.4 sent none (D25).
+    buyTiming: false,
   },
   app: { startAtLogin: false, startHidden: false, closeToTray: true, quickEntryHotkey: 'CommandOrControl+Alt+F' },
   // Live check (F16): the watcher reads the clipboard, so it stays off until the user turns it on.
@@ -66,6 +71,7 @@ export const DEFAULT_SETTINGS: Settings = {
   scraptfWindow: { enabled: false, acknowledgedAt: null, keepLoggedIn: false, readOnLoad: true, openLinksInWindow: false },
   networkPaused: false,
   blocklist: [],
+  ownSteamIds: [],
   ui: { theme: 'system', density: 'comfortable' },
 };
 

@@ -189,9 +189,12 @@ describe('main methods', () => {
     expect(SERVICE_METHODS).not.toContain('app.showBankStock');
     await expect(route(ctx(), 'app.showBankStock', { bank: 'hats', filter: 'flips' })).resolves.toEqual({ ok: true });
     await expect(route(ctx(), 'app.showBankStock', { bank: 'list', filter: 'new' })).resolves.toEqual({ ok: true });
+    // 0.8 (G5): a summary of watch toasts opens the Watched chip.
+    await expect(route(ctx(), 'app.showBankStock', { bank: 'hats', filter: 'watched' })).resolves.toEqual({ ok: true });
     expect(deps.showBankStock.mock.calls).toEqual([
       ['hats', 'flips'],
       ['list', 'new'],
+      ['hats', 'watched'],
     ]);
     const bad: unknown[] = [
       { bank: '<img src=x>', filter: 'flips' },
@@ -214,7 +217,7 @@ describe('main methods', () => {
       // Fixed text: nothing the page sent is quoted back (it reaches main's debug log).
       expect(err).not.toMatch(/img|proto|HATS|gone/);
     }
-    expect(deps.showBankStock).toHaveBeenCalledTimes(2);
+    expect(deps.showBankStock).toHaveBeenCalledTimes(3);
     expect(deps.service.callRaw).not.toHaveBeenCalled();
   });
 

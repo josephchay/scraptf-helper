@@ -88,7 +88,8 @@ describe('parseScrapTfHtml: saved /buy/hats page', () => {
     // 0.7.1 (P2): a strange skin without an effect is Strange (11), as backpack.tf keys it, whatever its class.
     ['9100000020', '15000;11;w2;pk14', 0, 120, 1],
     ['9100000021', '15063;15;w4;pk70', 0, 33, 1],
-    ['9100000022', '15000;15;u701;w1;pk1014', 3, 0, 1],
+    // 0.7.4 (F08): an unusual skin is Unusual plus the effect, as backpack.tf's buyers key it.
+    ['9100000022', '15000;5;u701;w1;pk1014', 3, 0, 1],
     ['9100000023', '940;6', 0, 20, 1],
     ['9100000024', '412;11;kt-2', 0, 40, 1],
     ['9100000025', '935;6', 0, 13, 1],

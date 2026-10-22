@@ -77,7 +77,8 @@ function seedTeamCaptain(repo: Repo, now = T0): { priceId: number; ids: string[]
     makeListing({ id: ids[1], steamid: 'S2', metalScrap: 105, lastEventAt: now - MIN }),
     makeListing({ id: ids[2], steamid: 'S3', metalScrap: 102, lastEventAt: now - MIN }),
   ]);
-  repo.upsertPricedb([{ sku: '378;6', name: 'Team Captain', buyKeys: 0, buyScrap: 100, sellKeys: 0, sellScrap: 120, time: Math.floor(now / 1000), fetchedAt: now }]);
+  // 0.7.4: PriceDB buy 92, so the 10 ref cost is not under 95% of what bots pay ('cost-below-market').
+  repo.upsertPricedb([{ sku: '378;6', name: 'Team Captain', buyKeys: 0, buyScrap: 92, sellKeys: 0, sellScrap: 120, time: Math.floor(now / 1000), fetchedAt: now }]);
   const price = repo.upsertScrapPrice({ sku: '378;6', name: 'Team Captain', costScrap: 90, source: 'user', observedAt: now - MIN });
   return { priceId: price.id, ids };
 }
@@ -123,7 +124,7 @@ describe('engine end to end', () => {
       updatedAt: T0,
     });
     expect(o!.consOrder?.listingId).toBe('tc-bot');
-    expect(o!.references.pricedb).toMatchObject({ buyScrap: 100, sellScrap: 120 });
+    expect(o!.references.pricedb).toMatchObject({ buyScrap: 92, sellScrap: 120 });
 
     const events = h.repo.listEvents({});
     expect(events.map((e) => e.kind).sort()).toEqual(['appeared', 'notified']);
@@ -909,7 +910,12 @@ describe('runMaintenance', () => {
       { ...event, at: now - SCRAPTF_EVENTS_MAX_AGE_MS - 1 },
       { ...event, at: now - 1 },
     ]);
-    expect(runMaintenance(repo, now)).toEqual({ listings: 1, events: 1, requests: 1, scraptfList: 1, bankStock: 1, scraptfEvents: 1 });
+    // 0.8 (H1): a recorded exit run past its 180 days goes, a fresh one stays.
+    const run = { baseSku: '378;6', revKeys: 0, revMetalScrap: 60, revIsBot: true, revVerified: true, bestKeys: 0, bestMetalScrap: 60, nextKeys: null, nextMetalScrap: null, buyerCount: 1, verifiedBuyerCount: 1, askKeys: null, askMetalScrap: null, askCount: null, scraptfPaysKeys: null, scraptfPaysScrap: null, keyScrap: 567 };
+    repo.insertHoldingMark({ ...run, fromAt: now - RETENTION.holdingMarksMs - 2, toAt: now - RETENTION.holdingMarksMs - 1 });
+    repo.insertHoldingMark({ ...run, fromAt: now - 2, toAt: now - 1 });
+    expect(runMaintenance(repo, now)).toEqual({ listings: 1, events: 1, requests: 1, scraptfList: 1, bankStock: 1, scraptfEvents: 1, holdingMarks: 1 });
+    expect(repo.holdingMarks('378;6', 0).map((m) => m.toAt)).toEqual([now - 1]);
     expect(repo.scraptfEvents().map((e) => e.at)).toEqual([now - 1]);
     expect(repo.getListing('new')).not.toBeNull();
     expect(repo.listEvents({})).toHaveLength(1);

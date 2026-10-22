@@ -21,6 +21,7 @@ import {
 } from '../../src/shared/holdings';
 import { valueScrap } from '../../src/shared/currency';
 import { HOLDING_STATUSES, type HoldingRow, type JournalPosition, type OrderSummary, type ScraptfListRow } from '../../src/shared/types';
+import type { NextBuyer } from '../../src/shared/types';
 
 const NOW = Date.UTC(2026, 9, 15, 12, 0, 0);
 const KEY = 568;
@@ -257,6 +258,10 @@ describe('CSV cells', () => {
       'exit',
       'exit_venue',
       'scraptf_pays',
+      // 0.8 (H6, H2, H3), appended.
+      'advice',
+      'next_buyer',
+      'lowest_ask',
     ]);
     const r = holdingRow(position('378;6', [KEY + 18, 600]), 'hats', buy(KEY + 90), P);
     const cells = holdingsCsvCells(r, KEY);
@@ -266,11 +271,20 @@ describe('CSV cells', () => {
     expect(cells[5]).toBe(new Date(r.heldSince).toISOString());
     expect(cells[7]).toBe('Metal Bank Bot (bot)');
     expect(cells[10]).toBe(r.status);
-    // Without a list the exit is the backpack.tf revenue.
-    expect(cells.slice(12)).toEqual(['1 key 10.00 ref', 'backpack.tf', '']);
+    // Without a list the exit is the backpack.tf revenue; no advice, next buyer or ask on this row.
+    expect(cells.slice(12)).toEqual(['1 key 10.00 ref', 'backpack.tf', '', '', '', '']);
     const empty = holdingsCsvCells(rowOf('5', [12], null), KEY);
     expect([empty[6], empty[7], empty[8], empty[9], empty[10]]).toEqual(['', '', '', '', 'no-buyers']);
-    expect(empty.slice(12)).toEqual(['', '', '']);
+    expect(empty.slice(12)).toEqual(['', '', '', '', '', '']);
+  });
+
+  it('0.8: write the advice kind, the next buyer and the lowest matching ask in the appended columns', () => {
+    const next: NextBuyer = { valueScrap: 55, keys: 0, metalScrap: 55, isBot: false, online: null, lastEventAt: NOW - 120_000, unverified: false };
+    const ask = { lowestScrap: KEY + 9, lowestKeys: 1, lowestMetalScrap: 9, lowestIsBot: true, lowestSeenAt: NOW, count: 2, botCount: 1, ownLeftOut: 0, mayIncludeOwn: true };
+    const base = holdingRow(position('378;6', [40]), 'hats', buy(60, { nextBuyer: next }), P, KEY, null, { ask, refs: null, snapshotAt: null });
+    const r: HoldingRow = { ...base, advice: { kind: 'sell-now', reasons: [], basis: null, refreshFirst: false } };
+    const byCol = Object.fromEntries(HOLDINGS_CSV_COLUMNS.map((c, i) => [c, holdingsCsvCells(r, KEY)[i]]));
+    expect(byCol).toMatchObject({ advice: 'sell-now', next_buyer: '6.11 ref', lowest_ask: '1 key 1.00 ref' });
   });
 
   it('write the scrap.tf exit (F14): sells_for stays the backpack.tf revenue, profit follows the exit', () => {
@@ -291,5 +305,33 @@ describe('CSV cells', () => {
     const r = holdingRow(position('378;6', [40]), 'hats', buy(60), P, KEY, { list, now: NOW });
     const byCol = Object.fromEntries(HOLDINGS_CSV_COLUMNS.map((c, i) => [c, holdingsCsvCells(r, KEY)[i]]));
     expect(byCol).toMatchObject({ sells_for: '6.66 ref', profit_now: '4.55 ref', exit: '9.00 ref', exit_venue: 'scrap.tf', scraptf_pays: '9.00 ref' });
+  });
+});
+
+describe('0.8 (PC-2, H2; PC-1 R-PC1-sell): the buy side depth and the sell path', () => {
+  const nextBuyer: NextBuyer = { valueScrap: 55, keys: 0, metalScrap: 55, isBot: false, online: null, lastEventAt: NOW - 120_000, unverified: false };
+
+  it('holdingRow copies nextBuyer and verifiedBuyerCount from the buy side, and leaves them absent without', () => {
+    const r = rowOf('378;6', [40], buy(60, { nextBuyer, verifiedBuyerCount: 2 }));
+    expect(r.nextBuyer).toEqual(nextBuyer);
+    expect(r.verifiedBuyerCount).toBe(2);
+    // A null next buyer (only one buyer) is carried as null, not dropped.
+    const alone = rowOf('378;6', [40], buy(60, { nextBuyer: null, verifiedBuyerCount: 1 }));
+    expect(alone.nextBuyer).toBeNull();
+    expect('nextBuyer' in alone).toBe(true);
+    expect(alone.verifiedBuyerCount).toBe(1);
+    for (const r2 of [rowOf('378;6', [40], buy(60)), rowOf('378;6', [40], null)]) {
+      expect('nextBuyer' in r2).toBe(false);
+      expect('verifiedBuyerCount' in r2).toBe(false);
+    }
+  });
+
+  it('holdingFigures takes friction only, never the price-move reserve (a sale into a live order)', () => {
+    const a = { revenueScrap: 120, qty: 2, costScrap: 180, nextLotCostScrap: 90 };
+    for (const frictionScrap of [0, 2]) {
+      const without = holdingFigures(a, { ...P, frictionScrap });
+      expect(holdingFigures(a, { ...P, frictionScrap, exitReservePct: 0.3 })).toEqual(without);
+    }
+    expect(rowOf('378;6', [40], buy(60)).profitNowScrap).toBe(holdingRow(position('378;6', [40]), 'hats', buy(60), { ...P, exitReservePct: 0.3 }).profitNowScrap);
   });
 });

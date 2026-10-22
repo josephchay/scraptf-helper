@@ -13,7 +13,8 @@
 // the opt-in scrap.tf window open Flip Desk's links (openLinksInWindow), main shows
 // the same static page there instead (links.open answers openedIn: 'window'), and
 // the toast and tooltips say so. 0.7.1 (ACT-11): a bank stock row's menu carries its exact copy
-// (ItemMenuTarget.copy), and Record buy books that copy at the price its save listed.
+// (ItemMenuTarget.copy), and Record buy books that copy at the price its save listed. 0.8 (G1): "Watch on
+// scrap.tf…" opens the Watch dialog (WatchDialog.tsx) for the row's copy (ItemMenuTarget.special): a local list.
 //
 // MenuPopover is the generic part (placement, roving focus, closing rules); the
 // drawer's buyer actions menu (F3) uses it too.
@@ -53,6 +54,7 @@ import { scraptfLinksInWindow } from '../scraptfWindowModel';
 import { openOrCopy } from './ExternalLink';
 import { Icon } from './Icon';
 import { useRecordTrade } from './RecordTradeDialog';
+import { useWatchDialog } from './WatchDialog';
 
 export interface ItemMenuTarget {
   sku: string;
@@ -71,6 +73,8 @@ export interface ItemMenuTarget {
    * copy is booked as painted, at the price its save listed, instead of the price sheet's newest price.
    */
   copy?: RecordBuyCopy;
+  /** 0.8 (G1): the bank_stock special key of the row's copy ('' plain): Watch on scrap.tf… watches that copy; absent: the SKU's own. */
+  special?: string;
 }
 
 export { isContextMenuKey, menuPointForRect } from '../itemMenuModel';
@@ -135,6 +139,11 @@ export function useItemMenu(): { open(target: ItemMenuTarget, at: { x: number; y
   const recordTrade = useRecordTrade();
   const openRecord = useRef(recordTrade.open);
   openRecord.current = recordTrade.open;
+  // 0.8 (G1): Watch on scrap.tf… opens this dialog, which outlives the menu as Record trade's does.
+  const watch = useWatchDialog();
+  const openWatch = useRef(watch.open);
+  openWatch.current = watch.open;
+  const onWatch = useCallback((t: ItemMenuTarget) => openWatch.current({ sku: t.sku, name: t.name, special: t.special ?? null }), []);
   const profit = useRef(settings?.profit ?? DEFAULT_SETTINGS.profit);
   profit.current = settings?.profit ?? DEFAULT_SETTINGS.profit;
   const [recordGate] = useState(createLatestGate);
@@ -169,18 +178,30 @@ export function useItemMenu(): { open(target: ItemMenuTarget, at: { x: number; y
 
   const element = (
     <>
-      {state ? <ItemMenuView key={state.seq} state={state} onDone={close} onRecord={record} /> : null}
+      {state ? <ItemMenuView key={state.seq} state={state} onDone={close} onRecord={record} onWatch={onWatch} /> : null}
       {recordTrade.element}
+      {watch.element}
     </>
   );
   return { open, element };
 }
 
-function ItemMenuView({ state, onDone, onRecord }: { state: OpenState; onDone: () => void; onRecord: (side: 'buy' | 'sell', target: ItemMenuTarget) => void }) {
+function ItemMenuView({
+  state,
+  onDone,
+  onRecord,
+  onWatch,
+}: {
+  state: OpenState;
+  onDone: () => void;
+  onRecord: (side: 'buy' | 'sell', target: ItemMenuTarget) => void;
+  onWatch: (target: ItemMenuTarget) => void;
+}) {
   const { openItem, toast, settings } = useApp();
   const { target } = state;
   const [links, setLinks] = useState<LinksState>({ status: 'loading' });
-  const [seenOn, setSeenOn] = useState<ScraptfSeenOn | null>(null);
+  // 0.7.4 (R28): where a save last showed the item, and the bank its kind is sold on, kept apart (as the drawer).
+  const [scraptf, setScraptf] = useState<{ seenOn: Pick<ScraptfSeenOn, 'bank'> | null; kindBank: ScraptfBank | null }>({ seenOn: null, kindBank: null });
 
   // Lazily, once per open: the menu is often used only to copy or open details.
   useEffect(() => {
@@ -206,7 +227,9 @@ function ItemMenuView({ state, onDone, onRecord }: { state: OpenState; onDone: (
     let alive = true;
     rpc('item.detail', { sku: target.sku, history: false })
       .then((d) => {
-        if (alive) setSeenOn(d?.seenOn ?? null);
+        // 0.7.4 (F36): an item no save names goes to the bank its kind is sold on (ItemDetail.kindBank).
+        // 0.7.4 (R28): so does one last seen on the /items list, which names no bank page.
+        if (alive) setScraptf({ seenOn: d?.seenOn ?? null, kindBank: d?.kindBank ?? null });
       })
       .catch(() => undefined);
     return () => {
@@ -216,7 +239,7 @@ function ItemMenuView({ state, onDone, onRecord }: { state: OpenState; onDone: (
 
   // F21: the scrap.tf action's tooltip says where main opens it (the user's scrap.tf window or the browser).
   const inWindow = scraptfLinksInWindow(settings);
-  const sections = useMemo(() => itemMenuSections(target, links, seenOn, inWindow), [target, links, seenOn, inWindow]);
+  const sections = useMemo(() => itemMenuSections(target, links, scraptf.seenOn, inWindow, scraptf.kindBank), [target, links, scraptf, inWindow]);
 
   const run = (a: ItemMenuAction) => {
     switch (a.kind) {
@@ -240,6 +263,9 @@ function ItemMenuView({ state, onDone, onRecord }: { state: OpenState; onDone: (
         return;
       case 'link':
         void openOrCopy(a.url, toast);
+        return;
+      case 'watch':
+        onWatch(target);
         return;
     }
   };

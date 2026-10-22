@@ -65,7 +65,8 @@ function position(sku: string, lots: number[]): JournalPosition {
 }
 
 function list(over: Partial<ScraptfListStored> = {}) {
-  const s: ScraptfListStored = { sku: '143;6', name: 'Earbuds', sellsKeys: 0, sellsScrap: 120, paysKeys: 0, paysScrap: 100, stock: 1, stockLimit: 3, batchId: 101, observedAt: T0 - 12 * MIN, ...over };
+  // 0.7.4: the row of this very copy (a family row's exit is labelled so, test/renderer/audit-074-list-notes.test.ts).
+  const s: ScraptfListStored = { sku: '143;6', name: 'Earbuds', sellsKeys: 0, sellsScrap: 120, paysKeys: 0, paysScrap: 100, stock: 1, stockLimit: 3, batchId: 101, observedAt: T0 - 12 * MIN, craft: 'craftable', ...over };
   return valueScraptfListRow(s, KEY);
 }
 
@@ -129,7 +130,7 @@ describe('"Sells now for": the better exit', () => {
     const r = row([50], order(80), list());
     expect(r.status).toBe('sell');
     expect(profitNowTitle(r, KEY, { frictionScrap: 0 })).toMatch(/^Selling the oldest unit to scrap\.tf now: \+5\.55 ref/);
-    expect(holdingStatusTitle(r)).toBe(`Sell now (scrap.tf). ${HOLDING_STATUS_HELP.sell}`);
+    expect(holdingStatusTitle(r)).toBe(`Clears target (scrap.tf). ${HOLDING_STATUS_HELP.sell}`);
     expect(holdingStatusTitle(row([50], order(100), list()))).toBe(HOLDING_STATUS_HELP.sell);
   });
 });
@@ -311,7 +312,7 @@ describe('against the browser mock', () => {
     expect(t.cell(t.cell(jacket, 'h-sells')!, 'exit-pill')).toBeNull();
     // The scrap.tf pill is not a status pill: every row's first holding-pill is still its status.
     const pills = rows.map((r) => t.cell(t.rowEl(r.sku), 'holding-pill')!.textContent);
-    expect(new Set(pills)).toEqual(new Set(['Sell now', 'Hold', 'Loss', 'No buyers']));
+    expect(new Set(pills)).toEqual(new Set(['Clears target', 'Below target', 'Loss', 'No buyers']));
   });
 });
 

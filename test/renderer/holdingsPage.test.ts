@@ -72,7 +72,8 @@ describe('the page', () => {
 
   it('refetches when the profit thresholds or the blocklist change (status and Pay up to follow them)', () => {
     expect(page).toMatch(/useEffect\(\(\) => \{\s*if \(!profitSettings\) return;\s*if \(settingsSeen\.current\) reloadSoon\(\);/);
-    expect(page).toContain('}, [profitSettings, blocklist, reloadSoon]);');
+    // 0.8 (H3): and when your own accounts change (their listings leave the rows' asks).
+    expect(page).toContain('}, [profitSettings, blocklist, ownIds, reloadSoon]);');
   });
 
   it('answers the buyer key on a row without a buyer profile, instead of doing nothing', () => {
@@ -99,9 +100,9 @@ describe('the page', () => {
 describe('the Record trade dialog', () => {
   const dialog = read('components/RecordTradeDialog.tsx');
 
-  it('reads item.detail (no history) and holdings.list, and writes only journal.add / journal.delete', () => {
+  it('reads item.detail (no history) and holdings.list, and writes only journal.add / journal.delete / (0.8, J6) journal.update', () => {
     const methods = new Set([...dialog.matchAll(/rpc\('([a-zA-Z.]+)'/g)].map((m) => m[1]));
-    expect([...methods].sort()).toEqual(['holdings.list', 'item.detail', 'journal.add', 'journal.delete']);
+    expect([...methods].sort()).toEqual(['holdings.list', 'item.detail', 'journal.add', 'journal.delete', 'journal.update']);
     expect(dialog).toContain("rpc('item.detail', detailParams(init.sku))");
     expect(dialog).not.toMatch(/https?:\/\//);
     expect(dialog).not.toMatch(/\bfetch\(|XMLHttpRequest|WebSocket/);
@@ -231,9 +232,9 @@ describe('HoldingsTable', () => {
     expect(els.map((e) => e.getAttribute('id'))).toEqual(rows.map((_, i) => `holdrow-${i}`));
     expect(els[0]!.getAttribute('class')).toContain('status-sell');
     const heads = t.grid.descendants().filter((e) => e.getAttribute('role') === 'columnheader');
-    expect(heads.map((h) => h.textContent)).toEqual(['Item', 'Qty', 'Your cost', 'Held for', 'Sells now for', 'Buyers', 'Profit now', 'Confidence', 'Updated', 'Actions']);
+    expect(heads.map((h) => h.textContent)).toEqual(['Item', 'Qty', 'Your cost', 'Held for', 'Sells now for', 'Buyers', 'Profit now', 'Advice', 'Confidence', 'Updated', 'Actions']);
     const pills = els.map((e) => e.descendants().find((d) => (d.getAttribute('class') ?? '').includes('holding-pill'))!.textContent);
-    expect(new Set(pills)).toEqual(new Set(['Sell now', 'Hold', 'Loss', 'No buyers']));
+    expect(new Set(pills)).toEqual(new Set(['Clears target', 'Below target', 'Loss', 'No buyers']));
     const sell = els[0]!;
     expect(sell.textContent).toContain(rows[0]!.name);
     expect(sell.textContent).toContain('Record sale…');

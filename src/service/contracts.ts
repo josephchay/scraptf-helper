@@ -13,11 +13,13 @@ import type {
   EventQuery,
   GroupBy,
   HistoryPoint,
+  HoldingMark,
   HostBudget,
   ImportBatch,
   Intent,
   ItemSuggestion,
   JournalEntry,
+  JournalPatch,
   KeyPriceQuote,
   KeyPriceState,
   Listing,
@@ -37,6 +39,8 @@ import type {
   ScraptfChangeKind,
   ScraptfEventStored,
   ScraptfListStored,
+  ScraptfWatch,
+  ScraptfWatchWrite,
   SecretName,
   Settings,
   UnixMs,
@@ -85,6 +89,13 @@ export interface HttpRequestOptions {
   /** Longest time to wait for a rate-limit slot before throwing RateLimitedError (default 60 s). */
   maxWaitMs?: number;
   signal?: AbortSignal;
+  /**
+   * 0.7.4 (F52): true for an unavailable status (500, 502-504, 52x, 530) whose parsed body is this caller's
+   * answer about this one request, not an outage (Steam Market's 500 {"success":false}: no listing under that
+   * name). Such an answer counts as a success for the budget instead of pausing it. Never asked about a 429 or a
+   * challenge page; a body that is not JSON reaches it as null.
+   */
+  isAnswer?: (status: number, data: unknown) => boolean;
 }
 
 export interface HttpResponse<T = unknown> {
@@ -267,6 +278,11 @@ export interface Repo {
   upsertBptfNames(rows: BptfNameRow[]): void;
   getBptfName(sku: string): BptfNameRow | null;
   findSkuByBptfName(name: string): string | null;
+  /**
+   * 0.7.4 (F15/F42/F72): every SKU learned under this name (backpack.tf files one name under defindex
+   * twins), exact case first, then by SKU; never by when it was seen, so the answer does not move.
+   */
+  findSkusByBptfName(name: string, limit?: number): string[];
   searchBptfNames(q: string, limit: number): BptfNameRow[];
 
   // PriceDB
@@ -290,6 +306,11 @@ export interface Repo {
   listScrapPrices(q?: string): ScrapPrice[];
   getScrapPrice(id: number): ScrapPrice | null;
   scrapPricesForSku(sku: string): ScrapPrice[];
+  /**
+   * 0.7.4 (F31, F37, F56, F62): the 'import' prices whose import batch is of `bank`, observed before
+   * `beforeAt`, newest first: a bank's own prices, read per bank (import_batches.bank), never a table scan.
+   */
+  importScrapPricesOfBank(bank: ScraptfBank, beforeAt: UnixMs): ScrapPrice[];
   upsertScrapPrice(input: ScrapPriceInput & { name: string; observedAt: UnixMs; source: PriceSource }): ScrapPrice;
   deleteScrapPrice(id: number): void;
 
@@ -313,8 +334,12 @@ export interface Repo {
   queryOpportunities(q: OppQuery, page?: OppPage): Opportunity[];
   /** Number of rows matching q's filters and search. */
   countOpportunities(q: OppQuery): number;
-  /** Per-group count and summed profit (null profit counts as 0) over every row matching q; unordered. */
-  opportunityGroupStats(q: OppQuery, by: GroupBy): OppGroupStat[];
+  /**
+   * Per-group count and summed profit (null profit counts as 0) over every row matching q; unordered.
+   * 0.7.4 (R27): copies of an item on the same revenue order (`useOrder`'s, default conservative) count once
+   * per group, at the best of the matching rows (onceByOrderProfit in src/shared/copyExtras.ts).
+   */
+  opportunityGroupStats(q: OppQuery, by: GroupBy, useOrder?: Settings['profit']['useOrder']): OppGroupStat[];
   /** Cheap counts for AppStatus: all rows, profitable rows, profitable rows at high confidence. */
   opportunityCounts(): { opportunities: number; profitable: number; highConfidence: number };
   appendEvents(events: Omit<OpportunityEvent, 'id'>[]): void;
@@ -323,8 +348,34 @@ export interface Repo {
 
   // journal
   listJournal(limit?: number): JournalEntry[];
+  /** 0.8 (J6): one row by id; null when there is none. */
+  getJournal(id: number): JournalEntry | null;
   addJournal(entry: Omit<JournalEntry, 'id'>): JournalEntry;
+  /** 0.8 (J6): sets the given venue, note and fee (JournalPatch); side, item, price and time stay. null for an unknown id. */
+  updateJournal(id: number, patch: JournalPatch): JournalEntry | null;
   deleteJournal(id: number): void;
+
+  // scrap.tf watches (0.8 G1, schema V15)
+  /** Every watch, by id. */
+  listWatches(): ScraptfWatch[];
+  getWatch(id: number): ScraptfWatch | null;
+  /** The watch of one copy (specialKey null: the any-copy watch of the base), or null. */
+  findWatch(sku: string, specialKey: string | null): ScraptfWatch | null;
+  countWatches(): number;
+  /**
+   * Adds a watch, or with `id` updates that one (throws when missing); without `id`, the watch of the same copy is
+   * updated in place. One transaction. Stamps updated_at = `now` (and created_at on an insert). Throws Error
+   * WATCH_COPY_TAKEN when an update would give a watch another watch's copy, TypeError on a bad sku or number or a
+   * specialKey of '*' (WATCH_ANY_COPY_SENTINEL: the copy index's every-copy stand-in; every copy is null).
+   */
+  upsertWatch(w: ScraptfWatchWrite, now: UnixMs): ScraptfWatch;
+  deleteWatch(id: number): void;
+  /**
+   * 0.8 ('watches.restore', Undo of a removal): inserts the removed watch again with its own id and times (ids are
+   * AUTOINCREMENT, never handed out twice). One transaction. A watch that still has the id is returned as it is.
+   * Throws Error WATCH_COPY_TAKEN when another watch has that copy now, TypeError as upsertWatch.
+   */
+  restoreWatch(w: ScraptfWatchWrite & { id: number }, createdAt: UnixMs, updatedAt: UnixMs): ScraptfWatch;
 
   // item schema
   replaceSchema(s: SchemaSnapshot): void;
@@ -364,8 +415,19 @@ export interface Repo {
   scraptfListSummary(): ScraptfListSummary;
   /** Retention (maintenance, RETENTION.scraptfListMs): deletes rows observed before `ts`; returns how many. */
   purgeScraptfListOlderThan(ts: UnixMs): number;
+  /**
+   * 0.7.4: deletes the rows of these SKUs observed before `beforeTs` (importSavedPage: a whole /items save
+   * that no longer shows them, in its own transaction); returns how many.
+   */
+  deleteScraptfListRows(skus: readonly string[], beforeTs: UnixMs): number;
 
   // scrap.tf bank stock (F17, schema V6): what each saved bank page had in stock at that moment
+  /**
+   * 0.7.4: the bank of the newest bank stock row (by save time, then batch id) of any of these SKUs, any
+   * extras, outside the /items list and /unusuals; null when no such save lists one. One primary-key seek
+   * per kept save and SKU.
+   */
+  bankStockNewestBankOf(skus: readonly string[]): ScraptfBank | null;
   /**
    * Writes one save's rows (importSavedPage, inside its own transaction, after createImportBatch). A row
    * without a SKU is skipped; a repeated (sku, specialKey) keeps its first row. Costs with no finite
@@ -421,6 +483,24 @@ export interface Repo {
   /** Retention: deletes events older than `now - maxAgeMs` (default SCRAPTF_EVENTS_MAX_AGE_MS, 90 d); returns how many. */
   pruneScraptfEvents(now: UnixMs, maxAgeMs?: number): number;
 
+  // recorded exit runs of held and watched items (0.8 H1, schema V15)
+  /** Each base's newest run (by from_at, then id), one index seek per base; bases with none are absent. */
+  latestHoldingMarks(bases: readonly string[]): Map<string, HoldingMark>;
+  /** Appends a run (keys and metal of a side both or neither: NULL when its metal is not finite; counts whole; keyScrap NULL when null); returns its id. */
+  insertHoldingMark(m: Omit<HoldingMark, 'id'>): number;
+  /**
+   * Moves a run's to_at forward (never back: MAX) and, when given, sets its latest counts (buyer_count,
+   * verified_buyer_count, ask_count); false when the run no longer exists (pruned).
+   */
+  extendHoldingMark(id: number, toAt: UnixMs, counts?: Pick<HoldingMark, 'buyerCount' | 'verifiedBuyerCount' | 'askCount'>): boolean;
+  /** One base's runs with to_at >= sinceTs, oldest first, the newest `limit` of them (default HOLDING_DETAIL_MAX_MARKS, at most 5000). */
+  holdingMarks(baseSku: string, sinceTs: UnixMs, limit?: number): HoldingMark[];
+  /**
+   * Retention: deletes runs whose to_at is older than now - maxAgeMs (default HOLDING_MARKS_MAX_AGE_MS), then each
+   * base's oldest runs beyond perBaseMax (default HOLDING_MARKS_PER_BASE_MAX); one transaction; returns rows deleted.
+   */
+  pruneHoldingMarks(now: UnixMs, opts?: { maxAgeMs?: number; perBaseMax?: number }): number;
+
   // request log
   appendRequestLog(row: RequestLogRow): void;
   recentRequests(limit: number): RequestLogRow[];
@@ -468,6 +548,17 @@ export interface SchemaService {
   paintkitName(id: number): string | null;
   paintkitIdByName(name: string): number | null;
   paintkits(): PaintkitRow[];
+  /**
+   * 0.7.4 (F09/F14/F49/F73, F08/F43/F69): every base SKU whose buy orders are this base's book, the
+   * canonical one (bookBase) first and `base` itself included: backpack.tf files one item's orders under
+   * defindex twins (18/205, 9536/17208, 15000/201 ...) and an unusual skin under 5+effect, 11+effect or the
+   * 0.7.3 15+effect form. [base] without a schema. Optional: test doubles leave it out (domain/bookTwins.ts).
+   */
+  bookBases?(base: string): readonly string[];
+  /** 0.7.4: the one base of bookBases that keys a merged book (a Live market row, an engine rule row). */
+  bookBase?(base: string): string;
+  /** 0.7.4 (F74): a kit, fabricator, strangifier, unusualifier or chemistry set SKU without its target: no listing has it. */
+  isTargetlessTool?(sku: string): boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -525,6 +616,11 @@ export interface SnapshotResult {
   name: string;
   createdAt: UnixSec | null;
   listings: Listing[];
+  /**
+   * 0.7.4 (F51): raw rows bp.tf returned per side, mapped or not (a row whose intent cannot be read counts
+   * on both). A side at SNAPSHOT_SIDE_PAGE (30) is a full page, not the whole book. Omitted: unknown.
+   */
+  sides?: { buy: number; sell: number };
 }
 
 export interface BptfApi {

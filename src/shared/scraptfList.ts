@@ -6,6 +6,7 @@
 
 import { valueScrap } from './currency';
 import { SCRAPTF_ITEMS_URL } from './links';
+import { canonical, fromObject, fromString } from './sku';
 import { HOLDING_EXIT_VENUES, KEY_SKU } from './types';
 import type { HoldingExit, Scrap, ScrapPrice, ScraptfListCoverage, ScraptfListKey, ScraptfListRow, ScraptfListStored, UnixMs } from './types';
 
@@ -33,6 +34,71 @@ export function scraptfListFull(stock: number | null, stockLimit: number | null)
   return finite(stock) && finite(stockLimit) && stock >= stockLimit;
 }
 
+/**
+ * 0.7.4: the family an /items row stands for, as scrap.tf lists it: the SKU with craftability, killstreak
+ * tier, festivizing and paint dropped (sheens, killstreakers and parts are no SKU tokens). Effect, wear and
+ * paintkit, australium, quality, elevated strange, crate series and craft number stay: scrap.tf lists those
+ * apart. null for a kit (its tier and target are the item) and for an unreadable SKU.
+ */
+export function scraptfListFamilyOf(sku: string): string | null {
+  if (typeof sku !== 'string' || sku.trim() === '') return null;
+  try {
+    const obj = fromString(canonical(sku.trim()));
+    if (!(obj.defindex > 0) || obj.target !== null || obj.output !== null) return null;
+    return fromObject({ ...obj, craftable: true, killstreak: 0, festive: false, paint: null });
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 0.7.4: the stored row a lookup of `sku` reads (`get`: the stored row of a SKU, if any), shared by the
+ * service's list cache (rowFor, has) and the browser mock. The SKU's own row (exact, then with paint
+ * dropped), else its family's (scraptfListFamilyOf): an unmarked row ('any') stands for every copy scrap.tf
+ * sells at its price, so a Non-Craftable, killstreak or festivized copy with no row of its own reads it, as
+ * 'family'. Never a row proven for other copies (a 'craftable' row for a Non-Craftable copy), never past a
+ * Non-Craftable row of the item's own (725;6;uncraftable keeps its row; its killstreak copies read none),
+ * never for a kit.
+ */
+export function scraptfListLookup<T extends Pick<ScraptfListStored, 'craft'>>(get: (sku: string) => T | undefined, sku: string): { stored: T; match: 'exact' | 'family' } | null {
+  if (typeof sku !== 'string' || sku.trim() === '') return null;
+  const direct = get(sku);
+  if (direct) return { stored: direct, match: 'exact' };
+  let obj: ReturnType<typeof fromString>;
+  try {
+    obj = fromString(canonical(sku.trim()));
+  } catch {
+    return null;
+  }
+  const base = fromObject({ ...obj, paint: null });
+  const own = get(base);
+  if (own) return { stored: own, match: 'exact' };
+  const family = scraptfListFamilyOf(base);
+  if (family === null || family === base) return null;
+  const row = get(family);
+  if (!row || (row.craft ?? 'any') !== 'any') return null;
+  // A Non-Craftable copy of an item scrap.tf lists Non-Craftable apart: priced apart, so not the family's.
+  if (obj.craftable === false && get(fromObject({ ...fromString(family), craftable: false }))) return null;
+  return { stored: row, match: 'family' };
+}
+
+/**
+ * 0.7.4: the row is proven to price this very copy: looked up exactly (not as its family, ScraptfListRow.match)
+ * and marked Non-Craftable, or shown Craftable beside the item's Non-Craftable row. Only such a row's price
+ * is a cost ("Use as my price", quick entry's Use, the Live check's list price); a family row ('any') is
+ * shown, never used as one.
+ */
+export function scraptfListCraftProven(row: Pick<ScraptfListRow, 'craft' | 'match'>): boolean {
+  return (row.match ?? 'exact') === 'exact' && (row.craft === 'craftable' || row.craft === 'uncraftable');
+}
+
+/** 0.7.4: why a list row's price is no cost of this copy (scraptfListCraftProven false), as the drawer and quick entry say it. */
+export const SCRAPTF_LIST_CRAFT_UNPROVEN =
+  'The scrap.tf/items list does not show whether this is the Craftable or Non-Craftable copy; check the bank page';
+
+/** 0.7.4: a family row's label (ScraptfListRow.match 'family', or craft 'any'): one row for every copy at its price. */
+export const SCRAPTF_LIST_FAMILY_LABEL = 'One scrap.tf/items row for every copy at this price';
+
 /** A stored row valued with key price `keyScrap` (keys and metal kept apart in the *Raw fields). */
 export function valueScraptfListRow(r: ScraptfListStored, keyScrap: Scrap): ScraptfListRow {
   const sells = finite(r.sellsScrap) ? r.sellsScrap : null;
@@ -54,6 +120,7 @@ export function valueScraptfListRow(r: ScraptfListStored, keyScrap: Scrap): Scra
     stockLimit,
     full: scraptfListFull(stock, stockLimit),
     observedAt: r.observedAt,
+    ...(r.craft !== undefined ? { craft: r.craft } : {}),
   };
 }
 
@@ -100,16 +167,27 @@ export function scraptfListCoverage(summary: { items: number; newestAt: UnixMs |
   return { label: SCRAPTF_LIST_LABEL, url: SCRAPTF_ITEMS_URL, lastSavedAt: items > 0 && summary && finite(summary.newestAt) ? summary.newestAt : null, items };
 }
 
-/** MarketRow's scrap.tf list fields for a row (all null/false without a list row). */
-export function marketListFields(
-  list: ScraptfListRow | null,
-): { scraptfPaysScrap: Scrap | null; scraptfStock: number | null; scraptfStockLimit: number | null; scraptfFull: boolean; scraptfListAt: UnixMs | null } {
+/** 0.7.4: a family row: unmarked ('any', one row for every copy at its price) or read as a copy's family (match). */
+export function scraptfListIsFamily(row: Pick<ScraptfListRow, 'craft' | 'match'>): boolean {
+  return row.match === 'family' || (row.craft ?? 'any') === 'any';
+}
+
+/** MarketRow's scrap.tf list fields for a row (all null/false without a list row; 0.7.4: scraptfListFamily only when set). */
+export function marketListFields(list: ScraptfListRow | null): {
+  scraptfPaysScrap: Scrap | null;
+  scraptfStock: number | null;
+  scraptfStockLimit: number | null;
+  scraptfFull: boolean;
+  scraptfListAt: UnixMs | null;
+  scraptfListFamily?: true;
+} {
   return {
     scraptfPaysScrap: list?.paysScrap ?? null,
     scraptfStock: list?.stock ?? null,
     scraptfStockLimit: list?.stockLimit ?? null,
     scraptfFull: list?.full ?? false,
     scraptfListAt: list?.observedAt ?? null,
+    ...(list && scraptfListIsFamily(list) ? { scraptfListFamily: true as const } : {}),
   };
 }
 
@@ -131,6 +209,7 @@ export function holdingListFields(list: ScraptfListRow | null): {
   scraptfPaysScrapRaw: Scrap | null;
   scraptfFull: boolean;
   scraptfListAt: UnixMs | null;
+  scraptfListFamily?: true;
 } {
   return {
     scraptfPaysScrap: list?.paysScrap ?? null,
@@ -138,6 +217,8 @@ export function holdingListFields(list: ScraptfListRow | null): {
     scraptfPaysScrapRaw: list?.paysScrapRaw ?? null,
     scraptfFull: list?.full ?? false,
     scraptfListAt: list?.observedAt ?? null,
+    // 0.7.4: scrap.tf pays one price for every copy a family row stands for; its exit is labelled so.
+    ...(list && scraptfListIsFamily(list) ? { scraptfListFamily: true as const } : {}),
   };
 }
 

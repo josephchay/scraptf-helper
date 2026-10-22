@@ -11,6 +11,7 @@ import type { RecordTradeFormProps } from '../../src/renderer/components/RecordT
 import { createMockBridge, type MockBridge } from '../../src/renderer/mock';
 import { fromDateTimeLocal, toDateTimeLocal } from '../../src/renderer/format';
 import { tabbablesWithin, type RecordTradeInit } from '../../src/renderer/recordTradeModel';
+import { journalEditInit, journalIndex } from '../../src/renderer/journalModel';
 import { DEFAULT_SETTINGS } from '../../src/shared/defaults';
 import type { ToastOptions } from '../../src/renderer/toastModel';
 import { installDomShim, ShimEvent, type ShimDocument, type ShimElement } from './domShim';
@@ -361,5 +362,139 @@ describe('RecordTradeForm', () => {
   it('explains a sale of something not held', async () => {
     const t = await mount({ side: 'sell', sku: '5021;6', name: 'Mann Co. Supply Crate Key', scrap: 500 });
     expect(t.compare().textContent).toMatch(/No open buy of this item in your journal/);
+  });
+});
+
+describe('RecordTradeForm, 0.8 (fees, write-offs, edit)', () => {
+  const titleOf = (t: Awaited<ReturnType<typeof mount>>) => doc.getElementById(t.dialog()!.getAttribute('aria-labelledby')!)!.textContent;
+  const feeInput = (t: Awaited<ReturnType<typeof mount>>) => t.by((e) => e.tagName === 'INPUT' && (e.getAttribute('id') ?? '').endsWith('-fee'));
+  const venueInput = (t: Awaited<ReturnType<typeof mount>>) => t.by((e) => e.tagName === 'INPUT' && e.getAttribute('list') !== null);
+  const value = (e: ShimElement | undefined) => (e as unknown as { value: string } | undefined)?.value;
+
+  it('edit mode: side, item, price and time locked; only venue, note and fee saved via journal.update, and Undo restores', async () => {
+    const rows = await journalRows();
+    const sale = rows.find((e) => e.side === 'sell' && e.name === 'Team Captain')!;
+    const idx = journalIndex(await bridge.rpc('journal.summary', undefined));
+    const init = journalEditInit(sale, idx, rows);
+    expect(init.editPair?.other?.side).toBe('buy');
+    const t = await mount(init);
+    const rpc = vi.spyOn(bridge, 'rpc');
+
+    expect(titleOf(t)).toBe('Edit sale');
+    // No side switch, no price field and no When: what an edit cannot change is said instead.
+    expect(t.buttons().some((b) => b.getAttribute('role') === 'radio' && (b.textContent === 'Bought' || b.textContent === 'Sold'))).toBe(false);
+    expect(t.by((e) => cls(e).includes('pill') && e.textContent === 'Sell')).toBeDefined();
+    expect(t.by((e) => cls(e).includes('rt-locked'))?.textContent).toMatch(/^Sold for 1 key 22\.00 ref on .* \(key at 62\.88 ref\)\. To change the price or time, delete this trade and log it again\.$/);
+    expect(t.by((e) => e.tagName === 'INPUT' && e.getAttribute('type') === 'datetime-local')).toBeUndefined();
+    // The fee is the only money field, and it has focus.
+    expect(t.priceInput()).toBe(feeInput(t));
+    expect(doc.activeElement).toBe(feeInput(t));
+    expect(t.compare().textContent).toMatch(/^This sale books \+.* on the buy of .* \(scrap\.tf\)\.$/);
+
+    await t.type(feeInput(t)!, '0.22');
+    expect(t.compare().textContent).toMatch(/\(was \+.*\)\.$/);
+    await t.type(venueInput(t)!, 'marketplace.tf');
+    await t.submit();
+
+    const updates = () => rpc.mock.calls.filter((c) => c[0] === 'journal.update');
+    expect(updates()).toHaveLength(1);
+    expect(updates()[0]![1]).toEqual({ id: sale.id, venue: 'marketplace.tf', feeKeys: 0, feeScrap: 2 });
+    expect(rpc.mock.calls.some((c) => c[0] === 'journal.add')).toBe(false);
+    expect(t.onClose).toHaveBeenCalledTimes(1);
+    const [text, tone, opts] = t.toast.mock.calls[0]!;
+    expect([text, tone]).toEqual(['Updated the sale of Team Captain.', 'good']);
+    expect((await journalRows()).find((e) => e.id === sale.id)).toEqual({ ...sale, venue: 'marketplace.tf', feeKeys: 0, feeScrap: 2 });
+
+    opts!.action!.onClick();
+    await settle();
+    expect(updates()).toHaveLength(2);
+    expect(updates()[1]![1]).toEqual({ id: sale.id, venue: sale.venue, note: sale.note, feeKeys: null, feeScrap: null });
+    expect((await journalRows()).find((e) => e.id === sale.id)).toEqual(sale);
+    expect(t.toast).toHaveBeenLastCalledWith('Restored the sale of Team Captain.', 'info');
+  });
+
+  it('edit mode: saving with nothing changed closes with no RPC and no toast', async () => {
+    const rows = await journalRows();
+    const buy = rows.find((e) => e.side === 'buy' && e.name === 'Earbuds')!;
+    const t = await mount(journalEditInit(buy, journalIndex(await bridge.rpc('journal.summary', undefined)), rows));
+    const rpc = vi.spyOn(bridge, 'rpc');
+    expect(titleOf(t)).toBe('Edit buy');
+    expect(t.compare().textContent).toMatch(/^Still held: its fee is part of the lot's cost/);
+    await t.submit();
+    expect(t.onClose).toHaveBeenCalledTimes(1);
+    expect(rpc).not.toHaveBeenCalled();
+    expect(t.toast).not.toHaveBeenCalled();
+  });
+
+  it('edit mode: a fee of 0.125 keys opens as recorded, and a note-only save leaves it (review fix: was rounded to 0.13)', async () => {
+    const sale = (await journalRows()).find((e) => e.side === 'sell' && e.name === 'Team Captain')!;
+    await bridge.rpc('journal.update', { id: sale.id, feeKeys: 0.125, feeScrap: 0 });
+    const rows = await journalRows();
+    const withFee = rows.find((e) => e.id === sale.id)!;
+    expect(withFee).toMatchObject({ feeKeys: 0.125, feeScrap: 0 });
+    const init = journalEditInit(withFee, journalIndex(await bridge.rpc('journal.summary', undefined)), rows);
+
+    // Untouched: no RPC, no toast, no "(was …)".
+    const t = await mount(init);
+    const rpc = vi.spyOn(bridge, 'rpc');
+    expect(value(feeInput(t))).toBe('0.125 keys');
+    expect(t.compare().textContent).not.toContain('(was');
+    await t.submit();
+    expect(t.onClose).toHaveBeenCalledTimes(1);
+    expect(rpc).not.toHaveBeenCalled();
+    expect(t.toast).not.toHaveBeenCalled();
+    t.unmount();
+
+    // The note alone changes: the patch carries the note only.
+    const t2 = await mount(init);
+    const noteInput = t2.by((e) => e.tagName === 'INPUT' && (e.getAttribute('id') ?? '').endsWith('-note'))!;
+    await t2.type(noteInput, 'typo fixed');
+    await t2.submit();
+    const updates = rpc.mock.calls.filter((c) => c[0] === 'journal.update');
+    expect(updates).toHaveLength(1);
+    expect(updates[0]![1]).toEqual({ id: sale.id, note: 'typo fixed' });
+    expect((await journalRows()).find((e) => e.id === sale.id)).toMatchObject({ feeKeys: 0.125, feeScrap: 0, note: 'typo fixed' });
+  });
+
+  it('a fee typed on a sale lowers the previewed profit to what the journal books', async () => {
+    const t = await mount({ side: 'sell', ...KNIFE, venue: 'marketplace.tf', keys: 0, scrap: 60 });
+    // The oldest Strange Knife lot cost 4.88 ref (44 scrap): 60 - 44 = 16 scrap.
+    expect(t.compare().textContent).toContain('Profit +1.77 ref on the lot you bought');
+    expect(t.dialog()!.textContent).toContain('marketplace.tf keeps about 10% of the sale price');
+    await t.type(feeInput(t)!, '2 scrap');
+    expect(t.compare().textContent).toContain('Profit +1.55 ref on the lot you bought');
+    await t.type(feeInput(t)!, 'lots');
+    expect(t.compare().textContent).toContain("Can't read that fee yet, so there is nothing to compare.");
+    await t.type(feeInput(t)!, '2 scrap');
+
+    await t.submit();
+    const added = (await journalRows())[0]!;
+    expect(added).toMatchObject({ side: 'sell', keys: 0, scrap: 60, feeKeys: 0, feeScrap: 2 });
+    const closed = (await bridge.rpc('journal.summary', undefined)).closed.find((c) => c.sellId === added.id)!;
+    expect(closed.profitScrap).toBe(14);
+  });
+
+  it('a write-off: no price, venue or fee; compares with the next lot, shows Sells now, and saves keys 0 and scrap 0', async () => {
+    const t = await mount({ side: 'writeoff', ...KNIFE, venue: 'Written off' });
+    expect(titleOf(t)).toBe('Write off');
+    expect(t.priceInput()).toBeUndefined();
+    expect(venueInput(t)).toBeUndefined();
+    expect(t.by((e) => cls(e).includes('pill') && e.textContent === 'Write-off')).toBeDefined();
+    expect(t.dialog()!.textContent).toContain('Reason (optional)');
+    // Nothing to type a price into: the dialog itself has focus.
+    expect(doc.activeElement).toBe(t.dialog());
+    const compare = t.compare().textContent;
+    expect(compare).toContain('Next lot');
+    expect(compare).toContain('Writes off the lot you bought');
+    expect(compare).toContain('a loss of 4.88 ref. Nothing is sold.');
+    expect(compare).toContain('Sells now');
+    expect(cls(t.compare())).toContain('tone-bad');
+
+    await t.submit();
+    const added = (await journalRows())[0]!;
+    expect(added).toMatchObject({ side: 'writeoff', venue: 'Written off', sku: '194;11', keys: 0, scrap: 0 });
+    expect(added.feeKeys).toBeUndefined();
+    expect(t.toast.mock.calls[0]![0]).toBe('Recorded a write-off of Strange Knife.');
+    expect(t.toast.mock.calls[0]![2]?.action?.label).toBe('Undo');
   });
 });

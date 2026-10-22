@@ -321,6 +321,8 @@ describe('holdings.list', () => {
     rec(repo, 'buy', '15000;6', 30); // no order at all
     const h = setup({ repo });
     h.start();
+    // 0.8 (H4): the first list fills the per-base reference cache.
+    h.list();
     const books = vi.spyOn(repo, 'buyListingsByBaseSkus');
     const refs = vi.spyOn(repo, 'getPricedb');
     expect(h.list().rows.map((x) => [x.sku, x.status])).toEqual([
@@ -388,6 +390,15 @@ describe('heldBases', () => {
     expect(h.holdings.heldBases().has('205;6')).toBe(false); // cached until the journal change
     h.holdings.journalChanged();
     expect(h.holdings.heldBases()).toEqual(new Set(['378;6', '378;5;u13', '205;6']));
+  });
+
+  // 0.7.4 (F38): a sale of a copy owned before the app no longer settles the next buy of the item.
+  it('holds a buy logged after a sale with no buy before it', () => {
+    const repo = newRepo();
+    rec(repo, 'sell', '5040;6', 198, { keys: 2 });
+    rec(repo, 'buy', '5040;6', 389, { keys: 1 });
+    const h = setup({ repo });
+    expect(h.holdings.heldBases()).toEqual(new Set(['5040;6']));
   });
 });
 
@@ -639,5 +650,94 @@ describe('sell notifications', () => {
     expect(timers.count).toBe(0);
     timers.advance(HOLDINGS_CHECK_MS);
     expect(sent).toHaveLength(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 0.8 (PC-2, H2; PC-1 R-PC1-sell)
+// ---------------------------------------------------------------------------
+
+describe('holdings.list: next buyer and the price-move reserve (0.8)', () => {
+  /** seedBooks plus a second Team Captain buyer at 100, so one held base has a next buyer and one has none. */
+  function seed(repo: Repo): void {
+    seedBooks(repo);
+    repo.upsertListings([buy('378;6', 100, { id: 'tc2', steamid: '76561198000000009', userName: 'Dee' })]);
+    rec(repo, 'buy', '378;6', 90);
+    rec(repo, 'buy', '126;6', 55);
+    rec(repo, 'buy', '15000;6', 30);
+  }
+
+  it("carries the market entry's nextBuyer and verifiedBuyerCount on rows with a buy side", () => {
+    const repo = newRepo();
+    seed(repo);
+    const h = setup({ repo });
+    h.start();
+    for (const base of ['378;6', '126;6']) {
+      const e = h.market.entryFor(base)!;
+      const r = h.row(base)!;
+      expect(r.nextBuyer).toEqual(e.nextBuyer);
+      expect(r.verifiedBuyerCount).toBe(e.verifiedBuyerCount);
+    }
+    expect(h.row('378;6')).toMatchObject({ verifiedBuyerCount: 2, nextBuyer: { valueScrap: 100, unverified: false } });
+    expect(h.row('126;6')).toMatchObject({ verifiedBuyerCount: 1, nextBuyer: null });
+    // No order for the Sniper Rifle: no buy side, so no depth either.
+    const none = h.row('15000;6')!;
+    expect('nextBuyer' in none || 'verifiedBuyerCount' in none).toBe(false);
+  });
+
+  it('judges a held row without the price-move reserve (a sale into a live order)', () => {
+    const plain = (() => {
+      const repo = newRepo();
+      seed(repo);
+      const h = setup({ repo });
+      h.start();
+      return h.list().rows;
+    })();
+    const repo = newRepo();
+    seed(repo);
+    const h = setup({ repo, settings: { profit: { exitReservePct: 0.3 } } });
+    h.start();
+    const reserved = h.list().rows;
+    expect(reserved.map((r) => [r.sku, r.profitNowScrap, r.status])).toEqual(plain.map((r) => [r.sku, r.profitNowScrap, r.status]));
+    expect(reserved.find((r) => r.sku === '378;6')!.profitNowScrap).toBe(120 - 90);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 0.8 (H5): the user's typical hold on each row
+// ---------------------------------------------------------------------------
+
+describe('holdings.list: the typical hold (0.8, H5)', () => {
+  it("sets the item's own median at 3 sales, the journal's at 5, and counts every open unit as still held", () => {
+    const repo = newRepo();
+    seedBooks(repo);
+    const at = (hours: number) => ({ ts: T0 - 200 * HOUR + hours * HOUR });
+    // Three Team Captain flips held 1, 2 and 6 hours; one Team Captain and one Bill's Hat still held.
+    rec(repo, 'buy', '378;6', 80, at(0));
+    rec(repo, 'sell', '378;6', 95, at(1));
+    rec(repo, 'buy', '378;6', 80, at(10));
+    rec(repo, 'sell', '378;6', 95, at(12));
+    rec(repo, 'buy', '378;6', 80, at(20));
+    rec(repo, 'sell', '378;6', 95, at(26));
+    rec(repo, 'buy', '378;6', 90, at(30));
+    rec(repo, 'buy', '126;6', 55, at(31));
+    // A write-off is not a sale: it never counts toward a hold.
+    rec(repo, 'buy', '205;6', 50, at(40));
+    rec(repo, 'writeoff', '205;6', 0, at(140));
+    const h = setup({ repo });
+    h.start();
+    expect(h.row('378;6')!.typicalHold).toEqual({ medianMs: 2 * HOUR, count: 3, scope: 'item', stillHeld: 1 });
+    // Three sales in all are too few for the journal's median: no key at all.
+    expect('typicalHold' in h.row('126;6')!).toBe(false);
+
+    // Two more sales (of another item) make five; the rows follow on the next read after journalChanged.
+    rec(repo, 'buy', '30920;6', 20, at(50));
+    rec(repo, 'sell', '30920;6', 30, at(53));
+    rec(repo, 'buy', '30920;6', 20, at(60));
+    rec(repo, 'sell', '30920;6', 30, at(64));
+    h.holdings.journalChanged();
+    // Holds of 1, 2, 3, 4 and 6 hours; both open units (every position's, not just this row's) were left out.
+    expect(h.row('126;6')!.typicalHold).toEqual({ medianMs: 3 * HOUR, count: 5, scope: 'all', stillHeld: 2 });
+    expect(h.row('378;6')!.typicalHold).toMatchObject({ scope: 'item', count: 3, stillHeld: 1 });
   });
 });

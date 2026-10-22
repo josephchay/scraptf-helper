@@ -66,6 +66,12 @@ export function fmtPct(ratio: number | null | undefined, digits = 1): string {
   return `${pct.toFixed(Math.abs(pct) >= 1000 ? 0 : digits)}%`;
 }
 
+/** 0.05 -> "5%", 0.125 -> "12.5%": whole percents without a decimal (the thresholds and the price-move reserve). */
+export function ratioPctText(ratio: number): string {
+  const whole = Math.abs(ratio * 100 - Math.round(ratio * 100)) < 1e-9;
+  return fmtPct(ratio, whole ? 0 : 1);
+}
+
 const intFormat = new Intl.NumberFormat('en-US');
 
 export function fmtInt(n: number | null | undefined): string {
@@ -117,6 +123,15 @@ export function fmtAge(ms: number | null | undefined): string {
   if (a < 86_400_000) return `${Math.floor(a / 3_600_000)} h`;
   if (a < 60 * 86_400_000) return `${Math.floor(a / 86_400_000)} d`;
   return `${Math.floor(a / (30 * 86_400_000))} mo`;
+}
+
+/**
+ * 0.8: a hold time between two logged journal rows: DASH for none, '< 1 min' under a minute (When keeps minutes
+ * only, so a buy logged in its sale's own minute holds 0), else fmtAge. fmtAge would say "now" for 0.
+ */
+export function fmtHold(ms: number | null | undefined): string {
+  if (ms === null || ms === undefined || !Number.isFinite(ms)) return DASH;
+  return ms < 60_000 ? '< 1 min' : fmtAge(ms);
 }
 
 /** "12 min ago", "in 40 s", "just now". */
@@ -493,7 +508,40 @@ const FLAGS: Record<string, FlagInfo> = {
     tone: 'bad',
   },
   'rule-estimate': { label: 'Rule estimate', help: 'Cost comes from a price-sheet rule, not a price you saw for this item. Check scrap.tf stock and price by hand.', tone: 'info' },
-  'unverified-orders': { label: 'Unverified orders', help: 'The orders used have not been confirmed recently.', tone: 'warn' },
+  // 0.7.4 (F78)
+  'rule-under-scraptf': {
+    label: 'Above your rule',
+    help: "Your saved scrap.tf pages or scrap.tf/items list showed this item for more than your rule's price, so that price is the cost here (the reasons say where and when). Check scrap.tf by hand.",
+    tone: 'info',
+  },
+  // 0.7.4 (F27, F33)
+  'shared-buyer': {
+    label: 'Shared buyer',
+    help: 'Another copy of this item sells to the same buy order for more. The buyer may take only one, so the totals count that order once (at the best copy).',
+    tone: 'muted',
+  },
+  'unverified-orders': {
+    label: 'Unverified orders',
+    help: 'The order your profit uses has not been seen by the live feed or a snapshot for over 24 h (for example while the app was closed), so it may have been filled or removed. Not notified until a snapshot or the feed confirms it; use Refresh from backpack.tf to check now.',
+    tone: 'warn',
+  },
+  // 0.8 (PC-2)
+  'single-exit': {
+    label: 'One buyer',
+    help: 'Only the buyer your profit uses clears your thresholds at this cost. If their order fills, is withdrawn or turns out stale while you buy on scrap.tf, the next buyer pays too little (the reasons say how much). A warning, not a fill chance: the score is unchanged.',
+    tone: 'warn',
+  },
+  // 0.7.4 (F22, F70): the scrap.tf cost against PriceDB for this exact item (and its craftability twin).
+  'variant-suspect': {
+    label: 'Variant?',
+    help: "scrap.tf's price is well under what PriceDB says bots pay for this item, and matches its Non-Craftable (or Craftable) copy instead. The price is probably for the other copy: check craftability before buying. Capped at Low, never notified.",
+    tone: 'bad',
+  },
+  'cost-below-market': {
+    label: 'Below market',
+    help: 'scrap.tf sells this for less than bots pay for this exact item on PriceDB (under 95% of its buy price, by 1 ref or more). Usually the price is for another copy (Non-Craftable, another quality or kit tier): check before buying. Capped at Low, never notified.',
+    tone: 'bad',
+  },
 };
 
 export function flagInfo(flag: string): FlagInfo {
@@ -519,6 +567,36 @@ export function keyPriceSummary(kp: KeyPriceState | null | undefined, now: UnixM
   };
 }
 
+/** 0.7.4 (F71): a quote's price is "old" for display once its source last changed it this long before the fetch. */
+export const KEY_PRICE_SET_NOTE_MS = 60 * 60_000;
+
+/**
+ * 0.7.4 (F71): the real age of a key price beside its fetch age. `priceSet` ("set 2 mo ago") when its source last
+ * changed it at least KEY_PRICE_SET_NOTE_MS before the quote was checked (backpack.tf's community key price can
+ * stand for weeks while it is fetched hourly); `divergence` when another fresh source disagrees by about 1 ref.
+ */
+export function keyPriceNotes(
+  kp: Pick<KeyPriceState, 'source' | 'observedAt'> & Partial<Pick<KeyPriceState, 'priceAt' | 'divergence' | 'valueScrap'>>,
+  now: UnixMs,
+): { priceSet: string | null; priceSetTitle: string | null; divergence: string | null } {
+  const at = kp.priceAt;
+  const checked = kp.observedAt;
+  const known = typeof at === 'number' && Number.isFinite(at) && at > 0 && typeof checked === 'number' && Number.isFinite(checked);
+  const old = known && checked - at >= KEY_PRICE_SET_NOTE_MS;
+  const source = KEY_SOURCE_LABELS[kp.source] ?? kp.source;
+  const d = kp.divergence;
+  let divergence: string | null = null;
+  if (d && Number.isFinite(d.otherScrap) && Number.isFinite(d.deltaScrap) && d.deltaScrap !== 0) {
+    const other = KEY_SOURCE_LABELS[d.otherSource] ?? d.otherSource;
+    divergence = `${other} values a key at ${fmtRefOnly(d.otherScrap)} (${fmtRefOnly(Math.abs(d.deltaScrap))} ${d.deltaScrap > 0 ? 'higher' : 'lower'}). Set a manual key price in Settings if you trade at that price.`;
+  }
+  return {
+    priceSet: old ? `set ${fmtAgo(at, now)}` : null,
+    priceSetTitle: old ? `${source} last changed this price ${fmtDateTime(at)}; the quote was checked ${fmtAge(now - checked)} ago.` : null,
+    divergence,
+  };
+}
+
 /** Plain-language summary of a price-sheet rule filter. */
 export function describeRuleFilter(f: RuleFilter): string {
   const parts: string[] = [];
@@ -528,6 +606,11 @@ export function describeRuleFilter(f: RuleFilter): string {
   if (f.craftable === false) parts.push('non-craftable');
   if (f.australium === true) parts.push('australium');
   if (f.australium === false) parts.push('not australium');
+  // 0.7.4 (F79)
+  if (f.festive === true) parts.push('festivized');
+  if (f.festive === false) parts.push('not festivized');
+  if (f.elevated === true) parts.push('elevated Strange');
+  if (f.elevated === false) parts.push('not elevated Strange');
   if (f.killstreak?.length) parts.push(f.killstreak.map((k) => (k === 0 ? 'no killstreak' : (KILLSTREAK_NAMES[k] ?? `killstreak ${k}`).toLowerCase())).join(' or '));
   if (f.hasEffect === true) parts.push('with an unusual effect');
   if (f.hasEffect === false) parts.push('no unusual effect');

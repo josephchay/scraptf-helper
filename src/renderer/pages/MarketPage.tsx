@@ -118,6 +118,7 @@ import { indexOfRow, isMenuKeyEcho, isSearchShortcut, menuAnchorRect, moveCursor
 import { allItemsChip, listPaysCell, listStockCell } from '../scraptfListModel';
 import { scraptfLinksInWindow, scraptfWindowOn } from '../scraptfWindowModel';
 import { MIN_CEILING_PRESETS, readMinCeiling } from '../shoppingModel';
+import { timingBadge } from '../timingModel';
 
 type MenuPoint = { x: number; y: number };
 
@@ -651,6 +652,7 @@ export function MarketPage() {
               rows={rows}
               dataKey={win.data?.key ?? ''}
               keyScrap={keyScrap}
+              reservePct={settings?.profit.exitReservePct ?? null}
               now={now}
               density={settings?.ui.density ?? 'comfortable'}
               selectedId={selectedId}
@@ -1248,6 +1250,8 @@ export interface MarketTableProps {
   /** The query the rows answer: a new one scrolls back to the top. */
   dataKey: string;
   keyScrap: Scrap | null;
+  /** 0.8 (PC-1): Settings' price-move reserve, named in the Flip hover (verdictPill) only when above 0; absent: none. */
+  reservePct?: number | null;
   now: number;
   density: 'comfortable' | 'compact';
   selectedId: string | null;
@@ -1275,6 +1279,7 @@ export function MarketTable({
   rows,
   dataKey,
   keyScrap,
+  reservePct = null,
   now,
   density,
   selectedId,
@@ -1492,6 +1497,7 @@ export function MarketTable({
               rowH={rowH}
               selected={selected}
               keyScrap={keyScrap}
+              reservePct={reservePct}
               now={now}
               flash={dir}
               // Only flashing rows see the parity, so a flash re-renders just them.
@@ -1604,6 +1610,7 @@ const ItemRow = memo(function ItemRow({
   rowH,
   selected,
   keyScrap,
+  reservePct,
   now,
   flash,
   flashOdd,
@@ -1618,6 +1625,7 @@ const ItemRow = memo(function ItemRow({
   rowH: number;
   selected: boolean;
   keyScrap: Scrap | null;
+  reservePct: number | null;
   now: number;
   flash: FlashDir | null;
   /** Alternates the animation name, so a row that changes again restarts its flash. */
@@ -1629,13 +1637,15 @@ const ItemRow = memo(function ItemRow({
   scraptfInWindow?: boolean;
 }) {
   const order = r.revenueOrder;
-  const pill = verdictPill(r, keyScrap);
+  const pill = verdictPill(r, keyScrap, reservePct);
   const yours = yourPriceCell(r, keyScrap, now);
   const pays = listPaysCell(r, keyScrap, now);
   const stock = listStockCell(r, now);
   const updated = marketUpdatedAt(r);
   // F17: new on scrap.tf since the previous save of a bank page (MarketRow.scraptfNewAt).
   const fresh = scraptfNewBadge(r, now);
+  // The hover names the scrap.tf price judged: a list-only row shows no price of the user's.
+  const timing = timingBadge(r.scraptfTiming, now, keyScrap);
   // F19: the bank page to look for it on, in the Item cell (the grid's column budget is test-pinned).
   const stf = onScraptf ? marketScraptfButton(r, now, scraptfInWindow) : null;
   // Flags that should stop a purchase get an icon; the drawer explains every flag.
@@ -1666,6 +1676,12 @@ const ItemRow = memo(function ItemRow({
           <span className={`pill market-new tone-${fresh.tone}`} title={fresh.title}>
             {fresh.text}
             <span className="sr-only"> on scrap.tf</span>
+          </span>
+        ) : null}
+        {/* 0.8 (T7): the buy timing of the copy the row's scrap.tf link reads (Wait / Buy now only). */}
+        {timing ? (
+          <span className={`pill tone-${timing.tone} timing-badge`} title={timing.title}>
+            {timing.text}
           </span>
         ) : null}
         {bad.length ? (
@@ -1702,7 +1718,7 @@ const ItemRow = memo(function ItemRow({
         <Money scrap={r.revenueScrap} keyScrap={keyScrap} />
         {order ? (
           <span className="buyer-type">
-            <OnlineDot online={order.online} />
+            <OnlineDot online={order.online} seenAt={order.lastEventAt} />
             <Icon name={order.isBot ? 'bolt' : 'user'} size={12} title={order.isBot ? 'Bot' : 'Human'} />
           </span>
         ) : null}

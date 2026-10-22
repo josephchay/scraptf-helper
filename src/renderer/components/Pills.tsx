@@ -1,6 +1,8 @@
 import type { ReactNode } from 'react';
-import type { ConfidenceLevel, ConnState } from '../../shared/types';
-import { CONFIDENCE_LABELS, CONN_STATE_LABELS, connTone, flagInfo, type ItemTag, type Tone } from '../format';
+import { orderSeenRecently } from '../../shared/buyerSeen';
+import type { ConfidenceLevel, ConnState, OrderSummary } from '../../shared/types';
+import { CONFIDENCE_LABELS, CONN_STATE_LABELS, connTone, flagInfo, fmtAge, type ItemTag, type Tone } from '../format';
+import { Icon } from './Icon';
 import { Tip } from './Tip';
 
 export function StatePill({ state, label, title }: { state: ConnState; label?: string; title?: string }) {
@@ -107,7 +109,39 @@ export function ItemTagChip({ tag }: { tag: ItemTag }) {
   );
 }
 
-export function OnlineDot({ online }: { online: boolean | null }) {
-  const label = online === true ? 'Online' : online === false ? 'Offline' : 'Online status unknown';
-  return <span className={`online-dot ${online === true ? 'on' : online === false ? 'off' : 'unknown'}`} title={label} aria-label={label} role="img" />;
+/**
+ * The buyer's presence. 0.7.4 (F23, F63): with `seenAt` (the order's lastEventAt), a flag from an event
+ * older than ORDER_CONFIRMED_MS (2 h) before `now` (default: the render time) shows as unknown, titled
+ * with what it was and when: the flag is as old as that event and nothing refreshes it.
+ */
+export function OnlineDot({ online, seenAt, now }: { online: boolean | null; seenAt?: number | null; now?: number }) {
+  const at = typeof now === 'number' ? now : Date.now();
+  const stale = typeof seenAt === 'number' && !orderSeenRecently(seenAt, at);
+  const shown = stale ? null : online;
+  const ago = stale && Number.isFinite(seenAt) ? fmtAge(at - seenAt) : null;
+  const label = ago
+    ? `${online === true ? 'Online' : online === false ? 'Offline' : 'Online status unknown'} when last seen, ${ago} ago; not confirmed since`
+    : shown === true
+      ? 'Online'
+      : shown === false
+        ? 'Offline'
+        : 'Online status unknown';
+  return <span className={`online-dot ${shown === true ? 'on' : shown === false ? 'off' : 'unknown'}`} title={label} aria-label={label} role="img" />;
+}
+
+/**
+ * 0.7.4 (F63): the revenue order nobody has confirmed for 24 h ('unverified'): a warn clock titled with its
+ * age (with `label`, the age in words too), so a days-old exit does not read as a live bid. Nothing for
+ * any other order.
+ */
+export function UnverifiedOrderMark({ order, now, label = false }: { order: Pick<OrderSummary, 'flags' | 'lastEventAt'> | null | undefined; now: number; label?: boolean }) {
+  if (!order || !order.flags.includes('unverified')) return null;
+  const ago = Number.isFinite(order.lastEventAt) ? fmtAge(now - order.lastEventAt) : null;
+  const title = `${ago ? `Revenue order last seen ${ago} ago` : 'Revenue order not seen recently'}: it may have been filled or removed while the live feed was off. Use Refresh from backpack.tf in the item panel to confirm.`;
+  return (
+    <span className="tone-text-warn unverified-order" title={title} aria-label={label ? undefined : title} role={label ? undefined : 'img'}>
+      <Icon name="clock" size={12} />
+      {label ? ` order last seen ${ago ?? 'long'} ago, may be gone` : null}
+    </span>
+  );
 }

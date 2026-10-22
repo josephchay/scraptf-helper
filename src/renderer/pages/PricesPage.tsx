@@ -15,6 +15,7 @@ import { useApp } from '../hooks/appContext';
 import { usePersistentState } from '../hooks/usePersistentState';
 import { useRpcQuery, useThrottled, useVisiblePush } from '../hooks/useRpc';
 import { useDebounced, useNow } from '../hooks/useTimers';
+import { priceMenuTarget } from '../watchesModel';
 import { RulesPanel } from './RulesPanel';
 
 function sanitizeUnit(v: unknown): BareUnit {
@@ -85,7 +86,8 @@ function PriceSheet() {
   // places a keyboard event's 0,0 next to that link (ItemMenu resolveMenuPoint).
   const openMenu = (p: ScrapPrice, e: MouseEvent<HTMLElement>) => {
     e.preventDefault();
-    menu.open({ sku: p.sku, name: p.name }, { x: e.clientX, y: e.clientY });
+    // 0.8: on the copy the price is for, so Watch on scrap.tf… watches that copy (priceMenuTarget).
+    menu.open(priceMenuTarget(p), { x: e.clientX, y: e.clientY });
   };
 
   const rows = useMemo(() => {

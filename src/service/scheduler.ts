@@ -11,7 +11,15 @@ import type { BptfApi, Clock, Engine, HttpClient, Logger, PriceDb, Repo, SchemaS
 import { BptfCredentialError, BptfNotConfiguredError, BptfSnapshotUnavailableError } from './connectors/bptfApi';
 import { META_LOAD_ALL_AT, loadAllFresh } from './connectors/pricedb';
 import { runMaintenance, type MarketIndex } from './domain';
-import { HostBlockedError, NetworkPausedError, NetworkRequestError, RateLimitedError, type TimerApi } from './net';
+import {
+  HostBlockedError,
+  HttpStatusError,
+  NetworkPausedError,
+  NetworkRequestError,
+  RateLimitedError,
+  isUnavailableStatus,
+  type TimerApi,
+} from './net';
 import type { Settings, SecretName } from '../shared/types';
 
 const SEC = 1_000;
@@ -282,7 +290,12 @@ function globalSnapshotFailure(err: unknown): boolean {
     err instanceof HostBlockedError ||
     err instanceof BptfSnapshotUnavailableError ||
     err instanceof BptfCredentialError ||
-    err instanceof BptfNotConfiguredError
+    err instanceof BptfNotConfiguredError ||
+    // 0.7.4 (F52): a 500, 502-504 or Cloudflare 52x is taken as the host's fault, not the SKU's. The budget is
+    // paused by then, so the job waits instead of cooling this one SKU down for 30 min. snapshot-watched still
+    // rotates past a base that answered so, and cools it down once another base succeeded in between (the name
+    // fails, not the host): see lastUnavailable in buildJobs.
+    (err instanceof HttpStatusError && isUnavailableStatus(err.status))
   );
 }
 
@@ -301,8 +314,16 @@ export interface JobContext {
   secret(name: SecretName): string | null;
   /** Base SKUs that have a scrap.tf price or an open journal lot (the watchlist; held SKUs since F11). */
   watchedBaseSkus(): string[];
-  /** Next base SKU queued for a background snapshot (e.g. a price was just added), or null. */
+  /** Next base SKU queued for a background snapshot (a price was just added: core's typed-prices queue), or null. */
   nextQueuedSnapshot(): string | null;
+  /**
+   * 0.7.4 (F16, F24, F30): watched base SKUs whose book matters most, most urgent first (core: profitable,
+   * then below-threshold rows whose revenue order is unverified or not confirmed within CONFIRMED_MS, most
+   * profit first, then rows whose unverified best order would be a flip (unverifiedUpside), then held items to
+   * sell on such an order, then held items whose advice says refresh first (0.8)). snapshot-watched takes the first
+   * stale one after the queue, before its oldest-first scan; the cadence and budget are unchanged. Optional (tests).
+   */
+  snapshotPriority?(): string[];
   /** Fetches a snapshot for a base SKU and reconciles the order book. */
   snapshot(baseSku: string, priority: 'user' | 'background'): Promise<void>;
   /** A key quote was stored; re-evaluate when the selected key value moved. */
@@ -341,6 +362,32 @@ export function buildJobs(ctx: JobContext): JobSpec[] {
     const wait = snapshotFailWait(f.n);
     if (f.until - now > wait) f.until = now + wait;
     return f.until > now;
+  };
+  /**
+   * 0.7.4: base SKU -> when its last background snapshot returned (this process only). A snapshot served
+   * from bptfApi's 10-min cache leaves snapshot_times alone, so without this the same base would take the
+   * one slot a minute until the cache expired. A failed try is not recorded (snapFail covers the SKU's own
+   * failures; a pause or a rate limit is retried as before).
+   */
+  const lastTried = new Map<string, UnixMs>();
+  const triedRecently = (base: string, now: UnixMs): boolean => {
+    const t = lastTried.get(base);
+    return t !== undefined && t <= now && now - t < SNAPSHOT_STALE_MS;
+  };
+  /**
+   * 0.7.4 (F52): base SKU -> when its last background snapshot answered unavailable (500, 502-504, 52x, 530;
+   * this process only). Such an answer pauses the whole budget and sets no cooldown (an outage is the host's),
+   * but one name that keeps failing must not take every slot once the pause ends: for SNAPSHOT_STALE_MS the job
+   * prefers any other stale candidate and takes this base only when none is left. A second unavailable answer
+   * for it after a real snapshot of another base (`lastFetchedAt`) means the name fails, not the host: it then
+   * cools down like the SKU's own failures (snapFail). Still at most one request a run, inside the budget.
+   */
+  const lastUnavailable = new Map<string, UnixMs>();
+  /** When a background snapshot last fetched a book (stamped snapshot_times; a cached answer does not count). */
+  let lastFetchedAt: UnixMs | null = null;
+  const recentlyUnavailable = (base: string, now: UnixMs): boolean => {
+    const t = lastUnavailable.get(base);
+    return t !== undefined && t <= now && now - t < SNAPSHOT_STALE_MS;
   };
   /** Time until PriceDB's full list is due again: 0 unless a load stamped within the last 4 h is still fresh. */
   const untilFullListDue = (): number => {
@@ -458,6 +505,9 @@ export function buildJobs(ctx: JobContext): JobSpec[] {
     {
       // Keeps watched SKUs' order books fresh: at most ONE background snapshot per minute, and only
       // when the snapshot budget has a free slot right now, so user refreshes are never starved.
+      // 0.7.4: the pick is the queue, then ctx.snapshotPriority (unconfirmed profitable rows first), then
+      // the oldest snapshot; only the order changed, not the cadence, the budget or the watched-only rule. A base
+      // whose last answer was unavailable goes behind every other stale candidate (lastUnavailable).
       id: 'snapshot-watched',
       everyMs: MIN,
       firstDelayMs: 20 * SEC,
@@ -473,28 +523,74 @@ export function buildJobs(ctx: JobContext): JobSpec[] {
         const now = clock.now();
         if (http.nextAllowedAt('bptf-snapshot') > now) return;
         let target = ctx.nextQueuedSnapshot();
-        if (target !== null && coolingDown(toBaseSku(target), now)) target = null;
+        if (target !== null && (coolingDown(toBaseSku(target), now) || triedRecently(toBaseSku(target), now))) target = null;
+        const watched = target === null ? ctx.watchedBaseSkus() : [];
+        /** 0.7.4 (F52): the first stale priority base skipped for a recent unavailable answer (used only when nothing else is stale). */
+        let afterOthers: string | null = null;
+        if (target === null && ctx.snapshotPriority) {
+          // 0.7.4: the books the user is about to act on first, still watched ones only.
+          let urgent: string[] = [];
+          try {
+            urgent = ctx.snapshotPriority();
+          } catch (err) {
+            log.warn(`could not rank the background snapshots: ${err instanceof Error ? err.message : String(err)}`);
+          }
+          const isWatched = new Set(watched);
+          for (const sku of urgent) {
+            const base = toBaseSku(sku);
+            if (!isWatched.has(base) || coolingDown(base, now) || triedRecently(base, now)) continue;
+            if (!snapshotIsStale(repo.getSnapshotAt(base), now)) continue;
+            if (recentlyUnavailable(base, now)) {
+              afterOthers ??= base;
+              continue;
+            }
+            target = base;
+            break;
+          }
+        }
         if (target === null) {
           let oldest: { sku: string; at: number } | null = null;
-          for (const sku of ctx.watchedBaseSkus()) {
+          let oldestUnavailable: { sku: string; at: number } | null = null;
+          for (const sku of watched) {
             // A SKU whose snapshot keeps failing must not be picked every minute ahead of the rest.
-            if (coolingDown(toBaseSku(sku), now)) continue;
+            if (coolingDown(toBaseSku(sku), now) || triedRecently(toBaseSku(sku), now)) continue;
             const at = repo.getSnapshotAt(sku) ?? 0;
             // 0.7.3: one stamped in the future (clock moved back) has no known age: stale, not fresh.
             if (!snapshotIsStale(at, now)) continue;
+            if (recentlyUnavailable(toBaseSku(sku), now)) {
+              if (!oldestUnavailable || at < oldestUnavailable.at) oldestUnavailable = { sku, at };
+              continue;
+            }
             if (!oldest || at < oldest.at) oldest = { sku, at };
           }
-          target = oldest?.sku ?? null;
+          target = oldest?.sku ?? afterOthers ?? oldestUnavailable?.sku ?? null;
         }
         if (target === null) return;
         const base = toBaseSku(target);
+        const stampBefore = repo.getSnapshotAt(base);
         try {
           await ctx.snapshot(base, 'background');
           snapFail.delete(base);
+          lastUnavailable.delete(base);
+          const done = clock.now();
+          if (repo.getSnapshotAt(base) !== stampBefore) lastFetchedAt = done;
+          lastTried.set(base, done);
+          if (lastTried.size > 1_000) for (const [b, t] of lastTried) if (!(t <= done && done - t < SNAPSHOT_STALE_MS)) lastTried.delete(b);
         } catch (err) {
-          if (!globalSnapshotFailure(err)) {
+          const failedAt = clock.now();
+          if (err instanceof HttpStatusError && isUnavailableStatus(err.status)) {
+            // 0.7.4 (F52): the budget is paused (host's failure). The same base answering so again after another
+            // base's book was fetched in between is this name's failure: it cools down like a 4xx.
+            const prev = lastUnavailable.get(base);
+            if (prev !== undefined && lastFetchedAt !== null && lastFetchedAt > prev) {
+              const n = (snapFail.get(base)?.n ?? 0) + 1;
+              snapFail.set(base, { n, until: failedAt + snapshotFailWait(n) });
+            }
+            lastUnavailable.set(base, failedAt);
+            if (lastUnavailable.size > 1_000) for (const [b, t] of lastUnavailable) if (!(t <= failedAt && failedAt - t < SNAPSHOT_FAIL_MAX_MS)) lastUnavailable.delete(b);
+          } else if (!globalSnapshotFailure(err)) {
             const n = (snapFail.get(base)?.n ?? 0) + 1;
-            snapFail.set(base, { n, until: clock.now() + snapshotFailWait(n) });
+            snapFail.set(base, { n, until: failedAt + snapshotFailWait(n) });
           }
           throw err;
         }
@@ -526,7 +622,7 @@ export function buildJobs(ctx: JobContext): JobSpec[] {
       async run() {
         const r = runMaintenance(repo, clock.now());
         log.info(
-          `maintenance: purged ${r.listings} listings, ${r.events} events, ${r.requests} request-log rows, ${r.scraptfList} scrap.tf list rows, ${r.bankStock} bank stock rows, ${r.scraptfEvents} scrap.tf change events`,
+          `maintenance: purged ${r.listings} listings, ${r.events} events, ${r.requests} request-log rows, ${r.scraptfList} scrap.tf list rows, ${r.bankStock} bank stock rows, ${r.scraptfEvents} scrap.tf change events, ${r.holdingMarks} exit runs`,
         );
         engine.markAllDirty();
         // Purged listings were deleted without a markDirty: entries built on them must go.

@@ -57,7 +57,8 @@ function seedTeamCaptain(repo: Repo): void {
     makeListing({ id: 'tc-h1', steamid: 'S2', metalScrap: 105, lastEventAt: T0 - MIN }),
     makeListing({ id: 'tc-h2', steamid: 'S3', metalScrap: 102, lastEventAt: T0 - MIN }),
   ]);
-  repo.upsertPricedb([{ sku: '378;6', name: 'Team Captain', buyKeys: 0, buyScrap: 100, sellKeys: 0, sellScrap: 120, time: Math.floor(T0 / 1000), fetchedAt: T0 }]);
+  // 0.7.4: PriceDB buy 92, so the 10 ref cost is not under 95% of what bots pay ('cost-below-market').
+  repo.upsertPricedb([{ sku: '378;6', name: 'Team Captain', buyKeys: 0, buyScrap: 92, sellKeys: 0, sellScrap: 120, time: Math.floor(T0 / 1000), fetchedAt: T0 }]);
   repo.upsertScrapPrice({ sku: '378;6', name: 'Team Captain', costScrap: 90, source: 'import', observedAt: T0 - MIN });
 }
 
@@ -70,7 +71,8 @@ describe('one toast per item for copies stored under one SKU (0.7.3)', () => {
 
     expect(h.events.notified).toHaveLength(2);
     const [kit, tc] = h.events.notified;
-    expect(kit).toMatchObject({ title: 'Profit: Professional Killstreak Rocket Launcher', sku: RL });
+    // 0.7.4 (F66): the title names the copy (its sheen and killstreaker; 2001 has no name in the table).
+    expect(kit).toMatchObject({ title: 'Profit: Professional Killstreak Rocket Launcher (Team Shine, A killstreaker)', sku: RL });
     expect(kit!.body.startsWith('10 keys (50%) — sell to bot buy order')).toBe(true);
     expect(tc).toEqual({ title: 'Profit: Team Captain', body: '2.00 ref (20%) — sell to bot buy order, pay up to 11.00 ref', sku: '378;6' });
     expect(h.events.notified.some((n) => n.sku === null)).toBe(false);
@@ -115,7 +117,7 @@ describe('one toast per item for copies stored under one SKU (0.7.3)', () => {
     h.engine.markDirty([RL]);
     await h.engine.runNow();
     expect(h.events.notified).toHaveLength(3);
-    expect(h.events.notified[2]).toMatchObject({ title: 'Profit: Professional Killstreak Rocket Launcher', sku: RL });
+    expect(h.events.notified[2]).toMatchObject({ title: 'Profit: Professional Killstreak Rocket Launcher (Manndarin, Cerebral Discharge)', sku: RL });
     expect(h.events.notified[2]!.body.startsWith('12 keys')).toBe(true);
   });
 

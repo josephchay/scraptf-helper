@@ -15,10 +15,24 @@ import type {
   ProfitSettings,
   ProfitTier,
   Scrap,
+  ScrapPrice,
+  UnixMs,
 } from '../shared/types';
-import { profitStatus } from '../shared/ceiling';
+import { buyerPresenceText } from '../shared/buyerSeen';
+import {
+  SINGLE_EXIT_TEXT,
+  buyerDepthOf,
+  exitOrdersOfSummaries,
+  flipProfit,
+  profitStatus,
+  reservePctOf,
+  singleExitOf,
+  type CeilingSettings,
+  type ProfitBreakdown,
+} from '../shared/ceiling';
+import { copyExtrasWords, onceByOrderProfit, opportunityCopyKey } from '../shared/copyExtras';
 import { CATEGORIES, CATEGORY_LABELS, PROFIT_TIER_LABELS } from '../shared/types';
-import { CONFIDENCE_LABELS, INPUT_KIND_LABELS, fmtMoney } from './format';
+import { CONFIDENCE_LABELS, INPUT_KIND_LABELS, PAINT_NAMES, fmtMoney, fmtSignedMoney, paintHex, ratioPctText } from './format';
 
 export type SortKey = NonNullable<OppQuery['sort']>;
 export type SortDir = NonNullable<OppQuery['dir']>;
@@ -177,6 +191,46 @@ export function revenueOrderOf(o: Pick<Opportunity, 'revenueScrap' | 'bestOrder'
   return [o.consOrder, o.bestOrder, o.instantOrder].find((x) => x !== null && x.valueScrap === o.revenueScrap) ?? preferred ?? null;
 }
 
+/** The summary bar's "N profitable, together +X" (profitableTotals). */
+export interface ProfitableTotals {
+  /** Summed profit, each revenue buy order counted once at its most profitable row. */
+  profit: Scrap;
+  /** Profitable rows, every copy counted (the table's own count). */
+  profitable: number;
+  /** Profitable rows left out of `profit` because a more profitable row sells to the same order. */
+  sharedCopies: number;
+}
+
+/**
+ * 0.7.4 (F27, F33): the profitable rows' total profit, one profit per revenue buy order: copies of one item
+ * (a kit's sheen combos, painted copies) and generic orders shared by several items are each valued against
+ * the same order, which may buy only one, so only the most profitable row of each order counts. A row with
+ * no order (or no listing id) counts on its own. Matches the engine's 'shared-buyer' flag per item.
+ */
+export function profitableTotals(rows: readonly Opportunity[], useOrder: UseOrder): ProfitableTotals {
+  const best = new Map<string, Scrap>();
+  let profitable = 0;
+  for (const o of rows) {
+    if (o.status !== 'profitable' || o.profitScrap === null || !Number.isFinite(o.profitScrap)) continue;
+    profitable++;
+    const id = revenueOrderOf(o, useOrder)?.listingId;
+    const key = id ? `order:${id}` : `row:${o.key}`;
+    const cur = best.get(key);
+    if (cur === undefined || o.profitScrap > cur) best.set(key, o.profitScrap);
+  }
+  let profit = 0;
+  for (const v of best.values()) profit += v;
+  return { profit, profitable, sharedCopies: profitable - best.size };
+}
+
+/** 0.7.4 (F27, F33): the summary bar's note: "2 copies share a buyer, counted once". */
+export function sharedBuyerNote(sharedCopies: number): string {
+  return sharedCopies === 1 ? '1 copy shares a buyer, counted once' : `${sharedCopies} copies share a buyer, counted once`;
+}
+
+export const SHARED_BUYER_TITLE =
+  "Copies of an item (or items) that sell to the same backpack.tf buy order are counted once in the total, at the best copy's profit: the buyer may take only one. Each row still shows its own profit.";
+
 /** Revenue column header tooltip for each useOrder setting. */
 export const REVENUE_ORDER_TITLES: Record<UseOrder, string> = {
   conservative: 'Conservative revenue: the best order that is not an outlier. Hover a value for best and instant.',
@@ -279,20 +333,27 @@ function orderIndex(by: GroupBy, key: string): number {
   return i === -1 ? Number.MAX_SAFE_INTEGER : i;
 }
 
-/** Group counts and summed profit (null profit counts as 0), in display order. */
-export function summarizeGroups(rows: readonly Opportunity[], by: GroupBy): GroupSummary[] {
-  const map = new Map<string, GroupSummary>();
+/**
+ * 0.7.4 (F27, F33; R27): a group's summed profit, copies of an item that sell to the same buy order counted
+ * once at the best copy among `rows` (onceByOrderProfit, by revenueOrderOf), as the service's
+ * opportunityGroupStats sums it: a filter that hides the best copy counts the next one, not none.
+ */
+export function groupProfitOf(rows: readonly Opportunity[], useOrder: UseOrder = 'conservative'): Scrap {
+  return onceByOrderProfit(rows, (o) => revenueOrderOf(o, useOrder));
+}
+
+/** Group counts and summed profit (null profit counts as 0; groupProfitOf's one buyer once), in display order. */
+export function summarizeGroups(rows: readonly Opportunity[], by: GroupBy, useOrder: UseOrder = 'conservative'): GroupSummary[] {
+  const buckets = new Map<string, Opportunity[]>();
   for (const o of rows) {
     const key = groupKeyOf(o, by);
-    let g = map.get(key);
-    if (!g) {
-      g = { by, key, label: groupLabel(by, key), count: 0, totalProfitScrap: 0 };
-      map.set(key, g);
-    }
-    g.count++;
-    g.totalProfitScrap += o.profitScrap ?? 0;
+    const list = buckets.get(key);
+    if (list) list.push(o);
+    else buckets.set(key, [o]);
   }
-  return [...map.values()].sort((a, b) => orderIndex(by, a.key) - orderIndex(by, b.key) || a.key.localeCompare(b.key));
+  return [...buckets.entries()]
+    .map(([key, list]): GroupSummary => ({ by, key, label: groupLabel(by, key), count: list.length, totalProfitScrap: groupProfitOf(list, useOrder) }))
+    .sort((a, b) => orderIndex(by, a.key) - orderIndex(by, b.key) || a.key.localeCompare(b.key));
 }
 
 export interface OppGroup {
@@ -309,7 +370,7 @@ export interface OppGroup {
  * service sent group summaries for the same grouping they provide the counts
  * and totals, because they cover every match rather than the loaded page.
  */
-export function groupOpportunities(rows: readonly Opportunity[], by: GroupBy, serverGroups?: readonly GroupSummary[] | null): OppGroup[] {
+export function groupOpportunities(rows: readonly Opportunity[], by: GroupBy, serverGroups?: readonly GroupSummary[] | null, useOrder: UseOrder = 'conservative'): OppGroup[] {
   const buckets = new Map<string, Opportunity[]>();
   for (const o of rows) {
     const k = groupKeyOf(o, by);
@@ -331,7 +392,7 @@ export function groupOpportunities(rows: readonly Opportunity[], by: GroupBy, se
       key,
       label: s?.label || groupLabel(by, key),
       count: s ? Math.max(s.count, groupRows.length) : groupRows.length,
-      totalProfitScrap: s ? s.totalProfitScrap : groupRows.reduce((t, o) => t + (o.profitScrap ?? 0), 0),
+      totalProfitScrap: s ? s.totalProfitScrap : groupProfitOf(groupRows, useOrder),
       rows: groupRows,
     });
   }
@@ -460,6 +521,81 @@ export function payUpToTitle(
   return d > 0 ? `${head} Your price is ${fmtMoney(d, keyScrap)} under it.` : `${head} Your price is ${fmtMoney(-d, keyScrap)} over it.`;
 }
 
+/** 0.8 (PC-1): "friction", or "friction and the 5% price-move reserve" when one is set. */
+export function exitCostsWords(reservePct: number | null | undefined): string {
+  const pct = reservePctOf({ exitReservePct: reservePct ?? 0 });
+  return pct > 0 ? `friction and the ${ratioPctText(pct)} price-move reserve` : 'friction';
+}
+
+/** "A", "A and B", "A, B and C". */
+function andList(parts: readonly string[]): string {
+  return parts.length <= 1 ? (parts[0] ?? '') : `${parts.slice(0, -1).join(', ')} and ${parts[parts.length - 1]}`;
+}
+
+/**
+ * 0.8 (PC-1): "Sells for 33.33 ref, minus your cost 22.22 ref, friction 0.11 ref and the 5% price-move reserve 1.66 ref:
+ * profit +9.33 ref." Friction and the reserve are named only when above 0 (two items: "A and B"; three: "A, B and C").
+ * Null for a null breakdown.
+ */
+export function profitBreakdownText(b: ProfitBreakdown | null, keyScrap: Scrap | null): string | null {
+  if (!b) return null;
+  // The friction exitCostsOf applied (frictionOf), never the raw setting (profitPath.test.ts rule 1).
+  const { revenueScrap, costScrap, frictionScrap: friction, reserveScrap, reservePct, profitScrap } = b;
+  const parts = [`your cost ${fmtMoney(costScrap, keyScrap)}`];
+  if (friction > 0) parts.push(`friction ${fmtMoney(friction, keyScrap)}`);
+  if (reserveScrap > 0) parts.push(`the ${ratioPctText(reservePct)} price-move reserve ${fmtMoney(reserveScrap, keyScrap)}`);
+  return `Sells for ${fmtMoney(revenueScrap, keyScrap)}, minus ${andList(parts)}: profit ${fmtSignedMoney(profitScrap, keyScrap)}.`;
+}
+
+/** 0.8 (PC-2): the drawer's Next buyer label hover: which buyer the line names (buyerDepthOf's rule in words). */
+export const NEXT_BUYER_HELP =
+  'If the buyer your profit uses fills or withdraws their order while you buy on scrap.tf: the best other buyer in the book below (another SteamID, not an outlier, one seen in the last 24 h when there is one).';
+
+/** 0.8 (PC-2): the drawer input card's Next buyer line; tone 'warn' when only the revenue order's buyer makes the flip. */
+export interface NextBuyerLine {
+  text: string;
+  title: string;
+  tone: 'warn' | null;
+}
+
+/**
+ * 0.8 (PC-2): the drawer input card's Next buyer line over the drawer's own book (ItemDetail.buyOrders) for the row's
+ * revenue order (revenueOrderOf). Null without a revenue order or when that order is not among the book's eligible
+ * orders (another copy's classification): then nothing is claimed. Presence and price only, never a fill chance.
+ */
+export function nextBuyerLine(
+  o: Pick<Opportunity, 'revenueScrap' | 'costScrap' | 'bestOrder' | 'consOrder' | 'instantOrder'>,
+  buyOrders: readonly OrderSummary[],
+  p: CeilingSettings & Pick<ProfitSettings, 'useOrder'>,
+  keyScrap: Scrap | null,
+  now: UnixMs,
+): NextBuyerLine | null {
+  const order = revenueOrderOf(o, p.useOrder);
+  if (!order || o.revenueScrap === null) return null;
+  const depth = buyerDepthOf(exitOrdersOfSummaries(buyOrders), order.listingId, p.useOrder);
+  if (depth.revenueBuyer === null) return null;
+  const tone = singleExitOf(o.revenueScrap, o.costScrap, depth.nextBuyer, p) !== null ? 'warn' : null;
+  const who = order.userName || (order.isBot ? 'this bot' : 'this buyer');
+  const next = depth.nextBuyer;
+  if (next === null) return { text: 'None: only this buyer', tone, title: `If ${who} fills or withdraws, no other usable buyer is in the book.` };
+  const profit = flipProfit(next.valueScrap, o.costScrap, p);
+  const ok = profitStatus(profit, o.costScrap, p) === 'profitable';
+  const pays = fmtMoney(next.valueScrap, keyScrap);
+  const verdict = ok ? (next.unverified ? 'a flip at this cost, if that order is still there' : 'still a flip at this cost') : 'not a flip at this cost';
+  return {
+    text: `${pays} · profit ${fmtSignedMoney(profit, keyScrap)}${next.unverified ? ' · not seen in 24 h' : ''}`,
+    title: `If ${who} fills or withdraws, the next buyer (${next.isBot ? 'bot' : 'human'}, ${buyerPresenceText(next, now)}) pays ${pays}: ${verdict}. Buy orders show demand, not sales.`,
+    tone,
+  };
+}
+
+/** 0.8 (PC-2): the Opportunities Buyers cell's hover for a 'single-exit' row: "N buyers with eligible orders. <reason text>."; undefined otherwise. */
+export function singleExitTitleOf(o: Pick<Opportunity, 'flags' | 'reasons' | 'buyerCount'>): string | undefined {
+  if (!o.flags.includes('single-exit')) return undefined;
+  const reason = o.reasons.find((r) => r.startsWith(`0 ${SINGLE_EXIT_TEXT}`));
+  return `${o.buyerCount} ${o.buyerCount === 1 ? 'buyer' : 'buyers'} with eligible orders. ${reason ? reason.slice(2) : SINGLE_EXIT_TEXT}.`;
+}
+
 /**
  * On Windows Chromium also sends a contextmenu event for Shift+F10 or the menu
  * key (on key up), after the keydown already opened the item menu: within this
@@ -508,4 +644,68 @@ export function statusFor(
   p: Pick<ProfitSettings, 'minProfitScrap' | 'minProfitPctOfCost' | 'minMargin'>,
 ): OpportunityStatus {
   return profitStatus(profit, costScrap, p);
+}
+
+/**
+ * 0.7.4 (F66): what tells one copy of an item from another (Opportunity.copyKey): every extra in words
+ * ("Noble Hatter's Violet", "Team Shine", "Fire Horns", "Spell: Exorcism", "Strange part: Kills", "Name tag"),
+ * or [] for a plain copy or a key it cannot read.
+ */
+export function copyExtrasText(copyKey: string | null | undefined): string[] {
+  return copyExtrasWords(copyKey, (paint) => PAINT_NAMES[paint] ?? `Paint ${paintHex(paint)}`);
+}
+
+/**
+ * 0.7.4 (F66): the copy tag beside an opportunity's name: its first two extras ("Team Shine, Fire Horns",
+ * "+1" past them) and a hover listing them all; null for a plain copy or a rule. 0.7.4 (R30): a paint the
+ * row's own SKU carries already has its chip beside the name (itemTags), so the tag leaves it out (null when
+ * it was the only extra); the hover still lists it. Each copy's Pay up to comes from the buyers who take that
+ * copy (the engine's explicitInput target), so the hover no longer calls it a clean copy's.
+ */
+export function copyLabelOf(o: Pick<Opportunity, 'copyKey' | 'inputKind'> & Partial<Pick<Opportunity, 'sku'>>): { text: string; title: string } | null {
+  if (o.inputKind === 'rule') return null;
+  const all = copyExtrasText(o.copyKey);
+  if (all.length === 0) return null;
+  const chip = paintOfSku(o.sku);
+  const shown = chip === null ? all : copyExtrasWords(o.copyKey, (paint) => (paint === chip ? '' : paintWord(paint))).filter((w) => w !== '');
+  if (shown.length === 0) return null;
+  const text = shown.length > 2 ? `${shown.slice(0, 2).join(', ')} +${shown.length - 2}` : shown.join(', ');
+  return {
+    text,
+    title: `This copy: ${all.join(', ')}. Each copy of an item is its own row, priced against the buyers who take this copy (generic orders and any that ask for its extras).`,
+  };
+}
+
+function paintWord(paint: number): string {
+  return PAINT_NAMES[paint] ?? `Paint ${paintHex(paint)}`;
+}
+
+/** The paint decimal in a SKU (";p<decimal>"), else null. */
+function paintOfSku(sku: string | undefined): number | null {
+  const m = typeof sku === 'string' ? /;p(\d+)(?:;|$)/.exec(sku) : null;
+  const n = m ? Number(m[1]) : NaN;
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+/** 0.7.4 (F66): the drawer's "other copy" hover names the copy: "The Last Laugh (After Eight)". */
+export function otherCopyName(p: Pick<ScrapPrice, 'sku' | 'name' | 'special'>): string {
+  const extras = copyExtrasText(opportunityCopyKey(p.sku, p.special));
+  return extras.length > 0 ? `${p.name} (${extras.join(', ')})` : p.name;
+}
+
+/**
+ * 0.7.4 (F68): the drawer's input card title. The `price:<id>` ref is a price row id, never a page: "Imported
+ * price #1554 · import #33" names the import batch as the Import page's "#" column and the Price sheet's
+ * "Imported #33" do; "Typed price #12" as the Price sheet's "Edit price #12"; "Rule: <name>" (else its id).
+ * `price` is the input's own row when the drawer has it (absent, or no batch recorded: no batch part).
+ */
+export function inputCardLabel(o: Pick<Opportunity, 'inputKind' | 'inputRef'> & Partial<Pick<Opportunity, 'copyKey'>>, price?: { importBatch: number | null } | null, ruleName?: string): string {
+  if (o.inputKind === 'rule') return `Rule: ${ruleName ?? o.inputRef.replace('rule:', '#')}`;
+  const id = o.inputRef.startsWith('price:') ? o.inputRef.slice('price:'.length) : o.inputRef;
+  // 0.7.4 (F66): which copy, e.g. "Imported price #1960 · import #35 · Noble Hatter's Violet".
+  const extras = copyExtrasText(o.copyKey);
+  const copy = extras.length > 0 ? ` · ${extras.join(', ')}` : '';
+  if (o.inputKind === 'user') return `Typed price #${id}${copy}`;
+  const batch = price?.importBatch;
+  return `Imported price #${id}${typeof batch === 'number' && Number.isSafeInteger(batch) && batch > 0 ? ` · import #${batch}` : ''}${copy}`;
 }

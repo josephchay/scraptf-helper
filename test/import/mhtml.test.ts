@@ -256,7 +256,8 @@ describe('readMhtml', () => {
       '--b--',
       '',
     ].join('\r\n');
-    expect(readMhtml(file)).toEqual({ ok: true, html: '', contentLocation: 'https://scrap.tf/buy/hats', notes: [] });
+    // 0.7.4 (F82): no Date header, so no save time.
+    expect(readMhtml(file)).toEqual({ ok: true, html: '', contentLocation: 'https://scrap.tf/buy/hats', notes: [], date: null });
     // With a body line that is empty, too.
     expect(readMhtml(file.replace('hats\r\n\r\n', 'hats\r\n\r\n\r\n'))).toMatchObject({ ok: true, html: '', contentLocation: 'https://scrap.tf/buy/hats' });
     // So the import says the bank page holds no card, rather than reading the frame.

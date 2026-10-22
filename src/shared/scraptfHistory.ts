@@ -6,25 +6,34 @@
 //
 // Matching and the new / gone / cheaper / pricier rules are F17's (diffBankStock, bankStockOnSale);
 // this module only adds 'restocked' and 'stock' and reads a sequence of saves instead of a pair.
+//
+// 0.8 (T1, LC-3, LC-5): the per-bank lifecycle (scraptfLifecycleOf), one walk over a bank's retained saves
+// giving every copy's price states, listing runs and the bank's asset-id stability, and the one restock
+// rule (scraptfSeenBefore, scraptfIsRestock). scraptfTiming.ts estimates from the lifecycle.
 
 import {
   BANK_STOCK_PLAIN_KEY,
+  BANK_STOCK_SESSION_GAP_MS,
   SCRAPTF_LONG_LISTED_MS,
   bankStockIsOwnCopy,
   bankStockKey,
+  bankStockListFamily,
   bankStockOnSale,
   bankStockPagePath,
   bankStockTargetOf,
   diffBankStock,
   scraptfPriceChange,
+  type BankStockDiffRow,
 } from './bankStock';
 import { formatScrap, valueScrap } from './currency';
 import { scraptfBankInfo } from './links';
+import { fromObject, fromString, isValidSku } from './sku';
 import type {
   BankStockStored,
   KeyPriceState,
   NewScraptfEvent,
   Scrap,
+  ScraptfAssetStability,
   ScraptfBank,
   ScraptfChangeEvent,
   ScraptfChangeKind,
@@ -32,6 +41,7 @@ import type {
   ScraptfHistoryPoint,
   ScraptfItemHistory,
   ScraptfKeyRun,
+  ScraptfListingRun,
   ScraptfPriceChange,
   ScraptfWindowSettings,
   UnixMs,
@@ -57,6 +67,41 @@ export const SCRAPTF_ITEM_EVENTS = 50;
  * (a 'stock' event per save) never push a price drop out of the drawer's history.
  */
 export const SCRAPTF_ITEM_STOCK_EVENTS = 10;
+/**
+ * 0.8 (T1): a copy off sale for any number of observations and back within this long of its last on-sale sighting,
+ * at the same raw price, is a flap, not a 'gone' (a partial look, a lapsed reservation). In time, not in saves, so
+ * the read density never changes the answer.
+ */
+export const SCRAPTF_FLAP_MAX_MS = 60 * MIN_MS;
+/**
+ * 0.8 (T2, LC-4): the widest bracket the estimators ever accept: the ceiling of a page's gap limit
+ * (scraptfGapLimitMs), and the limit of a page with fewer than two looks in its last 7 d. Here because the walk needs
+ * it; scraptfTiming.ts re-exports it.
+ */
+export const SCRAPTF_TIMING_MAX_BRACKET_MS = 24 * HOUR_MS;
+/**
+ * 0.8 (T2, LC-4, review): a page's gap limit is this many times its usual longest gap in a day (scraptfGapLimitMs:
+ * the median over the UTC days of its last 7 d of each day's longest gap between looks, a night say), between
+ * SCRAPTF_TIMING_MIN_GAP_MS and SCRAPTF_TIMING_MAX_BRACKET_MS. A gap between two observations of a copy over its
+ * page's limit censors its state and run at the last sighting before it (cutAt), and a state or run begun after one is
+ * left out (wideStart). Retention keeps one save a day past 7 d (bankStockThinning): pooled with the user's own looks,
+ * those day-wide brackets read a drop and then a sale as one 'gone' and merge drops, which no horizon floor corrects.
+ * The save schedule decides the cut, never the outcome, so censoring there biases nothing; a page looked at once a day
+ * keeps 24 h, as its own saves are no finer.
+ */
+export const SCRAPTF_TIMING_GAP_SLACK = 1.25;
+/** The floor of a page's gap limit: retention's hourly tier (1-7 d, the newest save of each clock hour) leaves gaps under 2 h. */
+export const SCRAPTF_TIMING_MIN_GAP_MS = 2 * HOUR_MS;
+/** scraptfLookGapMs and scraptfGapLimitMs read the looks within this long before a page's newest save. */
+export const SCRAPTF_TIMING_GAP_WINDOW_MS = 7 * DAY_MS;
+/** 0.8 (LC-5): asset-id labels need this share of cross-look single-card pairs to keep their id... */
+export const SCRAPTF_ASSET_STABLE_SHARE = 0.95;
+/** ...over at least this many pairs (each at least BANK_STOCK_SESSION_GAP_MS apart). */
+export const SCRAPTF_ASSET_STABLE_MIN_PAIRS = 50;
+/** 0.8: ScraptfItemCycles.runs keeps at most this many newest runs. */
+export const SCRAPTF_ITEM_RUNS_MAX = 20;
+/** DM-5 (moved here from renderer/historyModel.ts in 0.8, which re-exports it): a newest sighting older than this is no current listing; T3's 'stale-save'. */
+export const HISTORY_LAST_SEEN_STALE_MS = 48 * HOUR_MS;
 /** 0.7.1 (DM-6): the change kinds that are a price event (an item history reads them apart from 'stock'). */
 export const SCRAPTF_PRICE_KINDS: readonly ScraptfChangeKind[] = ['new', 'restocked', 'cheaper', 'pricier', 'gone'];
 /** S5: settings.import.resaveReminderMin's range (0 = off). */
@@ -104,7 +149,7 @@ export function scraptfEventsOf(a: {
     const cur = d.current;
     const prev = d.previous;
     let kind: NewScraptfEvent['kind'] | null = null;
-    if (d.change === 'new') kind = prev !== null || a.seenBefore?.(d.key) === true ? 'restocked' : 'new';
+    if (d.change === 'new') kind = scraptfIsRestock(d, a.seenBefore?.(d.key) === true) ? 'restocked' : 'new';
     else if (d.change !== null) kind = d.change;
     else if (cur && prev && d.onSale && bankStockOnSale(prev) && finite(cur.stock) && finite(prev.stock) && cur.stock !== prev.stock) kind = 'stock';
     if (kind === null) continue;
@@ -129,6 +174,23 @@ export function scraptfEventsOf(a: {
   return out;
 }
 
+/**
+ * 0.8 (G3, LC-7): an earlier retained save of the bank listed this copy at all (on sale or sold out): its run's seenAt
+ * (the runs index, scraptfRunsOf) is before `savedAt`. The change feed's seenBefore and the notifier read this rule.
+ */
+export function scraptfSeenBefore(run: Pick<ScraptfKeyRun, 'seenAt'> | null | undefined, savedAt: UnixMs): boolean {
+  return run !== null && run !== undefined && finite(run.seenAt) && finite(savedAt) && run.seenAt < savedAt;
+}
+
+/**
+ * 0.8 (G3, LC-7): a copy on sale again on a save (diffBankStock 'new') is back, not new, when the previous save of its
+ * page listed it (sold out or without a price) or it was seen before (scraptfSeenBefore). scraptfEventsOf's
+ * 'restocked' and the notifier's "Back on scrap.tf" both read it, so the toast and the feed agree.
+ */
+export function scraptfIsRestock(d: Pick<BankStockDiffRow, 'change' | 'previous'>, seenBefore: boolean): boolean {
+  return d.change === 'new' && (d.previous !== null || seenBefore);
+}
+
 // ---------------------------------------------------------------------------
 // S4: an event valued now and joined to the live buy side
 // ---------------------------------------------------------------------------
@@ -143,10 +205,33 @@ export interface ScraptfEventBuySide {
 }
 
 /**
- * A stored event valued at `keyScrap` and joined to `buy` (null: no eligible buyer). flip: the new
- * price is at or under Pay up to now (a 'gone' event has no new price, so never a flip).
+ * 0.7.4 (F01): a stored event of the /items list whose row in the event's own save (`rowOf`: null when the
+ * save or the row is not known, a 'gone' row the save no longer lists included) is not proven to price one
+ * copy (bankStockListFamily): a family row, every copy at its price. Its price meets no Craftable buyer, so
+ * scraptfChangeEvent joins it to no buy side. Never for a bank page's event.
  */
-export function scraptfChangeEvent(e: ScraptfEventStored, keyScrap: Scrap, buy: ScraptfEventBuySide | null): ScraptfChangeEvent {
+export function scraptfEventListFamily(
+  e: Pick<ScraptfEventStored, 'bank' | 'batchId' | 'sku' | 'specialKey'>,
+  rowOf: (e: Pick<ScraptfEventStored, 'batchId' | 'sku' | 'specialKey'>) => BankStockStored | null | undefined,
+): boolean {
+  if (e.bank !== 'list') return false;
+  let row: BankStockStored | null = null;
+  try {
+    row = rowOf(e) ?? null;
+  } catch {
+    row = null;
+  }
+  return bankStockListFamily('list', row);
+}
+
+/**
+ * A stored event valued at `keyScrap` and joined to `buy` (null: no eligible buyer). flip: the new
+ * price is at or under Pay up to now (a 'gone' event has no new price, so never a flip). 0.7.4: `family`
+ * (scraptfEventListFamily) joins it to no buy side whatever `buy` holds, and marks it `listFamily`.
+ */
+export function scraptfChangeEvent(e: ScraptfEventStored, keyScrap: Scrap, buyIn: ScraptfEventBuySide | null, opts: { family?: boolean } = {}): ScraptfChangeEvent {
+  const family = opts.family === true;
+  const buy = family ? null : buyIn;
   const fromValueScrap = finite(e.fromScrap) ? valueScrap(finite(e.fromKeys) ? e.fromKeys : 0, e.fromScrap, keyScrap) : null;
   const toValueScrap = finite(e.toScrap) ? valueScrap(finite(e.toKeys) ? e.toKeys : 0, e.toScrap, keyScrap) : null;
   // Equal raw prices are no move, whatever the key price did since.
@@ -168,6 +253,7 @@ export function scraptfChangeEvent(e: ScraptfEventStored, keyScrap: Scrap, buy: 
     maxCostScrap,
     flip: e.kind !== 'gone' && toValueScrap !== null && maxCostScrap !== null && toValueScrap <= maxCostScrap,
     ...buyers,
+    ...(family ? { listFamily: true as const } : {}),
   };
 }
 
@@ -190,6 +276,74 @@ export interface ScraptfKeyState {
   pricePrevAt: UnixMs | null;
 }
 
+/** 0.8 (T1): how a price state ended. */
+export type ScraptfStateOutcome = 'reprice-down' | 'arrival' | 'sold-cheapest' | 'reprice-up' | 'gone' | 'untradable' | 'open';
+
+/** 0.8 (T1): one stretch of a copy on sale at one raw price, in one bank (flaps merged). */
+export interface ScraptfPriceState {
+  /** The copy (bankStockKey): the table counts distinct copies (ScraptfBuyTiming.n.copies, dropCopies). */
+  key: string;
+  startAt: UnixMs;
+  /** The copy's observation before startAt; null: left-censored. */
+  startPrevAt: UnixMs | null;
+  /** The newest save on sale at this price. */
+  lastAt: UnixMs;
+  /** The save that showed the next state (another price, or off sale); null while open. */
+  endAt: UnixMs | null;
+  raw: { keys: number; scrap: Scrap };
+  /** Stock on its first save. */
+  stock: number | null;
+  outcome: ScraptfStateOutcome;
+  /** The next price (reprices, arrival, sold-cheapest); null otherwise. */
+  nextRaw: { keys: number; scrap: Scrap } | null;
+  /** Index into the copy's runs of the run it began in. */
+  run: number;
+  /** Flaps absorbed. */
+  flaps: number;
+  /**
+   * The last sighting before the first gap over its page's gap limit (scraptfGapLimitMs, at most
+   * SCRAPTF_TIMING_MAX_BRACKET_MS) between two observations of the copy while this state was open (including the gap
+   * before the save that ended it); null: none. The table censors the state there, whatever its outcome.
+   */
+  cutAt: UnixMs | null;
+  /** A reprice proven on one card (stock 1, the same asset id on both sides, the bank's ids stable): true; ids differ: false; else null. */
+  sameItem: boolean | null;
+  family?: true;
+  /** Its start bracket (startAt - startPrevAt) is over the gap limit of the page it began on: the table leaves it out (start side). */
+  wideStart?: true;
+}
+
+/** 0.8: one copy's lifecycle in one bank. */
+export interface ScraptfCopyLifecycle {
+  key: string;
+  sku: string;
+  specialKey: string;
+  /** Its home page now (the page of the newest save that listed it). */
+  home: string;
+  runs: ScraptfListingRun[];
+  states: ScraptfPriceState[];
+  /** As ScraptfItemCycles.returns. */
+  returns: number;
+  /** Its newest observation (a save that listed it, or its home page's save without it), and the newest save that listed it. */
+  lastObsAt: UnixMs;
+  lastListedAt: UnixMs;
+  /** On sale on its newest observation. */
+  onSale: boolean;
+}
+
+/** 0.8: one bank's lifecycle (scraptfLifecycleOf); the history index caches it per runs rebuild. */
+export interface ScraptfBankLifecycle {
+  /** Exactly what scraptfKeyStatesOf returned before 0.8 (ACT-10). */
+  keyStates: Map<string, ScraptfKeyState>;
+  copies: Map<string, ScraptfCopyLifecycle>;
+  /** Per page (ScraptfSaveRows.page), its save times, oldest first. */
+  pageSaves: Map<string, UnixMs[]>;
+  /** Per page, scraptfLookGapMs of its save times, once per build (its gap limit and the timing read it); absent on a hand-built lifecycle. */
+  lookGaps?: Map<string, number | null>;
+  assetStability: ScraptfAssetStability;
+  newestSaveAt: UnixMs | null;
+}
+
 /**
  * A change event would be written between these two rows of one copy (scraptfEventsOf's rules); without
  * `stock`, only a price or on-sale change counts (ScraptfKeyState.priceSince).
@@ -205,64 +359,406 @@ function stateChanged(prev: BankStockStored | null, cur: BankStockStored | null,
   return stock && finite(prev.stock) && finite(cur.stock) && prev.stock !== cur.stock;
 }
 
+/** ACT-10's bookkeeping for one copy: its state, and its newest observation's row and time. */
+interface KeyStateWalk {
+  state: ScraptfKeyState;
+  last: BankStockStored | null;
+  lastAt: UnixMs;
+}
+
+/** ACT-10: one more observation of a copy already known (0.7.1's rule, unchanged). */
+function see(st: KeyStateWalk, at: UnixMs, row: BankStockStored | null): void {
+  if (stateChanged(st.last, row, true)) {
+    st.state.prevAt = st.lastAt;
+    st.state.since = at;
+  }
+  if (stateChanged(st.last, row, false)) {
+    st.state.pricePrevAt = st.lastAt;
+    st.state.priceSince = at;
+  }
+  st.state.onSale = bankStockOnSale(row);
+  st.last = row;
+  st.lastAt = at;
+}
+
 /**
  * 0.7.1 (ACT-10): per copy (bankStockKey), its current state across one bank's retained saves, by
  * scraptfRunsOf's home-page rule (a save of another page that does not list it says nothing). From the
- * saves in memory, never a query. O(rows + observations).
+ * saves in memory, never a query. O(rows + observations). 0.8: the lifecycle's keyStates, which the walk
+ * builds with the same rule and the same `see`, so the two are equal by construction (the ACT-10 tests pin it).
  */
 export function scraptfKeyStatesOf(saves: readonly ScraptfSaveRows[]): Map<string, ScraptfKeyState> {
-  interface St {
-    state: ScraptfKeyState;
-    home: string;
-    last: BankStockStored | null;
-    lastAt: UnixMs;
+  return scraptfLifecycleOf(saves).keyStates;
+}
+
+// ---------------------------------------------------------------------------
+// 0.8 (T1, LC-3, LC-5): the per-bank lifecycle
+// ---------------------------------------------------------------------------
+
+/** A row's asset id when it is a single card (stock 1) with a non-empty id, else null (a stack, or no id). */
+function singleCardId(r: BankStockStored | null | undefined): string | null {
+  return r && r.stock === 1 && typeof r.assetId === 'string' && r.assetId !== '' ? r.assetId : null;
+}
+
+/** diffBankStock's priceChange rule: cheaper by value at `keyScrap`; equal value goes by keys. */
+function cheaperRaw(cur: { keys: number; scrap: Scrap }, prev: { keys: number; scrap: Scrap }, keyScrap: Scrap): boolean {
+  const d = valueScrap(cur.keys, cur.scrap, keyScrap) - valueScrap(prev.keys, prev.scrap, keyScrap);
+  return d !== 0 ? d < 0 : cur.keys < prev.keys;
+}
+
+/** The SKU's not-tradable twin (its ';untradable' SKU), or null for an unparsable or already untradable SKU. */
+function untradableTwinOf(sku: string): string | null {
+  if (!isValidSku(sku)) return null;
+  try {
+    const obj = fromString(sku);
+    return obj.tradable === false ? null : fromObject({ ...obj, tradable: false });
+  } catch {
+    return null;
   }
-  const states = new Map<string, St>();
+}
+
+/**
+ * 0.8 (LC-5): the pre-pass, one walk oldest first, O(rows): how often a single card kept its asset id between the
+ * user's looks. A pair is a key on sale as one card with an id on a save of a page whose previous save also listed it
+ * on sale with an id, the two at least BANK_STOCK_SESSION_GAP_MS apart (the last sighting of one look against the
+ * first of the next): dense window reads of one look always show the same card and say nothing about the hours or
+ * days between a reprice or a return. A page move or a save between that did not list it on sale gives no pair.
+ * Stable: SCRAPTF_ASSET_STABLE_SHARE over at least SCRAPTF_ASSET_STABLE_MIN_PAIRS pairs.
+ */
+export function scraptfAssetStabilityOf(saves: readonly ScraptfSaveRows[]): ScraptfAssetStability {
+  const pageSeq = new Map<string, number>();
+  const last = new Map<string, { at: UnixMs; page: string; seq: number; assetId: string | null }>();
+  let pairs = 0;
+  let same = 0;
+  for (const save of oldestFirst(saves)) {
+    const seq = (pageSeq.get(save.page) ?? 0) + 1;
+    pageSeq.set(save.page, seq);
+    const seen = new Set<string>();
+    for (const row of save.rows) {
+      const key = bankStockKey(row.sku, row.specialKey);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      if (!bankStockOnSale(row)) continue;
+      const id = singleCardId(row);
+      const prev = last.get(key);
+      if (id !== null && prev && prev.assetId !== null && prev.page === save.page && prev.seq === seq - 1 && save.savedAt - prev.at >= BANK_STOCK_SESSION_GAP_MS) {
+        pairs++;
+        if (prev.assetId === id) same++;
+      }
+      if (prev) {
+        prev.at = save.savedAt;
+        prev.page = save.page;
+        prev.seq = seq;
+        prev.assetId = id;
+      } else last.set(key, { at: save.savedAt, page: save.page, seq, assetId: id });
+    }
+  }
+  const share = pairs > 0 ? same / pairs : null;
+  return { pairs, same, share, stable: pairs >= SCRAPTF_ASSET_STABLE_MIN_PAIRS && share !== null && share >= SCRAPTF_ASSET_STABLE_SHARE };
+}
+
+/**
+ * 0.8 (T3): how often the user looks at a page, from its save times. Saves less than BANK_STOCK_SESSION_GAP_MS
+ * apart are one look (a window session of 30 s reads is one look); this is the median gap from one look's last save
+ * to the next look's first, over the looks within SCRAPTF_TIMING_GAP_WINDOW_MS before the newest time; null with
+ * fewer than 2 looks there. A raw median over saves would read seconds for any window user, even one who looks once
+ * a day. (Here because the walk's gap limit needs it; scraptfTiming.ts re-exports it.)
+ */
+export function scraptfLookGapMs(times: readonly UnixMs[]): number | null {
+  return lookStatsOf(times).lookGapMs;
+}
+
+/**
+ * 0.8 (T2, LC-4, review): a page's gap limit from its save times: SCRAPTF_TIMING_GAP_SLACK times its usual longest
+ * gap in a day (the median, over the UTC days of the looks within SCRAPTF_TIMING_GAP_WINDOW_MS before its newest save,
+ * of each day's longest gap between looks, a gap counted on the day of the look that ends it), clamped to
+ * [SCRAPTF_TIMING_MIN_GAP_MS, SCRAPTF_TIMING_MAX_BRACKET_MS]; the ceiling with fewer than 2 looks. An hourly looker
+ * with 9 h nights gets about 11 h: the nights are kept, retention's one save a day past 7 d is cut, never pooled. A
+ * median over days, so one long absence does not lift it.
+ */
+export function scraptfGapLimitMs(times: readonly UnixMs[]): number {
+  return lookStatsOf(times).gapLimitMs;
+}
+
+/** One sort of a page's save times for both: its look gap (scraptfLookGapMs) and its gap limit (scraptfGapLimitMs). */
+function lookStatsOf(times: readonly UnixMs[]): { lookGapMs: number | null; gapLimitMs: number } {
+  const tt = times.filter(finite).sort((a, b) => a - b);
+  const none = { lookGapMs: null, gapLimitMs: SCRAPTF_TIMING_MAX_BRACKET_MS };
+  if (tt.length === 0) return none;
+  const from = tt[tt.length - 1]! - SCRAPTF_TIMING_GAP_WINDOW_MS;
+  const looks: { first: UnixMs; last: UnixMs }[] = [];
+  for (const at of tt) {
+    if (at < from) continue;
+    const l = looks[looks.length - 1];
+    if (l && at - l.last < BANK_STOCK_SESSION_GAP_MS) l.last = at;
+    else looks.push({ first: at, last: at });
+  }
+  if (looks.length < 2) return none;
+  const gaps: number[] = [];
+  const dayMax = new Map<number, number>();
+  for (let i = 1; i < looks.length; i++) {
+    const g = looks[i]!.first - looks[i - 1]!.last;
+    gaps.push(g);
+    const day = Math.floor(looks[i]!.first / DAY_MS);
+    dayMax.set(day, Math.max(dayMax.get(day) ?? 0, g));
+  }
+  const usual = medianOf([...dayMax.values()])!;
+  return {
+    lookGapMs: medianOf(gaps),
+    gapLimitMs: Math.min(SCRAPTF_TIMING_MAX_BRACKET_MS, Math.max(SCRAPTF_TIMING_MIN_GAP_MS, SCRAPTF_TIMING_GAP_SLACK * usual)),
+  };
+}
+
+function medianOf(xs: number[]): number | null {
+  if (xs.length === 0) return null;
+  xs.sort((a, b) => a - b);
+  const m = xs.length >> 1;
+  return xs.length % 2 === 1 ? xs[m]! : (xs[m - 1]! + xs[m]!) / 2;
+}
+
+/** One copy during the walk: ACT-10's bookkeeping, its lifecycle and what the post-pass needs. */
+interface CopyWalk extends KeyStateWalk {
+  life: ScraptfCopyLifecycle;
+  /** Its observation before the one being read; null: none (left-censored). */
+  prevObsAt: UnixMs | null;
+  /** On sale on its newest observation (a run is open). */
+  listed: boolean;
+  /** Its newest on-sale row (the last run's last on-sale row). */
+  lastOnSale: BankStockStored | null;
+  /** Reprices between two single cards with ids, by the index of the state they closed: true when the ids are equal. */
+  assetCmp: Map<number, boolean> | null;
+  /** 'became untradable' candidates: [run index, state index]. */
+  untradable: [number, number][] | null;
+}
+
+/**
+ * 0.8 (T1, LC-3, LC-5): the single walk over one bank's retained saves (oldest first, O(rows + observations)), by
+ * scraptfRunsOf's home-page rule (a page move is no break). It gives ACT-10's key states (scraptfKeyStatesOf), and per
+ * copy (bankStockKey) its listing runs and price states:
+ * - A run is an unbroken stretch of observations on sale; it ends 'absent', 'sold-out' or (with stable ids, the
+ *   same asset id under the item's ';untradable' SKU in that save) 'untradable'.
+ * - A flap (the run ended 'absent', back within `flapMaxMs` of its last on-sale sighting at the same raw price,
+ *   stock not lower, and with stable ids the same asset id on single cards) marks the earlier run `flap` and
+ *   re-opens its price state, so it is no 'gone'. In time, not in saves: read density never changes it.
+ * - A price state ends 'reprice-down' / 'arrival' (cheaper; more stock) or 'reprice-up' / 'sold-cheapest' (pricier;
+ *   less stock), by diffBankStock's direction rule at `keyScrap`, or 'gone'. With stable ids (the pre-pass,
+ *   scraptfAssetStabilityOf), two single cards with different ids turn a reprice into an arrival or a sale.
+ * - A gap over the gap limit of the page saved (`maxGapMs`) between two observations sets `cutAt` (the last sighting
+ *   before it) on the open state and run, before the row after it is read, and a state or run begun after one is
+ *   `wideStart`: the save schedule decides the censoring, never the outcome.
+ * `flapMaxMs` defaults to SCRAPTF_FLAP_MAX_MS (0 turns flaps off); `maxGapMs` (one limit for every page) defaults to
+ * each page's own scraptfGapLimitMs of its save times (its look gap is kept on the result, `lookGaps`);
+ * `bank` marks the /items list's family rows (bankStockListFamily). `assetStability`, when given, is the pre-pass over
+ * these same saves already done (the history keeps it for Health), so it is not walked twice. Pure; from the saves in
+ * memory, never a query.
+ */
+export function scraptfLifecycleOf(
+  saves: readonly ScraptfSaveRows[],
+  opts: { bank?: ScraptfBank | null; keyScrap?: Scrap; flapMaxMs?: number; maxGapMs?: number; assetStability?: ScraptfAssetStability } = {},
+): ScraptfBankLifecycle {
+  const bank = opts.bank ?? null;
+  const keyScrap = finite(opts.keyScrap) ? opts.keyScrap : 0;
+  const flapMaxMs = finite(opts.flapMaxMs) ? Math.max(0, opts.flapMaxMs) : SCRAPTF_FLAP_MAX_MS;
+  const fixedGapMs = finite(opts.maxGapMs) ? opts.maxGapMs : null;
+  const assetStability = opts.assetStability ?? scraptfAssetStabilityOf(saves);
+  const stable = assetStability.stable;
+  const walks = new Map<string, CopyWalk>();
   const homeKeys = new Map<string, Set<string>>();
+  // The pages' save times first: each page's look gap sets its gap limit before the walk reads a row.
+  const ordered = oldestFirst(saves);
+  const pageSaves = new Map<string, UnixMs[]>();
+  for (const save of ordered) {
+    const times = pageSaves.get(save.page);
+    if (times) times.push(save.savedAt);
+    else pageSaves.set(save.page, [save.savedAt]);
+  }
+  const lookGaps = new Map<string, number | null>();
+  const gapLimits = new Map<string, number>();
+  for (const [page, times] of pageSaves) {
+    const st = lookStatsOf(times);
+    lookGaps.set(page, st.lookGapMs);
+    gapLimits.set(page, fixedGapMs ?? st.gapLimitMs);
+  }
+  const pageLastAt = new Map<string, UnixMs>();
+  let newestSaveAt: UnixMs | null = null;
   const homeOf = (page: string): Set<string> => {
     let s = homeKeys.get(page);
     if (!s) homeKeys.set(page, (s = new Set()));
     return s;
   };
-  const see = (st: St, at: UnixMs, row: BankStockStored | null): void => {
-    if (stateChanged(st.last, row, true)) {
-      st.state.prevAt = st.lastAt;
-      st.state.since = at;
+
+  const step = (w: CopyWalk, at: UnixMs, row: BankStockStored | null, listedHere: ReadonlyMap<string, BankStockStored>, maxGapMs: number): void => {
+    const life = w.life;
+    const runs = life.runs;
+    const states = life.states;
+    const on = bankStockOnSale(row);
+    life.lastObsAt = at;
+    if (row) life.lastListedAt = at;
+    const run = w.listed ? runs[runs.length - 1] : undefined;
+    const open = w.listed ? states[states.length - 1] : undefined;
+    // Wider than this page's saves resolve: a state or run starting here is left out on the start side.
+    const wide = w.prevObsAt !== null && at - w.prevObsAt > maxGapMs;
+    // A wide gap censors the open state and run at their last sighting before it, before this row is read, so an
+    // ending first shown after the gap is cut exactly like a state still at its price after it.
+    if (run && open && wide && w.prevObsAt !== null) {
+      if (open.cutAt === null) open.cutAt = w.prevObsAt;
+      if (run.cutAt === undefined) run.cutAt = w.prevObsAt;
     }
-    if (stateChanged(st.last, row, false)) {
-      st.state.pricePrevAt = st.lastAt;
-      st.state.priceSince = at;
+    if (on && row) {
+      const raw = rawOf(row);
+      const stock = finite(row.stock) ? row.stock : null;
+      const family = bankStockListFamily(bank, row);
+      if (!run || !open) {
+        const lastRun = runs[runs.length - 1];
+        const lastState = states[states.length - 1];
+        const before = w.lastOnSale;
+        const id = singleCardId(row);
+        const beforeId = singleCardId(before);
+        const flap =
+          flapMaxMs > 0 &&
+          lastRun !== undefined &&
+          lastState !== undefined &&
+          before !== null &&
+          lastRun.endedAs === 'absent' &&
+          lastState.outcome === 'gone' &&
+          at - lastRun.lastOnSaleAt <= flapMaxMs &&
+          raw.keys === lastState.raw.keys &&
+          raw.scrap === lastState.raw.scrap &&
+          !(stock !== null && finite(before.stock) && stock < before.stock) &&
+          !(stable && id !== null && beforeId !== null && id !== beforeId);
+        runs.push({
+          firstOnSaleAt: at,
+          startAfter: w.prevObsAt,
+          lastOnSaleAt: at,
+          endedAt: null,
+          endedAs: null,
+          startRaw: raw,
+          endRaw: raw,
+          drops: 0,
+          saves: 1,
+          sameAssetAsBefore: lastRun !== undefined && id !== null && beforeId !== null ? id === beforeId : null,
+          ...(family ? { family: true as const } : {}),
+          ...(wide ? { wideStart: true as const } : {}),
+        });
+        if (flap) {
+          lastRun!.flap = true;
+          lastState!.outcome = 'open';
+          lastState!.endAt = null;
+          lastState!.lastAt = at;
+          lastState!.flaps++;
+          const gone = states.length - 1;
+          if (w.untradable) w.untradable = w.untradable.filter(([, s]) => s !== gone);
+        } else {
+          states.push({ key: life.key, startAt: at, startPrevAt: w.prevObsAt, lastAt: at, endAt: null, raw, stock, outcome: 'open', nextRaw: null, run: runs.length - 1, flaps: 0, cutAt: null, sameItem: null, ...(family ? { family: true as const } : {}), ...(wide ? { wideStart: true as const } : {}) });
+        }
+      } else {
+        run.lastOnSaleAt = at;
+        run.saves++;
+        run.endRaw = raw;
+        if (raw.keys !== open.raw.keys || raw.scrap !== open.raw.scrap) {
+          const prev = w.lastOnSale;
+          // An unknown stock counts as unchanged.
+          const both = stock !== null && prev !== null && finite(prev.stock);
+          if (cheaperRaw(raw, open.raw, keyScrap)) open.outcome = both && stock > prev!.stock! ? 'arrival' : 'reprice-down';
+          else open.outcome = both && stock < prev!.stock! ? 'sold-cheapest' : 'reprice-up';
+          open.endAt = at;
+          open.nextRaw = raw;
+          const a = singleCardId(prev);
+          const b = singleCardId(row);
+          if (a !== null && b !== null) (w.assetCmp ??= new Map()).set(states.length - 1, a === b);
+          states.push({ key: life.key, startAt: at, startPrevAt: open.lastAt, lastAt: at, endAt: null, raw, stock, outcome: 'open', nextRaw: null, run: runs.length - 1, flaps: 0, cutAt: null, sameItem: null, ...(family ? { family: true as const } : {}), ...(wide ? { wideStart: true as const } : {}) });
+        } else open.lastAt = at;
+      }
+      w.lastOnSale = row;
+    } else if (run && open) {
+      run.endedAt = at;
+      run.endedAs = row ? 'sold-out' : 'absent';
+      open.outcome = 'gone';
+      open.endAt = at;
+      // Became untradable: gone from the list while the same single card shows under the item's ';untradable' SKU.
+      const id = singleCardId(w.lastOnSale);
+      if (row === null && id !== null) {
+        const twin = untradableTwinOf(life.sku);
+        if (twin !== null && listedHere.get(bankStockKey(twin, life.specialKey))?.assetId === id) (w.untradable ??= []).push([runs.length - 1, states.length - 1]);
+      }
     }
-    st.state.onSale = bankStockOnSale(row);
-    st.last = row;
-    st.lastAt = at;
+    w.prevObsAt = at;
+    w.listed = on;
+    life.onSale = on;
   };
-  for (const save of oldestFirst(saves)) {
-    const listedHere = new Set<string>();
+
+  for (const save of ordered) {
+    const at = save.savedAt;
+    const prevPageAt = pageLastAt.get(save.page) ?? null;
+    pageLastAt.set(save.page, at);
+    const maxGapMs = gapLimits.get(save.page) ?? SCRAPTF_TIMING_MAX_BRACKET_MS;
+    if (newestSaveAt === null || at > newestSaveAt) newestSaveAt = at;
+    const listedHere = new Map<string, BankStockStored>();
     for (const row of save.rows) {
       const key = bankStockKey(row.sku, row.specialKey);
-      if (listedHere.has(key)) continue;
-      listedHere.add(key);
-      const st = states.get(key);
-      if (!st) {
-        states.set(key, { state: { onSale: bankStockOnSale(row), since: save.savedAt, prevAt: null, priceSince: save.savedAt, pricePrevAt: null }, home: save.page, last: row, lastAt: save.savedAt });
+      if (!listedHere.has(key)) listedHere.set(key, row);
+    }
+    for (const [key, row] of listedHere) {
+      let w = walks.get(key);
+      if (!w) {
+        w = {
+          state: { onSale: bankStockOnSale(row), since: at, prevAt: null, priceSince: at, pricePrevAt: null },
+          last: row,
+          lastAt: at,
+          life: { key, sku: row.sku, specialKey: row.specialKey, home: save.page, runs: [], states: [], returns: 0, lastObsAt: at, lastListedAt: at, onSale: false },
+          // Its first observation follows the page's save before, which did not list it.
+          prevObsAt: prevPageAt,
+          listed: false,
+          lastOnSale: null,
+          assetCmp: null,
+          untradable: null,
+        };
+        walks.set(key, w);
         homeOf(save.page).add(key);
-        continue;
+      } else {
+        if (w.life.home !== save.page) {
+          homeKeys.get(w.life.home)?.delete(key);
+          w.life.home = save.page;
+          homeOf(save.page).add(key);
+        }
+        see(w, at, row);
       }
-      if (st.home !== save.page) {
-        homeKeys.get(st.home)?.delete(key);
-        st.home = save.page;
-        homeOf(save.page).add(key);
-      }
-      see(st, save.savedAt, row);
+      step(w, at, row, listedHere, maxGapMs);
     }
     for (const key of homeKeys.get(save.page) ?? []) {
-      if (!listedHere.has(key)) see(states.get(key)!, save.savedAt, null);
+      if (listedHere.has(key)) continue;
+      const w = walks.get(key)!;
+      see(w, at, null);
+      step(w, at, null, listedHere, maxGapMs);
     }
   }
-  const out = new Map<string, ScraptfKeyState>();
-  for (const [key, st] of states) out.set(key, st.state);
-  return out;
+
+  const keyStates = new Map<string, ScraptfKeyState>();
+  const copies = new Map<string, ScraptfCopyLifecycle>();
+  for (const [key, w] of walks) {
+    keyStates.set(key, w.state);
+    const { runs, states } = w.life;
+    if (stable) {
+      for (const [i, same] of w.assetCmp ?? []) {
+        const s = states[i]!;
+        s.sameItem = same;
+        if (!same) {
+          // Another card at the new price: the one at the old price was sold (or a cheaper one came in).
+          if (s.outcome === 'reprice-down') s.outcome = 'arrival';
+          else if (s.outcome === 'reprice-up') s.outcome = 'sold-cheapest';
+        }
+      }
+      for (const [r, s] of w.untradable ?? []) {
+        runs[r]!.endedAs = 'untradable';
+        states[s]!.outcome = 'untradable';
+      }
+    } else for (const run of runs) run.sameAssetAsBefore = null;
+    // Runs count reprice-downs only, as labelled (the estimators' drop event also takes arrivals).
+    for (let i = 0; i + 1 < states.length; i++) if (states[i]!.outcome === 'reprice-down') runs[states[i + 1]!.run]!.drops++;
+    for (let i = 1; i < runs.length; i++) if (runs[i]!.startAfter !== null && !runs[i - 1]!.flap) w.life.returns++;
+    copies.set(key, w.life);
+  }
+  return { keyStates, copies, pageSaves, lookGaps, assetStability, newestSaveAt };
 }
 
 /**
@@ -521,6 +1017,27 @@ function copyPickOf(banks: ItemBanks, key: string, base: string, specialKey: str
   return { pick: onSaleNow ?? lastOnSale ?? lastListed, tier: onSaleNow ? 0 : lastOnSale ? 1 : 2, name };
 }
 
+/**
+ * 0.8: the bank one copy's history is read from (copyPickOf's rule, which scraptfItemHistoryOf applies), over the
+ * banks' lifecycles instead of their saves: on sale on its newest observation (at lastObsAt), else the one that last
+ * had it on sale (its last run's lastOnSaleAt), else the one that last listed it (lastListedAt); a bank page before
+ * the /items list, then the newer. Null when no bank has the copy. A test keeps it equal to scraptfItemHistoryOf's bank.
+ */
+export function scraptfCopyBankOf(banks: readonly { bank: ScraptfBank; life: Pick<ScraptfBankLifecycle, 'copies'> }[], key: string): ScraptfBank | null {
+  let onSaleNow: { bank: ScraptfBank; at: UnixMs } | null = null;
+  let lastOnSale: { bank: ScraptfBank; at: UnixMs } | null = null;
+  let lastListed: { bank: ScraptfBank; at: UnixMs } | null = null;
+  for (const b of banks) {
+    const c = b.life.copies.get(key);
+    if (!c) continue;
+    if (c.onSale && better({ bank: b.bank, at: c.lastObsAt }, onSaleNow)) onSaleNow = { bank: b.bank, at: c.lastObsAt };
+    const run = c.runs[c.runs.length - 1];
+    if (run && better({ bank: b.bank, at: run.lastOnSaleAt }, lastOnSale)) lastOnSale = { bank: b.bank, at: run.lastOnSaleAt };
+    if (better({ bank: b.bank, at: c.lastListedAt }, lastListed)) lastListed = { bank: b.bank, at: c.lastListedAt };
+  }
+  return (onSaleNow ?? lastOnSale ?? lastListed)?.bank ?? null;
+}
+
 function keyScrapOf(kp: KeyPriceState | null): Scrap {
   return kp && finite(kp.valueScrap) && kp.valueScrap > 0 ? kp.valueScrap : 0;
 }
@@ -665,6 +1182,8 @@ export function scraptfItemHistoryOf(a: {
 export interface ScraptfListed {
   since: UnixMs;
   lastSeenAt: UnixMs;
+  /** 0.8: the copy (bankStockKey) whose run was picked. */
+  key?: string;
 }
 
 /**
@@ -681,14 +1200,14 @@ export function scraptfListedPick(cur: ScraptfListed | null | undefined, next: S
 /**
  * 0.7.1 (DM-5): MarketRow.scraptfListedSince and scraptfLastSeenAt for a base SKU from one bank's runs:
  * among the copies of it listed now (any special key), the one seen on sale last (scraptfListedPick), its
- * run's start and newest sighting; null when none is listed.
+ * run's start and newest sighting; null when none is listed. 0.8: and that copy's key (T7's timing reads it).
  */
 export function scraptfListedOf(runs: ReadonlyMap<string, ScraptfKeyRun> | null | undefined, baseSku: string): ScraptfListed | null {
   if (!runs) return null;
   let best: ScraptfListed | null = null;
   for (const r of runs.values()) {
     if (r.sku !== baseSku || r.listedSince === null) continue;
-    const next = { since: r.listedSince, lastSeenAt: r.lastSeenAt ?? r.listedSince };
+    const next = { since: r.listedSince, lastSeenAt: r.lastSeenAt ?? r.listedSince, key: r.key };
     if (scraptfListedPick(best, next)) best = next;
   }
   return best;

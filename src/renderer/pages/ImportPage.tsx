@@ -15,7 +15,7 @@ import { useNow } from '../hooks/useTimers';
 import { copyText } from '../clipboard';
 import { ExternalLink } from '../components/ExternalLink';
 import { SaveModeChoice, ScraptfListCard } from '../components/ScraptfListCard';
-import { chooseWatchFolder, importListRowsText, importToastText } from '../scraptfListModel';
+import { chooseWatchFolder, importListFamilyText, importListRowsText, importToastText, listRereadNote } from '../scraptfListModel';
 import { importBankText, importBatchItemsRemoved } from '../banksModel';
 import { importOriginView } from '../scraptfWindowModel';
 import {
@@ -127,6 +127,8 @@ function PermissionTemplate() {
 function ImportEnabled() {
   const { settings, updateSettings, toast, bumpData, lastImport } = useApp();
   const batches = useRpcQuery('import.batches', { limit: 20 });
+  // 0.7.4: whether the upgrade left the price list empty (listRereadNote); local IPC only.
+  const listStatus = useRpcQuery('scraptf.listStatus', undefined);
   // F18: opened from the no-cards toast ("How to save"), the page starts on the import it was about.
   const [last, setLast] = useState<ImportResult | null>(lastImport);
   const [busy, setBusy] = useState(false);
@@ -134,8 +136,10 @@ function ImportEnabled() {
   usePush('import.done', (r) => {
     setLast(r);
     void batches.reload();
+    void listStatus.reload();
     bumpData();
   });
+  const reread = listRereadNote(listStatus.data, batches.data);
 
   const pickFile = async () => {
     setBusy(true);
@@ -181,7 +185,12 @@ function ImportEnabled() {
       const reports = await rpc('import.report', {});
       const text = importReportText(reports);
       const copied = text !== null && (await copyText(text));
-      const t = importReportToast(copied, text === null ? 0 : reports.length);
+      // 0.8 (LC-6): the copied reads' reserved / not-tradable markers, summed (an older service sends none).
+      const markers = reports.reduce(
+        (m, r) => ({ reserved: m.reserved + (r.counts?.reserved ?? 0), notTradable: m.notTradable + (r.counts?.notTradable ?? 0) }),
+        { reserved: 0, notTradable: 0 },
+      );
+      const t = importReportToast(copied, text === null ? 0 : reports.length, markers);
       toast(t.text, t.tone);
     } catch (e) {
       toast(`Could not read the parser report: ${errorMessage(e)}`, 'bad');
@@ -192,9 +201,14 @@ function ImportEnabled() {
 
   return (
     <div className="import-grid">
-      {/* F14: every scrap.tf price in one save of scrap.tf/items, the same card as on the Live market. */}
+      {/* F14: every item's stock and what scrap.tf pays in one save of scrap.tf/items (0.7.4: prices only rows that show their copy), the same card as on the Live market. */}
       <div className="span-2">
         <ScraptfListCard placement="import" />
+        {reread ? (
+          <Banner tone="info" icon="info">
+            {reread}
+          </Banner>
+        ) : null}
       </div>
 
       <section className="card" aria-labelledby="import-how">
@@ -325,6 +339,8 @@ function ImportEnabled() {
 /** One import's result. Exported for the render tests only. */
 export function ImportResultView({ r }: { r: ImportResult }) {
   const listText = importListRowsText(r);
+  // 0.7.4: the page's family rows are on the list but no cost of their own (scraptfListModel).
+  const familyText = importListFamilyText(r);
   // F15: which banks card this save counts for (the parser's recognised page); F18: none when it stored nothing,
   // blaming the save type only when the page came without its cards; 0.7.3: the bare Unusuals index has none to show.
   const bank = importBankText(r.bank, r.stored, importSavedWithoutCards(r), r.origin === 'window', false, importUnusualsIndex(r));
@@ -370,7 +386,10 @@ export function ImportResultView({ r }: { r: ImportResult }) {
         {listText ? (
           <>
             <dt>Price list</dt>
-            <dd>{listText}</dd>
+            <dd>
+              {listText}
+              {familyText ? <span className="muted small"> {familyText}</span> : null}
+            </dd>
           </>
         ) : null}
       </dl>

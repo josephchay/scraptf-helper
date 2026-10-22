@@ -3,13 +3,25 @@
 // drawer opens, shows "Listed since …", stock now, the four change chips, the step chart and the change
 // lines (or the empty state for an item no save lists), and reads again on 'scraptf.changed' and
 // 'prices.changed', throttled and only while the window is shown. It opens nothing and nothing leaves
-// the process; the wiring is checked statically too.
+// the process; the wiring is checked statically too. 0.8 (T5, LC-3): the Cycles block (the buy timing, the
+// listing runs, a tick under each drop), absent for a history from an older service.
 
 import { readFileSync } from 'node:fs';
 import { act, createElement, type ReactNode } from 'react';
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
-import { historyChips, historyEventGroups, historyListedLine, historyNowText } from '../../src/renderer/historyModel';
+import {
+  STEP_BOX,
+  historyChips,
+  historyEventGroups,
+  historyListedLine,
+  historyNowText,
+  historyRunLines,
+  historySeries,
+  historyTimingView,
+  stepChartGeom,
+} from '../../src/renderer/historyModel';
 import { createMockBridge, type MockBridge } from '../../src/renderer/mock';
+import { TIMING_ESTIMATE_NOTE } from '../../src/renderer/timingModel';
 import type { FlipdeskBridge, PushContract, PushEvent } from '../../src/shared/rpc';
 import { installDomShim, ShimElement, ShimEvent, type ShimDocument } from './domShim';
 
@@ -77,7 +89,24 @@ async function listedSku(): Promise<string> {
   }
 }
 
-async function mount(sku: string) {
+/** 0.8: a plain hats item whose history has its listing runs and a buy-timing verdict (the Cycles block). */
+async function cyclesSku(): Promise<string> {
+  const b = createMockBridge({ tickMs: 0, latencyMs: 0, now: () => T0 });
+  try {
+    const r = await b.rpc('scraptf.bankStock', { bank: 'hats', limit: 60 });
+    for (const row of r.rows) {
+      if (row.hasExtras || row.change === 'gone') continue;
+      const h = await b.rpc('scraptf.itemHistory', { sku: row.sku });
+      if (h.bank !== null && h.timing && h.cycles && h.cycles.runs.length > 0 && h.points.length > 2) return row.sku;
+    }
+    throw new Error('no item with cycles in the mock');
+  } finally {
+    b.dispose();
+  }
+}
+
+/** `older`: answer 'scraptf.itemHistory' as a service from before 0.8 would, without `timing` and `cycles`. */
+async function mount(sku: string, opts: { older?: boolean } = {}) {
   vi.useFakeTimers({ toFake: ['Date'] });
   vi.setSystemTime(T0);
   win()['location'] = { hash: '' };
@@ -88,6 +117,12 @@ async function mount(sku: string) {
     windowKind: 'dashboard',
     rpc: (m, p) => {
       calls.push({ method: m, params: p });
+      if (opts.older && m === 'scraptf.itemHistory') {
+        return b.rpc(m, p).then((h) => {
+          const { timing: _timing, cycles: _cycles, ...rest } = h as Record<string, unknown>;
+          return rest as never;
+        });
+      }
       return b.rpc(m, p);
     },
     on: (e, fn) => {
@@ -226,9 +261,61 @@ describe('the scrap.tf history block in the drawer (F20 U1)', () => {
   });
 });
 
+describe('0.8 the Cycles block (T5, LC-3)', () => {
+  it('shows the buy timing between the chips and the chart, the runs after the chart, and a tick under each drop', async () => {
+    const sku = await cyclesSku();
+    const t = await mount(sku);
+    const h = await t.b.rpc('scraptf.itemHistory', { sku });
+    const key = h.keyPrice?.valueScrap ?? null;
+    const view = historyTimingView(h.timing, h, key, T0)!;
+    const box = t.within('stf-hist-timing')[0]!;
+    expect(box.getAttribute('role')).toBe('group');
+    expect(box.getAttribute('aria-label')).toBe('Buy timing');
+    const pill = box.descendants().find((e) => (e.getAttribute('class') ?? '').includes('stf-hist-timing-pill'))!;
+    expect(pill.textContent).toBe(view.pill.text);
+    expect(pill.getAttribute('title')).toBe(view.pill.title);
+    const paras = box.descendants().filter((e) => e.tagName === 'P').map((e) => e.textContent);
+    expect(paras).toEqual([...view.lines, TIMING_ESTIMATE_NOTE]);
+    // Order: chips, the timing, the chart, the runs.
+    const block = t.block()!;
+    const order = block.descendants().map((e) => e.getAttribute('class') ?? '');
+    const at = (cls: string) => order.findIndex((c) => c.split(' ').includes(cls));
+    expect(at('stf-hist-chips')).toBeLessThan(at('stf-hist-timing'));
+    expect(at('stf-hist-timing')).toBeLessThan(at('stf-hist-chart'));
+    expect(at('stf-hist-chart')).toBeLessThan(at('stf-hist-runs'));
+    const runs = historyRunLines(h.cycles, h, key, T0)!;
+    const head = block.descendants().find((e) => e.tagName === 'H4' && e.textContent === runs.head)!;
+    expect(head.getAttribute('title')).toBe(runs.title);
+    const items = t.within('stf-hist-runs')[0]!.descendants().filter((e) => e.tagName === 'LI');
+    expect(items.map((e) => e.textContent)).toEqual(runs.lines.slice(0, 5).map((l) => l.text));
+    const downs = stepChartGeom(historySeries(h.points), STEP_BOX, { downAts: h.cycles!.dropAts })!.downs!;
+    expect(block.descendants().some((e) => e.getAttribute('class') === 'stf-hist-down')).toBe(downs.length > 0);
+    // Still text only: no link, nothing loaded.
+    expect(block.descendants().some((e) => e.tagName === 'A' || e.tagName === 'IMG' || e.tagName === 'IFRAME')).toBe(false);
+  });
+
+  it('a history without timing or cycles (an older service) renders as before', async () => {
+    const sku = await cyclesSku();
+    const t = await mount(sku, { older: true });
+    const block = t.block()!;
+    expect(block.textContent).toContain('scrap.tf history');
+    expect(t.within('stf-hist-timing')).toEqual([]);
+    expect(t.within('stf-hist-runs')).toEqual([]);
+    expect(block.descendants().some((e) => e.getAttribute('class') === 'stf-hist-down')).toBe(false);
+    expect(block.descendants().some((e) => e.tagName === 'svg' && (e.getAttribute('class') ?? '').includes('stf-hist-svg'))).toBe(true);
+    expect(t.within('stf-hist-chip')).toHaveLength(4);
+  });
+});
+
 describe('wiring (static)', () => {
   const comp = read('components/ScraptfHistory.tsx');
   const drawer = read('pages/ItemDrawer.tsx');
+
+  it('0.8: marks the drops only from the history\'s cycles, and styles the Cycles block from tokens', () => {
+    expect(comp).toContain('stepChartGeom(series, STEP_BOX, dropAts ? { downAts: dropAts } : {})');
+    const rules = read('styles/scraptf-history.css').replace(/\/\*[\s\S]*?\*\//g, '');
+    for (const cls of ['stf-hist-timing', 'stf-hist-runs', 'stf-hist-down']) expect(rules).toContain(`.${cls}`);
+  });
 
   it('reads only scraptf.itemHistory, lazily, refreshed visible-only and throttled', () => {
     expect(comp).toContain("useRpcQuery('scraptf.itemHistory', special !== undefined && special !== null ? { sku, special } : { sku })");
@@ -242,7 +329,9 @@ describe('wiring (static)', () => {
 
   it('is mounted once in the drawer, after the scrap.tf price list', () => {
     expect(drawer.match(/<ScraptfHistory /g)).toHaveLength(1);
-    expect(drawer).toContain('<ScraptfHistory sku={d.sku} keyScrap={keyScrap} now={now} />');
+    // 0.7.4 (F65): with the newer look that stored no save (unsavedLookOf), so an older save is never "Now".
+    // 0.7.4 (F66): and the copy the drawer was opened on (a painted or kit copy's row), when there is one.
+    expect(drawer).toContain('<ScraptfHistory sku={d.sku} {...(copyKey !== null ? { special: copyKey } : {})} keyScrap={keyScrap} now={now} unsaved={unsaved} />');
     expect(drawer.indexOf('<ScraptfListSection')).toBeLessThan(drawer.indexOf('<ScraptfHistory'));
     expect(drawer.indexOf('<ScraptfHistory')).toBeLessThan(drawer.indexOf('<PriceSection'));
   });

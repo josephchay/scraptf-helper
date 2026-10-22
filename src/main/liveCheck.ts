@@ -18,7 +18,18 @@
 
 import { z } from 'zod';
 import type { Logger } from '../service/contracts';
-import { blankCheckResult, CHECK_ARM_MS, CHECK_NOTIFY_DEDUP_MS, CHECK_POPUP_MIN_GAP_MS, CHECK_WATCH_INTERVAL_MS, checkPriceIsOtherCopy } from '../shared/check';
+import {
+  blankCheckResult,
+  CHECK_ARM_MS,
+  CHECK_NOTIFY_DEDUP_MS,
+  CHECK_POPUP_MIN_GAP_MS,
+  CHECK_WATCH_INTERVAL_MS,
+  checkCostSuspect,
+  checkCraftUndecided,
+  checkPriceIsOtherCopy,
+  checkPriceReadAsRef,
+  checkRevenueUnverified,
+} from '../shared/check';
 import { formatKeysMetal, formatScrap } from '../shared/currency';
 import { DEFAULT_SETTINGS } from '../shared/defaults';
 import type { PushContract } from '../shared/rpc';
@@ -164,10 +175,17 @@ export function checkPriceTooOld(r: Pick<CheckResult, 'price' | 'checkedAt'>, in
  * 5.33 ref (copied) → sells for 1 key 9.11 ref, +3.77 ref (6%)". null unless the result is an item with a
  * flip verdict and a price, and null when that price is for a copy with extras (CHECK_EXTRAS_NOTE): no
  * flip for a plain one. 0.7.3: null too when the price, other than a copied one, is older than
- * `inputStaleMs` (profit.inputStaleMs; README "Notifications", the engine's ACT-2 rule).
+ * `inputStaleMs` (profit.inputStaleMs; README "Notifications", the engine's ACT-2 rule). 0.7.4: null too for
+ * an undecided craftability (F41, checkCraftUndecided: the copied text did not say and the saved scrap.tf data
+ * does not tell the copies apart) and for a number read as ref without a unit (F44, checkPriceReadAsRef; the service never
+ * gives the watcher one, so this only backs that up). 0.7.4 (R22, F13/F47): null too on an unverified revenue
+ * order (not seen for 24 h, checkRevenueUnverified), as the engine's and the bank stock's toasts wait for a
+ * confirmed one; and (R14) for a price the cost check flagged (checkCostSuspect: probably another copy's). The
+ * popup still shows such a result.
  */
 export function flipNotification(r: CheckResult, inputStaleMs?: number | null): PushContract['notify'] | null {
   if (r.status !== 'item' || r.verdict !== 'flip' || !r.sku || !r.price || checkPriceTooOld(r, inputStaleMs) || checkPriceIsOtherCopy(r)) return null;
+  if (checkCraftUndecided(r) || checkPriceReadAsRef(r) || checkRevenueUnverified(r) || checkCostSuspect(r)) return null;
   const k = r.keyScrap;
   let body = `scrap.tf ${formatKeysMetal(r.price.keys, r.price.scrapRaw)} (${PRICE_SOURCE_WORDS[r.price.source] ?? 'price'})`;
   const revenue = r.revenue?.revenueScrap;

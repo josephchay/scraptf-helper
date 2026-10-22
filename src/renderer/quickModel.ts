@@ -3,10 +3,27 @@
 // (F12). Kept out of QuickEntry.tsx so the rules are unit-tested.
 
 import { SCRAPTF_BOUNDARY_SHORT } from '../shared/boundaryText';
-import { frictionOf, maxCostFor, type CeilingSettings } from '../shared/ceiling';
+import {
+  buyerDepthOf,
+  exitOrdersOfSummaries,
+  flipProfit,
+  maxCostFor,
+  profitBreakdown,
+  singleExitOf,
+  singleExitText,
+  type CeilingSettings,
+} from '../shared/ceiling';
 import { CHECK_PRICE_TEXT_MAX } from '../shared/check';
 import { parsePrice } from '../shared/currency';
-import { SCRAPTF_LIST_PRICE_NOTE, scraptfListFresh, scraptfListUsePrice } from '../shared/scraptfList';
+import {
+  SCRAPTF_LIST_CRAFT_UNPROVEN,
+  SCRAPTF_LIST_FAMILY_LABEL,
+  SCRAPTF_LIST_PRICE_NOTE,
+  scraptfListCraftProven,
+  scraptfListFresh,
+  scraptfListIsFamily,
+  scraptfListUsePrice,
+} from '../shared/scraptfList';
 import { baseSku, fromObject, fromString } from '../shared/sku';
 import type {
   ItemDetail,
@@ -23,7 +40,7 @@ import type {
   UnixMs,
 } from '../shared/types';
 import { fmtAgo, fmtDateTime, fmtInt, fmtKeysMetal, fmtMoney } from './format';
-import { statusFor } from './oppModel';
+import { profitBreakdownText, statusFor } from './oppModel';
 
 /** Quiet time after a pick before 'item.detail' runs, so arrowing through picks does not fire a request each. */
 export const PREVIEW_DEBOUNCE_MS = 150;
@@ -92,7 +109,7 @@ export function previewRevenue(d: Pick<ItemDetail, 'revenue' | 'buyOrders'>, p: 
 
 export interface ProfitPreview {
   costScrap: Scrap;
-  /** revenue − cost − friction, as the engine computes it; null without revenue. */
+  /** flipProfit (friction and the price-move reserve), as the engine computes it; null without revenue. */
   profitScrap: Scrap | null;
   /** profit / cost; null without revenue or for a free item (as the engine stores it). */
   margin: number | null;
@@ -103,11 +120,11 @@ export interface ProfitPreview {
   headroomScrap: Scrap | null;
 }
 
-/** Live profit for a typed cost, computed locally with the engine's rules (friction, profitStatus). */
+/** Live profit for a typed cost, computed locally with the engine's rules (flipProfit, profitStatus). */
 export function profitPreview(costScrap: Scrap, rev: Pick<ItemRevenue, 'revenueScrap' | 'maxCostScrap'> | null, p: CeilingSettings): ProfitPreview {
   const revenue = rev?.revenueScrap ?? null;
   const ceiling = rev?.maxCostScrap ?? null;
-  const profitScrap = revenue === null ? null : revenue - costScrap - frictionOf(p);
+  const profitScrap = flipProfit(revenue, costScrap, p);
   return {
     costScrap,
     profitScrap,
@@ -126,6 +143,29 @@ export function previewTone(pv: Pick<ProfitPreview, 'status' | 'underCeiling'>):
   if (pv.status === 'unprofitable') return 'bad';
   if (pv.status === 'no-buyers') return 'muted';
   return 'warn';
+}
+
+/**
+ * 0.8 (PC-1, PC-2): the Profit line's hover: the breakdown (profitBreakdownText) and, for a profitable price, whether only
+ * the revenue order's buyer makes it a flip (singleExitOf over the preview's book); undefined without a preview.
+ */
+export function previewProfitTitle(
+  pv: ProfitPreview | null,
+  rev: ItemRevenue | null,
+  buyOrders: readonly OrderSummary[],
+  p: PreviewSettings,
+  keyScrap: Scrap | null,
+): string | undefined {
+  if (!pv) return undefined;
+  const parts: string[] = [];
+  const breakdown = profitBreakdownText(profitBreakdown(rev?.revenueScrap, pv.costScrap, p), keyScrap);
+  if (breakdown) parts.push(breakdown);
+  if (pv.status === 'profitable' && rev?.order) {
+    const s = singleExitOf(rev.revenueScrap, pv.costScrap, buyerDepthOf(exitOrdersOfSummaries(buyOrders), rev.order.listingId, p.useOrder).nextBuyer, p);
+    if (s) parts.push(`${singleExitText(s, (v) => fmtMoney(v, keyScrap))}.`);
+  }
+  const text = parts.join(' ');
+  return text === '' ? undefined : text;
 }
 
 /**
@@ -320,8 +360,13 @@ export interface QuickListHint {
   /** "sells 1.33 ref · stock 2, saved 3 min ago" (the "scrap.tf list" label is the line's own). */
   text: string;
   title: string;
-  /** What Use writes into the price field; null when there is nothing to buy (sold out, or stock 0). */
+  /**
+   * What Use writes into the price field; null when there is nothing to buy (sold out, or stock 0) and 0.7.4
+   * for a row not proven to price this copy (a family row: `unproven`).
+   */
   price: string | null;
+  /** 0.7.4: the row prices every copy at its price, not proven this one (scraptfListCraftProven), so Use is off. */
+  unproven: boolean;
   /** 'warn' once the saved row is older than a day: check scrap.tf before trusting it. */
   tone: 'muted' | 'warn';
   observedAt: UnixMs;
@@ -335,27 +380,32 @@ export function quickListHint(row: ScraptfListRow | null | undefined, pickedSku:
   const sells = listSellsText(row);
   // A priced row with stock 0 cannot be bought either; the import refuses it as a price (scraptfListUsePrice).
   const outOfStock = sells !== null && scraptfListUsePrice(row) === null;
-  const price = outOfStock ? null : sells;
-  const stock = finiteNum(row.stock) ? ` · stock ${fmtInt(row.stock)}` : '';
+  // 0.7.4: a family row (every copy at its price, Craftable or not) is no price of this copy: Use is off.
+  const unproven = sells !== null && !outOfStock && !scraptfListCraftProven(row);
+  const family = scraptfListIsFamily(row);
+  const price = outOfStock || unproven ? null : sells;
+  const stock = finiteNum(row.stock) ? ` · stock ${fmtInt(row.stock)}${family ? ' for every copy' : ''}` : '';
   const otherCopy = listRowIsOtherCopy(row, pickedSku);
-  const copy = otherCopy ? ' (plain copy)' : '';
+  const copy = family ? ' (every copy at this price)' : otherCopy ? ' (plain copy)' : '';
   const fresh = scraptfListFresh(row, now);
   const saved = `saved ${fmtAgo(row.observedAt, now)}`;
   const text = `${sells ? `sells ${sells}` : 'sold out'}${copy}${stock}, ${saved}`;
   const title = [
     `scrap.tf's price list as you saved it ${fmtDateTime(row.observedAt)}.`,
-    otherCopy ? 'It prices the plain copy of this item, not this one.' : '',
+    family ? `${SCRAPTF_LIST_FAMILY_LABEL} (Craftable or Non-Craftable, any killstreak tier): its stock counts all of them.` : otherCopy ? 'It prices the plain copy of this item, not this one.' : '',
     price
       ? `Use puts ${price} in the price field; Enter saves it with the list's date.`
       : outOfStock
         ? 'Out of stock on scrap.tf (stock 0 when you saved the list), so there is nothing to buy at this price.'
-        : 'It shows no price to buy (sold out), so there is nothing to use.',
+        : unproven
+          ? `${SCRAPTF_LIST_CRAFT_UNPROVEN}, so Use is off.`
+          : 'It shows no price to buy (sold out), so there is nothing to use.',
     fresh ? 'Stock may have changed since.' : 'Older than a day: check scrap.tf, or save scrap.tf/items again.',
     SCRAPTF_BOUNDARY_SHORT,
   ]
     .filter(Boolean)
     .join(' ');
-  return { text, title, price, tone: fresh ? 'muted' : 'warn', observedAt: row.observedAt, otherCopy };
+  return { text, title, price, unproven, tone: fresh ? 'muted' : 'warn', observedAt: row.observedAt, otherCopy };
 }
 
 // ---------------------------------------------------------------------------

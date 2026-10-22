@@ -5,11 +5,12 @@
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createMockBridge, type MockBridge } from '../../src/renderer/mock';
-import { MOCK_WINDOW_READ_WARNING } from '../../src/renderer/mockScraptfWindow';
-import { readStatusText } from '../../src/renderer/scraptfWindowModel';
+import { MOCK_WINDOW_READ_WARNING, createMockScraptfWindow, type MockScraptfWindowDeps } from '../../src/renderer/mockScraptfWindow';
+import { readStatusText, readStatusView } from '../../src/renderer/scraptfWindowModel';
+import { DEFAULT_SETTINGS } from '../../src/shared/defaults';
+import type { ScraptfWindowRead, Settings } from '../../src/shared/types';
 import { SCRAPTF_BANKS, SCRAPTF_HOME_URL } from '../../src/shared/links';
 import type { PushContract } from '../../src/shared/rpc';
-import type { ScraptfWindowRead } from '../../src/shared/types';
 import {
   IMPORT_HTML_ORIGIN_REFUSAL,
   READ_MANUAL_MIN_GAP_MS,
@@ -91,6 +92,10 @@ describe('scraptfWindow.* (mock)', () => {
     const top = (await b.rpc('scraptf.bankStock', { bank: 'hats', filter: 'flips', sort: 'profit', limit: 1 })).rows[0]!;
     expect(reads[0]).toMatchObject({ stored: reads[0]!.items, bestFlip: { sku: top.sku, name: top.name, profitScrap: top.profitScrap } });
     expect(reads[0]!.pageFlips).toBeGreaterThanOrEqual(reads[0]!.newFlips);
+    // 0.7.4: the counts are the stock page's own (its Flips chip and the new flips among them, the shared rules).
+    const counts = (await b.rpc('scraptf.bankStock', { bank: 'hats', limit: 1 })).counts;
+    expect(counts.flips).toBeGreaterThan(0);
+    expect(reads[0]).toMatchObject({ pageFlips: counts.flips, newFlips: counts.newFlips });
     await b.rpc('scraptfWindow.forward', undefined);
     expect((await b.rpc('scraptfWindow.state', undefined)).url).toBe(HATS);
   });
@@ -168,5 +173,49 @@ describe('the toolbar demo (#/scraptf-bar)', () => {
     expect(readStatusText(null, T0)).toBe('Not read yet');
     expect(readStatusText({ at: T0 - 3_000, path: '/buy/hats', items: 48, bank: 'hats', newFlips: 2, warning: null }, T0)).toMatch(/^Read 48 items from \/buy\/hats · 2 new flips · /);
     expect(readStatusText({ at: T0, path: '/', items: 1, bank: null, newFlips: 1, warning: 'x' }, T0)).toMatch(/^Read 1 item from \/ · 1 new flip · x · /);
+  });
+});
+
+describe('0.8 (G2): the flips a read dropped under Pay up to', () => {
+  const on: Settings = {
+    ...DEFAULT_SETTINGS,
+    import: { ...DEFAULT_SETTINGS.import, enabled: true, acknowledgedAt: T0 },
+    scraptfWindow: { ...DEFAULT_SETTINGS.scraptfWindow, enabled: true, acknowledgedAt: T0 },
+  };
+  /** The read on load of the hats page, with these counts from the mock's bank stock. */
+  function readWith(flipsOn: MockScraptfWindowDeps['flipsOn']): ScraptfWindowRead {
+    const reads: ScraptfWindowRead[] = [];
+    const w = createMockScraptfWindow({
+      now: () => T0,
+      settings: () => on,
+      emit: (e, p) => void (e === 'scraptfWindow.read' && p !== null && reads.push(p as ScraptfWindowRead)),
+      itemsOn: () => 24,
+      ...(flipsOn ? { flipsOn } : {}),
+    });
+    w.open({ start: HATS });
+    expect(reads).toHaveLength(1);
+    return reads[0]!;
+  }
+
+  it('carries droppedFlips only when the counts give it, and the status line and title say it', () => {
+    const read = readWith(() => ({ pageFlips: 10, newFlips: 1, droppedFlips: 2 }));
+    expect(read).toMatchObject({ pageFlips: 10, newFlips: 1, droppedFlips: 2 });
+    expect(readStatusText(read, T0)).toMatch(/^Read 24 items from \/buy\/hats · 10 flips \(1 new, 2 cheaper\) · /);
+    expect(readStatusView(read, T0).title).toContain('10 flips on sale on this page now, 1 of them new since your previous save. 2 of them dropped under your Pay up to on this read.');
+    // Without it (an older count, or made-up counts): the key is absent and the words are as before.
+    const before = readWith(() => ({ pageFlips: 10, newFlips: 1 }));
+    expect('droppedFlips' in before).toBe(false);
+    expect(readStatusText(before, T0)).toMatch(/^Read 24 items from \/buy\/hats · 10 flips \(1 new\) · /);
+    expect('droppedFlips' in readWith(undefined)).toBe(false);
+  });
+
+  it("the mock's own read carries the hats page's count", async () => {
+    const b = make();
+    await turnOn(b);
+    const reads: ScraptfWindowRead[] = [];
+    b.on('scraptfWindow.read', (p) => void (p !== null && reads.push(p)));
+    await b.rpc('scraptfWindow.open', { start: HATS });
+    expect(reads).toHaveLength(1);
+    expect(typeof reads[0]!.droppedFlips).toBe('number');
   });
 });

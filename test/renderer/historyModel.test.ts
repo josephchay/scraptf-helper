@@ -6,9 +6,10 @@
 
 import { afterEach, describe, expect, it } from 'vitest';
 import { fmtSaveTime } from '../../src/renderer/changesModel';
-import { fmtAgo, fmtDateTime } from '../../src/renderer/format';
+import { fmtAgo, fmtDateTime, fmtMoney, fmtSignedMoney } from '../../src/renderer/format';
 import {
   HISTORY_EVENTS_SHOWN,
+  HISTORY_LAST_SEEN_STALE_MS,
   STEP_BOX,
   historyBankPath,
   historyChartLabel,
@@ -19,15 +20,19 @@ import {
   historyNote,
   historyNowText,
   historyReadout,
+  historyRunLines,
   historySeries,
+  historyTimingView,
   nearestStep,
   priceChangeText,
   stepChartGeom,
   type StepPoint,
 } from '../../src/renderer/historyModel';
 import { createMockBridge, type MockBridge } from '../../src/renderer/mock';
+import { TIMING_ESTIMATE_NOTE } from '../../src/renderer/timingModel';
 import { SCRAPTF_BANKS } from '../../src/shared/links';
-import type { ScraptfChangeEvent, ScraptfHistoryPoint, ScraptfItemHistory, ScraptfPriceChange } from '../../src/shared/types';
+import { HISTORY_LAST_SEEN_STALE_MS as SHARED_STALE_MS, scraptfAgoText } from '../../src/shared/scraptfHistory';
+import type { ScraptfBuyTiming, ScraptfChangeEvent, ScraptfHistoryPoint, ScraptfItemCycles, ScraptfItemHistory, ScraptfListingRun, ScraptfPriceChange } from '../../src/shared/types';
 
 const NOW = Date.UTC(2026, 9, 15, 12, 0, 0);
 const MIN = 60_000;
@@ -308,5 +313,239 @@ describe('over the browser mock', () => {
     expect(withChanges).toBeGreaterThan(0);
     const never = await b.rpc('scraptf.itemHistory', { sku: '5021;6' });
     if (never.bank === null) expect(historyNote(never)!.title).toBe('Not in your saved scrap.tf pages yet');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 0.8 (T5, LC-3): the Cycles block: buy timing, listing runs and the chart's down markers
+// ---------------------------------------------------------------------------
+
+/** A whole verdict (scraptfBuyTimingOf's shape): 8 of 41 prices (6 items) at risk; within 1 d 35 % dropped. */
+function buyTiming(over: Partial<ScraptfBuyTiming> = {}): ScraptfBuyTiming {
+  return {
+    verdict: 'wait',
+    why: 'drop-likely',
+    bank: 'hats',
+    key: '378;6|',
+    costScrap: 13,
+    revenueScrap: 18,
+    maxCostScrap: 15,
+    priceSince: NOW - 2 * DAY,
+    pricePrevAt: NOW - 3 * DAY,
+    lastSeenAt: NOW - 5 * HOUR,
+    ageMs: 2 * DAY - 5 * HOUR,
+    horizonMs: DAY,
+    pDrop: 0.35,
+    pGone: 0.25,
+    pRise: 0.15,
+    pNone: 0.25,
+    dropPct: 0.08,
+    dropPctSource: 'bank',
+    expectedNextScrap: 12,
+    evBuyScrap: 5,
+    evWaitScrap: 9,
+    dropsThisRun: 2,
+    steps: [
+      { at: NOW - 30 * HOUR, prevAt: NOW - 31 * HOUR, fromScrap: 15, toScrap: 14, pct: -1 / 15 },
+      { at: NOW - 5 * HOUR, prevAt: NOW - 6 * HOUR, fromScrap: 14, toScrap: 13, pct: -1 / 14 },
+    ],
+    cadenceMs: null,
+    cadenceSource: null,
+    nextDropAt: null,
+    earlierRunEnds: [],
+    scope: 'bank',
+    lookGapMs: 6 * HOUR,
+    resolutionMs: 2 * HOUR,
+    n: { states: 41, copies: 6, ended: 30, drops: 19, dropCopies: 5, gone: 10, rose: 8, atRisk: 8, atRiskEnd: 3, ownDrops: 2, imprecise: 2, wideGap: 1 },
+    ...over,
+  };
+}
+
+const day = (ts: number) => fmtSaveTime(ts).split(' ').slice(0, 2).join(' ');
+
+describe('0.8 the buy-timing block (T5)', () => {
+  it('re-exports the shared DM-5 staleness (T3 reads it too)', () => {
+    expect(HISTORY_LAST_SEEN_STALE_MS).toBe(SHARED_STALE_MS);
+    expect(HISTORY_LAST_SEEN_STALE_MS).toBe(48 * HOUR);
+  });
+
+  it('a wait: the pill, the drops, the odds over their own denominator with the prices and items behind them, the money', () => {
+    const v = historyTimingView(buyTiming(), { bank: 'hats' }, K, NOW)!;
+    expect(v.pill).toMatchObject({ text: 'Wait ~1 d', tone: 'warn' });
+    expect(v.pill.title).toContain('Of the 8 prices on scrap.tf/buy/hats still at their price at this age (from 41 prices of 6 items in your saves)');
+    expect(v.lines).toEqual([
+      '2 drops in this run (−7 %, −7 %)',
+      'On scrap.tf/buy/hats in your saves, of the 8 prices still at their price at this age (41 prices of 6 items): within 1 d 35 % dropped, 40 % went or rose first; 3 were still at their price at the end of that time. From your save 5 h ago.',
+      `Wait 1 d: expected ${fmtSignedMoney(9, K)} vs ${fmtSignedMoney(5, K)} now (Sells for ${fmtMoney(18, K)}, Pay up to ${fmtMoney(15, K)})`,
+    ]);
+    expect(v.note).toBe(TIMING_ESTIMATE_NOTE);
+    // A pooled band says so.
+    expect(historyTimingView(buyTiming({ scope: 'band' }), { bank: 'hats' }, K, NOW)!.lines[1]).toContain('of the 8 prices of similar value still at their price');
+  });
+
+  it("an own rhythm: 'would be due' ahead, 'was due' once past; a bank rhythm never gets a date", () => {
+    const ahead = historyTimingView(buyTiming({ cadenceSource: 'own', cadenceMs: 2 * DAY, nextDropAt: NOW + 2 * DAY }), { bank: 'hats' }, K, NOW)!;
+    expect(ahead.lines[0]).toBe(`2 drops in this run (−7 %, −7 %), about every 2 d in your saves; by that rhythm the next drop would be due around ${day(NOW + 2 * DAY)}`);
+    const past = historyTimingView(buyTiming({ cadenceSource: 'own', cadenceMs: 2 * DAY, nextDropAt: NOW - DAY }), { bank: 'hats' }, K, NOW)!;
+    expect(past.lines[0]).toBe(`2 drops in this run (−7 %, −7 %), about every 2 d in your saves; by that rhythm a drop was due ${day(NOW - DAY)}: save the page again to see`);
+    const bank = historyTimingView(buyTiming({ cadenceSource: 'bank', cadenceMs: 2 * DAY, nextDropAt: null }), { bank: 'hats' }, K, NOW)!;
+    expect(bank.lines[0]).toBe('2 drops in this run (−7 %, −7 %); drops on scrap.tf/buy/hats in your saves came a median 2 d after the price was set (19 drops)');
+    for (const l of [...ahead.lines, ...past.lines, ...bank.lines]) expect(l).not.toMatch(/will drop|likely to drop|probab/i);
+    // No drop in this run and no rhythm: no drops line.
+    expect(historyTimingView(buyTiming({ dropsThisRun: 0, steps: [] }), { bank: 'hats' }, K, NOW)!.lines[0]).toMatch(/^On scrap\.tf\/buy\/hats/);
+  });
+
+  it('every other verdict: its pill, its reason, and the earlier runs\' last prices (never a floor)', () => {
+    const over = historyTimingView(buyTiming({ verdict: 'over', why: 'over', earlierRunEnds: [{ endedAt: NOW - 3 * DAY, endedAs: 'absent', lastScrap: 11 }, { endedAt: NOW - 9 * DAY, endedAs: 'sold-out', lastScrap: 10 }] }), { bank: 'hats' }, K, NOW)!;
+    expect(over.pill.text).toBe('Over Pay up to');
+    expect(over.pill.tone).toBe('bad');
+    expect(over.pill.title).toBe('Over Pay up to, and no drop likely enough to bring it under. From your save 5 h ago; an estimate, not a forecast.');
+    expect(over.lines.at(-1)).toBe(`Earlier runs ended at ${fmtMoney(11, K)} and ${fmtMoney(10, K)} (the lowest seen so far is not a floor)`);
+    const none = historyTimingView(buyTiming({ verdict: 'no-buyers', why: 'no-buyers', revenueScrap: null, maxCostScrap: null, horizonMs: null, pDrop: null, pGone: null, pRise: null, pNone: null, evBuyScrap: null, evWaitScrap: null }), { bank: 'hats' }, K, NOW)!;
+    expect(none.pill).toMatchObject({ text: 'No buyers', tone: 'muted' });
+    expect(none.lines).toContain('No backpack.tf buyer to judge it against');
+    const nothing = { horizonMs: null, pDrop: null, pGone: null, pRise: null, pNone: null, evWaitScrap: null } as const;
+    const few = historyTimingView(buyTiming({ verdict: 'not-enough-data', why: 'few-drops', ...nothing, n: { ...buyTiming().n, drops: 3, dropCopies: 2 } }), { bank: 'hats' }, K, NOW)!;
+    expect(few.pill).toMatchObject({ text: 'Not enough data', tone: 'muted' });
+    // The reason first, then what the run shows.
+    expect(few.lines[0]).toBe('Only 3 price drops in your saves of scrap.tf/buy/hats so far, from 2 items (5 drops from 3 items needed); keep saving it');
+    expect(few.lines[1]).toBe('2 drops in this run (−7 %, −7 %)');
+    const sparse = historyTimingView(buyTiming({ verdict: 'not-enough-data', why: 'sparse-saves', ...nothing, lookGapMs: 3 * DAY }), { bank: 'hats' }, K, NOW)!;
+    expect(sparse.lines.join('\n')).toContain('You look at its page about every 3 d (saves within 30 min count as one look)');
+    expect(historyTimingView(null, { bank: 'hats' }, K, NOW)).toBeNull();
+    expect(historyTimingView(undefined, { bank: 'hats' }, K, NOW)).toBeNull();
+  });
+});
+
+function run(over: Partial<ScraptfListingRun> = {}): ScraptfListingRun {
+  return {
+    firstOnSaleAt: NOW - 5 * DAY,
+    startAfter: NOW - 5 * DAY - 12 * HOUR,
+    lastOnSaleAt: NOW - 2 * HOUR,
+    endedAt: null,
+    endedAs: null,
+    startRaw: { keys: 0, scrap: 13 },
+    endRaw: { keys: 0, scrap: 11 },
+    drops: 1,
+    saves: 10,
+    sameAssetAsBefore: null,
+    ...over,
+  };
+}
+
+/** Three runs, oldest first: one already listed at the first save (ended gone), a flap, and the open one after it. */
+function cycles(over: Partial<ScraptfItemCycles> = {}): ScraptfItemCycles {
+  return {
+    runs: [
+      run({ firstOnSaleAt: NOW - 10 * DAY, startAfter: null, lastOnSaleAt: NOW - 8 * DAY, endedAt: NOW - 8 * DAY + 12 * HOUR, endedAs: 'absent', startRaw: { keys: 0, scrap: 15 }, endRaw: { keys: 0, scrap: 13 }, drops: 2, saves: 5 }),
+      run({ firstOnSaleAt: NOW - 6 * DAY, startAfter: NOW - 6 * DAY - 12 * HOUR, lastOnSaleAt: NOW - 5 * DAY, endedAt: NOW - 5 * DAY + 30 * MIN, endedAs: 'absent', flap: true, startRaw: { keys: 0, scrap: 13 }, endRaw: { keys: 0, scrap: 13 }, drops: 0, saves: 3, sameAssetAsBefore: false }),
+      run({ firstOnSaleAt: NOW - 5 * DAY + 50 * MIN, startAfter: NOW - 5 * DAY + 30 * MIN, sameAssetAsBefore: true }),
+    ],
+    runsTotal: 3,
+    returns: 1,
+    dropAts: [NOW - 2 * HOUR],
+    assetIdsStable: true,
+    ...over,
+  };
+}
+
+describe('0.8 the listing runs (LC-3)', () => {
+  it('heads with the runs and returns, and lists each run newest first, bracketed by the saves', () => {
+    const v = historyRunLines(cycles(), { bank: 'hats', keyPrice: null }, K, NOW)!;
+    expect(v.head).toBe('Listed 3 times in your saves (back once)');
+    expect(v.title).toContain("'gone from the page' can be a sale, a reservation or a move");
+    expect(v.lines.map((l) => l.text)).toEqual([
+      `${day(NOW - 5 * DAY + 50 * MIN)} → now (${scraptfAgoText(5 * DAY - 2 * HOUR - 50 * MIN)} so far), ${fmtMoney(13, K)} → ${fmtMoney(11, K)}, 1 drop · listed now · the same item came back`,
+      `${day(NOW - 6 * DAY)} → ${day(NOW - 5 * DAY)} (${scraptfAgoText(DAY)}–${scraptfAgoText(DAY + 12 * HOUR + 30 * MIN)}), at ${fmtMoney(13, K)}, no drop, then back at the same price within the hour (a partial look, not counted as gone) · another copy (or the same one traded back)`,
+      `${day(NOW - 10 * DAY)} → ${day(NOW - 8 * DAY)} (at least ${scraptfAgoText(2 * DAY)}), ${fmtMoney(15, K)} → ${fmtMoney(13, K)}, 2 drops, then gone from the page · already listed at your first save of its page`,
+    ]);
+    expect(v.lines.map((l) => l.tone)).toEqual(['info', 'muted', 'muted']);
+    expect(v.lines[2]!.title).toContain(`The first save without it on sale: ${fmtDateTime(NOW - 8 * DAY + 12 * HOUR)}.`);
+  });
+
+  it("shows 'the same item came back' only while the bank's ids are stable", () => {
+    const v = historyRunLines(cycles({ assetIdsStable: false }), { bank: 'hats', keyPrice: null }, K, NOW)!;
+    for (const l of v.lines) expect(l.text).not.toMatch(/same item came back|another copy/);
+  });
+
+  it('words a sold-out end, an untradable end and a run whose newest save is long past', () => {
+    const v = historyRunLines(
+      cycles({
+        runs: [
+          run({ firstOnSaleAt: NOW - 9 * DAY, lastOnSaleAt: NOW - 8 * DAY, endedAt: NOW - 7 * DAY, endedAs: 'sold-out', startAfter: NOW - 9 * DAY - HOUR }),
+          run({ firstOnSaleAt: NOW - 6 * DAY, lastOnSaleAt: NOW - 5 * DAY, endedAt: NOW - 4 * DAY, endedAs: 'untradable', startAfter: NOW - 6 * DAY - HOUR }),
+          run({ firstOnSaleAt: NOW - 3 * DAY, startAfter: NOW - 3 * DAY - HOUR, lastOnSaleAt: NOW - 3 * DAY + HOUR }),
+        ],
+        runsTotal: 25,
+        returns: 2,
+      }),
+      { bank: 'hats', keyPrice: null },
+      K,
+      NOW,
+    )!;
+    expect(v.head).toBe('Listed 25 times in your saves (back 2 times)');
+    expect(v.title).toContain('The newest 3 of 25 runs are listed.');
+    expect(v.lines[0]!.text).toContain(`→ ${day(NOW - 3 * DAY + HOUR)} (`);
+    expect(v.lines[0]!.text).toContain('· listed in your newest save of its page');
+    expect(v.lines[1]!.text).toContain('then turned untradable (the same item showed as not tradable)');
+    expect(v.lines[1]!.tone).toBe('warn');
+    expect(v.lines[2]!.text).toContain('then sold out');
+  });
+
+  it('values prices at the history\'s key price, and is null without runs', () => {
+    const keys = cycles({ runs: [run({ startRaw: { keys: 1, scrap: 0 }, endRaw: { keys: 1, scrap: 0 } })], runsTotal: 1, returns: 0 });
+    const v = historyRunLines(keys, { bank: 'hats', keyPrice: { valueScrap: 600 } as ScraptfItemHistory['keyPrice'] }, K, NOW)!;
+    expect(v.head).toBe('Listed once in your saves');
+    expect(v.lines[0]!.text).toContain(`at ${fmtMoney(600, 600)}`);
+    expect(historyRunLines(null, { bank: 'hats', keyPrice: null }, K, NOW)).toBeNull();
+    expect(historyRunLines(undefined, { bank: 'hats', keyPrice: null }, K, NOW)).toBeNull();
+    expect(historyRunLines(cycles({ runs: [] }), { bank: 'hats', keyPrice: null }, K, NOW)).toBeNull();
+  });
+});
+
+describe("0.8 the chart's down markers (T5)", () => {
+  const pts: StepPoint[] = [
+    { at: 0, value: 20 },
+    { at: 100, value: 10 },
+    { at: 200, value: null },
+    { at: 300, value: 10 },
+    { at: 400, value: 8 },
+  ];
+
+  it('marks the dots of the saves that showed a drop, only when asked', () => {
+    const plain = stepChartGeom(pts)!;
+    // Without marks: exactly 0.7.4's geometry, no `downs` key (holdings' chart and every older caller).
+    expect(plain).not.toHaveProperty('downs');
+    expect(stepChartGeom(pts, STEP_BOX, {})).toEqual(plain);
+    const marked = stepChartGeom(pts, STEP_BOX, { downAts: [100, 400, 200, 999] })!;
+    expect(marked.downs).toEqual([plain.dots[1], plain.dots[3]]);
+    expect(marked.downs!.map((d) => d.i)).toEqual([1, 4]);
+    const { downs, ...rest } = marked;
+    expect(rest).toEqual(plain);
+    expect(downs).toBeDefined();
+    expect(stepChartGeom(pts, STEP_BOX, { downAts: [] })!.downs).toEqual([]);
+  });
+
+  it("over the browser mock: a saved copy's runs and drops line up with its chart", async () => {
+    const T0 = Date.UTC(2026, 9, 22, 12, 0, 0);
+    const b = createMockBridge({ tickMs: 0, latencyMs: 0, now: () => T0 });
+    try {
+      const stock = await b.rpc('scraptf.bankStock', { bank: 'hats', limit: 60 });
+      let checked = 0;
+      for (const r of stock.rows.filter((x) => x.change !== 'gone').slice(0, 20)) {
+        const special = r.key.slice(r.sku.length + 1);
+        const h = await b.rpc('scraptf.itemHistory', { sku: r.sku, special });
+        if (!h.cycles) continue;
+        checked++;
+        const g = stepChartGeom(historySeries(h.points), STEP_BOX, { downAts: h.cycles.dropAts })!;
+        expect(g.downs!.length).toBe(h.cycles.dropAts.filter((at) => h.points.some((p) => p.at === at && p.listed)).length);
+        const runs = historyRunLines(h.cycles, h, K, T0)!;
+        expect(runs.lines).toHaveLength(h.cycles.runs.length);
+        if (h.timing) expect(historyTimingView(h.timing, h, K, T0)!.note).toBe(TIMING_ESTIMATE_NOTE);
+      }
+      expect(checked).toBeGreaterThan(5);
+    } finally {
+      b.dispose();
+    }
   });
 });

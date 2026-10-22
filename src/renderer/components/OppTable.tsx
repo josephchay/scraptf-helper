@@ -1,8 +1,9 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type KeyboardEvent, type MouseEvent } from 'react';
 import type { Opportunity, Scrap } from '../../shared/types';
-import { INPUT_KIND_LABELS, STATUS_LABELS, fmtAge, fmtDateTime, fmtInt, fmtKeysDecimal, fmtKeysMetal, fmtMoney, fmtPct, fmtRefOnly } from '../format';
+import { INPUT_KIND_LABELS, STATUS_LABELS, flagInfo, fmtAge, fmtAgo, fmtDateTime, fmtInt, fmtKeysDecimal, fmtKeysMetal, fmtMoney, fmtPct, fmtRefOnly } from '../format';
 import {
   REVENUE_ORDER_TITLES,
+  copyLabelOf,
   indexOfRow,
   isMenuKeyEcho,
   menuAnchorRect,
@@ -10,6 +11,7 @@ import {
   nextGroupPageSize,
   payUpToTitle,
   revenueOrderOf,
+  singleExitTitleOf,
   type DisplayRow,
   type SortDir,
   type SortKey,
@@ -19,8 +21,10 @@ import { noRevenueTextOf } from '../quickModel';
 import { Icon } from './Icon';
 import { isContextMenuKey, menuPointForRect } from './ItemMenu';
 import { ItemName, Money } from './ItemName';
-import { ConfidenceBadge, OnlineDot } from './Pills';
+import { ConfidenceBadge, OnlineDot, UnverifiedOrderMark } from './Pills';
 import { Tip } from './Tip';
+// 0.8 cycles (T7): the Wait / Buy now tag.
+import { timingBadge } from '../timingModel';
 
 export const ROW_HEIGHT = { comfortable: 38, compact: 30 } as const;
 
@@ -343,7 +347,8 @@ const GroupRow = memo(function GroupRow({
         <span className="count-badge" title={g.rows.length < g.count ? `${g.rows.length} loaded of ${g.count}` : undefined}>
           {g.count}
         </span>
-        <span className="group-total">
+        {/* 0.7.4 (F27, F33; R27): copies of an item sharing one buyer count once, at the best copy the filters show. */}
+        <span className="group-total" title="Summed profit; copies of an item that sell to the same buy order count once, at the best copy shown.">
           <span className="muted">total</span> <Money scrap={g.totalProfitScrap} keyScrap={keyScrap} tone="profit" signed />
         </span>
       </div>
@@ -441,8 +446,17 @@ const OppRow = memo(function OppRow({
   const stale = o.inputKind !== 'rule' && inputAge > staleMs;
   // The buyer behind the revenue shown, not always the conservative one.
   const order = revenueOrderOf(o, useOrder);
+  // 0.7.4 (F63): an exit nobody has confirmed for 24 h; the row stays, marked (and is never toasted).
+  const unverified = order?.flags.includes('unverified') === true;
   // 0.7.3: no profit with buyers says why none is usable (noRevenueTextOf), not "No eligible buy orders".
   const noProfitTitle = o.profitScrap !== null ? undefined : o.buyerCount > 0 ? noRevenueTextOf(o) : 'No eligible buy orders';
+  const copy = copyLabelOf(o);
+  // The hover names the bank price judged, which can differ from the row's own input price.
+  const badge = timingBadge(o.timing, now, keyScrap);
+  // 0.7.4 (F27, F33): another copy sells to this row's buyer for as much or more; the totals count that order once.
+  const shared = o.flags.includes('shared-buyer');
+  // 0.8 (PC-2): only the revenue order's buyer makes the flip; the Buyers cell is marked and its hover says why.
+  const thin = o.flags.includes('single-exit');
   const style = rowStyle(index, rowH);
   return (
     <div
@@ -470,6 +484,18 @@ const OppRow = memo(function OppRow({
       <div role="gridcell" className="c-item">
         <span className={`status-dot tone-${STATUS_TONE[o.status]}`} title={STATUS_LABELS[o.status]} aria-label={STATUS_LABELS[o.status]} role="img" />
         <ItemName sku={o.sku} name={o.name} maxTags={3} />
+        {/* 0.7.4 (F66): which copy this row prices (a painted hat, a kit's sheen and killstreaker). */}
+        {copy ? (
+          <span className="item-tag copy-tag" title={copy.title}>
+            {copy.text}
+          </span>
+        ) : null}
+        {/* 0.8 (T7): the buy timing of the scrap.tf copy an 'import' row prices (Wait / Buy now only). */}
+        {badge ? (
+          <span className={`pill tone-${badge.tone} timing-badge`} title={badge.title}>
+            {badge.text}
+          </span>
+        ) : null}
         {o.flags.includes('unusual-risk') ? (
           <span className="tone-text-bad risk-icon" title="Unusual risk: get a background check before trading">
             <Icon name="warning" size={13} />
@@ -482,7 +508,7 @@ const OppRow = memo(function OppRow({
       <div role="gridcell" className="c-pay num">
         <Money scrap={o.maxCostScrap} keyScrap={keyScrap} title={payUpToTitle(o, keyScrap)} />
       </div>
-      <div role="gridcell" className="c-rev num">
+      <div role="gridcell" className={`c-rev num${unverified ? ' tone-text-warn' : ''}`}>
         <Tip
           content={() => (
             <dl className="kv tight">
@@ -492,22 +518,37 @@ const OppRow = memo(function OppRow({
               <dd>
                 {fmtMoney(o.bestScrap, keyScrap)}
                 {o.flags.includes('outlier-best') ? ' (outlier)' : ''}
+                {o.bestOrder?.flags.includes('unverified') && o.bestOrder.listingId !== order?.listingId ? ' (unverified)' : ''}
               </dd>
               <dt>Instant (bot)</dt>
               <dd>{fmtMoney(o.instantScrap, keyScrap)}</dd>
+              {unverified && order ? (
+                <>
+                  <dt>Order seen</dt>
+                  <dd>{fmtAgo(order.lastEventAt, now)}, may be gone</dd>
+                </>
+              ) : null}
             </dl>
           )}
         >
-          <Money scrap={o.revenueScrap} keyScrap={keyScrap} />
+          <span>
+            {/* 0.7.4 (F63): a revenue order nobody has confirmed for 24 h is marked, not shown as a live bid. */}
+            {unverified ? <UnverifiedOrderMark order={order} now={now} /> : null}
+            <Money scrap={o.revenueScrap} keyScrap={keyScrap} />
+          </span>
         </Tip>
       </div>
-      <div role="gridcell" className="c-profit num">
+      <div role="gridcell" className={`c-profit num${shared ? ' muted' : ''}`}>
         <Money
           scrap={o.profitScrap}
           keyScrap={keyScrap}
           tone="profit"
           signed
-          title={o.profitScrap !== null ? `${fmtRefOnly(o.profitScrap)} · ${fmtKeysDecimal(o.profitScrap, keyScrap)}` : noProfitTitle}
+          title={
+            o.profitScrap !== null
+              ? `${fmtRefOnly(o.profitScrap)} · ${fmtKeysDecimal(o.profitScrap, keyScrap)}${shared ? `. ${flagInfo('shared-buyer').help}` : ''}`
+              : noProfitTitle
+          }
         />
       </div>
       <div role="gridcell" className={`c-margin num${o.margin !== null && o.margin < 0 ? ' tone-text-bad' : ''}`}>
@@ -516,13 +557,13 @@ const OppRow = memo(function OppRow({
       <div role="gridcell" className="c-conf">
         <ConfidenceBadge score={o.confidence} level={o.confidenceLevel} reasons={o.reasons} />
       </div>
-      <div role="gridcell" className="c-buyers num">
+      <div role="gridcell" className={`c-buyers num${thin ? ' tone-text-warn' : ''}`} title={singleExitTitleOf(o)}>
         {o.buyerCount}
       </div>
       <div role="gridcell" className="c-btype">
         {order ? (
           <span className="buyer-type" title={order.userName ?? undefined}>
-            <OnlineDot online={order.online} />
+            <OnlineDot online={order.online} seenAt={order.lastEventAt} now={now} />
             {order.isBot ? (
               <>
                 <Icon name="bolt" size={12} /> Bot

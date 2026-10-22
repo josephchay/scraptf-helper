@@ -119,6 +119,12 @@ describe('small helpers', () => {
     expect(marketProfit(30, null, { frictionScrap: 0 })).toBeNull();
   });
 
+  it('0.8 (PC-1): marketProfit is flipProfit, the price-move reserve included', () => {
+    // 100 - 50 - 2 - ceil(100 x 5%) = 43.
+    expect(marketProfit(100, 50, { frictionScrap: 2, exitReservePct: 0.05 })).toBe(43);
+    expect(marketProfit(100, 50, { frictionScrap: 2, exitReservePct: 0 })).toBe(48);
+  });
+
   it('emptyMarketCounts has every verdict at zero', () => {
     expect(emptyMarketCounts()).toEqual(Object.fromEntries(MARKET_VERDICTS.map((x) => [x, 0])));
   });

@@ -181,7 +181,8 @@ describe('PriceDb.item', () => {
     const deps = makeDeps(() => res({ error: 'oops' }, { status: 500 }));
     const pdb = createPriceDb(deps);
     await expect(pdb.item('5021;6')).resolves.toBeNull();
-    expect(pdb.health()[0]).toMatchObject({ state: 'error', lastError: 'HTTP 500' });
+    // 0.7.4 (F52): a 500 pauses the budget as a 503 does, so health reads backoff (was 'error').
+    expect(pdb.health()[0]).toMatchObject({ state: 'backoff', lastError: 'HTTP 500' });
 
     const paused = makeDeps(() => {
       throw new NetworkPausedError();
@@ -295,6 +296,20 @@ describe('PriceDb.bulk', () => {
     expect(rows).toHaveLength(100);
     expect(deps.http.calls).toHaveLength(2);
     expect(pdb.health()[0]).toMatchObject({ state: 'backoff', lastError: 'HTTP 429' });
+  });
+
+  it('0.7.4 (F52): shows backoff, not error, for a 502, 504 or Cloudflare 522; a 400 is still an error', async () => {
+    for (const [status, state] of [
+      [502, 'backoff'],
+      [504, 'backoff'],
+      [522, 'backoff'],
+      [400, 'error'],
+    ] as const) {
+      const deps = makeDeps(() => res({ error: 'upstream' }, { status }));
+      const pdb = createPriceDb(deps);
+      await pdb.bulk(['161;6']).catch(() => undefined);
+      expect(pdb.health()[0]).toMatchObject({ state, lastError: `HTTP ${status}` });
+    }
   });
 });
 
@@ -410,7 +425,8 @@ describe('PriceDb.history and keyQuote', () => {
   it('builds the key quote from 5021;6 and stores it', async () => {
     const deps = makeDeps(itemRoute({ '5021;6': fixture('item-key.json') }));
     const q = await createPriceDb(deps).keyQuote();
-    expect(q).toEqual({ source: 'pricedb', buyScrap: 569, sellScrap: 581, observedAt: 1791968059 * 1000 });
+    // 0.7.4 (F71): PriceDB's price time is also the quote's priceAt.
+    expect(q).toEqual({ source: 'pricedb', buyScrap: 569, sellScrap: 581, observedAt: 1791968059 * 1000, priceAt: 1791968059 * 1000 });
     expect(deps.repo.keyQuotes()).toEqual([q]);
     expect(deps.http.calls[0]!.opts.priority).toBe('background');
   });

@@ -224,7 +224,7 @@ describe('the diff of a bank’s two newest saves (S2)', () => {
     const h = setup();
     seedHats(h.repo);
     hatsMarket(h);
-    const counts = { items: 9, inStock: 7, new: 2, gone: 2, cheaper: 2, pricier: 2, flips: 2, newFlips: 1, longListed: 0, dropped: 0 };
+    const counts = { items: 9, inStock: 7, new: 2, gone: 2, cheaper: 2, pricier: 2, flips: 2, newFlips: 1, longListed: 0, dropped: 0, dropping: 0, watched: 0 };
     for (const q of [{}, { filter: 'gone' as const }, { filter: 'new' as const, search: 'nothing matches this' }]) {
       const r = h.list(q);
       expect(r.counts).toEqual(counts);
@@ -288,7 +288,7 @@ describe('a first save, a never-saved bank, extras and the list', () => {
     h.set('200;11', 300);
     const r = h.list({ bank: 'stranges' });
     expect(r).toMatchObject({ savedAt: NOW - HOUR, previousSavedAt: null, saves: 1, total: 1 });
-    expect(r.counts).toEqual({ items: 3, inStock: 1, new: 0, gone: 0, cheaper: 0, pricier: 0, flips: 1, newFlips: 0, longListed: 0, dropped: 0 });
+    expect(r.counts).toEqual({ items: 3, inStock: 1, new: 0, gone: 0, cheaper: 0, pricier: 0, flips: 1, newFlips: 0, longListed: 0, dropped: 0, dropping: 0, watched: 0 });
     expect(r.rows[0]).toMatchObject({ sku: '200;11', change: null, category: 'stranges', previousCostScrap: null, verdict: 'flip' });
     expect(h.stock.whatsNew('stranges')).toBeNull();
     expect(h.stock.newFlips('stranges', id)).toEqual([]);

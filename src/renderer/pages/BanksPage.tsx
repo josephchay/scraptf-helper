@@ -9,6 +9,7 @@
 // with the bank's static SCRAPTF_BANKS page, on a click only); main loads it there for the user.
 // 0.7.1 (UX-1): the header adds "N flips on your saves, newest 3 min ago · View all", which opens
 // the Live market's #/market/flips (every Flip from a saved page, the freshest sighting first).
+// 0.8 (G1): "Your scrap.tf watches" (WatchesCard) below the cards: a local list, judged on the user's own saves.
 
 import { useCallback, useEffect, useId, useMemo, useRef, useState, type KeyboardEvent, type MouseEvent } from 'react';
 import { scraptfBankInfo } from '../../shared/links';
@@ -35,6 +36,7 @@ import { Icon } from '../components/Icon';
 import { useItemMenu, type ItemMenuTarget } from '../components/ItemMenu';
 import { ItemName } from '../components/ItemName';
 import { SaveModeChoice, SetupNoteView, copyFolderPath, useScraptfListStatus, useWatchFolderPicker } from '../components/ScraptfListCard';
+import { WatchesCard } from '../components/WatchesCard';
 import { errorMessage } from '../format';
 import { useApp } from '../hooks/appContext';
 import { useThrottled, useVisiblePush } from '../hooks/useRpc';
@@ -131,6 +133,8 @@ export function BanksPage() {
           if (stock) navigate(stock);
         }}
       />
+      {/* 0.8 (G1): the user's scrap.tf watches, judged on their own reads and saves only (a local list). */}
+      <WatchesCard keyScrap={keyScrap} now={now} onItem={(sku, copy) => openItem(sku, copy)} />
       <p className="hint-line muted small">
         Keyboard: arrows move between the pages, <kbd>Enter</kbd> opens the focused one in {openTarget(scraptfWindow)}, <kbd>Shift</kbd>+<kbd>F10</kbd> or right-click on an item
         for its actions.

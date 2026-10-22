@@ -1,7 +1,8 @@
 // 0.7.1 (P2): skins keyed the way backpack.tf buyers key them, whatever quality class scrap.tf gives the
 // card. A strange skin without an effect is Strange (11) with no second quality ("15000;11;w2;pk14"); an
-// unusual skin is Decorated (15) plus its effect, and strange too when it is ("...;u701;w1;pk14;strange");
-// killstreak and festive stay. The old "15;...;strange" form for a plain strange skin matched no order.
+// unusual skin is Unusual (5) plus its effect, and strange too when it is ("...;5;u701;w1;pk14;strange"; 0.7.4,
+// F08: 0.7.3 keyed it Decorated plus the effect, a form no backpack.tf order uses); killstreak and festive stay.
+// The old "15;...;strange" form for a plain strange skin matched no order.
 // Synthetic cards and rows; nothing is fetched.
 
 import { describe, expect, it } from 'vitest';
@@ -38,13 +39,13 @@ describe('strange and unusual skins on cards, every quality class (P2)', () => {
     expect(plain.skuObject).toEqual(fromString('15000;11;w2;pk14'));
     expect(plain.skuObject?.quality2).toBeNull();
     const unusual = one({ class: `item hoverable ${q} app440`, style: HOT, 'data-title': 'Strange Hot Night Owl Sniper Rifle (Factory New)' });
-    expect(unusual.sku).toBe('15000;15;u701;w1;pk14;strange');
-    expect(unusual.skuObject).toMatchObject({ quality: 15, quality2: 11, effect: 701 });
+    expect(unusual.sku).toBe('15000;5;u701;w1;pk14;strange');
+    expect(unusual.skuObject).toMatchObject({ quality: 5, quality2: 11, effect: 701 });
   });
 
-  it('an Unusual class with the effect is Decorated plus the effect, strange when the class or title says so', () => {
-    expect(one({ class: 'item quality5 app440', style: HOT, 'data-title': 'Hot Night Owl Sniper Rifle (Factory New)' }).sku).toBe('15000;15;u701;w1;pk14');
-    expect(one({ class: 'item quality5 quality11 app440', style: HOT, 'data-title': 'Hot Night Owl Sniper Rifle (Factory New)' }).sku).toBe('15000;15;u701;w1;pk14;strange');
+  it('an Unusual class with the effect is Unusual plus the effect, strange when the class or title says so', () => {
+    expect(one({ class: 'item quality5 app440', style: HOT, 'data-title': 'Hot Night Owl Sniper Rifle (Factory New)' }).sku).toBe('15000;5;u701;w1;pk14');
+    expect(one({ class: 'item quality5 quality11 app440', style: HOT, 'data-title': 'Hot Night Owl Sniper Rifle (Factory New)' }).sku).toBe('15000;5;u701;w1;pk14;strange');
   });
 
   it('a skin that is not strange is Decorated, whatever its class', () => {

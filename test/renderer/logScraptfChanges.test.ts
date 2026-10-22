@@ -425,8 +425,8 @@ describe('wiring (static)', () => {
     expect(page).toContain('const revalueSoon = useThrottled(() => feed.current?.revalue(shownRef.current), CHANGES_REVALUE_MS);');
     expect(page).toContain("useVisiblePush('opps.changed', throttledFetch);");
     expect(page).toContain("createChangesFeed((q) => rpc('scraptf.changes', q), setState,");
-    // The menu gets the bank the change was on; the drawer the base SKU.
-    expect(page).toContain('menuRef.current({ sku: e.sku, name: e.name, bank: e.bank }, at)');
+    // The menu gets the bank the change was on (and, 0.8 alerts review, its copy: changeMenuTarget); the drawer the base SKU.
+    expect(page).toContain('menuRef.current(changeMenuTarget(e), at)');
     expect(page).toContain('onClick={() => onOpen(e.sku)}');
   });
 });

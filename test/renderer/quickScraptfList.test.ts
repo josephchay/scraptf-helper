@@ -19,8 +19,9 @@ const MIN = 60_000;
 const HOUR = 60 * MIN;
 const K = 568;
 
+/** 0.7.4: proven the Craftable copy (the list shows its Non-Craftable row apart) unless `craft` says otherwise. */
 function stored(over: Partial<ScraptfListStored> = {}): ScraptfListStored {
-  return { sku: '378;6', name: 'Team Captain', sellsKeys: 0, sellsScrap: 12, paysKeys: 0, paysScrap: 11, stock: 2, stockLimit: 5, batchId: 101, observedAt: T0 - 3 * MIN, ...over };
+  return { sku: '378;6', name: 'Team Captain', sellsKeys: 0, sellsScrap: 12, paysKeys: 0, paysScrap: 11, stock: 2, stockLimit: 5, batchId: 101, observedAt: T0 - 3 * MIN, craft: 'craftable', ...over };
 }
 const listRow = (over: Partial<ScraptfListStored> = {}) => valueScraptfListRow(stored(over), K);
 
@@ -58,6 +59,18 @@ describe('the list hint', () => {
     expect(painted.otherCopy).toBe(true);
     expect(painted.title).toContain('It prices the plain copy of this item, not this one.');
     expect(quickListHint(listRow(), '378;6', T0)?.otherCopy).toBe(false);
+  });
+
+  it("offers no Use for a family row, and says it is one row for every copy at its price (0.7.4, F03)", () => {
+    const family = quickListHint(listRow({ craft: 'any', stock: 4, stockLimit: 25 }), '378;6', T0)!;
+    expect(family).toMatchObject({ text: 'sells 1.33 ref (every copy at this price) · stock 4 for every copy, saved 3 min ago', price: null, unproven: true });
+    expect(family.title).toContain('The scrap.tf/items list does not show whether this is the Craftable or Non-Craftable copy; check the bank page, so Use is off.');
+    expect(family.title).toContain('One scrap.tf/items row for every copy at this price');
+    // Read for a Non-Craftable copy with no row of its own (rowFor's match 'family'): the same.
+    expect(quickListHint({ ...listRow({ craft: 'any' }), match: 'family' }, '378;6;uncraftable', T0)).toMatchObject({ price: null, unproven: true });
+    // A proven row still offers its price; a sold-out row is no unproven one.
+    expect(quickListHint(listRow({ craft: 'uncraftable', sku: '378;6;uncraftable' }), '378;6;uncraftable', T0)).toMatchObject({ price: '1.33 ref', unproven: false });
+    expect(quickListHint(listRow({ craft: 'any', sellsKeys: null, sellsScrap: null, stock: 0 }), '378;6', T0)).toMatchObject({ price: null, unproven: false });
   });
 
   it('shows nothing without a list row', () => {

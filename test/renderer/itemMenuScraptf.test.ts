@@ -312,9 +312,11 @@ describe('ItemMenu wiring', () => {
     expect(menu).toMatch(/bank\?: ScraptfBank;/);
     const view = menu.slice(menu.indexOf('function ItemMenuView'), menu.indexOf('// Generic menu popover'));
     expect(view).toMatch(/if \(namedBank\) return;\s*let alive = true;\s*rpc\('item\.detail', \{ sku: target\.sku, history: false \}\)/);
-    expect(view).toContain('if (alive) setSeenOn(d?.seenOn ?? null);');
+    // 0.7.4 (F36): an item no save names goes to the bank its kind is sold on (ItemDetail.kindBank);
+    // 0.7.4 (R28): kept apart from seenOn, so a list seenOn still reaches it (as the drawer).
+    expect(view).toContain('if (alive) setScraptf({ seenOn: d?.seenOn ?? null, kindBank: d?.kindBank ?? null });');
     // F21: the scrap.tf window's openLinksInWindow words the action's tooltip only.
-    expect(view).toContain('itemMenuSections(target, links, seenOn, inWindow)');
+    expect(view).toContain('itemMenuSections(target, links, scraptf.seenOn, inWindow, scraptf.kindBank)');
     expect(view).toContain('const inWindow = scraptfLinksInWindow(settings);');
   });
 
@@ -328,7 +330,8 @@ describe('ItemMenu wiring', () => {
     const read = (p: string) => readFileSync(new URL(`../../src/renderer/pages/${p}`, import.meta.url), 'utf8');
     expect(read('MarketPage.tsx')).toContain('openMenuRef.current({ sku: r.sku, name: r.name, category: r.category }, at)');
     expect(read('ShoppingPage.tsx')).toContain('openMenuRef.current({ sku: r.sku, name: r.name, category: r.category }, at)');
-    expect(read('OpportunitiesPage.tsx')).toContain('openMenuRef.current({ sku: o.sku, name: o.name, category: o.category }, at)');
+    // 0.8 (alerts review): with the row's copy too; oppMenuTarget keeps the category (watchesModel.test.ts).
+    expect(read('OpportunitiesPage.tsx')).toContain('openMenuRef.current(oppMenuTarget(o), at)');
     expect(read('LogPage.tsx')).toContain('menu.open({ sku: e.sku, name: e.name, category: e.category }, ');
   });
 });

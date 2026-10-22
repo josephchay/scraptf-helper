@@ -18,7 +18,7 @@
 
 import { BANK_STOCK_MAX_LIMIT } from '../../shared/bankStock';
 import { BANK_LOOK_FOR, NO_BANK_FLIPS, bankFlips, bankLookFor, bankStockFlips, type BankFlips, type BankLookFor } from '../../shared/banks';
-import { SCRAPTF_BANKS, bankForCategory, isScraptfBank, type ScraptfBankInfo } from '../../shared/links';
+import { SCRAPTF_BANKS, isScraptfBank, type ScraptfBankInfo } from '../../shared/links';
 import { batchItemCounts, mergeBankNewestSaves, scraptfBankSaves, wholeLookNewestSaves } from '../../shared/market';
 import type {
   Category,
@@ -120,6 +120,9 @@ type SavedState = Pick<ScraptfBankSummary, 'lastSavedAt' | 'pages' | 'items' | '
 
 const NEVER_SAVED: Readonly<SavedState> = Object.freeze({ lastSavedAt: null, pages: 0, items: 0, inStock: 0 });
 const NOTHING_TO_LOOK_FOR: Readonly<BankLookFor> = Object.freeze({ unchecked: 0, lookFor: [] });
+
+/** 0.7.4 (F36): uncheckedBy's grouping for the cards: the bank page the row's scrap.tf button opens. */
+export const lookForBank = (_category: Category, bank: Exclude<ScraptfBank, 'list'>): Exclude<ScraptfBank, 'list'> => bank;
 
 interface Saves {
   /** Imported price id -> the bank of its page. */
@@ -283,7 +286,8 @@ export function createBanksSummary(deps: BanksSummaryDeps): BanksSummary {
   }
 
   function readLookFor(now: UnixMs): Map<ScraptfBank, BankLookFor> {
-    const groups = deps.market.uncheckedBy(bankForCategory, BANK_LOOK_FOR, now);
+    // 0.7.4 (F36): grouped by the page each row's scrap.tf button opens, not by category alone.
+    const groups = deps.market.uncheckedBy(lookForBank, BANK_LOOK_FOR, now);
     const out = new Map<ScraptfBank, BankLookFor>();
     for (const info of SCRAPTF_BANKS) {
       // The /items list sells everything and is no bank of a category: nothing to look for there.
@@ -291,7 +295,7 @@ export function createBanksSummary(deps: BanksSummaryDeps): BanksSummary {
       const g = groups.get(info.bank);
       if (!g) continue;
       // bankLookFor cuts and orders the few rows the index returned; the count is the group's own.
-      out.set(info.bank, { unchecked: g.count, lookFor: bankLookFor(g.rows, info.categories).lookFor });
+      out.set(info.bank, { unchecked: g.count, lookFor: bankLookFor(g.rows, info.categories, info.bank).lookFor });
     }
     return out;
   }

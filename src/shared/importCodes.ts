@@ -21,6 +21,20 @@ export const NO_PRICE_COLUMN = 'no-price-column';
 export const PARTIAL_READ = 'partial-read';
 /** An /items row whose stock limit could not be read. */
 export const NO_STOCK_LIMIT = 'no-stock-limit';
+/**
+ * 0.7.4 (F82): a saved file whose modified time is ahead of this computer's clock: its prices are stored,
+ * dated now, but it is no bank stock save (an old page with a reset time would rewrite the bank's history).
+ */
+export const FUTURE_MTIME = 'future-mtime';
+/** 0.7.4 (F82): a file's modified time further ahead of the clock than this is in the future (FUTURE_MTIME). */
+export const FUTURE_MTIME_SLACK_MS = 2 * 60_000;
+/** 0.7.4: /items rows that key to one item with different prices or stock: none of them sets a price. */
+export const DUPLICATE_ROW = 'duplicate-row';
+/**
+ * 0.7.4: an /items row that shows neither "Non-Craftable" nor a Craftable sibling: one entry for every copy
+ * scrap.tf sells at its price (a family row). A note for the parser report, never a refusal.
+ */
+export const CRAFT_UNVERIFIED = 'craft-unverified';
 
 /** Warning codes that mean an item was refused (not stored as a price), not just noted. */
 export const IMPORT_REFUSAL_CODES: readonly string[] = Object.freeze([
@@ -31,17 +45,31 @@ export const IMPORT_REFUSAL_CODES: readonly string[] = Object.freeze([
   'paintkit-unresolved',
   'wear-unresolved',
   'paintkit-mismatch',
+  // 0.7.4 (F76/F75): a Strange-only quality naming another quality or an effect; strange parts on a non-strange copy.
+  'quality-conflict',
+  'strange-conflict',
   'no-price',
   'unparsed-price',
   'parse-error',
   NO_STOCK_LIMIT,
+  DUPLICATE_ROW,
 ]);
 
 // Skip reasons that are no fault of the page or the parser (ImportResult.skipped).
 export const SKIP_OUT_OF_STOCK = 'out of stock on scrap.tf';
 export const SKIP_SAME_OR_CHEAPER = 'another copy at the same or a lower price is on this page';
 export const SKIP_NEWER_SAVE = 'a newer saved page already set this price';
-export const BENIGN_SKIP_REASONS: readonly string[] = Object.freeze([SKIP_OUT_OF_STOCK, SKIP_SAME_OR_CHEAPER, SKIP_NEWER_SAVE]);
+/** 0.7.4: an /items family row is kept on the price list, never as a cost (CRAFT_UNVERIFIED). */
+export const SKIP_CRAFT_UNPROVEN = 'the scrap.tf/items list does not show whether this is the Craftable or Non-Craftable copy';
+/** 0.7.4: the /items list never replaces a bank page's own price of a copy (that bank's saves decide it). */
+export const SKIP_BANK_CARD_PRICE = "its bank page's own price for this copy is stored";
+/**
+ * 0.7.4: a newer whole save of the copy's bank page does not show it on sale (an older bank page arriving late,
+ * or an /items row whose home bank was saved after the list without it): no price is set, and none exists.
+ * SKIP_NEWER_SAVE stays for a copy a newer page did price.
+ */
+export const SKIP_NOT_ON_SALE_NEWER = 'a newer save of its bank page does not show it on sale';
+export const BENIGN_SKIP_REASONS: readonly string[] = Object.freeze([SKIP_OUT_OF_STOCK, SKIP_SAME_OR_CHEAPER, SKIP_NEWER_SAVE, SKIP_CRAFT_UNPROVEN, SKIP_BANK_CARD_PRICE, SKIP_NOT_ON_SALE_NEWER]);
 
 // Partial look (DM-2): a save is partial when the newest stored save of the same page is at most this
 // old, had at least the minimum on-sale keys, and this save has fewer than the ratio of them. The floor

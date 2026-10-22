@@ -7,8 +7,8 @@
 
 import { formatScrap, scrapToRef } from '../../shared/currency';
 import type { JournalEntry, Opportunity, OpportunityEvent, Scrap, UnixMs } from '../../shared/types';
+import { JOURNAL_CSV_COLUMNS, journalCsvCells, journalLedger } from '../../shared/journal';
 import { revenueOrderByValue } from './engine';
-import { journalValue } from './journal';
 
 export type CsvCell = string | number | boolean | null | undefined;
 
@@ -130,12 +130,10 @@ export function eventsCsv(events: readonly OpportunityEvent[]): string {
   return toCsv(out);
 }
 
-/** Oldest first, the order FIFO profit is worked out in. */
+/**
+ * 0.8 (J5): the ledger in FIFO order (journalOrder; before, (ts, id) listed a same-minute sale before its buy), each
+ * row with its fee and FIFO state and, on a sale, the buy it closed, its cost, proceeds, fees, profit and hold.
+ */
 export function journalCsv(entries: readonly JournalEntry[]): string {
-  const out: CsvCell[][] = [['id', 'time', 'side', 'venue', 'sku', 'name', 'keys', 'metal_ref', 'key_price_ref', 'value_ref', 'note']];
-  const sorted = [...entries].sort((a, b) => a.ts - b.ts || a.id - b.id);
-  for (const e of sorted) {
-    out.push([e.id, iso(e.ts), e.side, e.venue, e.sku, e.name, e.keys, ref(e.scrap), ref(e.keyPriceScrap), ref(journalValue(e)), e.note]);
-  }
-  return toCsv(out);
+  return toCsv([JOURNAL_CSV_COLUMNS, ...journalLedger(entries).map(journalCsvCells)]);
 }

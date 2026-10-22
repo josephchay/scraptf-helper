@@ -1,9 +1,11 @@
 // Key price used to value keys received from backpack.tf buyers (design brief §5.3).
 
-import type { KeyPriceQuote, KeyPriceSource, KeyPriceState, Scrap, ScraptfListKey, Settings, UnixMs } from '../../shared/types';
+import type { KeyPriceDivergence, KeyPriceQuote, KeyPriceSource, KeyPriceState, Scrap, ScraptfListKey, Settings, UnixMs } from '../../shared/types';
 
 /** A source is stale after 6 h. */
 export const KEY_PRICE_STALE_MS = 6 * 60 * 60 * 1000;
+/** 0.7.4 (F71): two fresh automatic quotes this far apart (1 ref) are worth a warning (KeyPriceState.divergence). */
+export const KEY_PRICE_DIVERGENCE_SCRAP = 9;
 /** Clearly marked fallback when no source has a value: 60 ref. */
 export const DEFAULT_KEY_SCRAP = 540;
 /** Anything outside 2 ref .. 2000 ref is a broken quote, not a key price. */
@@ -86,6 +88,11 @@ export function isQuoteStale(q: Pick<KeyPriceQuote, 'observedAt'>, now: UnixMs):
   return !Number.isFinite(q.observedAt) || now - q.observedAt > KEY_PRICE_STALE_MS;
 }
 
+/** 0.7.4 (F71): a quote's own price time, or null when unknown. */
+function priceAtOf(q: KeyPriceQuote): UnixMs | null {
+  return typeof q.priceAt === 'number' && Number.isFinite(q.priceAt) && q.priceAt > 0 ? q.priceAt : null;
+}
+
 export function defaultKeyPrice(quotes: KeyPriceQuote[] = [], scraptfFromList: ScraptfListKey | null = null): KeyPriceState {
   return { valueScrap: DEFAULT_KEY_SCRAP, source: 'default', observedAt: null, stale: true, quotes, scraptfFromList };
 }
@@ -123,12 +130,35 @@ export function selectKeyPrice(quotes: KeyPriceQuote[], settings: Settings, now:
 
   const fresh = candidates.find((c) => !isQuoteStale(c.q, now));
   if (fresh) {
-    return { valueScrap: capByScraptfPays(fresh.v, cap), source: fresh.q.source, observedAt: fresh.q.observedAt, stale: false, quotes: shown, scraptfFromList };
+    // 0.7.4 (F71): the priority stays (brief §5.3); a fresh second source that disagrees is only reported.
+    let divergence: KeyPriceDivergence | null = null;
+    for (const c of candidates) {
+      if (c === fresh || isQuoteStale(c.q, now) || Math.abs(c.v - fresh.v) < KEY_PRICE_DIVERGENCE_SCRAP) continue;
+      if (divergence === null || Math.abs(c.v - fresh.v) > Math.abs(divergence.deltaScrap)) divergence = { otherSource: c.q.source, otherScrap: c.v, deltaScrap: c.v - fresh.v };
+    }
+    return {
+      valueScrap: capByScraptfPays(fresh.v, cap),
+      source: fresh.q.source,
+      observedAt: fresh.q.observedAt,
+      stale: false,
+      quotes: shown,
+      priceAt: priceAtOf(fresh.q),
+      divergence,
+      scraptfFromList,
+    };
   }
 
   const latest = [...candidates].sort((a, b) => b.q.observedAt - a.q.observedAt)[0];
   if (latest) {
-    return { valueScrap: capByScraptfPays(latest.v, cap), source: latest.q.source, observedAt: latest.q.observedAt, stale: true, quotes: shown, scraptfFromList };
+    return {
+      valueScrap: capByScraptfPays(latest.v, cap),
+      source: latest.q.source,
+      observedAt: latest.q.observedAt,
+      stale: true,
+      quotes: shown,
+      priceAt: priceAtOf(latest.q),
+      scraptfFromList,
+    };
   }
 
   // Brief §5.3 lists the user override last; it still beats a made-up default.

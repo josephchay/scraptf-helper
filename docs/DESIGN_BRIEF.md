@@ -588,7 +588,7 @@ Template: `{defindex, quality, craftable:true, tradable:true, killstreak:0, aust
 - v3 order: `defindex;quality;u;australium;n;c;uncraftable;untradable;w;pk;strange;kt-;festive;td-;od-;oq-;p`
 - legacy order: `defindex;quality;u;australium;uncraftable;untradable;w;pk;strange;kt-;td-;festive;n;c;od-;oq-;p`
 
-Examples: `5021;6`, `378;5;u13`, `378;5;u13;strange`, `205;11;australium;kt-3`, `205;11;uncraftable;kt-3;festive`, `1104;15;w1;pk114`, `15000;15;u701;w1;pk14`, `20003;6;kt-3;td-205;od-6526;oq-6`, `378;6;p16738740`, `160;3;n4`, `5041;6;c11` (not `5022;6;c11`).
+Examples: `5021;6`, `378;5;u13`, `378;5;u13;strange`, `205;11;australium;kt-3`, `205;11;uncraftable;kt-3;festive`, `1104;15;w1;pk114`, `15000;5;u701;w1;pk14`, `20003;6;kt-3;td-205;od-6526;oq-6`, `378;6;p16738740`, `160;3;n4`, `5041;6;c11` (not `5022;6;c11`).
 
 ### 4.2 Canonicalisation and lookup strategy
 - **Internal identity:** the parsed object. The DB key is its v3 string; secondary indexes hold the legacy string and a base SKU with paint removed.
@@ -600,7 +600,7 @@ Examples: `5021;6`, `378;5;u13`, `378;5;u13;strange`, `205;11;australium;kt-3`, 
   1. legacy;
   2. v3;
   3. swapped `w`/`pk` order (pricedb holds 179 `pk..;w..` SKUs and 2,988 `w`-first ones);
-  4. for strange skins: the 11-primary form `{d};11;w;pk[;kt]`, then `{d};15;w;pk[;kt];strange` (the stale fallback). From 0.7.1 the saved-page parser itself emits the 11-primary form for a strange skin without an effect (`15000;11;w2;pk14`, whatever quality class scrap.tf gives the card), and `{d};15;u{e};w;pk;strange` for an unusual strange skin, so imported prices already match the buyers' SKUs (ARCHITECTURE, "0.7.1 round", P2);
+  4. for strange skins: the 11-primary form `{d};11;w;pk[;kt]`, then `{d};15;w;pk[;kt];strange` (the stale fallback). From 0.7.1 the saved-page parser itself emits the 11-primary form for a strange skin without an effect (`15000;11;w2;pk14`, whatever quality class scrap.tf gives the card), and (from 0.7.4) `{d};5;u{e};w;pk;strange` for an unusual strange skin (`{d};5;u{e};w;pk` when not strange), so imported prices already match the buyers' SKUs (ARCHITECTURE, "0.7.1 round", P2, and the "0.7.4 round", unusual skins);
   5. for crates: a defindex alias (5022 ↔ 5041 and similar) from the schema.
 - **Defindex aliases:** use the `defindex[]` array from IGetPrices (stock vs upgradeable, crate defindexes) to build `defindex_aliases`. Matching treats aliases as equal.
 - **"The" prefix:** schema items with `proper_name:true` map "The X" and "X" to the same defindex. bp.tf names include "The" inconsistently ("The Festivized Huntsman" vs "Strange Festivized ..."), so **never synthesise bp.tf names** when a learned name exists.
@@ -642,7 +642,7 @@ Ids 2 and 4 are unused.
 **Conventions**
 - Strange Unusual: quality 5 plus `strange`.
 - Strange Australium: quality 11 plus `australium`.
-- Unusual skins: quality 15 plus u701 Hot, u702 Isotope, u703 Cool or u704 Energy Orb.
+- Unusual skins: quality 5 plus u701 Hot, u702 Isotope, u703 Cool or u704 Energy Orb, and `strange` (quality2) for a strange one (`15000;5;u701;w1;pk14;strange`), the form backpack.tf's buy orders use. (Until 0.7.4 this said quality 15 plus the effect, which no live order matched: ARCHITECTURE deviation 12.)
 - War Paint items: defindex 16000 + paintkit, quality 15 (strange war paints are quality 11).
 
 ### 4.4 Building a SKU from backpack.tf structured fields

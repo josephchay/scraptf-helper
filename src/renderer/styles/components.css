@@ -561,6 +561,18 @@ textarea.input {
   animation: pulse 2.2s ease-in-out infinite;
 }
 
+/* 0.8 (T6, T7): the Wait / Buy now tag in an Item cell (bank stock, Live market, Opportunities), the metrics of
+   the market's New pill. In the cell, not a column of its own: the name ellipses first, the tag never shrinks
+   (bank stock alone, whose Item cell holds more tags, lets its tags ellipse past the name's floor: .bs-tags). */
+.timing-badge {
+  flex-shrink: 0;
+  height: 17px;
+  margin-left: 4px;
+  padding: 0 5px;
+  font-size: 10.5px;
+  cursor: help;
+}
+
 .chip-flag {
   display: inline-flex;
   align-items: center;

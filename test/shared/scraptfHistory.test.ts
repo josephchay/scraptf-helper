@@ -4,7 +4,7 @@
 // reminders' texts. Pure; nothing here touches the network or scrap.tf.
 
 import { describe, expect, it } from 'vitest';
-import { bankStockKey } from '../../src/shared/bankStock';
+import { bankStockKey, diffBankStock } from '../../src/shared/bankStock';
 import { SCRAPTF_BANKS, STATIC_EXTERNAL_URLS, isAllowedExternalUrl, isScraptfBankUrl } from '../../src/shared/links';
 import {
   SCRAPTF_CHANGES_CSV_COLUMNS,
@@ -18,6 +18,7 @@ import {
   scraptfChangesLimit,
   scraptfEventMatches,
   scraptfEventsOf,
+  scraptfIsRestock,
   scraptfItemHistoryOf,
   scraptfListedSinceOf,
   scraptfObservationsOf,
@@ -25,6 +26,7 @@ import {
   scraptfResaveDue,
   scraptfResaveNotice,
   scraptfRunsOf,
+  scraptfSeenBefore,
   type ScraptfSaveRows,
 } from '../../src/shared/scraptfHistory';
 import type { BankStockStored, KeyPriceState, ScraptfChangeEvent, ScraptfEventStored, ScraptfKeyRun } from '../../src/shared/types';
@@ -352,5 +354,43 @@ describe('re-save reminders (S5)', () => {
       expect(isScraptfBankUrl(bad), String(bad)).toBe(false);
     }
     expect(SCRAPTF_RESAVE_HELP).toBe("Flip Desk can't refresh scrap.tf for you; this reminds you to save the page again");
+  });
+});
+
+describe('0.8 (G3, LC-7, D8): the one restock rule', () => {
+  it('scraptfSeenBefore: an earlier retained save of the bank listed the copy at all', () => {
+    expect(scraptfSeenBefore({ seenAt: NOW - HOUR }, NOW)).toBe(true);
+    expect(scraptfSeenBefore({ seenAt: NOW }, NOW)).toBe(false);
+    expect(scraptfSeenBefore({ seenAt: NOW + 1 }, NOW)).toBe(false);
+    expect(scraptfSeenBefore(null, NOW)).toBe(false);
+    expect(scraptfSeenBefore(undefined, NOW)).toBe(false);
+    expect(scraptfSeenBefore({ seenAt: Number.NaN }, NOW)).toBe(false);
+    expect(scraptfSeenBefore({ seenAt: NOW - HOUR }, Number.NaN)).toBe(false);
+  });
+
+  it("scraptfIsRestock: a 'new' row the previous save listed (sold out or without a price), or seen before", () => {
+    expect(scraptfIsRestock({ change: 'new', previous: row('1;6', 20, 0) }, false)).toBe(true);
+    expect(scraptfIsRestock({ change: 'new', previous: row('1;6', null) }, false)).toBe(true);
+    expect(scraptfIsRestock({ change: 'new', previous: null }, true)).toBe(true);
+    expect(scraptfIsRestock({ change: 'new', previous: null }, false)).toBe(false);
+    for (const change of ['gone', 'cheaper', 'pricier', null] as const) expect(scraptfIsRestock({ change, previous: row('1;6', 20) }, true)).toBe(false);
+  });
+
+  it("scraptfEventsOf's restocked is exactly scraptfIsRestock over diffBankStock (output unchanged)", () => {
+    const previous = [row('4;6', 20, 0), row('6;6', 25, 2), row('11;6', null)];
+    const newest = [row('4;6', 20, 4), row('7;6', 33), row('8;6', 12), row('11;6', 30)];
+    const seen = new Set([bankStockKey('8;6', '')]);
+    const events = scraptfEventsOf({ bank: 'hats', page: '/buy/hats', at: NOW, batchId: 9, keyScrap: K, newest, previous, seenBefore: (key) => seen.has(key) });
+    expect(events.map((e) => [e.sku, e.kind])).toEqual([
+      ['4;6', 'restocked'],
+      ['7;6', 'new'],
+      ['8;6', 'restocked'],
+      ['11;6', 'restocked'],
+      ['6;6', 'gone'],
+    ]);
+    const expected = diffBankStock(newest, previous, K)
+      .filter((d) => d.change === 'new')
+      .map((d) => [d.sku, scraptfIsRestock(d, seen.has(d.key)) ? 'restocked' : 'new']);
+    expect(events.filter((e) => e.kind !== 'gone').map((e) => [e.sku, e.kind])).toEqual(expected);
   });
 });

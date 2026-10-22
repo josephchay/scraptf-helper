@@ -104,7 +104,8 @@ describe('migration V13: killstreaks looks left with no prices and no bank stock
     // 53: the /items list, no save and no price under it.
     batch(db, 53, 'list', 7);
 
-    expect(migrate(db).applied).toEqual([13]);
+    // V13 alone (0.7.4's V14 zeroes the /items list batches it empties of prices).
+    expect(migrate(db, MIGRATIONS.slice(0, 13)).applied).toEqual([13]);
     expect([50, 51, 52, 53].map((id) => itemCount(db, id))).toEqual([1, 1, 4, 7]);
   });
 });

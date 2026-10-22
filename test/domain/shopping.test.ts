@@ -259,6 +259,21 @@ describe('buildShoppingList', () => {
     expect(buildShoppingList(rows, {}, KP, T0).rows.map((x) => x.knownStock)).toEqual([null, null, null]);
   });
 
+  it('0.7.4 (F22, F70): marks a known price flagged Variant? or Below market as suspect, not otherwise', () => {
+    const rows = [
+      opp('70;6', { inputRef: 'price:1', flags: ['variant-suspect'] }),
+      // A rule wins the ceiling; the known price is the import flagged below market.
+      opp('71;6', { inputRef: 'rule:1', confidence: 95, maxCostScrap: 140 }),
+      opp('71;6', { inputRef: 'price:2', inputKind: 'import', flags: ['cost-below-market'] }),
+      opp('72;6', { inputRef: 'price:3' }),
+    ];
+    const by = (sku: string) => buildShoppingList(rows, {}, KP, T0).rows.find((x) => x.sku === sku)!;
+    // The numbers stay as they are (under_ceiling in the CSV too); only the flag is added.
+    expect(by('70;6')).toMatchObject({ knownCostScrap: 100, underCeiling: true, knownSuspect: true });
+    expect(by('71;6')).toMatchObject({ knownCostScrap: 100, underCeiling: true, knownSuspect: true });
+    expect(by('72;6')).not.toHaveProperty('knownSuspect');
+  });
+
   it('copes with an empty or missing query', () => {
     expect(buildShoppingList([], {}, null, T0)).toEqual({ rows: [], total: 0, groups: [], keyPrice: null, generatedAt: T0 });
     expect(buildShoppingList([opp('50;6')], undefined as unknown as object, KP, T0).total).toBe(1);

@@ -57,6 +57,8 @@ describe('ItemDetail.scraptfList (F14)', () => {
       stockLimit: 5,
       full: false,
       observedAt: T0 - 3 * MIN,
+      // 0.7.4: stored unmarked, so a family row; read for its own SKU, so no match field (exact).
+      craft: 'any',
     });
     // A painted copy reads the clean base's row (the list shows plain copies).
     expect(detail(repo, '378;6;p3100495')!.scraptfList).toEqual(d.scraptfList);

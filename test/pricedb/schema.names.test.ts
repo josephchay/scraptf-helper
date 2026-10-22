@@ -21,7 +21,7 @@ const DERIVED: [string, string][] = [
   ['190;0', 'Normal Bat'],
   ['5021;6', 'Mann Co. Supply Crate Key'],
   ['5002;6', 'Refined Metal'],
-  ['15000;15;u701;w1;pk14;strange', 'Strange Hot Night Owl Sniper Rifle (Factory New)'],
+  ['15000;5;u701;w1;pk14;strange', 'Strange Hot Night Owl Sniper Rifle (Factory New)'],
   ['1015;5;u3010', 'Mega Strike Taunt: The Shred Alert'],
   ['378;6;strange', 'Strange Unique Team Captain'],
   ['378;5', 'Unusual Team Captain'],
@@ -46,6 +46,11 @@ const NOT_ROUND_TRIP: Record<string, string> = {
   '15000;15;w1;pk14;strange': '15000;11;w1;pk14',
   // A War Paint without its paintkit cannot be told apart from the generic War Paint.
   '16105;15;w3': '9536;15;w3',
+  // 0.7.4 (F08/F43/F69): sku.pricedb.io keys an unusual skin Decorated plus the effect; backpack.tf's buyers
+  // (and so this resolver) key it Unusual plus the effect.
+  '15000;15;u701;w1;pk14': '15000;5;u701;w1;pk14',
+  // 0.7.4 (F46): a craft number nothing in this fixture prices is read as the plain item (with a warning).
+  '160;3;n4': '160;3',
 };
 
 let deps: TestDeps;
@@ -122,6 +127,9 @@ describe('baseNameForSku and marketHashName', () => {
     ['205;11;australium;kt-3', 'Strange Professional Killstreak Australium Rocket Launcher'],
     ['15000;15;w1;pk14', 'Night Owl Sniper Rifle (Factory New)'],
     ['15000;15;u701;w1;pk14', 'Unusual Night Owl Sniper Rifle (Factory New)'],
+    // 0.7.4 (F08): the form the app keys unusual skins by now, as backpack.tf's market_name has them.
+    ['15000;5;u701;w1;pk14', 'Unusual Night Owl Sniper Rifle (Factory New)'],
+    ['15000;5;u701;w1;pk14;strange', 'Strange Unusual Night Owl Sniper Rifle (Factory New)'],
     ['5022;6;c1', 'Mann Co. Supply Crate Series #1'],
     ['20000;6;td-103;od-6522;oq-6', 'Camera Beard Strangifier Chemistry Set Series #1'],
     ['1015;5;u3010', 'Unusual Taunt: The Shred Alert'],
@@ -201,7 +209,8 @@ describe('resolve', () => {
     ['https://backpack.tf/stats/Unique/Mann%20Co.%20Supply%20Crate/Tradable/Craftable/11', '5041;6;c11'],
     ['https://backpack.tf/stats/Unique/Strangifier/Tradable/Craftable/378', '6522;6;td-378'],
     ['https://backpack.tf/stats/Unique/Killstreak%20Kit/Tradable/Non-Craftable/3-205', '6526;6;uncraftable;kt-3;td-205'],
-    ['https://backpack.tf/stats/Decorated%20Weapon/Night%20Owl%20%7C%20Sniper%20Rifle%20(Factory%20New)/Tradable/Craftable/701', '15000;15;u701;w1;pk14'],
+    // 0.7.4 (F08): bp.tf's stats page files it under Decorated Weapon; its buy orders key it Unusual.
+    ['https://backpack.tf/stats/Decorated%20Weapon/Night%20Owl%20%7C%20Sniper%20Rifle%20(Factory%20New)/Tradable/Craftable/701', '15000;5;u701;w1;pk14'],
     [
       'https://next.backpack.tf/stats?item=Rocket%20Launcher&quality=Strange&australium=1&killstreakTier=3&sheen=-1&killstreaker=-1',
       '205;11;australium;kt-3',

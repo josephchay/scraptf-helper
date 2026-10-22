@@ -21,7 +21,7 @@ import type {
   UnixSec,
 } from '../../shared/types';
 import { KEY_SKU } from '../../shared/types';
-import { baseSku, fromObject, fromString, looksLikeSku, normalizeSkuObject } from '../../shared/sku';
+import { baseSku, canonicalUnusualSkin, fromObject, fromString, looksLikeSku, normalizeSkuObject } from '../../shared/sku';
 import { refToScrap } from '../../shared/currency';
 
 // ---------------------------------------------------------------------------
@@ -252,6 +252,15 @@ function safeCall<T>(fn: () => T, fallback: T): T {
   }
 }
 
+/**
+ * 0.7.4 (R18): `defindex` keys a base of `wanted`'s book (SchemaService.bookBases: a Collector's Chemistry Set's
+ * 20001 beside the parser's 20006). A schema without bookBases (a test double) twins nothing.
+ */
+function isBookTwinDefindex(schema: SchemaService, wanted: SkuObject, defindex: number): boolean {
+  const bases = safeCall(() => schema.bookBases?.(baseSku(wanted)) ?? [], [] as readonly string[]);
+  return bases.some((b) => Number(b.slice(0, b.indexOf(';'))) === defindex);
+}
+
 /** Lower id of a RED/BLU pair; killstreaker eye glows (2001-2008) are not unusual effects. */
 function canonicalEffect(schema: SchemaService, id: number | null): number | null {
   if (id === null || !Number.isInteger(id) || id <= 0) return null;
@@ -335,6 +344,43 @@ function isTargetTool(name: string | undefined): boolean {
   return typeof name === 'string' && /\b(Strangifier|Unusualifier)\b/i.test(name) && !/Chemistry Set/i.test(name);
 }
 
+/** 0.7.4 (F17): the canonical kit defindex per tier, and back. */
+const KIT_BY_TIER: Readonly<Record<number, number>> = { 1: 6527, 2: 6523, 3: 6526 };
+const TIER_BY_KIT: ReadonlyMap<number, number> = new Map([
+  [6527, 1],
+  [6523, 2],
+  [6526, 3],
+]);
+
+/**
+ * 0.7.4 (F17): a legacy killstreak kit defindex: one of the schema's "X Killstreakifier Basic" tools, all named
+ * just "Kit" (5726-5801). backpack.tf files some kit orders of every tier under them ("Non-Craftable Professional
+ * Killstreak Rocket Launcher Kit" on 5728), whose priceindex "3-18" is tier and target like a real kit's. Without
+ * a schema row, a payload whose base name is "Kit" and whose name ends in "Killstreak ... Kit" counts too.
+ */
+function isLegacyKit(schema: SchemaService, defindex: number, baseName: string | null, fullName: string | undefined): boolean {
+  if (KIT_DEFINDEXES.has(defindex)) return false;
+  const row = safeCall(() => schema.itemByDefindex(defindex), null);
+  if (row) return row.itemClass === 'tool' && row.itemName.trim().toLowerCase() === 'kit' && /Killstreakifier/i.test(row.name);
+  return (baseName ?? '').trim().toLowerCase() === 'kit' && typeof fullName === 'string' && /\bKillstreak\b.*\bKit$/i.test(fullName.trim());
+}
+
+/**
+ * 0.7.4 (F17): a kit's defindex and tier. The canonical kits carry their tier in the defindex, and it wins over
+ * killstreakTier (every order seen that disagreed was priced as its defindex's tier; counted as
+ * 'kit-tier-conflict'). A legacy kit takes the canonical defindex of its tier (killstreakTier, the priceindex or
+ * the name); without a tier it stays as it is.
+ */
+function kitIdentity(defindex: number, killstreak: number, stats: BptfMapStats | undefined): { defindex: number; killstreak: number } {
+  const own = TIER_BY_KIT.get(defindex);
+  if (own !== undefined) {
+    if (killstreak !== 0 && killstreak !== own) noteShape(stats, 'kit-tier-conflict');
+    return { defindex, killstreak: own };
+  }
+  const canonical = KIT_BY_TIER[killstreak];
+  return canonical !== undefined ? { defindex: canonical, killstreak } : { defindex, killstreak };
+}
+
 function isCrateItem(schema: SchemaService, defindexes: readonly number[], name: string | undefined): boolean {
   for (const d of defindexes) {
     const row = safeCall(() => schema.itemByDefindex(d), null);
@@ -361,7 +407,20 @@ function baseNameFor(schema: SchemaService, defindex: number, given: string | un
   return row ? row.itemName : null;
 }
 
-function nameHints(fullName: string | undefined, baseName: string | null): NameHints {
+/**
+ * 0.7.4 (F18): the prefix without the item's unusual effect name, which may hold a prefix word itself: the taunt
+ * effect "Festivized Formation" is no festivizer. One whole-word occurrence, case-insensitively.
+ */
+function withoutEffectName(text: string, effectName: string | null | undefined): string {
+  const e = typeof effectName === 'string' ? effectName.trim() : '';
+  if (!e) return text;
+  return text
+    .replace(new RegExp(`(^|\\s)${escapeRegExp(e)}(?=\\s|$)`, 'i'), ' ')
+    .replace(/\s{2,}/g, ' ')
+    .replace(/^\s+/, '');
+}
+
+function nameHints(fullName: string | undefined, baseName: string | null, effectName?: string | null): NameHints {
   const out: NameHints = {
     nonCraftable: false,
     nonTradable: false,
@@ -398,12 +457,12 @@ function nameHints(fullName: string | undefined, baseName: string | null): NameH
       if (j >= 0) prefix = name.slice(0, j);
     }
   }
-  const scope = prefix ?? '';
+  const scope = withoutEffectName(prefix ?? '', effectName);
   out.festivized = /\bFestivized\b/i.test(scope);
   out.australium = /\bAustralium\b/i.test(scope);
   // bp.tf always puts the elevated "Strange" first ("Strange Collector's ...", "Strange Burning Flames ...").
   out.strange = /^Strange\s/i.test(scope.replace(/^Non-Craftable\s+/i, '')) && !/^Strange\b/i.test(baseName ?? '');
-  const ksScope = prefix ?? name;
+  const ksScope = prefix !== null ? scope : withoutEffectName(name, effectName);
   for (const [re, tier] of KILLSTREAK_BY_PREFIX) {
     if (re.test(ksScope)) {
       out.killstreak = tier;
@@ -435,11 +494,12 @@ function wsSkuParts(item: Record<string, unknown>, schema: SchemaService, stats:
   const quality = it.quality;
   const name = it.name;
   const baseName = baseNameFor(schema, defindex, it.baseName);
-  const hints = nameHints(name, baseName);
 
   const particle = soft(particleSchema, item['particle'], 'particle', stats);
   const rawEffect = particle ? particle.id : null;
   let effect = canonicalEffect(schema, rawEffect);
+  // 0.7.4 (F18): read without the effect's own name, as the snapshot path is.
+  const hints = nameHints(name, baseName, effect !== null ? safeCall(() => schema.effectName(effect!), null) : null);
 
   const elevated = soft(entityId, item['elevatedQuality'], 'elevatedQuality', stats);
   let quality2: number | null = null;
@@ -476,7 +536,8 @@ function wsSkuParts(item: Record<string, unknown>, schema: SchemaService, stats:
     target = recipe.targetItem?.defindex ?? recipe.targetItem?._source?.defindex ?? null;
   }
 
-  const isKit = KIT_DEFINDEXES.has(defindex);
+  // 0.7.4 (F17): a legacy kit defindex ("Sniperrifle Killstreakifier Basic", item_name "Kit") is a kit too.
+  const isKit = KIT_DEFINDEXES.has(defindex) || isLegacyKit(schema, defindex, baseName, name);
   const pi = parsePriceindex(it.priceindex);
   if (pi) {
     if (pi.length === 3) {
@@ -485,7 +546,7 @@ function wsSkuParts(item: Record<string, unknown>, schema: SchemaService, stats:
       target ??= pi[2]!;
     } else if (pi.length === 2) {
       if (isKit) {
-        if (killstreak === 0) killstreak = pi[0]! <= 3 ? pi[0]! : 0;
+        if (killstreak === 0) killstreak = pi[0]! >= 1 && pi[0]! <= 3 ? pi[0]! : 0;
         target ??= pi[1]!;
       } else {
         output ??= pi[0]!;
@@ -505,24 +566,28 @@ function wsSkuParts(item: Record<string, unknown>, schema: SchemaService, stats:
   // Non-craftable items omit `craftable` entirely (FIELDS.md), so the name decides.
   const craftable = typeof craftableField === 'boolean' ? craftableField : !hints.nonCraftable;
   const tradable = typeof tradableField === 'boolean' ? tradableField : !hints.nonTradable;
+  const kit = isKit ? kitIdentity(defindex, killstreak, stats) : null;
 
-  const obj = normalizeSkuObject({
-    defindex,
-    quality,
-    craftable,
-    tradable,
-    killstreak,
-    australium: item['australium'] === true,
-    effect,
-    festive: item['festivized'] === true,
-    paintkit,
-    wear,
-    quality2,
-    crateseries,
-    target,
-    output,
-    outputQuality,
-  });
+  // 0.7.4 (F08/F43/F69): an unusual skin keyed as its buyers key it, whichever quality the document carries.
+  const obj = canonicalUnusualSkin(
+    normalizeSkuObject({
+      defindex: kit?.defindex ?? defindex,
+      quality,
+      craftable,
+      tradable,
+      killstreak: kit?.killstreak ?? killstreak,
+      australium: item['australium'] === true,
+      effect,
+      festive: item['festivized'] === true,
+      paintkit,
+      wear,
+      quality2,
+      crateseries,
+      target,
+      output,
+      outputQuality,
+    }),
+  );
 
   // Cross-check the computed object against bp.tf's own priceindex.
   let priceindexMismatch = false;
@@ -628,10 +693,15 @@ export function mapWsPayload(payload: unknown, schema: SchemaService, nowMs: Uni
     marketName,
   };
   if (stats) stats.mapped++;
+  // 0.7.4 (F46): a medal's or numbered item's "#N" is that one copy's craft number, which the base SKU has no part
+  // of (backpack.tf keys "Gentle Manne's Service Medal #4243" as the plain 121;6): learned without it, so the
+  // plain item is never named after a stranger's copy. A crate's "#N" is its series and stays.
+  const numbered = itemName !== null && parts.obj.crateseries === null && parts.obj.craftnumber === null && !isCrateItem(schema, [parts.obj.defindex], itemName);
+  const learned = numbered ? itemName.replace(/\s+#\d{1,9}$/, '') : (itemName ?? '');
   return {
     ok: true,
     listing,
-    name: { sku: base, name: itemName ?? '', marketName, lastSeen: nowMs },
+    name: { sku: base, name: learned, marketName, lastSeen: nowMs },
     priceindexMismatch: parts.priceindexMismatch,
   };
 }
@@ -804,7 +874,6 @@ export function listingFromSnapshot(
   const { defindex, quality } = parsed.data.item;
   const attrs = readAttributes(item['attributes'], stats);
   const baseName = baseNameFor(schema, defindex, undefined);
-  const hints = nameHints(itemName, baseName);
 
   const effectRaw = attrs.has(134) ? attrFloat(attrs.get(134)) : attrs.has(2041) ? attrInt(attrs.get(2041)) : null;
   let effect = canonicalEffect(schema, effectRaw !== null && Number.isInteger(effectRaw) ? effectRaw : null);
@@ -816,9 +885,14 @@ export function listingFromSnapshot(
     }
     if (cleaned) effect = canonicalEffect(schema, safeCall(() => schema.effectIdByName(cleaned), null));
   }
+  // 0.7.4 (F18): the name read without the effect's own name ("Festivized Formation" festivizes nothing).
+  const hints = nameHints(itemName, baseName, effect !== null ? safeCall(() => schema.effectName(effect!), null) : null);
 
   const killstreakAttr = attrFloat(attrs.get(2025));
-  const killstreak = killstreakAttr !== null && killstreakAttr >= 1 && killstreakAttr <= 3 ? Math.round(killstreakAttr) : hints.killstreak;
+  const killstreakRead = killstreakAttr !== null && killstreakAttr >= 1 && killstreakAttr <= 3 ? Math.round(killstreakAttr) : hints.killstreak;
+  // 0.7.4 (F17): a kit keyed by its tier's defindex, as on the feed.
+  const kit = KIT_DEFINDEXES.has(defindex) || isLegacyKit(schema, defindex, baseName, itemName) ? kitIdentity(defindex, killstreakRead, stats) : null;
+  const killstreak = kit?.killstreak ?? killstreakRead;
   const wear = wearFromFloat(attrFloat(attrs.get(725))) ?? hints.wear;
   const paintkitAttr = attrInt(attrs.get(834));
   const crateAttr = attrFloat(attrs.get(187));
@@ -828,23 +902,28 @@ export function listingFromSnapshot(
   const tradable = item['flag_cannot_trade'] === true || item['tradable'] === false ? false : !hints.nonTradable;
   const strange = attrs.has(214) || hints.strange;
 
-  const obj = normalizeSkuObject({
-    defindex,
-    quality,
-    craftable,
-    tradable,
-    killstreak,
-    australium: attrPresentNonZero(attrs.get(2027)) || (hints.australium && quality === 11),
-    effect,
-    festive: attrPresentNonZero(attrs.get(2053)) || hints.festivized,
-    paintkit: paintkitAttr !== null && paintkitAttr >= 0 ? paintkitAttr : null, // 0.7.3: pk0 is Red Rock Roscoe
-    wear,
-    quality2: strange && quality !== 11 ? 11 : null,
-    crateseries: crateAttr !== null && crateAttr > 0 ? Math.round(crateAttr) : hints.crateSeries,
-    target: targetAttr !== null && targetAttr > 0 ? Math.round(targetAttr) : null,
-  });
+  // 0.7.4 (F08/F43/F69): an unusual skin keyed as its buyers key it (canonicalUnusualSkin), as on the feed.
+  const obj = canonicalUnusualSkin(
+    normalizeSkuObject({
+      defindex: kit?.defindex ?? defindex,
+      quality,
+      craftable,
+      tradable,
+      killstreak,
+      australium: attrPresentNonZero(attrs.get(2027)) || (hints.australium && quality === 11),
+      effect,
+      festive: attrPresentNonZero(attrs.get(2053)) || hints.festivized,
+      paintkit: paintkitAttr !== null && paintkitAttr >= 0 ? paintkitAttr : null, // 0.7.3: pk0 is Red Rock Roscoe
+      wear,
+      quality2: strange && quality !== 11 ? 11 : null,
+      crateseries: crateAttr !== null && crateAttr > 0 ? Math.round(crateAttr) : hints.crateSeries,
+      target: targetAttr !== null && targetAttr > 0 ? Math.round(targetAttr) : null,
+    }),
+  );
   const wanted = requestedSku && looksLikeSku(requestedSku) ? fromString(requestedSku) : null;
-  if (wanted && wanted.defindex === defindex && wanted.output !== null && obj.output === null) {
+  // 0.7.4 (R18): or a book twin of it (a Collector's set bp.tf filed under 20001 for a request keyed 20006), so
+  // the order lands on a base of the requested book (20001;6;od-228;oq-14) instead of a bare 20001;6.
+  if (wanted && wanted.output !== null && obj.output === null && (wanted.defindex === defindex || isBookTwinDefindex(schema, wanted, defindex))) {
     obj.output = wanted.output;
     obj.outputQuality = wanted.outputQuality;
     if (obj.target === null) obj.target = wanted.target;
@@ -1017,7 +1096,7 @@ export function parseIGetPrices(json: unknown, schema: SchemaService): ParsedPri
       }
       paintkit = pk.paintkit;
     }
-    const isKit = defindexes.some((d) => KIT_DEFINDEXES.has(d));
+    const isKit = defindexes.some((d) => KIT_DEFINDEXES.has(d) || isLegacyKit(schema, d, null, undefined));
     const crateItem = isCrateItem(schema, defindexes, itemName);
     const targetTool = isTargetTool(itemName);
 
@@ -1081,8 +1160,12 @@ export function parseIGetPrices(json: unknown, schema: SchemaService): ParsedPri
               valueHigh: entry.data.value_high ?? null,
               lastUpdate: toUnixSec(entry.data.last_update),
             };
-            for (const defindex of defindexes) {
-              const sku = fromObject({ ...obj, defindex });
+            // 0.7.4 (F17): a kit price is its tier's kit, one row on that tier's canonical defindex (not one
+            // per legacy "Kit" defindex the entry lists).
+            const kitDefindex = isKit && pi?.length === 2 ? KIT_BY_TIER[obj.killstreak ?? 0] : undefined;
+            for (const defindex of kitDefindex !== undefined ? [kitDefindex] : defindexes) {
+              // 0.7.4 (F08): bp.tf's price pages file unusual skins under Decorated Weapon; keyed as the orders are.
+              const sku = fromObject(canonicalUnusualSkin(normalizeSkuObject({ ...obj, defindex })));
               const prev = bySku.get(sku);
               if (!prev || (row.lastUpdate ?? 0) >= (prev.lastUpdate ?? 0)) bySku.set(sku, { sku, ...row });
             }
@@ -1107,13 +1190,17 @@ export function communityRowsFromPrices(response: unknown, schema: SchemaService
 const currencyEntrySchema = z.looseObject({
   defindex: int.optional(),
   name: z.string().optional(),
-  price: z.looseObject({ value: num, value_high: num.optional(), currency: z.string().optional() }),
+  // 0.7.4 (F71): last_update is read loosely (unknown, not a failed entry, when it is missing or odd).
+  price: z.looseObject({ value: num, value_high: num.optional(), currency: z.string().optional(), last_update: z.unknown().optional() }),
 });
 
 /**
  * Key price from IGetCurrencies v1. `currencies` may be an array (swagger) or
  * an object keyed metal/keys/hat (classic docs); the key entry is defindex 5021
- * or the `keys` key. Only metal-denominated prices are used.
+ * or the `keys` key. Only metal-denominated prices are used. `observedAt` is the
+ * fetch (the price is current as of it, so the 6 h stale gate keeps its meaning);
+ * 0.7.4 (F71): `priceAt` is the price's own `last_update` (backpack.tf's community
+ * key price can stay unchanged for weeks), null when the answer has none.
  */
 export function parseIGetCurrencies(json: unknown, nowMs: UnixMs): KeyPriceQuote | null {
   const resp = unwrapResponse(json);
@@ -1139,5 +1226,6 @@ export function parseIGetCurrencies(json: unknown, nowMs: UnixMs): KeyPriceQuote
   const currency = best.price.currency ?? 'metal';
   if (currency !== 'metal' || !(best.price.value > 0)) return null;
   const high = best.price.value_high !== undefined && best.price.value_high >= best.price.value ? best.price.value_high : best.price.value;
-  return { source: 'bptf', buyScrap: refToScrap(best.price.value), sellScrap: refToScrap(high), observedAt: nowMs };
+  const updated = toUnixSec(best.price.last_update);
+  return { source: 'bptf', buyScrap: refToScrap(best.price.value), sellScrap: refToScrap(high), observedAt: nowMs, priceAt: updated === null ? null : updated * 1000 };
 }

@@ -35,6 +35,8 @@ export const MIN_PROFIT_PCT_OF_COST = { min: 0, max: 100 } as const;
 export const SUSPECT_MARGIN_PCT = { min: 0, max: 100_000 } as const;
 /** profit.referenceMaxAgeMs, shown in days: the schema allows 0 to 365 days. */
 export const REFERENCE_MAX_AGE_DAYS = { min: 0, max: 365 } as const;
+/** 0.8 (PC-1): profit.exitReservePct, shown in percent: the schema allows 0 to 0.5. */
+export const EXIT_RESERVE_PCT = { min: 0, max: 50 } as const;
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -60,6 +62,13 @@ export function daysTextToMs(v: string): number {
 export function suspectMarginHint(ratio: number): string {
   const base = 'With fewer than 3 buyers and no usable reference price, a margin above this is capped at Low confidence and never notified. It usually means a wrong variant or unit.';
   return ratio > 0 ? `${base} 0 turns the check off.` : `Off. ${base}`;
+}
+
+/** 0.8 (PC-1): what the price-move reserve does, and that the number is the user's, not measured. */
+export function exitReserveHint(ratio: number): string {
+  const base =
+    "Taken off what the buyer pays, for a price drop between buying on scrap.tf and the buyer accepting. Lowers Profit and Pay up to wherever a buy is judged. A sale into a live buy order (selling what you hold now, or to the next buyer) is judged without it; Holdings' advice includes it for exits nobody pays today (a listing, a recorded high, a reference). Your own allowance: Flip Desk does not measure price swings.";
+  return ratio > 0 ? base : `Off. ${base}`;
 }
 
 /**
@@ -108,8 +117,20 @@ export function holdingsNotifyHint(notificationsOn: boolean): string {
   return notificationsOn ? base : `Desktop notifications are off, so this shows nothing until they are on. ${base}`;
 }
 
-/** notifications.newOnScraptf (F17): new flips on a scrap.tf bank page the user saved. */
-export const NEW_ON_SCRAPTF_NOTIFY_LABEL = 'New flips on scrap.tf pages you save';
+/**
+ * notifications.newOnScraptf (F17): flips on a scrap.tf bank page the user saved. 0.8 (G2, LC-7): also one a read
+ * made cheaper than Pay up to and one back on sale, which take the place of toasts the same find got before.
+ */
+export const NEW_ON_SCRAPTF_NOTIFY_LABEL = 'New, cheaper or back-in-stock flips on scrap.tf pages you save';
+
+/** "<A>, <B> and <C>, so this shows nothing yet. <base>" for what keeps a switch silent; `base` alone when nothing does. */
+function silentHint(missing: readonly string[], base: string): string {
+  if (!missing.length) return base;
+  const first = missing[0]!;
+  const list = [first.charAt(0).toUpperCase() + first.slice(1), ...missing.slice(1)];
+  const said = list.length === 1 ? list[0]! : `${list.slice(0, -1).join(', ')} and ${list[list.length - 1]!}`;
+  return `${said}, so this shows nothing yet. ${base}`;
+}
 
 /**
  * The switch's description. The service also needs desktop notifications on, "Imported pages" under
@@ -118,18 +139,55 @@ export const NEW_ON_SCRAPTF_NOTIFY_LABEL = 'New flips on scrap.tf pages you save
 export function newOnScraptfNotifyHint(a: { notificationsOn: boolean; importKind: boolean; importOn: boolean }): string {
   const dedupMin = Math.round(BANK_STOCK_NOTIFY_DEDUP_MS / 60_000);
   const base =
-    `When a scrap.tf page you save has new items that are flips: "New on scrap.tf (Hats): <name>". ` +
-    `At most ${BANK_STOCK_MAX_NOTIFICATIONS} per save, then one summary; each item once per page every ${dedupMin} minutes. A first save of a page notifies nothing. ` +
+    `When a scrap.tf page you save has new items that are flips: "New on scrap.tf (Hats): <name>"; one a read made cheaper than your Pay up to: "Cheaper on scrap.tf (Hats): <name>"; and one back on sale: "Back on scrap.tf (Hats): <name>". ` +
+    `At most ${BANK_STOCK_MAX_NOTIFICATIONS} per save, then one summary that opens the page's stock; each item once per page every ${dedupMin} minutes. A first save of a page notifies nothing. ` +
     `Uses the minimum confidence and profit above. ${SCRAPTF_BOUNDARY_SHORT}`;
   const missing: string[] = [];
   if (!a.notificationsOn) missing.push('Desktop notifications are off');
   if (!a.importKind) missing.push('"Imported pages" is not ticked under Notify for');
   if (!a.importOn) missing.push('saved-page import is off (Import)');
-  if (!missing.length) return base;
-  const first = missing[0]!;
-  const list = [first.charAt(0).toUpperCase() + first.slice(1), ...missing.slice(1)];
-  const said = list.length === 1 ? list[0]! : `${list.slice(0, -1).join(', ')} and ${list[list.length - 1]!}`;
-  return `${said}, so this shows nothing yet. ${base}`;
+  return silentHint(missing, base);
+}
+
+/** notifications.watches (0.8, G1/G3): toasts for the items the user watches on scrap.tf. */
+export const WATCHES_NOTIFY_LABEL = 'Your scrap.tf watches';
+
+/**
+ * notifications.watches' description: "Watch (Hats): <name>" at the user's price or profit, "Back on scrap.tf" for a
+ * watch that asked, told on the read that shows it; a watch's profit target is also its item's bar for a typed or
+ * imported price, whose toast the engine then titles "Watch: <name>" (not "Profit:"). Desktop
+ * notifications and saved-page import must be on (each missing one is said first, as newOnScraptfNotifyHint).
+ */
+export function watchesNotifyHint(a: { notificationsOn: boolean; importOn: boolean }): string {
+  const base =
+    `For the items you watch (Watch on scrap.tf… in an item's menu or its details): "Watch (Hats): <name>" when a page you read or save shows one at or under your price, or at or over your profit, and "Back on scrap.tf (Hats): <name>" when one you asked about is on sale again. ` +
+    `Told on the read that shows it, not again for the same price. A watch's profit target is also that item's bar for a price you type or import: one that reaches it is told as "Watch: <name>" in place of "Profit: <name>". ` +
+    `At most ${BANK_STOCK_MAX_NOTIFICATIONS} per save with the other scrap.tf toasts, then one summary. ${SCRAPTF_BOUNDARY_SHORT}`;
+  const missing: string[] = [];
+  if (!a.notificationsOn) missing.push('Desktop notifications are off');
+  if (!a.importOn) missing.push('saved-page import is off (Import)');
+  return silentHint(missing, base);
+}
+
+/** notifications.buyTiming (0.8, G4): "Buy now" after Wait, off by default (D25). */
+export const BUY_TIMING_NOTIFY_LABEL = 'Buy now after Wait (estimate from your saves)';
+
+/**
+ * notifications.buyTiming's description: "Buy now (Hats): <name>" when a flip the user's saves said to wait for turns
+ * into a buy after a drop showed or the wait's time ran out; an estimate from the saves, never a forecast; off by
+ * default. It also needs everything the scrap.tf flips switch needs (the service's `flips`: that switch and "Imported
+ * pages" under Notify for) plus desktop notifications and saved-page import; each missing one is said first.
+ */
+export function buyTimingNotifyHint(a: { notificationsOn: boolean; newOnScraptfOn: boolean; importKind: boolean; importOn: boolean }): string {
+  const base =
+    `"Buy now (Hats): <name>" when a page you read or save turns a flip your saves said to wait for into a buy, after a drop showed or the wait's time ran out. ` +
+    `An estimate from your own saves, never a forecast; off by default. Needs the scrap.tf flips toggle above. ${SCRAPTF_BOUNDARY_SHORT}`;
+  const missing: string[] = [];
+  if (!a.notificationsOn) missing.push('Desktop notifications are off');
+  if (!a.newOnScraptfOn) missing.push('the scrap.tf flips toggle above is off');
+  if (!a.importKind) missing.push('"Imported pages" is not ticked under Notify for');
+  if (!a.importOn) missing.push('saved-page import is off (Import)');
+  return silentHint(missing, base);
 }
 
 // ---------------------------------------------------------------------------

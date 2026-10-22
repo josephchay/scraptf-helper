@@ -4,6 +4,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { createRepo, migrate, openDatabase, openRepo } from '../../src/service/db';
 import type { Repo } from '../../src/service/contracts';
+import { bankStockSpecialKey } from '../../src/shared/bankStock';
 import { profitStatus } from '../../src/shared/ceiling';
 import { mergeSettings, DEFAULT_SETTINGS } from '../../src/shared/defaults';
 import type { DeepPartial, Listing, ReferencePrices, Settings } from '../../src/shared/types';
@@ -57,7 +58,8 @@ function seedTeamCaptain(repo: Repo, source: 'user' | 'import' = 'user'): number
     makeListing({ id: 'tc-h1', steamid: 'S2', metalScrap: 105, lastEventAt: T0 - MIN }),
     makeListing({ id: 'tc-h2', steamid: 'S3', metalScrap: 102, lastEventAt: T0 - MIN }),
   ]);
-  repo.upsertPricedb([{ sku: '378;6', name: 'Team Captain', buyKeys: 0, buyScrap: 100, sellKeys: 0, sellScrap: 120, time: Math.floor(T0 / 1000), fetchedAt: T0 }]);
+  // 0.7.4: PriceDB buy 92, so the 10 ref cost is not under 95% of what bots pay ('cost-below-market').
+  repo.upsertPricedb([{ sku: '378;6', name: 'Team Captain', buyKeys: 0, buyScrap: 92, sellKeys: 0, sellScrap: 120, time: Math.floor(T0 / 1000), fetchedAt: T0 }]);
   return repo.upsertScrapPrice({ sku: '378;6', name: 'Team Captain', costScrap: 90, source, observedAt: T0 - MIN }).id;
 }
 
@@ -294,7 +296,10 @@ describe('F5: suspect-margin guard', () => {
     expect(o).toMatchObject({ status: 'profitable', profitScrap: 435, confidenceLevel: 'low' });
     expect(o.confidence).toBe(44);
     expect(o.flags).toContain('suspect-margin');
-    expect(o.reasons.at(-1)).toBe(REASON);
+    expect(o.reasons).toContain(REASON);
+    // 0.8 (PC-2): a lone profitable order is also a single exit; its 0-delta reason comes last.
+    expect(o.reasons.at(-1)).toMatch(/^0 Only this buyer makes it a flip/);
+    expect(o.flags).toContain('single-exit');
   });
 
   it('needs margin over the setting, fewer than 3 orders and no usable reference', () => {
@@ -420,6 +425,17 @@ describe('F6: notification controls and wording', () => {
     expect(notificationBody(r, K, 'conservative')).toBe('Check scrap.tf, pay up to 20.55 ref. Sells for 22.22 ref (human buyer)');
     expect(notificationTitle({ ...r, inputKind: 'user', name: '' })).toBe('Profit: 378;6');
     expect(notificationBody({ ...r, inputKind: 'user', maxCostScrap: null }, K, 'conservative')).toBe('11.11 ref (100%) — sell to human buy order');
+  });
+
+  it('0.7.4 (F66): names a copy with extras in its "Profit:" title, never a rule candidate', () => {
+    const painted = { inputKind: 'import' as const, name: 'The Last Laugh', sku: '30837;6', copyKey: bankStockSpecialKey({ paint: 2960676 }) };
+    expect(notificationTitle(painted, (d) => (d === 2960676 ? 'After Eight' : null))).toBe('Profit: The Last Laugh (After Eight)');
+    // No paint name to give: the colour.
+    expect(notificationTitle(painted)).toBe('Profit: The Last Laugh (Paint #2d2d24)');
+    const kit = { inputKind: 'import' as const, name: 'Professional Killstreak Kit', sku: '6526;6;kt-3;td-205', copyKey: bankStockSpecialKey({ sheen: 2, killstreaker: 2002, spells: ['Exorcism'] }) };
+    expect(notificationTitle(kit)).toBe('Profit: Professional Killstreak Kit (Deadly Daffodil, Fire Horns +1)');
+    expect(notificationTitle({ ...painted, copyKey: '' })).toBe('Profit: The Last Laugh');
+    expect(notificationTitle({ ...painted, inputKind: 'rule' })).toBe('Candidate: The Last Laugh');
   });
 });
 

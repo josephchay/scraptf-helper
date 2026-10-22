@@ -4,7 +4,7 @@
 
 import type { AppInfo, FlipdeskBridge, PushContract, PushEvent, RpcMethod, RpcParams, RpcResult } from '../shared/rpc';
 import { sameAccelerator } from '../shared/accelerator';
-import { blankCheckResult, CHECK_ARM_MS, CHECK_ARM_NAME_MAX, CHECK_HOTKEY_CONFLICT, CHECK_MAX_CHARS, CHECK_PRICE_TEXT_MAX, CHECK_RECENT_MAX, checkHintedNote } from '../shared/check';
+import { blankCheckResult, CHECK_ARM_MS, CHECK_ARM_NAME_MAX, CHECK_HOTKEY_CONFLICT, CHECK_MAX_CHARS, CHECK_PRICE_TEXT_MAX, CHECK_RECENT_MAX } from '../shared/check';
 import { formatScrap } from '../shared/currency';
 import { DEFAULT_SETTINGS, mergeSettings } from '../shared/defaults';
 import { HOLDINGS_CSV_COLUMNS, holdingRow, holdingsCsvCells, holdingsMatching, holdingsResult } from '../shared/holdings';
@@ -15,18 +15,22 @@ import {
   BANK_STOCK_MAX_SEARCH_CHARS,
   bankStockCounts,
   bankStockCsvCells,
+  bankStockDroppedIntoFlip,
   bankStockItemOf,
+  bankStockKey,
   bankStockMatching,
+  bankStockPricesOf,
   bankStockNewAt,
   bankStockPagePairs,
   bankStockResult,
   bankStockRows,
+  bankStockTargetOf,
   bankStockThinning,
   bankStockWhatsNew,
   diffBankStock,
   type BankStockBankDiff,
 } from '../shared/bankStock';
-import { SCRAPTF_BANKS, bankForCategory, preferScraptfSeen, scraptfSeenOn, type ScraptfSeen } from '../shared/links';
+import { SCRAPTF_BANKS, bankForCategory, preferScraptfSeen, scraptfLinkFor, scraptfSeenOn, type ScraptfSeen } from '../shared/links';
 import {
   MARKET_CSV_COLUMNS,
   MARKET_MAX_LIMIT,
@@ -49,6 +53,8 @@ import {
   scraptfChangeCsvCells,
   scraptfChangeEvent,
   scraptfChangesLimit,
+  scraptfCopyBankOf,
+  scraptfEventListFamily,
   scraptfEventMatches,
   scraptfEventsOf,
   scraptfItemHistoryOf,
@@ -56,19 +62,24 @@ import {
   scraptfListedOf,
   scraptfMarkSuperseded,
   scraptfRunsOf,
+  scraptfAssetStabilityOf,
+  type ScraptfEventBuySide,
   type ScraptfKeyState,
   type ScraptfListed,
   type ScraptfSaveRows,
 } from '../shared/scraptfHistory';
-import { scraptfListCoverage, scraptfListKeyOf, scraptfListPriceSaved, valueScraptfListRow } from '../shared/scraptfList';
+import { scraptfListCoverage, scraptfListKeyOf, scraptfListLookup, scraptfListPriceSaved, valueScraptfListRow } from '../shared/scraptfList';
 import { baseSku, canonical, fromString, isValidSku, looksLikeSku } from '../shared/sku';
 import type {
   AppStatus,
+  Category,
   BankStockQuery,
   BankStockResult,
   BankStockRow,
   CheckResult,
   CheckSource,
+  HoldingDetail,
+  HoldingMark,
   HoldingRow,
   HoldingsQuery,
   BuyerCheck,
@@ -97,6 +108,7 @@ import type {
   ScraptfBank,
   ScraptfBankSummary,
   ScraptfBanksResult,
+  ScraptfBuyTiming,
   ScraptfChangeEvent,
   ScraptfChangeKind,
   ScraptfChangesQuery,
@@ -107,6 +119,8 @@ import type {
   ScraptfListRow,
   ScraptfListStatus,
   ScraptfListStored,
+  ScraptfWatch,
+  ScraptfWatchInput,
   SecretsStatus,
   Settings,
   SetupCode,
@@ -114,8 +128,55 @@ import type {
   ShoppingQuery,
   UnixMs,
 } from '../shared/types';
-import { BANK_STOCK_FILTERS, BANK_STOCK_OPEN_FILTERS, BANK_STOCK_SORTS, CATEGORIES, KEY_SKU, SCRAPTF_BANK_IDS, SCRAPTF_CHANGE_KINDS, SECRET_NAMES } from '../shared/types';
+import { BANK_STOCK_FILTERS, BANK_STOCK_OPEN_FILTERS, BANK_STOCK_SORTS, CATEGORIES, CURRENCY_SKUS, JOURNAL_SIDES, KEY_SKU, SCRAPTF_BANK_IDS, SCRAPTF_CHANGE_KINDS, SECRET_NAMES } from '../shared/types';
+import {
+  JOURNAL_CSV_COLUMNS,
+  JOURNAL_ENTRY_GONE,
+  JOURNAL_MAX_FEE_KEYS,
+  JOURNAL_MAX_FEE_SCRAP,
+  JOURNAL_WRITE_OFF_NOTHING,
+  applyJournalPatch,
+  closedTradesOf,
+  feeOf,
+  feePatchOf,
+  journalCsvCells,
+  journalLedger,
+  typicalHold,
+  typicalHoldOf,
+  withTypicalHold,
+} from '../shared/journal';
+import {
+  HOLDING_DETAIL_LEAD_MS,
+  HOLDING_DETAIL_MAX_CLOSED,
+  HOLDING_DETAIL_MAX_MARKS,
+  HOLDING_DETAIL_UNHELD_MS,
+  HOLDING_HISTORY_MAX_RUNS,
+  attachHoldingAdvice,
+  holdingExitHistory,
+  holdingMarkSettingsKey,
+} from '../shared/holdingAdvice';
+import {
+  WATCHES_FULL,
+  WATCHES_MAX,
+  WATCH_ANY_COPY_SENTINEL,
+  WATCH_COPY_TAKEN,
+  WATCH_GONE,
+  WATCH_MAX_KEYS,
+  WATCH_MAX_SCRAP,
+  WATCH_NAME_MAX,
+  WATCH_NOT_A_COPY,
+  WATCH_SPECIAL_MAX,
+  watchIndexOf,
+  watchJoinOf,
+  watchRestoreOf,
+  watchViewsOf,
+  watchWriteOf,
+  type WatchPageRows,
+} from '../shared/watches';
 import { EVENTS_EXPORT_MAX, OPPORTUNITY_EVENT_KINDS, eventMatches } from '../shared/opportunityEvents';
+import { newestTypedPriceFor } from '../shared/priceCopy';
+import { markSharedBuyers } from '../shared/copyExtras';
+import { boundRuleCost, ruleUnderScraptfReason, scraptfSeenPriceOf, type ScraptfSeenPrice } from '../shared/ruleEvidence';
 import {
   CATALOG,
   MARKET_ONLY,
@@ -132,21 +193,27 @@ import {
   mockJournalSummary,
   mockKnownPrices,
   mockLinks,
+  mockHoldingAsk,
   mockHoldingBuySide,
+  mockHoldingRefs,
   mockMarketQuery,
   mockImportReport,
+  mockBankOf,
   mockMarketRow,
+  mockOrderFlags,
   mockParseBulk,
   mockPrices,
   mockRevenue,
   mockRulesFromJson,
   mockRulesToJson,
+  mockSeedWatches,
   mockShoppingList,
   mockSkipTotals,
   ruleMatches,
   seedJournal,
   seedBankStock,
   seedBankStockHistory,
+  seedHoldingMarks,
   seedPrices,
   seedScraptfList,
   type CatalogItem,
@@ -155,11 +222,21 @@ import {
   type MockStockSave,
 } from './mockData';
 import { NO_CARDS_SAVED, NO_CARDS_SAVED_REASON } from './importModel';
-import { checkDemoFromHash, mockCheckDemo, mockCheckResult, mockHintedParse, mockParseCheck, type MockParsedCheck } from './mockCheck';
+import { checkDemoFromHash, mockCheckDemo, mockCheckResult, mockHintedParse, mockJudgeCheck, mockParseCheck, type MockParsedCheck } from './mockCheck';
 import { gateScraptfWindow, IMPORT_HTML_ORIGIN_REFUSAL, SCRAPTF_BAR_HASH } from '../shared/scraptfWindowPolicy';
-import { IMPORT_REPORT_RING, SKIP_OUT_OF_STOCK } from '../shared/importCodes';
+import { IMPORT_REPORT_RING, SKIP_CRAFT_UNPROVEN, SKIP_OUT_OF_STOCK } from '../shared/importCodes';
 import { createMockScraptfWindow } from './mockScraptfWindow';
-import { filterOpportunities, orderByGroup, sortOpportunities, summarizeGroups } from './oppModel';
+import { filterOpportunities, orderByGroup, revenueOrderOf, sortOpportunities, summarizeGroups } from './oppModel';
+import { craftabilityTwin } from '../shared/ceiling';
+import {
+  scraptfBankCyclesOf,
+  scraptfBankTurnover,
+  scraptfItemTimingOf,
+  scraptfOpportunityTiming,
+  scraptfTimingBrief,
+  scraptfTimingForKey,
+  type ScraptfBankCycles,
+} from '../shared/scraptfTiming';
 import pkg from '../../package.json';
 
 export interface MockOptions {
@@ -200,6 +277,8 @@ const MIN = 60_000;
 const HOUR = 3_600_000;
 
 function csvCell(v: unknown): string {
+  // 0.8 (J5): as the service's csvCell, a number is never formula-guarded (a negative profit stays a number).
+  if (typeof v === 'number') return Number.isFinite(v) ? String(v) : '';
   let s = v === null || v === undefined ? '' : String(v);
   if (/^[=+\-@]/.test(s)) s = `'${s}`;
   return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
@@ -252,6 +331,9 @@ export function createMockBridge(opts: MockOptions = {}): MockBridge {
     DEFAULT_SETTINGS,
     barDemo ? { import: { enabled: true, acknowledgedAt: t0 }, scraptfWindow: { enabled: true, acknowledgedAt: t0 } } : {},
   );
+  // 0.8 (H6), as the service's markSettingsAt: when the buyer settings last changed (null: not since the mock began);
+  // the holdings advice compares only the runs recorded since then.
+  let markSettings: { key: string; at: UnixMs | null } = { key: holdingMarkSettingsKey(settings), at: null };
   const secrets: SecretsStatus = { bptfApiKey: false, bptfAccessToken: false, steamApiKey: false };
 
   const books = new Map<string, MockBook>();
@@ -293,6 +375,20 @@ export function createMockBridge(opts: MockOptions = {}): MockBridge {
   let ruleSeq = rules.reduce((m, r) => Math.max(m, r.id), 0) + 1;
   let journal: JournalEntry[] = seedJournal(t0);
   let journalSeq = journal.length + 1;
+  // 0.8 (H1): recorded exit runs of the seeded journal's held bases, served per base as repo.holdingMarks reads them.
+  // Seeded once from the books at t0 and the default key price, drawn from no RNG, so every other seed is unchanged.
+  const holdingMarks: readonly HoldingMark[] = seedHoldingMarks(
+    mockJournalSummary(journal).open,
+    (base) => {
+      const book = books.get(base) ?? extraBooks.get(base);
+      return book ? mockHoldingBuySide(book, settings, MOCK_KEY_SCRAP, t0) : null;
+    },
+    MOCK_KEY_SCRAP,
+    t0,
+  );
+  // 0.8 (G1): the user's scrap.tf watches, seeded from the hats page's rows on the first read (watchList); no RNG.
+  let watches: ScraptfWatch[] | null = null;
+  let watchSeq = 3;
   // Saved pages for the Live market's coverage strip (F13): some minutes old, some hours, skins and items never.
   // Each carries the categories it stored, as the service records them at import time (the seeded
   // prices' batch ids are random, so the rows could not say).
@@ -400,10 +496,11 @@ export function createMockBridge(opts: MockOptions = {}): MockBridge {
     const t = now();
     const scraptfFromList = listKey();
     const quotes: KeyPriceQuote[] = [
-      { source: 'pricedb', buyScrap: MOCK_KEY_SCRAP + keyDrift, sellScrap: MOCK_KEY_SCRAP + 12 + keyDrift, observedAt: t0 - 22 * MIN },
+      { source: 'pricedb', buyScrap: MOCK_KEY_SCRAP + keyDrift, sellScrap: MOCK_KEY_SCRAP + 12 + keyDrift, observedAt: t0 - 22 * MIN, priceAt: t0 - 22 * MIN },
     ];
     if (secrets.bptfApiKey && settings.connectors.bptfApi) {
-      quotes.unshift({ source: 'bptf', buyScrap: MOCK_KEY_SCRAP + 2 + keyDrift, sellScrap: MOCK_KEY_SCRAP + 9 + keyDrift, observedAt: t0 - 41 * MIN });
+      // 0.7.4 (F71): backpack.tf's community key price is fetched hourly but last changed days ago.
+      quotes.unshift({ source: 'bptf', buyScrap: MOCK_KEY_SCRAP + 2 + keyDrift, sellScrap: MOCK_KEY_SCRAP + 9 + keyDrift, observedAt: t0 - 41 * MIN, priceAt: t0 - 9 * 24 * 60 * MIN });
     }
     if (settings.keyPrice.mode === 'manual' && settings.keyPrice.manualScrap) {
       quotes.push({ source: 'manual', buyScrap: settings.keyPrice.manualScrap, sellScrap: null, observedAt: t0 });
@@ -413,19 +510,18 @@ export function createMockBridge(opts: MockOptions = {}): MockBridge {
     let value = q.buyScrap ?? MOCK_KEY_SCRAP;
     const cap = scraptfKeyCap();
     if (cap) value = Math.min(value, cap);
-    return { valueScrap: value, source: q.source, observedAt: q.observedAt, stale: t - q.observedAt > 6 * HOUR, quotes, scraptfFromList };
+    return { valueScrap: value, source: q.source, observedAt: q.observedAt, stale: t - q.observedAt > 6 * HOUR, quotes, priceAt: q.priceAt ?? null, divergence: null, scraptfFromList };
   }
 
-  /** The saved list row of a SKU's base (paint dropped), valued at `keyScrap` (the service's rowFor). */
+  /**
+   * The saved list row of a SKU's base (paint dropped), else 0.7.4 its family row (scraptfListLookup, as
+   * the service's rowFor: match 'family'), valued at `keyScrap`.
+   */
   function listRowFor(sku: string, keyScrap: Scrap = keyPrice().valueScrap): ScraptfListRow | null {
-    let base = sku;
-    try {
-      base = baseSku(sku);
-    } catch {
-      // an unparseable SKU is its own base
-    }
-    const r = listRows.find((x) => x.sku === base);
-    return r ? valueScraptfListRow(r, keyScrap) : null;
+    const hit = scraptfListLookup((s) => listRows.find((x) => x.sku === s), sku);
+    if (!hit) return null;
+    const row = valueScraptfListRow(hit.stored, keyScrap);
+    return hit.match === 'family' ? { ...row, match: 'family' } : row;
   }
 
   /** Row count, newest and oldest row and the saved pages behind them (the service's scraptfListSummary). */
@@ -518,7 +614,8 @@ export function createMockBridge(opts: MockOptions = {}): MockBridge {
         inStock: fromList ? listRows.filter((r) => (r.stock ?? 0) > 0).length : isList ? items : Math.round(items * 0.65),
         // UX-2b, as the service: a bank page counts its stock page's flips; the list keeps the price rule.
         ...(stockFlipsOf(info.bank, market) ?? flips.get(info.bank) ?? NO_BANK_FLIPS),
-        ...bankLookFor(rows, info.categories),
+        // 0.7.4 (F36): as the service, a row is the bank's when its scrap.tf button opens that page.
+        ...bankLookFor(rows, info.categories, info.bank),
         // F17: as the service, the change counts between the bank's two newest stock saves.
         whatsNew: whatsNewOf(info.bank, market),
       };
@@ -593,8 +690,106 @@ export function createMockBridge(opts: MockOptions = {}): MockBridge {
       },
       // F20: listed since, first seen and the change since listed, from the bank's runs.
       runOf: (key) => runsFor(bank).get(key) ?? null,
+      // 0.7.4, as the service: the list's unproven rows (craft 'any') meet no buyer.
+      bank,
+      // 0.8 (T4): each on-sale row's buy timing, by the shared rule over the bank's saves (the service's timingFor).
+      timingOf: (key, buy) => {
+        const t = mockTimingOf(bank, key, buy);
+        return t ? scraptfTimingBrief(t) : null;
+      },
     });
-    return { rows, items: newest.rows.length, savedAt: newest.savedAt, previousSavedAt: baseline?.savedAt ?? null, saves: p.saves };
+    // 0.8 (G1): each row's watch by the shared join, as the service's joinRow (the Watched chip and the row tag).
+    const index = watchIndexOf(watchList());
+    const kp = keyPrice().valueScrap;
+    const minConfidence = settings.notifications.minConfidence;
+    const joined =
+      index.size === 0
+        ? rows
+        : rows.map((r) => {
+            const w = watchJoinOf(index, r, kp, Number.isFinite(minConfidence) ? minConfidence : 0);
+            return w ? { ...r, watch: w } : r;
+          });
+    return { rows: joined, items: newest.rows.length, savedAt: newest.savedAt, previousSavedAt: baseline?.savedAt ?? null, saves: p.saves };
+  }
+
+  /**
+   * 0.8 (G1): the watch list, seeded on the first read from the hats page's rows (mockSeedWatches). The list is set
+   * empty before the seed reads those rows, so their join finds no watch yet instead of seeding again.
+   */
+  function watchList(): ScraptfWatch[] {
+    if (watches === null) {
+      watches = [];
+      watches = mockSeedWatches(bankStockAll('hats').rows, now());
+    }
+    return watches;
+  }
+
+  /** 0.8 ('watches.list'): per saved bank page, its newest save's on-sale rows of the given bases (the service's watchRows). */
+  function watchPages(bases: ReadonlySet<string>): WatchPageRows[] {
+    const out: WatchPageRows[] = [];
+    for (const info of SCRAPTF_BANKS) {
+      const s = bankStockAll(info.bank);
+      if (s.savedAt === null) continue;
+      const rows = s.rows.filter((r) => r.change !== 'gone' && bases.has(r.sku));
+      if (rows.length) out.push({ bank: info.bank, savedAt: s.savedAt, rows });
+    }
+    return out;
+  }
+
+  /** The service's zod for 'watches.*' (watchInput, watchesListParams, idOnly), with its messages' shape. */
+  function watchParams(method: string) {
+    const bad = (why: string): never => {
+      throw new Error(`Invalid parameters for ${method}: ${why}`);
+    };
+    const sku = (v: unknown): string => {
+      if (typeof v !== 'string') return bad('sku: expected a string');
+      const t = v.trim();
+      if (t.length < 1) return bad('sku: an item is required');
+      if (t.length > 300) return bad('sku: at most 300 characters');
+      const lower = t.toLowerCase();
+      if (!isValidSku(lower)) return bad('sku: not a SKU (pick an item first)');
+      return lower;
+    };
+    const watchId = (v: unknown): number => (typeof v === 'number' && Number.isInteger(v) && v > 0 ? v : bad('id: must be a positive whole number'));
+    // 'watches.restore': a removed watch's created and updated times, as the zod (whole ms, at least 0).
+    const time = (key: string, v: unknown): number => (typeof v === 'number' && Number.isInteger(v) && v >= 0 ? v : bad(`${key}: a time in ms, at least 0`));
+    const scrapOrNull = (key: string, v: unknown): Scrap | null | undefined => {
+      if (v === undefined || v === null) return v;
+      return typeof v === 'number' && Number.isInteger(v) && v >= 0 && v <= WATCH_MAX_SCRAP ? v : bad(`${key}: whole scrap, 0 to ${WATCH_MAX_SCRAP}`);
+    };
+    const flag = (key: string, v: unknown): boolean | undefined => (v === undefined || typeof v === 'boolean' ? v : bad(`${key}: expected a boolean`));
+    return {
+      sku,
+      watchId,
+      time,
+      input(p: unknown): ScraptfWatchInput {
+        if (!p || typeof p !== 'object') return bad('sku: required');
+        const q = p as Partial<Record<keyof ScraptfWatchInput, unknown>>;
+        const out: ScraptfWatchInput = { sku: '' };
+        if (q.id !== undefined) out.id = watchId(q.id);
+        out.sku = sku(q.sku);
+        if (q.copies !== undefined) out.copies = q.copies === 'one' || q.copies === 'any' ? q.copies : bad("copies: 'one' or 'any'");
+        if (q.special !== undefined) {
+          out.special = q.special === null || (typeof q.special === 'string' && q.special.length <= WATCH_SPECIAL_MAX) ? q.special : bad(`special: at most ${WATCH_SPECIAL_MAX} characters`);
+          // As the zod's refine: the copy index's every-copy stand-in is no copy key.
+          if (out.special === WATCH_ANY_COPY_SENTINEL) bad(`special: ${WATCH_NOT_A_COPY}`);
+        }
+        if (q.name !== undefined) out.name = typeof q.name === 'string' && q.name.length <= WATCH_NAME_MAX ? q.name : bad(`name: at most ${WATCH_NAME_MAX} characters`);
+        if (q.maxCostKeys !== undefined) {
+          const k = q.maxCostKeys;
+          out.maxCostKeys = typeof k === 'number' && Number.isFinite(k) && k >= 0 && k <= WATCH_MAX_KEYS ? k : bad(`maxCostKeys: 0 to ${WATCH_MAX_KEYS}`);
+        }
+        const maxCostScrap = scrapOrNull('maxCostScrap', q.maxCostScrap);
+        if (maxCostScrap !== undefined) out.maxCostScrap = maxCostScrap;
+        const minProfitScrap = scrapOrNull('minProfitScrap', q.minProfitScrap);
+        if (minProfitScrap !== undefined) out.minProfitScrap = minProfitScrap;
+        const onRestock = flag('onRestock', q.onRestock);
+        if (onRestock !== undefined) out.onRestock = onRestock;
+        const enabled = flag('enabled', q.enabled);
+        if (enabled !== undefined) out.enabled = enabled;
+        return out;
+      },
+    };
   }
 
   /**
@@ -635,7 +830,10 @@ export function createMockBridge(opts: MockOptions = {}): MockBridge {
 
   function bankStockList(q: BankStockQuery): BankStockResult {
     const s = bankStockAll(q.bank);
-    return bankStockResult({ q, rows: s.rows, items: s.items, savedAt: s.savedAt, previousSavedAt: s.previousSavedAt, saves: s.saves, keyPrice: keyPrice(), now: now() });
+    // 0.8 (LC-4): how long items stayed listed in the bank, as the service's turnoverFor.
+    const cycles = cyclesOf(q.bank);
+    const turnover = cycles ? scraptfBankTurnover(cycles) : null;
+    return bankStockResult({ q, rows: s.rows, items: s.items, savedAt: s.savedAt, previousSavedAt: s.previousSavedAt, saves: s.saves, turnover, keyPrice: keyPrice(), now: now() });
   }
 
   /**
@@ -687,6 +885,50 @@ export function createMockBridge(opts: MockOptions = {}): MockBridge {
     return runs;
   }
 
+  let cyclesMemo: { saves: MockStockSave[]; byBank: Map<ScraptfBank, ScraptfBankCycles> } | null = null;
+  /**
+   * 0.8: a bank's cycles (scraptfBankCyclesOf over its kept saves, at the key price when built), memoised until the
+   * saves change, as the service's history index builds them once per runs rebuild; null for a bank with no save.
+   */
+  function cyclesOf(bank: ScraptfBank): ScraptfBankCycles | null {
+    if (cyclesMemo === null || cyclesMemo.saves !== stockSaves) cyclesMemo = { saves: stockSaves, byBank: new Map() };
+    const hit = cyclesMemo.byBank.get(bank);
+    if (hit) return hit;
+    const saves = stockSavesOf(bank);
+    if (saves.length === 0) return null;
+    const c = scraptfBankCyclesOf(bank, saves.map(saveRows), keyPrice().valueScrap);
+    cyclesMemo.byBank.set(bank, c);
+    return c;
+  }
+
+  /** 0.8 (T3/T4): one copy's verdict, as the service's ScraptfHistory.timingFor (the shared scraptfTimingForKey). */
+  function mockTimingOf(bank: ScraptfBank, key: string, buy: ScraptfEventBuySide | null): ScraptfBuyTiming | null {
+    const cycles = cyclesOf(bank);
+    return cycles ? scraptfTimingForKey({ cycles, key, buy, profit: settings.profit, keyScrap: keyPrice().valueScrap, now: now() }) : null;
+  }
+
+  /** 0.8 (T4): the copy's verdict in the bank its item history reads (scraptfCopyBankOf), as the service's timingForCopy. */
+  function mockTimingForCopy(base: string, special: string, buy: ScraptfEventBuySide | null): ScraptfBuyTiming | null {
+    const key = bankStockKey(base, special);
+    const list: { bank: ScraptfBank; life: ScraptfBankCycles['life'] }[] = [];
+    for (const info of SCRAPTF_BANKS) {
+      const c = cyclesOf(info.bank);
+      if (c) list.push({ bank: info.bank, life: c.life });
+    }
+    const bank = scraptfCopyBankOf(list, key);
+    return bank ? mockTimingOf(bank, key, buy) : null;
+  }
+
+  /** 0.8 (T7): MarketRow.scraptfTiming as market.list joins it: the copy scraptfListedOf picks on the row's 'seen' bank. */
+  function withMarketTiming(r: MarketRow): MarketRow {
+    if (r.scraptfLink.source !== 'seen') return r;
+    const bank = r.scraptfLink.bank;
+    const key = scraptfListedOf(runsFor(bank), r.sku)?.key;
+    // As the service's market.entryFor: an entry only while the item has eligible buyers.
+    const t = key !== undefined ? mockTimingOf(bank, key, r.buyerCount > 0 ? r : null) : null;
+    return t ? { ...r, scraptfTiming: scraptfTimingBrief(t) } : r;
+  }
+
   /** The service's zod for 'scraptf.changes' (every key optional), with its messages' shape. */
   function changesQuery(q: unknown, method: string): ScraptfChangesQuery {
     const bad = (why: string): never => {
@@ -726,9 +968,12 @@ export function createMockBridge(opts: MockOptions = {}): MockBridge {
   function valuedEvents(list: readonly ScraptfEventStored[]): ScraptfChangeEvent[] {
     const kp = keyPrice().valueScrap;
     const byBase = new Map(marketRows().map((r) => [r.sku, r]));
+    // 0.7.4, as the service: an /items list event's row in its own save decides whether it meets a buyer.
+    const rowOf = (e: Pick<ScraptfEventStored, 'batchId' | 'sku' | 'specialKey'>) =>
+      stockSaves.find((s) => s.batchId === e.batchId)?.rows.find((r) => r.sku === e.sku && r.specialKey === e.specialKey) ?? null;
     const valued = list.map((e) => {
       const r = byBase.get(e.sku);
-      return scraptfChangeEvent(e, kp, r && r.buyerCount > 0 ? r : null);
+      return scraptfChangeEvent(e, kp, r && r.buyerCount > 0 ? r : null, { family: scraptfEventListFamily(e, rowOf) });
     });
     const states = new Map<ScraptfBank, ReadonlyMap<string, ScraptfKeyState>>();
     return scraptfMarkSuperseded(valued, (bank) => {
@@ -771,7 +1016,10 @@ export function createMockBridge(opts: MockOptions = {}): MockBridge {
     }
     const banks = SCRAPTF_BANKS.map((info) => ({ bank: info.bank, saves: stockSavesOf(info.bank).map(saveRows) })).filter((b) => b.saves.length > 0);
     const events = valuedEvents(stockEvents.filter((e) => e.sku === base));
-    return scraptfItemHistoryOf({ sku, specialKey: p.special ?? null, name: findCatalogItem(sku)?.name, banks, events, keyPrice: keyPrice(), now: now() });
+    const h = scraptfItemHistoryOf({ sku, specialKey: p.special ?? null, name: findCatalogItem(sku)?.name, banks, events, keyPrice: keyPrice(), now: now() });
+    // 0.8 (T3-T5): its runs and verdict in its bank, as the service; the buy side is the base's market row with buyers.
+    const row = marketRows().find((r) => r.sku === h.sku);
+    return { ...h, ...scraptfItemTimingOf(h, { cyclesOf, buy: row && row.buyerCount > 0 ? row : null, profit: settings.profit, keyScrap: keyPrice().valueScrap, now: now() }) };
   }
 
   function bookFor(sku: string, name?: string): MockBook {
@@ -781,6 +1029,11 @@ export function createMockBridge(opts: MockOptions = {}): MockBridge {
     const book = makeBook(rng, { ...item, value: 0 }, now(), true);
     books.set(sku, book);
     return book;
+  }
+
+  /** 0.7.4 (F78): as core's scraptfSeenPriceOf, over the mock's saved list and its bank saves' runs. */
+  function seenPriceOf(sku: string, kp: Scrap): ScraptfSeenPrice | null {
+    return scraptfSeenPriceOf(sku, { listRow: (b) => listRowFor(b, kp), runsFor }, kp);
   }
 
   function inputs(): { book: MockBook; input: MockInput }[] {
@@ -799,7 +1052,22 @@ export function createMockBridge(opts: MockOptions = {}): MockBridge {
         // Only plausible candidates: a flat rule price says nothing about rare or expensive copies.
         const ruleCost = rule.costKeys * MOCK_KEY_SCRAP + rule.costScrap;
         if (item.value > ruleCost * 3 + 18) continue;
-        out.push({ book, input: { kind: 'rule', ref: `rule:${rule.id}`, costKeys: rule.costKeys, costScrapRaw: rule.costScrap, observedAt: rule.observedAt, special: null } });
+        // 0.7.4 (F78): as the engine, never under a price the saved list or a bank save showed the plain copy at.
+        const kp = keyPrice().valueScrap;
+        const seen = seenPriceOf(item.sku, kp);
+        const bound = boundRuleCost(rule, seen, kp);
+        out.push({
+          book,
+          input: {
+            kind: 'rule',
+            ref: `rule:${rule.id}`,
+            costKeys: bound.costKeys,
+            costScrapRaw: bound.costScrapRaw,
+            observedAt: rule.observedAt,
+            special: null,
+            ...(bound.underScraptf && seen ? { ruleUnderScraptf: ruleUnderScraptfReason(seen, Math.round(rule.costKeys * kp) + rule.costScrap, kp) } : {}),
+          },
+        });
       }
     }
     return out;
@@ -850,10 +1118,23 @@ export function createMockBridge(opts: MockOptions = {}): MockBridge {
     let appeared = 0;
     let changed = 0;
     let gone = 0;
-    for (const { book, input } of inputs()) {
+    const evaluatedRows = [...inputs()].map(({ book, input }) => {
       const key = `${book.item.sku}|${input.ref}`;
       const prev = opps.get(key) ?? null;
-      const o = evaluateOpportunity(book, input, settings, kp, t, prev);
+      // 0.7.4 (F70): the craftability twin's book, for the cost check (as the engine's twin references).
+      const twinSku = input.kind === 'rule' ? null : craftabilityTwin(baseSku(book.item.sku));
+      const twin = twinSku ? (books.get(twinSku) ?? extraBooks.get(twinSku) ?? null) : null;
+      return { key, prev, o: evaluateOpportunity(book, input, settings, kp, t, prev, twin) };
+    });
+    // 0.7.4 (F27, F33): as the engine, copies of one item sharing a revenue order are flagged before the comparison.
+    const copiesByBase = new Map<string, Opportunity[]>();
+    for (const { o } of evaluatedRows) {
+      if (o.inputKind === 'rule') continue;
+      const b = baseSku(o.sku);
+      copiesByBase.set(b, [...(copiesByBase.get(b) ?? []), o]);
+    }
+    for (const copies of copiesByBase.values()) if (copies.length > 1) markSharedBuyers(copies, (x) => revenueOrderOf(x, settings.profit.useOrder));
+    for (const { key, prev, o } of evaluatedRows) {
       if (prev && same(prev, o)) {
         next.set(key, prev);
         continue;
@@ -891,6 +1172,9 @@ export function createMockBridge(opts: MockOptions = {}): MockBridge {
     if (!n.enabled || o.status !== 'profitable' || o.confidence < n.minConfidence || (o.profitScrap ?? 0) < n.minProfitScrap) return;
     // F5/F6: suspect margins and input kinds the user muted never notify.
     if (o.flags.includes('suspect-margin') || !n.inputKinds.includes(o.inputKind)) return;
+    // 0.7.4, as the engine: no toast on a cost far under market, nor (not recorded) on an unverified revenue order.
+    if (o.flags.includes('variant-suspect') || o.flags.includes('cost-below-market')) return;
+    if (revenueOrderOf(o, settings.profit.useOrder)?.flags.includes('unverified')) return;
     const last = notifiedAt.get(o.key);
     if (last !== undefined && t - last < n.dedupMs) return;
     notifiedAt.set(o.key, t);
@@ -1013,6 +1297,12 @@ export function createMockBridge(opts: MockOptions = {}): MockBridge {
       recentRequests: [...requestLog].sort((a, b) => b.ts - a.ts).slice(0, 60),
       db: { path: 'C:\\Users\\you\\AppData\\Roaming\\TF2 Flip Desk\\flipdesk.db', sizeBytes: 61_440_000 + tickCount * 4096 },
       engine: { lastRunAt: lastEngineRunAt, lastRunMs: lastEngineMs, evaluated: opps.size },
+      // 0.8 (LC-5): each saved bank's asset-id stability, as the service's history index measures it: the pre-pass
+      // alone (no lifecycle is built for Health's poll).
+      scraptfAssetIds: SCRAPTF_BANKS.flatMap((info) => {
+        const saves = stockSavesOf(info.bank);
+        return saves.length > 0 ? [{ bank: info.bank, ...scraptfAssetStabilityOf(saves.map(saveRows)) }] : [];
+      }),
     };
   }
 
@@ -1021,7 +1311,7 @@ export function createMockBridge(opts: MockOptions = {}): MockBridge {
     const tpl: Omit<RequestLogRow, 'ts' | 'ms' | 'bytes'>[] = [
       { host: 'pricedb.io', path: '/api/items-bulk', method: 'POST', status: 200, note: '87 SKUs' },
       { host: 'pricedb.io', path: '/api/item/30357;5;u702', method: 'GET', status: 200, note: null },
-      { host: 'pricedb.io', path: '/api/item/15141;15;u701;w1;pk300;strange', method: 'GET', status: 404, note: 'not covered by PriceDB' },
+      { host: 'pricedb.io', path: '/api/item/15141;5;u701;w1;pk300;strange', method: 'GET', status: 404, note: 'not covered by PriceDB' },
       { host: 'sku.pricedb.io', path: '/api/schema', method: 'GET', status: 304, note: 'ETag match' },
       { host: 'api.backpack.tf', path: '/api/classifieds/listings/snapshot?sku=Team%20Captain&appid=440&token=[redacted]', method: 'GET', status: 200, note: null },
       { host: 'api.backpack.tf', path: '/api/IGetCurrencies/v1?key=[redacted]&raw=1', method: 'GET', status: 200, note: null },
@@ -1138,7 +1428,7 @@ export function createMockBridge(opts: MockOptions = {}): MockBridge {
       if (i >= reached) return;
       const seenAt = sightings.get(sku) ?? null;
       const listed = listedOf(sku, seenAt);
-      const row = mockMarketRow({ item: book.item, book, known: known.get(sku), rules, settings, keyScrap: kp, now: t, list: listRowFor(sku, kp), newAt: newAt.get(sku) ?? null, seen: seenAt, listedSince: listed?.since ?? null, lastSeenAt: listed?.lastSeenAt ?? null });
+      const row = mockMarketRow({ item: book.item, book, known: known.get(sku), rules, settings, keyScrap: kp, now: t, list: listRowFor(sku, kp), newAt: newAt.get(sku) ?? null, seen: seenAt, listedSince: listed?.since ?? null, lastSeenAt: listed?.lastSeenAt ?? null, seenPriceOf: () => seenPriceOf(sku, kp) });
       if (row) out.push(row);
     });
     // Prices for items the mock has no book for: shown with no buyers.
@@ -1147,7 +1437,7 @@ export function createMockBridge(opts: MockOptions = {}): MockBridge {
       const item = findCatalogItem(sku) ?? { sku, name: k.typed?.name ?? k.page?.name ?? sku, category: guessCategory(sku) };
       const seenAt = sightings.get(sku) ?? null;
       const listed = listedOf(sku, seenAt);
-      const row = mockMarketRow({ item, book: null, known: k, rules, settings, keyScrap: kp, now: t, list: listRowFor(sku, kp), newAt: newAt.get(sku) ?? null, seen: seenAt, listedSince: listed?.since ?? null, lastSeenAt: listed?.lastSeenAt ?? null });
+      const row = mockMarketRow({ item, book: null, known: k, rules, settings, keyScrap: kp, now: t, list: listRowFor(sku, kp), newAt: newAt.get(sku) ?? null, seen: seenAt, listedSince: listed?.since ?? null, lastSeenAt: listed?.lastSeenAt ?? null, seenPriceOf: () => seenPriceOf(sku, kp) });
       if (row) out.push(row);
     }
     return out;
@@ -1244,18 +1534,80 @@ export function createMockBridge(opts: MockOptions = {}): MockBridge {
   function holdingRows(): HoldingRow[] {
     const t = now();
     const kp = keyPrice().valueScrap;
-    return mockJournalSummary(journal).open.map((pos) => {
+    // 0.8 (H5): as the service, each row carries the user's typical hold over every open position.
+    const s = mockJournalSummary(journal);
+    const hold = typicalHoldOf(s.closed, s.open);
+    return s.open.map((pos) => {
       let base = pos.sku;
       try {
         base = baseSku(pos.sku);
       } catch {
         // an unparseable SKU is its own base
       }
-      const book = books.get(base) ?? extraBooks.get(base) ?? null;
+      // A currency has no book, list row, ask, references or runs, as the service's rowsOf (its base is null there).
+      const runsBase = holdingBaseOf(pos.sku);
+      const book = runsBase === null ? null : (books.get(base) ?? extraBooks.get(base) ?? null);
       const category = (findCatalogItem(pos.sku) ?? findCatalogItem(base))?.category ?? guessCategory(base);
+      // 0.8 (H3, H4, H6): as the service's rowsOf, the copy's ask, the age-gated references and the last snapshot.
+      const extras = { ask: mockHoldingAsk(book, pos.sku, settings, kp, t), refs: mockHoldingRefs(book, settings, t), snapshotAt: book?.snapshotAt ?? null };
       // F14: the saved list row is the held item's scrap.tf exit (bestExitOf).
-      return holdingRow(pos, category, book ? mockHoldingBuySide(book, settings, kp, t) : null, settings.profit, kp, { list: listRowFor(base, kp), now: t });
+      const list = runsBase === null ? null : listRowFor(base, kp);
+      const row = withTypicalHold(holdingRow(pos, category, book ? mockHoldingBuySide(book, settings, kp, t) : null, settings.profit, kp, { list, now: t }, extras), hold);
+      // 0.8 (H6): the advice over the base's recorded runs, read as the service's historyFor reads them, since the buyer
+      // settings last changed; a currency has no book to refresh and no runs.
+      if (runsBase === null) return attachHoldingAdvice(row, null, settings.profit, kp, t, { book: false });
+      const history = holdingExitHistory(marksOf(runsBase, row.heldSince, HOLDING_HISTORY_MAX_RUNS), row.heldSince, kp, t, markSettings.at);
+      return attachHoldingAdvice(row, history, settings.profit, kp, t);
     });
+  }
+
+  /** 0.8 (H1): the base SKU a holding's runs are recorded under (paint dropped); null for a currency, as the service's. */
+  function holdingBaseOf(sku: string): string | null {
+    let base = sku;
+    try {
+      base = baseSku(sku);
+    } catch {
+      // an unparseable SKU is its own base
+    }
+    return CURRENCY_SKUS.includes(base) ? null : base;
+  }
+
+  /** 0.8 (H1): a base's seeded runs as repo.holdingMarks reads them: toAt >= since, the newest `limit`, oldest first. */
+  function marksOf(base: string | null, since: UnixMs, limit: number): HoldingMark[] {
+    if (base === null) return [];
+    const hits = holdingMarks.filter((m) => m.baseSku === base && m.toAt >= since).sort((a, b) => a.fromAt - b.fromAt || a.id - b.id);
+    return hits.slice(Math.max(0, hits.length - limit));
+  }
+
+  /**
+   * 0.8 (H7) 'holdings.detail' over mock data, by the service's rules (Holdings.detail): the held row (advice
+   * included), its lots oldest first, the SKU's closed trades newest first, the base's runs in the same window with
+   * `truncated`, the history and the typical hold. `sku` is canonical.
+   */
+  function holdingDetail(sku: string): HoldingDetail {
+    const t = now();
+    const kp = keyPrice().valueScrap;
+    const s = mockJournalSummary(journal);
+    const pos = s.open.find((p) => p.sku === sku) ?? null;
+    const row = pos ? (holdingRows().find((r) => r.sku === sku) ?? null) : null;
+    const base = holdingBaseOf(sku);
+    const since = row ? row.heldSince - HOLDING_DETAIL_LEAD_MS : t - HOLDING_DETAIL_UNHELD_MS;
+    const read = marksOf(base, since, HOLDING_DETAIL_MAX_MARKS + 1);
+    const truncated = read.length > HOLDING_DETAIL_MAX_MARKS;
+    const marks = truncated ? read.slice(read.length - HOLDING_DETAIL_MAX_MARKS) : read;
+    return {
+      sku,
+      baseSku: base,
+      row,
+      lots: pos ? [...pos.lots].sort((a, b) => a.ts - b.ts || a.id - b.id) : [],
+      closed: closedTradesOf(s.closed, sku).slice(0, HOLDING_DETAIL_MAX_CLOSED),
+      typicalHold: typicalHold(s.closed, s.open, sku),
+      marks,
+      truncated,
+      history: row ? holdingExitHistory(marks, row.heldSince, kp, t, markSettings.at) : null,
+      keyScrap: kp,
+      generatedAt: t,
+    };
   }
 
   /** 0.7.3, as the service's eventsExportQuery: the Live log's kinds, category and search. */
@@ -1293,6 +1645,13 @@ export function createMockBridge(opts: MockOptions = {}): MockBridge {
     emit('journal.changed', { at: now() });
   }
 
+  /** 0.8 (J2): the service's fee zod for one part: absent (or null in a patch), else finite, at least 0 and within `max`. */
+  function checkJournalFee(v: unknown, max: number, nullable: boolean): void {
+    if (v === undefined || (nullable && v === null)) return;
+    if (typeof v !== 'number' || !Number.isFinite(v) || v < 0) throw new Error('Fees must be zero or more.');
+    if (v > max) throw new Error('That fee is too high.');
+  }
+
   function marketList(q: MarketQuery): MarketListResult {
     const bad = (why: string): never => {
       throw new Error(`Invalid parameters for market.list: ${why}`);
@@ -1304,7 +1663,8 @@ export function createMockBridge(opts: MockOptions = {}): MockBridge {
     const all = marketRows(known);
     const res = mockMarketQuery(all, q, now());
     return {
-      rows: res.rows,
+      // 0.8 (T7): the page's rows only, as the service's list() (not the CSV, not the banks cards).
+      rows: res.rows.map(withMarketTiming),
       total: res.total,
       counts: res.counts,
       scraptf: scraptfSide(known),
@@ -1470,8 +1830,15 @@ export function createMockBridge(opts: MockOptions = {}): MockBridge {
     const list = listRowFor(sku);
     const assetId = scrapPrices.find((p) => p.assetId)?.assetId ?? null;
     const blocked = new Set(settings.blocklist);
+    const kp = keyPrice().valueScrap;
+    // 0.7.4 (R31): 'unverified' from the order's age now, as the service flags it (mockOrderFlags).
+    // 0.8 (PC-2): as buildItemDetail, every order valued at today's key price and the pricing's outliers flagged
+    // 'outlier' (mockPrices' outlierIds), so the drawer's Next buyer and the Live check read the book revenue came from.
+    const { outlierIds } = mockPrices(known, settings, kp, t);
     const buyOrders = known.buy
+      .map((o) => ({ ...o, valueScrap: Math.round(o.keys * kp) + o.metalScrap, flags: mockOrderFlags(o, t) }))
       .map((o) => (blocked.has(o.steamid) && o.eligible ? { ...o, eligible: false, flags: [...o.flags, 'blocklisted'] } : o))
+      .map((o) => (o.eligible && outlierIds.has(o.listingId) && !o.flags.includes('outlier') ? { ...o, flags: [...o.flags, 'outlier'] } : o))
       .sort((a, b) => Number(b.eligible) - Number(a.eligible) || b.valueScrap - a.valueScrap);
     return {
       sku,
@@ -1479,7 +1846,7 @@ export function createMockBridge(opts: MockOptions = {}): MockBridge {
       bptfName: known.item.name,
       category: known.item.category,
       skuObject: fromString(sku),
-      revenue: mockRevenue(known, settings, keyPrice().valueScrap, t),
+      revenue: mockRevenue(known, settings, kp, t),
       buyOrders,
       sellListings: known.sell,
       references: known.references,
@@ -1498,8 +1865,12 @@ export function createMockBridge(opts: MockOptions = {}): MockBridge {
       scraptfListSaved: list !== null && scraptfListPriceSaved(list, prices.filter((p) => p.sku === list.sku)),
       // F15: as the service, the bank of the newest imported price shown.
       seenOn: scraptfSeenOn(scrapPrices),
+      // 0.7.4 (R32): as the service's kindBank, the bank its kind is sold on (mockBankOf: no schema entry).
+      kindBank: mockBankOf(sku, known.item.category),
       // F17: as the service, this copy in the newest bank-stock save that lists it.
       bankStock: bankStockItemOf(stockDiffs(keyPrice().valueScrap), sku, keyPrice().valueScrap),
+      // 0.8 (H3): as buildItemDetail, what other sellers ask for this copy (askSideOf over the book's sells).
+      ask: mockHoldingAsk(known, sku, settings, keyPrice().valueScrap, t),
     };
   }
 
@@ -1511,7 +1882,19 @@ export function createMockBridge(opts: MockOptions = {}): MockBridge {
       const stock = byId.get(Number(o.inputRef.slice('price:'.length)))?.stock;
       return typeof stock === 'number' && Number.isFinite(stock) ? stock : null;
     };
-    return mockShoppingList([...opps.values()], q, settings.profit.useOrder, keyPrice(), now(), { staleMs: settings.profit.inputStaleMs, stockOf });
+    // 0.7.4 (F36): as the service's MarketIndex.bankFor, the bank page a save listed the item on, else its kind's.
+    const sightings = scraptfSeenByBase(stockDiffs(keyPrice().valueScrap));
+    const bankOf = (sku: string, category: Category): ScraptfBank => {
+      let base = sku;
+      try {
+        base = baseSku(sku);
+      } catch {
+        // as given
+      }
+      const link = scraptfLinkFor(category, sightings.get(base) ?? null, mockBankOf(base, category));
+      return link.bank === 'list' ? mockBankOf(base, category) : link.bank;
+    };
+    return mockShoppingList([...opps.values()], q, settings.profit.useOrder, keyPrice(), now(), { staleMs: settings.profit.inputStaleMs, stockOf, bankOf });
   }
 
   /** Fake but deterministic ban lookup; needs the token and the network like the service, cached 1 h. */
@@ -1566,13 +1949,15 @@ export function createMockBridge(opts: MockOptions = {}): MockBridge {
       return { ...r, batchId, observedAt: at };
     });
     const outOfStock = listRows.filter((r) => r.batchId === batchId && r.stock === 0);
-    const allSkipped = outOfStock.map((r) => ({ reason: SKIP_OUT_OF_STOCK, title: r.name }));
+    // 0.7.4, as the service: a family row (craft 'any') is a list row only, never a price.
+    const unproven = listRows.filter((r) => r.batchId === batchId && r.stock !== 0 && r.craft !== 'craftable' && r.craft !== 'uncraftable');
+    const allSkipped = [...outOfStock.map((r) => ({ reason: SKIP_OUT_OF_STOCK, title: r.name })), ...unproven.map((r) => ({ reason: SKIP_CRAFT_UNPROVEN, title: r.name }))];
     const result: ImportResult = {
       batchId,
       fileName,
       pageKind: 'items-list',
       parsed: listRows.length,
-      stored: stored - outOfStock.length,
+      stored: stored - outOfStock.length - unproven.length,
       skipped: allSkipped.slice(0, 500),
       // P5, as the service: the true total and the count per reason, before the list is cut.
       ...mockSkipTotals(allSkipped),
@@ -1675,28 +2060,47 @@ export function createMockBridge(opts: MockOptions = {}): MockBridge {
       parsed = fromHint;
       hinted = true;
     }
-    const sku = parsed.item.sku;
-    let base = sku;
-    try {
-      base = baseSku(sku);
-    } catch {
-      // an unparseable SKU is its own base
-    }
-    // Buyer confidence as the Live market row's (the service reads the market entry).
-    const book = books.get(base) ?? extraBooks.get(base) ?? null;
-    const row = book ? mockMarketRow({ item: book.item, book, known: undefined, rules: [], settings, keyScrap: kp, now: t }) : null;
-    const checked = mockCheckResult({
-      id,
-      source: source as CheckSource,
-      now: t,
+    /** One copy checked (the name in the hinted note is the resolved item's, never the text). */
+    const evaluate = (p: MockParsedCheck, craftNote: string | null): CheckResult => {
+      const sku = p.item.sku;
+      let base = sku;
+      try {
+        base = baseSku(sku);
+      } catch {
+        // an unparseable SKU is its own base
+      }
+      // Buyer confidence as the Live market row's (the service reads the market entry).
+      const book = books.get(base) ?? extraBooks.get(base) ?? null;
+      const row = book ? mockMarketRow({ item: book.item, book, known: undefined, rules: [], settings, keyScrap: kp, now: t }) : null;
+      return mockCheckResult({
+        id,
+        source: source as CheckSource,
+        now: t,
+        parsed: p,
+        detail: detail(sku),
+        keyScrap: kp,
+        settings,
+        confidence: row && row.buyerCount > 0 ? { value: row.confidence, level: row.confidenceLevel } : null,
+        hinted,
+        // 0.7.4: as the service, the hinted note names the item the user opened, also when its twin answers.
+        hintedName: hinted && sku !== parsed.item.sku ? (detail(parsed.item.sku)?.name ?? parsed.item.name) : null,
+        craftNote,
+        // 0.7.4 (R14): the craftability twin's references for the cost check, as the engine's twin references.
+        twinReferences: () => {
+          const twinSku = craftabilityTwin(base);
+          return (twinSku ? (books.get(twinSku) ?? extraBooks.get(twinSku) ?? null) : null)?.references ?? null;
+        },
+      });
+    };
+    // 0.7.4 (F41, F44): judged as the service judges it: the watcher drops a number without a unit, and a plain
+    // name's copy is the one the saved list rows and bank saves match.
+    const result = mockJudgeCheck({
       parsed,
-      detail: detail(sku),
-      keyScrap: kp,
-      settings,
-      confidence: row && row.buyerCount > 0 ? { value: row.confidence, level: row.confidenceLevel } : null,
+      source: source as CheckSource,
+      listRowFor: (s) => listRowFor(s, kp),
+      bankPricesFor: (s) => bankStockPricesOf(stockDiffs(kp), s),
+      evaluate,
     });
-    // The copied price is used, so no sold-out or extras note applies; the name is the resolved item's.
-    const result = hinted ? { ...checked, reason: checkHintedNote(checked.name ?? sku) } : checked;
     recentChecks = [result, ...recentChecks].slice(0, CHECK_RECENT_MAX);
     emit('check.done', result);
     return result;
@@ -1717,6 +2121,15 @@ export function createMockBridge(opts: MockOptions = {}): MockBridge {
       const top = bank ? bankStockList({ bank, filter: 'flips', sort: 'profit', limit: 1 }).rows[0] : undefined;
       return top && top.profitScrap !== null ? { sku: top.sku, name: top.name, profitScrap: top.profitScrap } : null;
     },
+    // 0.7.4 (G1 follow-up to R01/R06): the page's flip counts from the same shared rules as its Flips chip, so
+    // an /items row for every copy (bankStockListFamily) counts as no flip, as in the service's pageFlips.
+    flipsOn: (url) => {
+      const bank = SCRAPTF_BANKS.find((b) => b.url === url)?.bank;
+      if (!bank) return null;
+      const c = bankStockList({ bank, limit: 1 }).counts;
+      // 0.8 (G2): the flips this read dropped under Pay up to, by the shared rule (ImportResult.droppedFlips).
+      return { pageFlips: c.flips, newFlips: c.newFlips, droppedFlips: bankStockAll(bank).rows.filter(bankStockDroppedIntoFlip).length };
+    },
   });
 
   const handlers: Handlers = {
@@ -1727,7 +2140,13 @@ export function createMockBridge(opts: MockOptions = {}): MockBridge {
       const rows = q?.groupBy ? orderByGroup(sorted, q.groupBy) : sorted;
       const offset = Math.max(0, q?.offset ?? 0);
       const limit = Math.max(1, Math.min(5000, q?.limit ?? 500));
-      return { rows: rows.slice(offset, offset + limit), total: rows.length, groups: summarizeGroups(rows, q?.groupBy ?? 'category'), keyPrice: keyPrice(), generatedAt: now() };
+      // 0.8 (T4/T7): each 'import' row's buy timing on the page, as the service's listOpportunities joins it.
+      const t = now();
+      const page = rows.slice(offset, offset + limit).map((o) => {
+        const timing = scraptfOpportunityTiming(o, (b, s, buy) => mockTimingForCopy(b, s, buy), t);
+        return timing ? { ...o, timing } : o;
+      });
+      return { rows: page, total: rows.length, groups: summarizeGroups(rows, q?.groupBy ?? 'category', settings.profit.useOrder), keyPrice: keyPrice(), generatedAt: t };
     },
     'opps.events': (q) => {
       let list = events;
@@ -1799,6 +2218,12 @@ export function createMockBridge(opts: MockOptions = {}): MockBridge {
     'shopping.list': (q) => shoppingList(q ?? {}),
     'market.list': (q) => marketList(q ?? {}),
     'holdings.list': (q) => holdingsResult(holdingRows(), holdingsQuery(q, 'holdings.list'), keyPrice(), now()),
+    // 0.8 (H7): the drawer's "Your holding & trades", from the mock's holdings, as the service's Holdings.detail.
+    'holdings.detail': (p) => {
+      if (typeof p?.sku !== 'string' || !isValidSku(p.sku.trim().toLowerCase())) throw new Error('Invalid parameters for holdings.detail: sku: not a SKU (pick an item first)');
+      // Local only, as the service: the journal, the recorded exit runs and the same book (H7).
+      return holdingDetail(canonical(p.sku.trim().toLowerCase()));
+    },
     'item.detail': ({ sku, history }) => {
       const d = detail(sku);
       // history: false is quick entry's local-only preview.
@@ -1845,8 +2270,15 @@ export function createMockBridge(opts: MockOptions = {}): MockBridge {
       if (!input || typeof input.sku !== 'string' || !input.sku.trim()) throw new Error('An item is required.');
       if (!Number.isFinite(input.costScrap) || input.costScrap < 0) throw new Error('Price must be zero or more.');
       if (input.costKeys !== undefined && (!Number.isFinite(input.costKeys) || input.costKeys < 0)) throw new Error('Keys must be zero or more.');
-      const sku = canonical(input.sku.trim());
-      const existing = input.id !== undefined ? prices.find((p) => p.id === input.id) : undefined;
+      const typedSku = canonical(input.sku.trim());
+      // 0.7.4 (F80): as the service, replaceTyped (no id) updates the newest typed price of this copy, its
+      // stored SKU and extras kept; none adds a row.
+      const typed =
+        input.id === undefined && input.replaceTyped === true && (input.source ?? 'user') === 'user'
+          ? newestTypedPriceFor(prices.filter((p) => looksLikeSku(p.sku) && baseSku(p.sku) === baseSku(typedSku)), typedSku)
+          : null;
+      const sku = typed?.sku ?? typedSku;
+      const existing = typed ?? (input.id !== undefined ? prices.find((p) => p.id === input.id) : undefined);
       if (input.id !== undefined && !existing) throw new Error(`Price #${input.id} does not exist.`);
       const keep = keepUnlessMoved(existing, sku);
       const row: ScrapPrice = {
@@ -1988,10 +2420,20 @@ export function createMockBridge(opts: MockOptions = {}): MockBridge {
     },
     'journal.list': (p) => [...journal].sort((a, b) => b.ts - a.ts || b.id - a.id).slice(0, Math.max(1, p?.limit ?? 500)),
     'journal.add': (input) => {
-      if (input?.side !== 'buy' && input?.side !== 'sell') throw new Error('Side must be buy or sell.');
+      if (!JOURNAL_SIDES.includes(input?.side)) throw new Error('Side must be buy, sell or writeoff.');
       if (!input.venue?.trim()) throw new Error('A venue is required.');
       if (!input.sku?.trim()) throw new Error('An item is required.');
       if (!Number.isFinite(input.scrap) || input.scrap < 0) throw new Error('Price must be zero or more.');
+      // 0.7.4 (F39): as the service's journalInput, a backfill's key price then is whole scrap, 9 to 100,000.
+      const k = input.keyPriceScrap;
+      if (k !== undefined && (!Number.isInteger(k) || k < 9 || k > 100_000)) throw new Error('Key price must be at least 1 ref.');
+      // 0.8 (J2): as the service's zod, each fee part given is checked; a write-off receives nothing (its refine).
+      checkJournalFee(input.feeKeys, JOURNAL_MAX_FEE_KEYS, false);
+      checkJournalFee(input.feeScrap, JOURNAL_MAX_FEE_SCRAP, false);
+      if (input.side === 'writeoff' && ((input.keys ?? 0) !== 0 || input.scrap !== 0 || input.feeKeys !== undefined || input.feeScrap !== undefined)) {
+        throw new Error(JOURNAL_WRITE_OFF_NOTHING);
+      }
+      const fee = feeOf(input);
       const sku = canonical(input.sku.trim());
       const row: JournalEntry = {
         id: journalSeq++,
@@ -2002,8 +2444,9 @@ export function createMockBridge(opts: MockOptions = {}): MockBridge {
         name: input.name?.trim() || itemName(sku),
         keys: input.keys ?? 0,
         scrap: Math.round(input.scrap),
-        keyPriceScrap: keyPrice().valueScrap,
+        keyPriceScrap: k ?? keyPrice().valueScrap,
         note: input.note ?? null,
+        ...(fee ? { feeKeys: fee.keys, feeScrap: Math.round(fee.scrap) } : {}),
       };
       journal = [...journal, row];
       journalChanged();
@@ -2014,10 +2457,35 @@ export function createMockBridge(opts: MockOptions = {}): MockBridge {
       journalChanged();
       return { ok: true };
     },
+    // 0.8 (J6): as the service, venue, note and fee only (params checked first, then the row); a write-off takes no fee.
+    'journal.update': (p) => {
+      const bad = (why: string): never => {
+        throw new Error(`Invalid parameters for journal.update: ${why}`);
+      };
+      const entryId = p?.id;
+      if (typeof entryId !== 'number' || !Number.isInteger(entryId) || entryId <= 0) bad('id');
+      const venue = p.venue === undefined ? undefined : typeof p.venue === 'string' ? p.venue.trim() : null;
+      if (venue !== undefined && (venue === null || venue.length < 1 || venue.length > 100)) bad('venue');
+      if (p.note !== undefined && p.note !== null && (typeof p.note !== 'string' || p.note.length > 500)) bad('note');
+      checkJournalFee(p.feeKeys, JOURNAL_MAX_FEE_KEYS, true);
+      checkJournalFee(p.feeScrap, JOURNAL_MAX_FEE_SCRAP, true);
+      const before = journal.find((j) => j.id === entryId);
+      if (!before) throw new Error(JOURNAL_ENTRY_GONE);
+      if (before.side === 'writeoff' && feePatchOf(p)) throw new Error(JOURNAL_WRITE_OFF_NOTHING);
+      const row = applyJournalPatch(before, {
+        venue: venue ?? undefined,
+        note: p.note === undefined ? undefined : p.note?.trim() || null,
+        feeKeys: p.feeKeys,
+        feeScrap: p.feeScrap,
+      });
+      journal = journal.map((j) => (j.id === entryId ? row : j));
+      journalChanged();
+      return row;
+    },
     'journal.summary': () => mockJournalSummary(journal),
+    // 0.8 (J5): the service's ledger cells in FIFO order (the value_ref column included).
     'journal.exportCsv': () => {
-      const rows: unknown[][] = [['id', 'time', 'side', 'venue', 'sku', 'name', 'keys', 'metal_ref', 'key_price_ref', 'note']];
-      for (const j of [...journal].sort((a, b) => a.ts - b.ts)) rows.push([j.id, new Date(j.ts).toISOString(), j.side, j.venue, j.sku, j.name, j.keys, (j.scrap / 9).toFixed(2), (j.keyPriceScrap / 9).toFixed(2), j.note ?? '']);
+      const rows: unknown[][] = [[...JOURNAL_CSV_COLUMNS], ...journalLedger(journal).map(journalCsvCells)];
       return { csv: csv(rows), suggestedName: `flipdesk-journal-${stamp(now())}.csv` };
     },
     'import.html': (p) => {
@@ -2047,6 +2515,81 @@ export function createMockBridge(opts: MockOptions = {}): MockBridge {
     'scraptf.bankStock': (q) => bankStockList(bankStockQuery(q, 'scraptf.bankStock')),
     'scraptf.itemHistory': (p) => itemHistory(p),
     'scraptf.changes': (q) => changesList(changesQuery(q, 'scraptf.changes')),
+    // 0.8 (G1): as the service, from memory (the watch list and the kept saves) by the shared rules; nothing is fetched.
+    'watches.list': (p) => {
+      const q = p as { sku?: unknown } | null | undefined;
+      const sku = q?.sku !== undefined ? watchParams('watches.list').sku(q.sku) : null;
+      // Any SKU of the item lists its base's watches.
+      const base = sku !== null ? (bankStockTargetOf(sku)?.base ?? sku) : null;
+      const list = watchList().filter((w) => base === null || w.sku === base);
+      const pages = list.length > 0 ? watchPages(new Set(list.map((w) => w.sku))) : [];
+      const minConfidence = settings.notifications.minConfidence;
+      return watchViewsOf(list, pages, keyPrice().valueScrap, Number.isFinite(minConfidence) ? minConfidence : 0);
+    },
+    'watches.upsert': (p) => {
+      const input = watchParams('watches.upsert').input(p);
+      const all = watchList();
+      const existing = input.id !== undefined ? (all.find((w) => w.id === input.id) ?? null) : null;
+      if (input.id !== undefined && existing === null) throw new Error(WATCH_GONE);
+      const write = watchWriteOf(input, existing, (b) => findCatalogItem(b)?.name ?? null);
+      // As the repo: one watch per copy; an add of a watched copy updates it, an update may not take another's copy.
+      const same = all.find((w) => w.sku === write.sku && w.specialKey === write.specialKey) ?? null;
+      if (existing === null && same === null && all.length >= WATCHES_MAX) throw new Error(WATCHES_FULL);
+      if (existing !== null && same !== null && same.id !== existing.id) throw new Error(WATCH_COPY_TAKEN);
+      const target = existing ?? same;
+      const t = now();
+      const saved: ScraptfWatch = {
+        id: target ? target.id : watchSeq++,
+        sku: write.sku,
+        specialKey: write.specialKey,
+        name: write.name,
+        maxCostKeys: write.maxCostKeys,
+        maxCostScrap: write.maxCostScrap,
+        minProfitScrap: write.minProfitScrap,
+        onRestock: write.onRestock,
+        enabled: write.enabled,
+        createdAt: target ? target.createdAt : t,
+        updatedAt: t,
+      };
+      watches = target ? all.map((w) => (w.id === target.id ? saved : w)) : [...all, saved];
+      emit('watches.changed', { at: now() });
+      return saved;
+    },
+    'watches.delete': (p) => {
+      const watchId = watchParams('watches.delete').watchId((p as { id?: unknown } | null | undefined)?.id);
+      watches = watchList().filter((w) => w.id !== watchId);
+      emit('watches.changed', { at: now() });
+      return { ok: true };
+    },
+    // As the service: Undo of a removal puts the same watch back (its id and times, watchRestoreOf).
+    'watches.restore': (p) => {
+      const v = watchParams('watches.restore');
+      const q = (p ?? {}) as { id?: unknown; createdAt?: unknown; updatedAt?: unknown };
+      const id = v.watchId(q.id);
+      const input = { ...v.input(p), id, createdAt: v.time('createdAt', q.createdAt), updatedAt: v.time('updatedAt', q.updatedAt) };
+      const all = watchList();
+      const back = all.find((w) => w.id === id);
+      if (back) return back;
+      const r = watchRestoreOf(input, (b) => findCatalogItem(b)?.name ?? null, now());
+      if (all.some((w) => w.sku === r.write.sku && w.specialKey === r.write.specialKey)) throw new Error(WATCH_COPY_TAKEN);
+      if (all.length >= WATCHES_MAX) throw new Error(WATCHES_FULL);
+      const saved: ScraptfWatch = {
+        id,
+        sku: r.write.sku,
+        specialKey: r.write.specialKey,
+        name: r.write.name,
+        maxCostKeys: r.write.maxCostKeys,
+        maxCostScrap: r.write.maxCostScrap,
+        minProfitScrap: r.write.minProfitScrap,
+        onRestock: r.write.onRestock,
+        enabled: r.write.enabled,
+        createdAt: r.createdAt,
+        updatedAt: r.updatedAt,
+      };
+      watches = [...all, saved].sort((a, b) => a.id - b.id);
+      emit('watches.changed', { at: now() });
+      return saved;
+    },
     'check.text': (p) => liveCheck(p?.text, p?.source, p?.hint),
     'check.recent': () => recentChecks,
     'health.get': () => health(),
@@ -2104,7 +2647,7 @@ export function createMockBridge(opts: MockOptions = {}): MockBridge {
     // 0.7.1: as main, a known bank and chip only; held until the dashboard subscribes, as the preload holds it.
     'app.showBankStock': (p) => {
       if (!SCRAPTF_BANK_IDS.includes(p?.bank)) throw new Error('Invalid parameters for app.showBankStock: bank: not a scrap.tf bank');
-      if (!BANK_STOCK_OPEN_FILTERS.includes(p.filter)) throw new Error('Invalid parameters for app.showBankStock: filter: must be flips or new');
+      if (!BANK_STOCK_OPEN_FILTERS.includes(p.filter)) throw new Error('Invalid parameters for app.showBankStock: filter: must be flips, new or watched');
       emitHeld('ui.openBankStock', { bank: p.bank, filter: p.filter });
       return { ok: true };
     },
@@ -2119,6 +2662,9 @@ export function createMockBridge(opts: MockOptions = {}): MockBridge {
       if (!gate.ok) throw new Error(`Invalid settings: ${gate.message}`);
       const next = gate.settings;
       settings = next;
+      // 0.8 (H6), as Holdings.settingsChanged: a change to which buyers count is dated now.
+      const markKey = holdingMarkSettingsKey(settings);
+      if (markKey !== markSettings.key) markSettings = { key: markKey, at: now() };
       emit('settings.changed', settings);
       changedAndEmit();
       // F15: importEnabled and watchActive are part of the banks summary.

@@ -1,0 +1,24 @@
+/* 0.8 (J3): the Journal page's Results and Losing flips cards, the trades table's P/L and fee lines. */
+
+.journal-pnl {
+  white-space: nowrap;
+}
+
+.journal-fee {
+  display: block;
+}
+
+/* A rate shown from too few flips (MIN_RATE_TRADES): readable, but not as loud as a settled figure. */
+.stat-few .stat-value {
+  color: var(--text-muted);
+  font-weight: 500;
+}
+
+.journal-results .section-head {
+  flex-wrap: wrap;
+}
+
+/* The edit dialog's "Bought for … To change the price or time, delete …" line (J6). */
+.rt-locked {
+  margin: 0;
+}

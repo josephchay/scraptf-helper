@@ -6,7 +6,8 @@
 // unusual taunt is an unusual. Unusual quality without an effect (the generic
 // any-effect base, 378;5) is an unusual too.
 
-import type { Category, SkuObject } from './types';
+import { bankForCategory } from './links';
+import type { Category, ScraptfBank, SkuObject } from './types';
 
 /** The schema facts the classifier needs (a subset of SchemaItemRow). */
 export interface CategoryItemInfo {
@@ -104,4 +105,32 @@ export function categorize(obj: SkuObject, item: CategoryItemInfo | null): Categ
   if ((slot !== null && COSMETIC_SLOTS.has(slot)) || craftClass === 'hat') return 'hats';
   if ((slot !== null && WEAPON_SLOTS.has(slot)) || craftClass === 'weapon') return 'weapons';
   return 'other';
+}
+
+/**
+ * 0.7.4 (F36): the scrap.tf bank page that sells an item of this kind, for an item no saved page has shown
+ * yet (the Live market's scrap.tf button, the banks' "What to look for", the shopping list, ACT-8). The
+ * category alone is too coarse: the user's saves list strange cosmetics only on /buy/hats (and a few on
+ * /buy/items), never on /buy/stranges (weapons only); killstreak weapons and every australium on /buy/items;
+ * and /buy/killstreaks sells kits (tools) only. Unusuals, skins, hats and weapons keep their own page, taunts
+ * and the rest the items bank. Without the schema entry: what the SKU says (an australium on items, a
+ * killstreak item with a target, a kit or fabricator, on killstreaks, one without on items), else
+ * bankForCategory. Only SCRAPTF_BANKS ids come back (their static URLs, never item data, R1). Where a saved
+ * page did show the item, that page wins (scraptfLinkFor, preferScraptfSeen).
+ */
+export function scraptfBankForItem(category: Category, obj: SkuObject, item: CategoryItemInfo | null): Exclude<ScraptfBank, 'list'> {
+  if (category === 'unusuals' || category === 'skins') return category;
+  if (obj.australium === true) return 'items';
+  if (category === 'killstreaks') {
+    if (item) return lower(item.itemClass) === 'tool' ? 'killstreaks' : 'items';
+    return typeof obj.target === 'number' ? 'killstreaks' : 'items';
+  }
+  if (!item) return bankForCategory(category);
+  if (category === 'stranges') {
+    const slot = lower(item.slot);
+    if ((slot !== null && COSMETIC_SLOTS.has(slot)) || lower(item.craftClass) === 'hat') return 'hats';
+    if ((slot !== null && WEAPON_SLOTS.has(slot)) || lower(item.craftClass) === 'weapon') return 'stranges';
+    return 'items';
+  }
+  return bankForCategory(category);
 }

@@ -16,8 +16,16 @@
 // per-base "listed since" map so the Live market joins scraptfListedSince with one Map lookup per row.
 // An item read bisects each cached save for the one copy it asks about (0.7.3: with none named, for the
 // base's own copies, a sheen or killstreaker aside).
+//
+// 0.8 (T1-T4, LC-3-LC-5): per bank, its cycles (scraptfBankCyclesOf: the lifecycle walk over the same cached saves,
+// its pooled timing tables and its turnover) are built on first use per runs rebuild, and give the buy-timing
+// verdicts the bank stock, the Live market, Opportunities and the drawer join (a read hands them its own key price and
+// profit settings, ScraptfTimingInputs, so a join reads neither per row). Health's asset-id stability is the walk's
+// pre-pass alone, kept per runs rebuild: its poll builds no lifecycle. Still in memory only: no query and no request is
+// added.
 
 import { BANK_STOCK_PLAIN_KEY, bankStockIsOwnCopy, bankStockKey, bankStockTargetOf, type BankStockThinSave } from '../../shared/bankStock';
+import type { CeilingSettings } from '../../shared/ceiling';
 import { SCRAPTF_BANKS, scraptfBankInfo } from '../../shared/links';
 import type { PushContract } from '../../shared/rpc';
 import {
@@ -29,29 +37,38 @@ import {
   scraptfChangeCsvCells,
   scraptfChangeEvent,
   scraptfChangesLimit,
+  scraptfCopyBankOf,
+  scraptfEventListFamily,
   scraptfEventsOf,
   scraptfItemCopyOf,
   scraptfItemHistoryOf,
-  scraptfKeyStatesOf,
   scraptfListedPick,
   scraptfMarkSuperseded,
   scraptfRunsOf,
+  scraptfSeenBefore,
+  scraptfAssetStabilityOf,
+  type ScraptfBankLifecycle,
   type ScraptfEventBuySide,
   type ScraptfKeyState,
   type ScraptfListed,
   type ScraptfSaveRows,
 } from '../../shared/scraptfHistory';
+import { scraptfBankCyclesOf, scraptfBankTurnover, scraptfItemTimingOf, scraptfTimingForKey, type ScraptfBankCycles } from '../../shared/scraptfTiming';
 import type {
   BankStockStored,
   KeyPriceState,
   NewScraptfEvent,
   Scrap,
+  ScraptfAssetIdsHealth,
+  ScraptfAssetStability,
   ScraptfBank,
+  ScraptfBuyTiming,
   ScraptfChangeEvent,
   ScraptfChangesQuery,
   ScraptfEventStored,
   ScraptfItemHistory,
   ScraptfKeyRun,
+  ScraptfTurnover,
   UnixMs,
 } from '../../shared/types';
 import type { Clock, Logger, Repo, ScraptfEventQuery } from '../contracts';
@@ -73,6 +90,8 @@ export interface ScraptfHistoryDeps {
   keyPrice(): KeyPriceState;
   /** The schema's name of a SKU (core: schema.nameForSku): an item history's name when no save names it. Optional. */
   nameOf?(sku: string): string | null | undefined;
+  /** 0.8 (T3/T4): settings.profit for the timing EV (core: () => settings.profit). Omitted (tests): no timing. */
+  profit?(): CeilingSettings;
 }
 
 export interface ScraptfHistory {
@@ -90,7 +109,9 @@ export interface ScraptfHistory {
   /**
    * S3 'scraptf.itemHistory': one copy's history (scraptfItemHistoryOf over the runs index's saves), events
    * valued now. 0.7.1 (DM-6): its newest SCRAPTF_ITEM_EVENTS price events and, apart from them, its newest
-   * SCRAPTF_ITEM_STOCK_EVENTS stock moves, newest first in `events`. Never throws.
+   * SCRAPTF_ITEM_STOCK_EVENTS stock moves, newest first in `events`. 0.8 (T3-T5): with the copy's `cycles` and
+   * `timing` in the history's bank (scraptfItemTimingOf; timing null without deps.profit), left out when they
+   * cannot be read. Never throws.
    */
   itemHistory(sku: string, special: string | null | undefined, now: UnixMs): ScraptfItemHistory;
   /**
@@ -126,6 +147,43 @@ export interface ScraptfHistory {
   csv(q: ScraptfChangesQuery, now: UnixMs): string;
   /** Grows whenever a refresh changed the runs: the market and the bank stock key their cached passes on it. */
   version(): number;
+  /**
+   * 0.8 (T3/T4): one copy's buy-timing verdict in `bank` (scraptfTimingForKey over the bank's cycles), judged against
+   * `buy` at `now`. Null without deps.profit, for a copy not on sale on its newest observation and for a family row.
+   * A read after an import sees that import's save (onImport marks the index stale). Never throws: a failure is
+   * logged once per failure streak and gives null. `inputs`: the caller's key price and profit settings, read once per
+   * read rather than once per row (still null without deps.profit).
+   */
+  timingFor(bank: ScraptfBank, key: string, buy: ScraptfEventBuySide | null, now: UnixMs, inputs?: ScraptfTimingInputs): ScraptfBuyTiming | null;
+  /** 0.8 (T7): the copy listedFor picks for `baseSku` (the same bank rule: `bank`, else the bank listing it now), its verdict. */
+  timingForBase(
+    baseSku: string,
+    bank: ScraptfBank | null | undefined,
+    buy: ScraptfEventBuySide | null,
+    now: UnixMs,
+    inputs?: ScraptfTimingInputs,
+  ): ScraptfBuyTiming | null;
+  /** 0.8 (T4): one copy in the bank its item history reads (scraptfCopyBankOf over the banks whose runs index has the key), its verdict. */
+  timingForCopy(baseSku: string, specialKey: string, buy: ScraptfEventBuySide | null, now: UnixMs, inputs?: ScraptfTimingInputs): ScraptfBuyTiming | null;
+  /** 0.8 (LC-4): how long items stayed listed in a bank (scraptfBankTurnover, memoised per runs rebuild); null for a bank never saved. Never throws. */
+  turnoverFor(bank: ScraptfBank): ScraptfTurnover | null;
+  /**
+   * 0.8 (LC-5): each saved bank's asset-id stability (the lifecycle's pre-pass alone, kept per runs rebuild: no
+   * lifecycle is built for it), in SCRAPTF_BANKS order. Never throws.
+   */
+  assetStability(): ScraptfAssetIdsHealth[];
+}
+
+/**
+ * 0.8: what one read (a bank stock list, a market page, an Opportunities page) already holds, handed to every verdict
+ * it asks for, so a join of hundreds of rows reads the key price and the profit settings once, not once per row
+ * ('Never a query per row'). Omitted: the history reads both itself.
+ */
+export interface ScraptfTimingInputs {
+  /** The key price the read values at (engine.keyPrice().valueScrap, as the history's own). */
+  keyScrap: Scrap;
+  /** settings.profit, as deps.profit gives it. */
+  profit: CeilingSettings;
 }
 
 /** After a failed read, reads retry at most this often (refresh() retries at once), as BANK_STOCK_RETRY_MS. */
@@ -192,7 +250,17 @@ function rowsOfBase(rows: readonly BankStockStored[], base: string): BankStockSt
 }
 
 function sameRow(a: BankStockStored, b: BankStockStored): boolean {
-  return a.sku === b.sku && a.specialKey === b.specialKey && a.name === b.name && a.costKeys === b.costKeys && a.costScrap === b.costScrap && a.stock === b.stock;
+  return (
+    a.sku === b.sku &&
+    a.specialKey === b.specialKey &&
+    a.name === b.name &&
+    a.costKeys === b.costKeys &&
+    a.costScrap === b.costScrap &&
+    a.stock === b.stock &&
+    (a.craft ?? null) === (b.craft ?? null) &&
+    // 0.8 (LC-5): a shared row never carries a stale asset id.
+    (a.assetId ?? null) === (b.assetId ?? null)
+  );
 }
 
 /**
@@ -214,23 +282,31 @@ interface BankHistory {
   runs: Map<string, ScraptfKeyRun>;
   /**
    * Per base SKU: the run it is listed by (scraptfListedOf: the copy seen on sale last, then the earliest
-   * start), its start and its newest sighting.
+   * start), its start, its newest sighting and (0.8) that copy's key.
    */
-  listed: Map<string, ScraptfListed>;
-  /** 0.7.1 (ACT-10): each copy's current state (scraptfKeyStatesOf), built on the first feed read. */
-  states: Map<string, ScraptfKeyState> | null;
+  listed: Map<string, ScraptfListed & { key: string }>;
+  /**
+   * 0.8: scraptfBankCyclesOf over `saves` (lifecycle, pooled tables, turnover), built on first use per runs rebuild.
+   * Its lifecycle's keyStates are ACT-10's copy states (scraptfKeyStatesOf).
+   */
+  cycles: ScraptfBankCycles | null;
+  /**
+   * 0.8 (LC-5): the asset-id pre-pass over `saves` (scraptfAssetStabilityOf, O(rows)), on first use per runs rebuild:
+   * Health reads it without building the lifecycle, and the lifecycle reuses it.
+   */
+  stability: ScraptfAssetStability | null;
 }
 
 /**
  * scraptfListedOf for every base at once (one pass over the runs, so a market read is a Map lookup). 0.7.1
  * (DM-5): start and sighting come from one run, so a copy last seen weeks ago never lends its start to a
- * copy on today's save (the span is lastSeenAt - since).
+ * copy on today's save (the span is lastSeenAt - since). 0.8: with the picked copy's key (timingForBase).
  */
-function listedOf(runs: ReadonlyMap<string, ScraptfKeyRun>): Map<string, ScraptfListed> {
-  const out = new Map<string, ScraptfListed>();
+function listedOf(runs: ReadonlyMap<string, ScraptfKeyRun>): Map<string, ScraptfListed & { key: string }> {
+  const out = new Map<string, ScraptfListed & { key: string }>();
   for (const r of runs.values()) {
     if (r.listedSince === null) continue;
-    const next = { since: r.listedSince, lastSeenAt: r.lastSeenAt ?? r.listedSince };
+    const next = { since: r.listedSince, lastSeenAt: r.lastSeenAt ?? r.listedSince, key: r.key };
     if (scraptfListedPick(out.get(r.sku), next)) out.set(r.sku, next);
   }
   return out;
@@ -249,7 +325,7 @@ export function createScraptfHistory(deps: ScraptfHistoryDeps): ScraptfHistory {
   const saves = new Map<number, CachedSave>();
   const banks = new Map<ScraptfBank, BankHistory>();
   /** listedSinceFor without a bank: per base, the bank listing it now (a bank page before the list, then newer). Rebuilt lazily. */
-  let anyBank: Map<string, ScraptfListed & { bank: ScraptfBank }> | null = null;
+  let anyBank: Map<string, ScraptfListed & { bank: ScraptfBank; key: string }> | null = null;
   // The same SKUs and names repeat on every save of a page: one string each keeps the cache small.
   const pool = new Map<string, string>();
   let ver = 0;
@@ -259,6 +335,13 @@ export function createScraptfHistory(deps: ScraptfHistoryDeps): ScraptfHistory {
   let retryAt: UnixMs | null = null;
   let lastKeyPrice: KeyPriceState | null = null;
   let keyFailing = false;
+  /** 0.8: the cycle reads' failure streaks (by message): each is logged once per streak, not once per row. */
+  const streaks = new Set<string>();
+
+  function failed(msg: string, err: unknown): void {
+    if (!streaks.has(msg)) log.warn(msg, { error: errorText(err) });
+    streaks.add(msg);
+  }
 
   function now(): UnixMs {
     try {
@@ -292,7 +375,10 @@ export function createScraptfHistory(deps: ScraptfHistoryDeps): ScraptfHistory {
     return s;
   }
 
-  /** What the history reads of a row; the asset id is never read, so it is not kept. */
+  /**
+   * What the history reads of a row. 0.7.4: a list row's craft (the feed's buy side). 0.8: the asset id is kept for a
+   * single card: LC-5 and T1 compare it across saves (not interned: ids rarely repeat).
+   */
   function compact(r: BankStockStored): BankStockStored {
     return {
       sku: intern(r.sku),
@@ -301,7 +387,8 @@ export function createScraptfHistory(deps: ScraptfHistoryDeps): ScraptfHistory {
       costKeys: r.costKeys,
       costScrap: r.costScrap,
       stock: r.stock,
-      assetId: null,
+      assetId: r.stock === 1 && typeof r.assetId === 'string' && r.assetId !== '' ? r.assetId : null,
+      ...(r.craft !== undefined && r.craft !== null ? { craft: r.craft } : {}),
     };
   }
 
@@ -364,7 +451,7 @@ export function createScraptfHistory(deps: ScraptfHistoryDeps): ScraptfHistory {
       }
       // Only this bank's runs move: the others keep theirs.
       const runs = scraptfRunsOf(mine);
-      banks.set(bank, { saves: mine, runs, listed: listedOf(runs), states: null });
+      banks.set(bank, { saves: mine, runs, listed: listedOf(runs), cycles: null, stability: null });
     }
     anyBank = null;
     ver++;
@@ -391,9 +478,9 @@ export function createScraptfHistory(deps: ScraptfHistoryDeps): ScraptfHistory {
     }
   }
 
-  function anyBankMap(): Map<string, ScraptfListed & { bank: ScraptfBank }> {
+  function anyBankMap(): Map<string, ScraptfListed & { bank: ScraptfBank; key: string }> {
     if (anyBank !== null) return anyBank;
-    const out = new Map<string, ScraptfListed & { bank: ScraptfBank }>();
+    const out = new Map<string, ScraptfListed & { bank: ScraptfBank; key: string }>();
     for (const info of SCRAPTF_BANKS) {
       const b = banks.get(info.bank);
       if (!b) continue;
@@ -404,7 +491,7 @@ export function createScraptfHistory(deps: ScraptfHistoryDeps): ScraptfHistory {
           !cur ||
           (cur.bank === 'list' && info.bank !== 'list') ||
           ((cur.bank === 'list') === (info.bank === 'list') && l.lastSeenAt > cur.lastSeenAt);
-        if (better) out.set(base, { bank: info.bank, since: l.since, lastSeenAt: l.lastSeenAt });
+        if (better) out.set(base, { bank: info.bank, since: l.since, lastSeenAt: l.lastSeenAt, key: l.key });
       }
     }
     anyBank = out;
@@ -420,29 +507,82 @@ export function createScraptfHistory(deps: ScraptfHistoryDeps): ScraptfHistory {
   }
 
   /**
-   * ACT-10: a bank's copy states (scraptfKeyStatesOf over its cached saves), built once per runs rebuild;
-   * an empty map for a bank with no retained save (none of its events is current), null while the saves
-   * could not be read (events then stay as they are).
+   * 0.8: a bank's cycles (scraptfBankCyclesOf over its cached saves), built on first use per runs rebuild. Directions
+   * across a key boundary use the key price at build time: the cache is not rebuilt on a key move, as the events'
+   * directions were decided at import. Null while the saves could not be read, and for a bank with no retained save.
+   */
+  function cyclesOf(bank: ScraptfBank): ScraptfBankCycles | null {
+    if (failing) return null;
+    const b = banks.get(bank);
+    if (!b) return null;
+    if (b.cycles === null) b.cycles = scraptfBankCyclesOf(bank, b.saves, readKeyPrice().valueScrap, { assetStability: stabilityOf(b) });
+    return b.cycles;
+  }
+
+  /** 0.8 (LC-5): a bank's asset-id pre-pass, once per runs rebuild (the lifecycle's own when it is built already). */
+  function stabilityOf(b: BankHistory): ScraptfAssetStability {
+    b.stability ??= b.cycles?.life.assetStability ?? scraptfAssetStabilityOf(b.saves);
+    return b.stability;
+  }
+
+  /**
+   * ACT-10: a bank's copy states (its cycles' keyStates: scraptfKeyStatesOf over its cached saves), built once
+   * per runs rebuild; an empty map for a bank with no retained save (none of its events is current), null while
+   * the saves could not be read (events then stay as they are).
    */
   function statesOf(bank: ScraptfBank): ReadonlyMap<string, ScraptfKeyState> | null {
     if (failing) return null;
-    const b = banks.get(bank);
-    if (!b) return noStates;
-    if (b.states === null) b.states = scraptfKeyStatesOf(b.saves);
-    return b.states;
+    if (!banks.has(bank)) return noStates;
+    return cyclesOf(bank)?.life.keyStates ?? noStates;
+  }
+
+  /** ScraptfHistory.timingFor: the index brought up to the saves first, so an import's own save is read. */
+  function timingOf(bank: ScraptfBank, key: string, buy: ScraptfEventBuySide | null, at: UnixMs, inputs?: ScraptfTimingInputs): ScraptfBuyTiming | null {
+    if (!deps.profit) return null;
+    const msg = 'scrap.tf history could not judge buy timing';
+    try {
+      ensure();
+      const cycles = cyclesOf(bank);
+      // A read's own key price and settings when it passed them (one read, not one per row), else read here.
+      const given = inputs && finite(inputs.keyScrap) && inputs.keyScrap > 0 && inputs.profit ? inputs : null;
+      const out = cycles
+        ? scraptfTimingForKey({ cycles, key, buy, profit: given ? given.profit : deps.profit(), keyScrap: given ? given.keyScrap : readKeyPrice().valueScrap, now: at })
+        : null;
+      streaks.delete(msg);
+      return out;
+    } catch (err) {
+      failed(msg, err);
+      return null;
+    }
+  }
+
+  /** 0.7.4: an event's row in its own save, from the saves in memory (null: that save is not held). */
+  function eventRowOf(e: Pick<ScraptfEventStored, 'batchId' | 'sku' | 'specialKey'>): BankStockStored | null {
+    const s = saves.get(e.batchId);
+    return s ? rowIn(s.rows, e) : null;
   }
 
   /**
    * Stored events valued at `K` and joined to the live buy side of their base SKU (one entryFor per base);
    * 0.7.1 (ACT-10) a superseded flip keeps flip false and gets wasFlip (scraptfMarkSuperseded), from the
-   * saves in memory.
+   * saves in memory. 0.7.4: an /items list event whose row is not proven to price one copy
+   * (scraptfEventListFamily, from the saves in memory: one not held counts as unproven) gets no buy side.
    */
   function valued(list: readonly ScraptfEventStored[], K: Scrap): ScraptfChangeEvent[] {
     const buy = new Map<string, ScraptfEventBuySide | null>();
+    let synced = false;
+    const familyOf = (e: ScraptfEventStored): boolean => {
+      if (e.bank !== 'list') return false;
+      if (!synced) {
+        synced = true;
+        ensure();
+      }
+      return scraptfEventListFamily(e, eventRowOf);
+    };
     const out = list.map((e) => {
       let b = buy.get(e.sku);
       if (b === undefined) buy.set(e.sku, (b = entryOf(e.sku)));
-      return scraptfChangeEvent(e, K, b);
+      return scraptfChangeEvent(e, K, b, { family: familyOf(e) });
     });
     if (!out.some((e) => e.flip)) return out;
     try {
@@ -534,11 +674,8 @@ export function createScraptfHistory(deps: ScraptfHistoryDeps): ScraptfHistory {
         newest,
         previous: rows.get(previous.batchId) ?? [],
         keyScrap: readKeyPrice().valueScrap,
-        // Listed by a retained save of the bank (any page) from before this one.
-        seenBefore: (key) => {
-          const run = runs.get(key);
-          return run !== undefined && run.seenAt < self.savedAt;
-        },
+        // Listed by a retained save of the bank (any page) from before this one (D8: the one restock rule).
+        seenBefore: (key) => scraptfSeenBefore(runs.get(key), self.savedAt),
       });
     } catch (err) {
       // The rules are pure; a bug there must not cost the user the import.
@@ -601,7 +738,17 @@ export function createScraptfHistory(deps: ScraptfHistoryDeps): ScraptfHistory {
           ? [...repo.scraptfEvents({ ...own, kinds: SCRAPTF_PRICE_KINDS, limit: SCRAPTF_ITEM_EVENTS }), ...repo.scraptfEvents({ ...own, kinds: ['stock'], limit: SCRAPTF_ITEM_STOCK_EVENTS })].sort((x, y) => y.id - x.id)
           : [];
         const events = valued(stored, kp.valueScrap);
-        return scraptfItemHistoryOf({ sku: text, specialKey: chosen, ...(name ? { name } : {}), banks: list, events, keyPrice: kp, now: at });
+        const h = scraptfItemHistoryOf({ sku: text, specialKey: chosen, ...(name ? { name } : {}), banks: list, events, keyPrice: kp, now: at });
+        // 0.8 (T3-T5): the copy's runs and verdict in the history's bank, from the bank's whole saves (its cycles).
+        const msg = 'scrap.tf history could not read the price cycles';
+        try {
+          const out = { ...h, ...scraptfItemTimingOf(h, { cyclesOf, buy: entryOf(base), profit: deps.profit?.() ?? null, keyScrap: kp.valueScrap, now: at }) };
+          streaks.delete(msg);
+          return out;
+        } catch (err) {
+          failed(msg, err);
+          return h;
+        }
       } catch (err) {
         log.warn('scrap.tf history could not read an item', { error: errorText(err) });
         return scraptfItemHistoryOf({ sku: text, specialKey, ...(name ? { name } : {}), banks: [], events: [], keyPrice: kp, now: at });
@@ -657,6 +804,74 @@ export function createScraptfHistory(deps: ScraptfHistoryDeps): ScraptfHistory {
     version() {
       ensure();
       return ver;
+    },
+
+    timingFor: timingOf,
+
+    timingForBase(baseSku, bank, buy, at, inputs) {
+      if (typeof baseSku !== 'string') return null;
+      try {
+        ensure();
+        // listedFor's pick: the bank's listed copy, else the bank listing it now and its copy.
+        const pick = bank !== undefined && bank !== null ? { bank, key: banks.get(bank)?.listed.get(baseSku)?.key } : anyBankMap().get(baseSku);
+        return pick?.key !== undefined ? timingOf(pick.bank, pick.key, buy, at, inputs) : null;
+      } catch (err) {
+        failed('scrap.tf history could not judge buy timing', err);
+        return null;
+      }
+    },
+
+    timingForCopy(baseSku, specialKey, buy, at, inputs) {
+      if (typeof baseSku !== 'string' || typeof specialKey !== 'string') return null;
+      try {
+        ensure();
+        const key = bankStockKey(baseSku, specialKey);
+        // Cycles are built only for the banks whose saves ever listed the copy.
+        const list: { bank: ScraptfBank; life: ScraptfBankLifecycle }[] = [];
+        for (const info of SCRAPTF_BANKS) {
+          if (!banks.get(info.bank)?.runs.has(key)) continue;
+          const c = cyclesOf(info.bank);
+          if (c) list.push({ bank: info.bank, life: c.life });
+        }
+        const bank = scraptfCopyBankOf(list, key);
+        return bank ? timingOf(bank, key, buy, at, inputs) : null;
+      } catch (err) {
+        failed('scrap.tf history could not judge buy timing', err);
+        return null;
+      }
+    },
+
+    turnoverFor(bank) {
+      const msg = 'scrap.tf history could not tell how long items stay listed';
+      try {
+        ensure();
+        const c = cyclesOf(bank);
+        const out = c ? scraptfBankTurnover(c) : null;
+        streaks.delete(msg);
+        return out;
+      } catch (err) {
+        failed(msg, err);
+        return null;
+      }
+    },
+
+    assetStability() {
+      const msg = 'scrap.tf history could not read the item ids';
+      try {
+        ensure();
+        const out: ScraptfAssetIdsHealth[] = [];
+        // The pre-pass alone (O(rows), kept per runs rebuild): Health polls this, and builds no bank's lifecycle.
+        // None while the saves could not be read (as the cycles).
+        for (const info of SCRAPTF_BANKS) {
+          const b = failing ? undefined : banks.get(info.bank);
+          if (b) out.push({ bank: info.bank, ...stabilityOf(b) });
+        }
+        streaks.delete(msg);
+        return out;
+      } catch (err) {
+        failed(msg, err);
+        return [];
+      }
     },
   };
 }

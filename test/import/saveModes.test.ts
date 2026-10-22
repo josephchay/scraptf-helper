@@ -128,7 +128,9 @@ describe('a page saved as "Webpage, Single File" (.mhtml)', () => {
   it('imports exactly the items, prices, bank and bank stock of the same page saved as .html', () => {
     const fromHtml = setup();
     const a = fromHtml.run(HATS, NOW - MIN);
-    for (const file of [mhtmlOf(HATS), mhtmlOf(HATS, { encoding: 'base64' })]) {
+    // 0.7.4 (F82): saved when its file was (a Date seconds before the mtime), so both are dated alike.
+    const date = new Date(NOW - MIN - 2_000).toUTCString();
+    for (const file of [mhtmlOf(HATS, { date }), mhtmlOf(HATS, { encoding: 'base64', date })]) {
       const fromMhtml = setup();
       const b = fromMhtml.run(file, NOW - MIN, 'Hat Trading - TF2 - Scrap.TF.mhtml');
       expect(b.fileName).toBe('Hat Trading - TF2 - Scrap.TF.mhtml');

@@ -8,8 +8,7 @@
 // wrote rows, maintenance purged some). Rows are valued at the key price given by
 // the caller, else at the engine's, read once and kept until keyPriceChanged().
 
-import { scraptfListKeyOf, valueScraptfListRow } from '../../shared/scraptfList';
-import { baseSku as toBaseSku } from '../../shared/sku';
+import { scraptfListKeyOf, scraptfListLookup, valueScraptfListRow } from '../../shared/scraptfList';
 import { KEY_SKU } from '../../shared/types';
 import type { KeyPriceState, Scrap, ScraptfListKey, ScraptfListRow, ScraptfListStored } from '../../shared/types';
 import type { Logger, Repo, ScraptfListSummary } from '../contracts';
@@ -35,12 +34,13 @@ export interface ScraptfListCache {
   /** The key price moved: rows are valued again on their next read (core's keyQuotesChanged). */
   keyPriceChanged(): void;
   /**
-   * The list row for any SKU (paint dropped: the list shows plain copies), valued at `keyScrap` when
-   * given (the caller's own key price, e.g. a market read), else at the engine's. Null when the list
-   * has no row for it. A fresh copy each call.
+   * The list row for any SKU (paint dropped), else 0.7.4 its family row (`match` 'family': an unmarked row
+   * for every copy at its price, read for a Non-Craftable, killstreak or festivized copy with no row of its
+   * own), valued at `keyScrap` when given (the caller's own key price, e.g. a market read), else at the
+   * engine's. Null when the list has no row for it. A fresh copy each call.
    */
   rowFor(sku: string, keyScrap?: Scrap): ScraptfListRow | null;
-  /** Whether the list has a row for the SKU's base, without valuing it (the market's list filter). */
+  /** Whether rowFor finds a row for the SKU, without valuing it (the market's list filter). */
   has(sku: string): boolean;
   /** Every row by SKU, valued like rowFor. */
   all(keyScrap?: Scrap): ScraptfListRow[];
@@ -134,19 +134,15 @@ export function createScraptfListCache(deps: ScraptfListCacheDeps): ScraptfListC
     return { ...v };
   }
 
-  function storedFor(sku: string): ScraptfListStored | null {
+  /**
+   * The SKU's own row (exact, then with paint dropped), else 0.7.4 its family's (scraptfListLookup: an
+   * unmarked row stands for every copy scrap.tf sells at its price).
+   */
+  function storedFor(sku: string): { stored: ScraptfListStored; match: 'exact' | 'family' } | null {
     if (typeof sku !== 'string') return null;
     const map = loaded();
     if (map.size === 0) return null;
-    const direct = map.get(sku);
-    if (direct) return direct;
-    let base: string;
-    try {
-      base = toBaseSku(sku.trim());
-    } catch {
-      return null;
-    }
-    return map.get(base) ?? null;
+    return scraptfListLookup((s) => map.get(s), sku);
   }
 
   return {
@@ -170,8 +166,11 @@ export function createScraptfListCache(deps: ScraptfListCacheDeps): ScraptfListC
     },
 
     rowFor(sku, keyScrap) {
-      const stored = storedFor(sku);
-      return stored ? valuedRow(stored, keyFor(keyScrap)) : null;
+      const hit = storedFor(sku);
+      if (!hit) return null;
+      const row = valuedRow(hit.stored, keyFor(keyScrap));
+      // match is absent on an exact row (ScraptfListRow.match), as before 0.7.4.
+      return hit.match === 'family' ? { ...row, match: 'family' } : row;
     },
 
     has(sku) {

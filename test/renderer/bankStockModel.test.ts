@@ -37,17 +37,20 @@ import {
   bankStockSellsTitle,
   bankStockSortChange,
   bankStockStockCell,
+  bankStockTurnoverText,
   bankStockVerdictPill,
+  bankStockWatchTag,
   createBankStockLoader,
   isChangeFilter,
   sanitizeBankStockView,
   type BankStockView,
 } from '../../src/renderer/bankStockModel';
+import { fmtSaveTime } from '../../src/renderer/changesModel';
 import { fmtDateTime } from '../../src/renderer/format';
 import { BANK_STOCK_MAX_LIMIT, bankStockKey, bankStockSpecialKey, emptyBankStockCounts } from '../../src/shared/bankStock';
 import { SCRAPTF_BANKS, STATIC_EXTERNAL_URLS } from '../../src/shared/links';
 import { BANK_STOCK_FILTERS, BANK_STOCK_SORTS } from '../../src/shared/types';
-import type { BankStockCounts, BankStockQuery, BankStockResult, BankStockRow, OrderSummary } from '../../src/shared/types';
+import type { BankStockCounts, BankStockQuery, BankStockResult, BankStockRow, BankStockRowWatch, OrderSummary, ScraptfTimingBrief, ScraptfTurnover } from '../../src/shared/types';
 
 const NOW = Date.UTC(2026, 9, 15, 12, 0, 0);
 const MIN = 60_000;
@@ -217,7 +220,7 @@ describe('"Load more" while a read is in flight (F17-UI-3)', () => {
 });
 
 describe('the filter chips', () => {
-  it('All (in stock), New, Flips, Price changes, Gone, then F20 Listed > 24 h and Dropped since listed, counted over the whole bank', () => {
+  it("All (in stock), New, Flips, Price changes, Gone, then F20 Listed > 24 h and Dropped since listed, counted over the whole bank, then 0.8's Dropping and Watched", () => {
     const chips = bankStockChips(result({ counts: counts({ items: 48, inStock: 31, new: 5, gone: 3, cheaper: 2, pricier: 1, flips: 7, newFlips: 2, longListed: 12, dropped: 4 }) }));
     expect(chips.map((c) => [c.filter, c.label, c.count, c.disabled])).toEqual([
       ['all', 'All', '31', false],
@@ -227,6 +230,8 @@ describe('the filter chips', () => {
       ['gone', 'Gone', '3', false],
       ['long-listed', 'Listed > 24 h', '12', false],
       ['dropped', 'Dropped since listed', '4', false],
+      ['dropping', 'Dropping', '0', false],
+      ['watched', 'Watched', '0', false],
     ]);
     // Every filter the service knows has a chip, F17's first.
     expect(BANK_STOCK_CHIP_FILTERS).toEqual(BANK_STOCK_FILTERS);
@@ -372,7 +377,9 @@ describe('the cells', () => {
   });
 
   it('who buys it, and how many buyers there are', () => {
-    expect(bankStockSellsTitle(row(), K)).toBe('Sells for 5.00 ref to Keybot (bot, online) on backpack.tf. 4 buyers with eligible orders.');
+    // 0.7.4: presence as of `now`; the order's event a minute old is recent, five days old is not.
+    expect(bankStockSellsTitle(row(), K, undefined, NOW)).toBe('Sells for 5.00 ref to Keybot (bot, online) on backpack.tf. 4 buyers with eligible orders.');
+    expect(bankStockSellsTitle(row(), K, undefined, NOW + 5 * 24 * 60 * MIN)).toBe('Sells for 5.00 ref to Keybot (bot, last seen 5 d ago) on backpack.tf. 4 buyers with eligible orders.');
     expect(bankStockSellsTitle(row({ revenueScrap: null, revenueOrder: null, buyerCount: 0 }), K)).toBe('No eligible backpack.tf buy orders for this item in the live book.');
     expect(bankStockSellsTitle(row({ revenueScrap: null, revenueOrder: null, buyerCount: 2 }), K, 'conservative')).toMatch(/^Every eligible order looks unrealistic/);
     expect(bankStockBuyer(row())).toBe('Keybot');
@@ -592,5 +599,131 @@ describe('F20: Listed and Since listed', () => {
     expect(first.find((c) => c.filter === 'long-listed')).toMatchObject({ count: '3', disabled: false });
     expect(bankStockFilterEmpty('long-listed').title).toBe('Nothing listed for over a day');
     expect(bankStockFilterEmpty('dropped').title).toBe('Nothing dropped since listed');
+  });
+});
+
+describe('0.8 (T6, LC-4): drops in the run and the turnover line', () => {
+  const D = 24 * HOUR;
+  const change = (fromScrap: number, toScrap: number, since = NOW - 2 * D) => ({ fromScrap, toScrap, deltaScrap: toScrap - fromScrap, pct: fromScrap > 0 ? (toScrap - fromScrap) / fromScrap : null, since });
+  const day = (ts: number) => fmtSaveTime(ts).split(' ').slice(0, 2).join(' ');
+  function timing(over: Partial<ScraptfTimingBrief> = {}): ScraptfTimingBrief {
+    return {
+      verdict: 'buy-now',
+      why: 'flip-now',
+      bank: 'hats',
+      key: '5021;6|',
+      dropsThisRun: 2,
+      steps: [
+        { at: NOW - 30 * HOUR, prevAt: NOW - 31 * HOUR, fromScrap: 12, toScrap: 11.4, pct: -0.05 },
+        { at: NOW - 5 * HOUR, prevAt: NOW - 6 * HOUR, fromScrap: 11.4, toScrap: 11, pct: -0.04 },
+      ],
+      lastSeenAt: NOW - 5 * HOUR,
+      horizonMs: D,
+      pDrop: 0.2,
+      pGone: 0.3,
+      pRise: 0.1,
+      nextDropAt: null,
+      n: { states: 41, copies: 6, atRisk: 8, dropCopies: 5 },
+      ...over,
+    };
+  }
+
+  it('Since listed adds the drops in this run, dated at the saves that showed them (a lower bound)', () => {
+    const c = bankStockSinceListedCell(row({ changeSinceListed: change(12, 11), timing: timing() }), K);
+    expect(c).toMatchObject({ text: '↓ 8 % · 2×', tone: 'good' });
+    expect(c.title).toBe(
+      `1.33 ref when your saves began listing it (${fmtDateTime(NOW - 2 * D)}), 1.22 ref now: cheaper by 0.11 ref (\u22128 %), both at today's key price. ` +
+        `2 price drops in this run in your saves: ${day(NOW - 30 * HOUR)} \u22125 %, ${day(NOW - 5 * HOUR)} \u22124 % (a lower bound: several drops between two saves read as one).`,
+    );
+    // More drops than the brief's steps: the newest ones are named.
+    expect(bankStockSinceListedCell(row({ changeSinceListed: change(12, 11), timing: timing({ dropsThisRun: 7 }) }), K).title).toContain('7 price drops in this run in your saves: the newest ');
+    // No drop, no timing, or the dash case: exactly as before.
+    const before = bankStockSinceListedCell(row({ changeSinceListed: change(12, 11) }), K);
+    expect(bankStockSinceListedCell(row({ changeSinceListed: change(12, 11), timing: timing({ dropsThisRun: 0, steps: [] }) }), K)).toEqual(before);
+    expect(bankStockSinceListedCell(row({ changeSinceListed: null, timing: timing() }), K)).toEqual(bankStockSinceListedCell(row({ changeSinceListed: null }), K));
+  });
+
+  const turnover = (over: Partial<ScraptfTurnover> = {}): ScraptfTurnover => ({
+    bank: 'hats',
+    ended: 25,
+    open: 12,
+    wideGap: 0,
+    imprecise: 4,
+    p25Ms: 10 * HOUR,
+    medianMs: D + 4 * HOUR,
+    p75Ms: 3 * D,
+    resolutionMs: 2 * HOUR,
+    curve: [
+      { atMs: 0, stillListed: 1 },
+      { atMs: D + 4 * HOUR, stillListed: 0.5 },
+      { atMs: 4 * D, stillListed: 0.2 },
+    ],
+    droppedBeforeGoneShare: 0.4,
+    since: NOW - 30 * D,
+    ...over,
+  });
+
+  it('the turnover line: the median with its listings, ± the resolution and the still listed', () => {
+    const t = bankStockTurnoverText(turnover(), 'scrap.tf/buy/hats')!;
+    expect(t.text).toBe('In your saves, items here stayed listed a median 1 d 4 h before going (37 listings, ±2 h; 12 still listed)');
+    expect(t.title).toMatch(/^Kaplan-Meier over your saves of scrap\.tf\/buy\/hats/);
+    expect(t.title).toContain('Quartiles: 25 % gone by 10 h, half by 1 d 4 h, 75 % by 3 d.');
+    expect(t.title).toContain('4 listings were left out');
+    expect(t.title).toContain("'Gone' can be a sale, a reservation or a move");
+    expect(t.title).not.toContain('followed only to your last save');
+    const gaps = bankStockTurnoverText(turnover({ wideGap: 3 }), 'scrap.tf/buy/hats')!;
+    expect(gaps.text).toContain('(40 listings, ±2 h; 12 still listed)');
+    // The gap limit is per page (wider than its usual gaps, at most a day: retention's daily saves are never pooled).
+    expect(gaps.title).toContain('3 were followed only to your last save before a gap in your saves wider than your usual ones (or over a day).');
+  });
+
+  it('a curve that never reaches half, and not enough data below 15 ended listings', () => {
+    const long = bankStockTurnoverText(turnover({ medianMs: null, p75Ms: null, curve: [{ atMs: 0, stillListed: 1 }, { atMs: 3 * D, stillListed: 0.7 }] }), 'scrap.tf/buy/hats')!;
+    // Review fix: an estimated share (Kaplan-Meier), never "more than half of the 37 listings" as a count.
+    expect(long.text).toBe('In your saves, no median yet: an estimated 70 % of listings here were still listed after 3 d (37 listings; 12 still listed)');
+    expect(long.title).toContain('The share is an estimate, not a count of the listings');
+    expect(long.title).toContain('half by not reached');
+    const few = bankStockTurnoverText(turnover({ ended: 8, reason: 'not-enough-data', medianMs: null, p25Ms: null, p75Ms: null, resolutionMs: null }), 'scrap.tf/buy/hats')!;
+    expect(few.text).toBe('Not enough of your saves yet to say how long items stay listed here (8 of 15 ended listings)');
+    expect(few.title).toContain('once 15 listings have ended in your saves; 8 have, 12 are still listed.');
+    expect(bankStockTurnoverText(null, 'scrap.tf/buy/hats')).toBeNull();
+    expect(bankStockTurnoverText(undefined, 'scrap.tf/buy/hats')).toBeNull();
+  });
+});
+
+describe('0.8 (G1): bankStockWatchTag, a watched row\'s tag', () => {
+  const watch = (over: Partial<BankStockRowWatch> = {}): BankStockRowWatch => ({
+    id: 1,
+    anyCopy: false,
+    maxCostScrap: 120,
+    minProfitScrap: null,
+    onRestock: false,
+    met: null,
+    overTargetScrap: 5,
+    ...over,
+  });
+
+  it('is absent without a watch and for a gone row', () => {
+    expect(bankStockWatchTag(row(), K)).toBeNull();
+    expect(bankStockWatchTag(row({ change: 'gone', watch: watch({ met: 'price' }) }), K)).toBeNull();
+  });
+
+  it('says At target, Profit target, how far over, or Watched, with its tone', () => {
+    expect(bankStockWatchTag(row({ watch: watch({ met: 'price', overTargetScrap: -3 }) }), K)).toMatchObject({ text: 'At target', tone: 'good' });
+    expect(bankStockWatchTag(row({ watch: watch({ met: 'profit', minProfitScrap: 18 }) }), K)).toMatchObject({ text: 'Profit target', tone: 'good' });
+    expect(bankStockWatchTag(row({ watch: watch({ overTargetScrap: 5 }) }), K)).toMatchObject({ text: '0.55 ref over', tone: 'warn' });
+    expect(bankStockWatchTag(row({ watch: watch({ overTargetScrap: 0 }) }), K)).toMatchObject({ text: 'Watched', tone: 'muted' });
+    expect(bankStockWatchTag(row({ watch: watch({ maxCostScrap: null, overTargetScrap: null, onRestock: true }) }), K)).toMatchObject({ text: 'Watched', tone: 'muted' });
+  });
+
+  it('names the scope, the targets at the key price and the state; nothing is bought', () => {
+    const t = bankStockWatchTag(row({ watch: watch({ anyCopy: true, maxCostScrap: 120, minProfitScrap: 18, onRestock: true, overTargetScrap: 5 }) }), K)!;
+    expect(t.title).toBe(
+      'On your watch list (any copy): ≤ 13.33 ref · profit ≥ 2.00 ref · back on sale. It costs 0.55 ref more than your price target. Told when a page you read or save shows it; nothing is bought for you.',
+    );
+    expect(bankStockWatchTag(row({ watch: watch({ met: 'price' }) }), K)!.title).toMatch(/^On your watch list \(this copy\): ≤ 13\.33 ref\. Its price is at or under your target\./);
+    expect(bankStockWatchTag(row({ watch: watch({ maxCostScrap: null, overTargetScrap: null, onRestock: true }) }), K)!.title).toContain('You asked to be told when it is back on sale.');
+    // A target over a key reads in keys at the row's key price.
+    expect(bankStockWatchTag(row({ watch: watch({ maxCostScrap: K + 9, overTargetScrap: -1 }) }), K)!.title).toContain('≤ 1 key 1.00 ref');
   });
 });

@@ -7,7 +7,8 @@ import { describe, expect, it } from 'vitest';
 import { parsePrice } from '../../src/shared/currency';
 import { DEFAULT_SETTINGS } from '../../src/shared/defaults';
 import { holdingRow, holdingsResult } from '../../src/shared/holdings';
-import type { HoldingRow, JournalPosition, OrderSummary } from '../../src/shared/types';
+import { journalSummary, typicalHoldOf } from '../../src/shared/journal';
+import type { HoldingRow, JournalEntry, JournalPosition, OrderSummary } from '../../src/shared/types';
 import { HOLDING_STATUSES } from '../../src/shared/types';
 import {
   HOLDINGS_MAX_SEARCH_CHARS,
@@ -31,6 +32,7 @@ import {
   profitNowTitle,
   recordSaleInit,
   sanitizeHoldingsSearch,
+  typicalHoldText,
   unitsText,
   worthTitle,
 } from '../../src/renderer/holdingsModel';
@@ -91,7 +93,8 @@ function row(sku: string, lots: number[], revenue: OrderSummary | null): Holding
 
 describe('status', () => {
   it('labels, tones and explains every status', () => {
-    expect(HOLDING_STATUSES.map((s) => HOLDING_STATUS_LABELS[s])).toEqual(['Sell now', 'Hold', 'Loss', 'No buyers']);
+    // 0.8 (H6, D11): the pills describe the thresholds only; the Advice column says what to do.
+    expect(HOLDING_STATUSES.map((s) => HOLDING_STATUS_LABELS[s])).toEqual(['Clears target', 'Below target', 'Loss', 'No buyers']);
     expect(HOLDING_STATUSES.map((s) => HOLDING_STATUS_TONES[s])).toEqual(['good', 'warn', 'bad', 'muted']);
     for (const s of HOLDING_STATUSES) expect(HOLDING_STATUS_HELP[s].length).toBeGreaterThan(20);
   });
@@ -155,7 +158,9 @@ describe('cells', () => {
   it('names the buyer and explains the sale price', () => {
     expect(buyerName(order(1))).toBe('Flip Bot');
     expect(buyerName(order(1, { userName: null, isBot: false }))).toBe('Human');
-    expect(holdingSellsForTitle(two, KEY)).toBe('Sells now for 7.77 ref to Flip Bot (bot, online). Best 8.77 ref, instant 7.77 ref. 4 buyers with eligible orders.');
+    // 0.7.4: presence as of `now`; past 2 h since the order's event it says when the buyer was last seen.
+    expect(holdingSellsForTitle(two, KEY, T0)).toBe('Sells now for 7.77 ref to Flip Bot (bot, online). Best 8.77 ref, instant 7.77 ref. 4 buyers with eligible orders.');
+    expect(holdingSellsForTitle(two, KEY, T0 + 3 * 3_600_000)).toBe('Sells now for 7.77 ref to Flip Bot (bot, last seen 3 h ago). Best 8.77 ref, instant 7.77 ref. 4 buyers with eligible orders.');
     expect(holdingSellsForTitle(row('1;6', [9], null), KEY)).toBe('No eligible backpack.tf buy orders in the live book.');
     expect(holdingSellsForTitle({ ...row('1;6', [9], null), buyerCount: 2, flags: ['all-outliers'] }, KEY)).toMatch(/unrealistic/);
   });
@@ -241,5 +246,55 @@ describe('live flash', () => {
       ['d', 'down'],
     ]);
     expect(diffHoldingsFlash(null, next).size).toBe(0);
+  });
+});
+
+describe('0.8 (H5) the typical hold in the Held for tooltip', () => {
+  const heldSince = T0 - 2 * 86_400_000;
+  const oldest = `Oldest unit bought ${fmtDateTime(heldSince)}`;
+  const item = { medianMs: 3 * 86_400_000, count: 4, scope: 'item' as const, stillHeld: 0 };
+  const all = { medianMs: 5 * 3_600_000, count: 7, scope: 'all' as const, stillHeld: 0 };
+
+  it("words the item's own sales, and how many still held are left out", () => {
+    expect(heldForTitle({ heldSince, typicalHold: item })).toBe(`${oldest}. Your sales of this item came a median 3 d after the buy (4 sales).`);
+    expect(typicalHoldText({ ...item, stillHeld: 1 })).toBe('Your sales of this item came a median 3 d after the buy (4 sales; 1 still held is not counted).');
+    expect(typicalHoldText({ ...item, stillHeld: 2 })).toBe('Your sales of this item came a median 3 d after the buy (4 sales; 2 still held are not counted).');
+  });
+
+  it('words every sale when the item has too few of its own', () => {
+    expect(heldForTitle({ heldSince, typicalHold: all })).toBe(`${oldest}. Your sales came a median 5 h after the buy (7 sales; fewer than 3 of this item).`);
+    expect(typicalHoldText({ ...all, stillHeld: 1 })).toBe('Your sales came a median 5 h after the buy (7 sales; fewer than 3 of this item; 1 still held is not counted).');
+    expect(typicalHoldText({ ...all, stillHeld: 2 })).toBe('Your sales came a median 5 h after the buy (7 sales; fewer than 3 of this item; 2 still held are not counted).');
+  });
+
+  it("words same-minute flips (heldMs 0) as under a minute, never 'a median now'", () => {
+    // Review fix: When keeps minutes, so a buy and its sale recorded in one minute share a ts and hold 0.
+    const row = (id: number, side: 'buy' | 'sell', ts: number): JournalEntry => ({
+      id,
+      side,
+      ts,
+      venue: side === 'buy' ? 'scrap.tf' : 'backpack.tf',
+      sku: '378;6',
+      name: 'Team Captain',
+      keys: 0,
+      scrap: side === 'buy' ? 40 : 50,
+      keyPriceScrap: 568,
+      note: null,
+    });
+    const rows = [1, 2, 3].flatMap((i) => [row(2 * i - 1, 'buy', T0 - i * DAY), row(2 * i, 'sell', T0 - i * DAY)]).concat([row(7, 'buy', T0 - DAY / 2)]);
+    const s = journalSummary(rows);
+    const hold = typicalHoldOf(s.closed, s.open)('378;6')!;
+    expect(hold).toEqual({ medianMs: 0, count: 3, scope: 'item', stillHeld: 1 });
+    expect(typicalHoldText(hold)).toBe('Your sales of this item came a median < 1 min after the buy (3 sales; 1 still held is not counted).');
+    expect(heldForTitle({ heldSince, typicalHold: hold })).toBe(`${oldest}. Your sales of this item came a median < 1 min after the buy (3 sales; 1 still held is not counted).`);
+    expect(typicalHoldText({ ...all, medianMs: 30_000 })).toBe('Your sales came a median < 1 min after the buy (7 sales; fewer than 3 of this item).');
+    expect(typicalHoldText({ ...all, medianMs: 60_000 })).toBe('Your sales came a median 1 min after the buy (7 sales; fewer than 3 of this item).');
+  });
+
+  it('keeps the plain title without a typical hold, and none without a buy date', () => {
+    expect(heldForTitle({ heldSince })).toBe(oldest);
+    expect(heldForTitle({ heldSince: 0, typicalHold: item })).toBeUndefined();
+    // Never a forecast: no "usually", no "will".
+    for (const t of [item, all, { ...item, stillHeld: 3 }]) expect(typicalHoldText(t)).not.toMatch(/usually|will|expect/i);
   });
 });

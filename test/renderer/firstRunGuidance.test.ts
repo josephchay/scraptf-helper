@@ -1,7 +1,8 @@
 // UX-4 (0.7.1): a first run is told the quickest way in first. The setup checklist's "first price" step and
-// the empty Opportunities page lead with "Save scrap.tf/items once to price every item scrap.tf trades"
-// (and, with the opt-in window on, "or browse it in the Flip Desk window"); its button opens the Import
-// page's price-list card, and Quick entry and the price sheet stay as the other ways. The checklist is
+// the empty Opportunities page lead with saving scrap.tf's bank pages (0.7.4, R38: they price each copy;
+// scrap.tf/items adds stock and what scrap.tf pays, and prices only rows that show which copy they are),
+// with the opt-in window on "or browse them in the Flip Desk window"; its buttons open the scrap.tf banks
+// page and the Import page's price-list card, and Quick entry and the price sheet stay as the other ways. The checklist is
 // mounted with react-dom/client into the minimal DOM in domShim.ts against the browser mock (with no
 // price of the user's yet); the empty Opportunities page is checked statically. Nothing leaves the process.
 
@@ -88,15 +89,17 @@ async function mountChecklist(opts: { windowOn?: boolean } = {}) {
 }
 
 describe('the setup checklist (UX-4)', () => {
-  it('leads the first price with one save of scrap.tf/items, typing after it', async () => {
+  it('leads the first price with the bank pages, then scrap.tf/items, typing after them', async () => {
     const t = await mountChecklist();
     expect(t.content()).toContain('Add your first scrap.tf prices');
     expect(t.content()).toContain(`${firstPriceText(false)} Or type a price you see, or add a price-sheet rule for a whole category.`);
     expect(t.content()).not.toContain('Flip Desk window');
     expect(t.content()).toContain(SCRAPTF_BOUNDARY_SHORT);
     const labels = t.buttons().map((b) => b.textContent);
-    expect(labels.slice(labels.indexOf('Save scrap.tf/items'))).toEqual(['Save scrap.tf/items', 'Quick entry', 'Price sheet']);
-    // It opens the Import page, whose price-list card says how.
+    expect(labels.slice(labels.indexOf('scrap.tf bank pages'))).toEqual(['scrap.tf bank pages', 'Save scrap.tf/items', 'Quick entry', 'Price sheet']);
+    // The bank pages first (they price each copy), then the Import page, whose price-list card says how.
+    t.fire(t.buttons().find((b) => b.textContent === 'scrap.tf bank pages')!);
+    expect(t.location.hash).toBe('#/banks');
     t.fire(t.buttons().find((b) => b.textContent === 'Save scrap.tf/items')!);
     expect(t.location.hash).toBe('#/import');
   });
@@ -104,7 +107,20 @@ describe('the setup checklist (UX-4)', () => {
   it('names the Flip Desk window as the other way in while it is on', async () => {
     const t = await mountChecklist({ windowOn: true });
     expect(t.content()).toContain(firstPriceText(true));
-    expect(firstPriceText(true)).toContain('or browse it in the Flip Desk window');
+    expect(firstPriceText(true)).toContain('or browse them in the Flip Desk window');
+  });
+
+  it('never promises that one /items save prices every item (0.7.4, R38: only rows that show their copy)', () => {
+    for (const text of [firstPriceText(false), firstPriceText(true)]) {
+      expect(text).not.toMatch(/price every item|prices every item|every scrap\.tf price/);
+      expect(text).toContain('prices only the rows that show which copy they are');
+    }
+    // Nor does the README's First run and Daily workflow (the older "New in" notes are history).
+    const readme = readFileSync(new URL('../../README.md', import.meta.url), 'utf8');
+    const guide = readme.slice(readme.indexOf('## First run'), readme.indexOf('## New in 0.7.4'));
+    expect(guide.length).toBeGreaterThan(1000);
+    expect(guide).not.toMatch(/prices every item|Sync every scrap\.tf price|whole list reaches every part/);
+    expect(guide).toContain("else your saved scrap.tf list's when its row shows which copy it is");
   });
 });
 
@@ -123,6 +139,6 @@ describe('the empty Opportunities page (UX-4)', () => {
     expect([...order].sort((a, b) => a - b)).toEqual(order);
     expect(empty).toContain('className="btn primary" onClick={() => navigate(\'import\')}');
     expect(empty).toContain('Save scrap.tf/items');
-    expect(FIRST_PRICE_LEAD).toBe('Save scrap.tf/items once to price every item scrap.tf trades');
+    expect(FIRST_PRICE_LEAD).toBe("Save scrap.tf's bank pages to price each copy they sell");
   });
 });

@@ -4,12 +4,16 @@ import { renderToString } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
 import { isValidContactUrl } from '../../src/renderer/format';
 import {
+  BUY_TIMING_NOTIFY_LABEL,
+  buyTimingNotifyHint,
   CHECK_HOTKEY_CONFLICT_ERROR,
   checkHotkeyStatus,
   checkNotifyHint,
   checkWatchHint,
   CONTACT_ERROR,
   daysTextToMs,
+  EXIT_RESERVE_PCT,
+  exitReserveHint,
   HOLDINGS_NOTIFY_LABEL,
   holdingsNotifyHint,
   HOTKEY_HINT_ERROR,
@@ -40,6 +44,8 @@ import {
   validateContactUrl,
   validateHotkey,
   validateQuickEntryHotkey,
+  WATCHES_NOTIFY_LABEL,
+  watchesNotifyHint,
 } from '../../src/renderer/settingsFields';
 import { CHECK_PRIVACY_SENTENCE, CHECK_SAMPLE_TEXT } from '../../src/shared/check';
 import { BANK_STOCK_MAX_NOTIFICATIONS, BANK_STOCK_NOTIFY_DEDUP_MS } from '../../src/shared/bankStock';
@@ -558,7 +564,8 @@ describe('New flips on scrap.tf pages you save (F17): notifications.newOnScraptf
 
   it('is on by default and saves either way, changing only that switch', () => {
     expect(DEFAULT_SETTINGS.notifications.newOnScraptf).toBe(true);
-    expect(NEW_ON_SCRAPTF_NOTIFY_LABEL).toBe('New flips on scrap.tf pages you save');
+    // 0.8 (G2, LC-7): relabelled, as "Cheaper" and "Back on scrap.tf" toasts take the place of ones this switch sent.
+    expect(NEW_ON_SCRAPTF_NOTIFY_LABEL).toBe('New, cheaper or back-in-stock flips on scrap.tf pages you save');
     for (const newOnScraptf of [false, true]) {
       expect(mainAccepts({ notifications: { newOnScraptf } })).toBe(true);
       expect(applySettingsPatch(DEFAULT_SETTINGS, { notifications: { newOnScraptf } }).notifications.newOnScraptf).toBe(newOnScraptf);
@@ -615,5 +622,124 @@ describe('New flips on scrap.tf pages you save (F17): notifications.newOnScraptf
     const on = renderToString(createElement(AppProvider, null, createElement(NotifySection, { s: DEFAULT_SETTINGS }))).replace(/<!-- -->/g, '');
     const onAt = on.indexOf(NEW_ON_SCRAPTF_NOTIFY_LABEL);
     expect(on.slice(on.lastIndexOf('<input', onAt), onAt)).toContain('checked=""');
+  });
+});
+
+describe('0.8 (G1-G4): the scrap.tf watch and Buy now switches (notifications.watches, notifications.buyTiming)', () => {
+  const page = readFileSync(new URL('../../src/renderer/pages/SettingsPage.tsx', import.meta.url), 'utf8');
+  const section = page.slice(page.indexOf('function NotifySection'), page.indexOf('function FeedSection'));
+  const render = (s: Settings) => renderToString(createElement(AppProvider, null, createElement(NotifySection, { s }))).replace(/<!-- -->/g, '');
+  /** The switch's <input> right before `label` in the rendered section. */
+  const inputBefore = (html: string, label: string) => {
+    const at = html.indexOf(label);
+    expect(at).toBeGreaterThan(0);
+    return html.slice(html.lastIndexOf('<input', at), at);
+  };
+
+  it('names the new toasts in the scrap.tf flips description, keeping its pinned sentences', () => {
+    const hint = newOnScraptfNotifyHint({ notificationsOn: true, importKind: true, importOn: true });
+    expect(hint).toContain('"Cheaper on scrap.tf (Hats): <name>"');
+    expect(hint).toContain('"Back on scrap.tf (Hats): <name>"');
+    expect(hint).toContain("then one summary that opens the page's stock");
+    // G4 has its own switch: this description never promises a "Buy now".
+    expect(hint).not.toMatch(/Buy now/);
+  });
+
+  it('describes watch toasts from the user\'s own reads and saves, and says first what keeps them silent', () => {
+    expect(WATCHES_NOTIFY_LABEL).toBe('Your scrap.tf watches');
+    expect(DEFAULT_SETTINGS.notifications.watches).toBe(true);
+    const base = watchesNotifyHint({ notificationsOn: true, importOn: true });
+    expect(base).toContain('"Watch (Hats): <name>"');
+    expect(base).toContain('"Back on scrap.tf (Hats): <name>"');
+    expect(base).toContain('Watch on scrap.tf… in an item\'s menu or its details');
+    expect(base).toContain('Told on the read that shows it, not again for the same price.');
+    // Review fix: the engine titles that toast "Watch: <name>" (engine.ts notificationTitle), so the hint says so.
+    expect(base).toContain('one that reaches it is told as "Watch: <name>" in place of "Profit: <name>"');
+    expect(base).not.toContain('bar for its "Profit:" toast');
+    expect(base).toContain(`At most ${BANK_STOCK_MAX_NOTIFICATIONS} per save with the other scrap.tf toasts, then one summary.`);
+    expect(base).toMatch(/Flip Desk never loads scrap\.tf on its own\.$/);
+    expect(watchesNotifyHint({ notificationsOn: false, importOn: true })).toBe(`Desktop notifications are off, so this shows nothing yet. ${base}`);
+    expect(watchesNotifyHint({ notificationsOn: true, importOn: false })).toBe(`Saved-page import is off (Import), so this shows nothing yet. ${base}`);
+    expect(watchesNotifyHint({ notificationsOn: false, importOn: false })).toBe(`Desktop notifications are off and saved-page import is off (Import), so this shows nothing yet. ${base}`);
+  });
+
+  it('keeps "Buy now" off by default, worded as an estimate from the saves, never a forecast', () => {
+    expect(BUY_TIMING_NOTIFY_LABEL).toBe('Buy now after Wait (estimate from your saves)');
+    expect(DEFAULT_SETTINGS.notifications.buyTiming).toBe(false);
+    const on = { notificationsOn: true, newOnScraptfOn: true, importKind: true, importOn: true };
+    const base = buyTimingNotifyHint(on);
+    expect(base).toContain('"Buy now (Hats): <name>"');
+    expect(base).toContain('after a drop showed or the wait\'s time ran out');
+    expect(base).toContain('An estimate from your own saves, never a forecast; off by default.');
+    expect(base).toContain('Needs the scrap.tf flips toggle above.');
+    expect(base).toMatch(/Flip Desk never loads scrap\.tf on its own\.$/);
+    expect(buyTimingNotifyHint({ ...on, notificationsOn: false })).toBe(`Desktop notifications are off, so this shows nothing yet. ${base}`);
+    expect(buyTimingNotifyHint({ ...on, newOnScraptfOn: false })).toBe(`The scrap.tf flips toggle above is off, so this shows nothing yet. ${base}`);
+    // The service's `flips` also needs "Imported pages" under Notify for, and the import itself: each is named.
+    expect(buyTimingNotifyHint({ ...on, importKind: false })).toBe(`"Imported pages" is not ticked under Notify for, so this shows nothing yet. ${base}`);
+    expect(buyTimingNotifyHint({ ...on, importOn: false })).toBe(`Saved-page import is off (Import), so this shows nothing yet. ${base}`);
+    for (const buyTiming of [false, true]) expect(applySettingsPatch(DEFAULT_SETTINGS, { notifications: { buyTiming } }).notifications.buyTiming).toBe(buyTiming);
+  });
+
+  it('puts both switches after the scrap.tf flips switch and before Silent, each wired to its own key', () => {
+    expect(section).toContain(
+      "<Toggle checked={n.watches} onChange={(watches) => void set({ watches })} label={WATCHES_NOTIFY_LABEL} description={watchesNotifyHint({ notificationsOn: n.enabled, importOn: s.import.enabled && s.import.acknowledgedAt !== null })} />",
+    );
+    expect(section).toContain(
+      "<Toggle checked={n.buyTiming} onChange={(buyTiming) => void set({ buyTiming })} label={BUY_TIMING_NOTIFY_LABEL} description={buyTimingNotifyHint({ notificationsOn: n.enabled, newOnScraptfOn: n.newOnScraptf, importKind: kinds.includes('import'), importOn: s.import.enabled && s.import.acknowledgedAt !== null })} />",
+    );
+    expect(section.indexOf('label={NEW_ON_SCRAPTF_NOTIFY_LABEL}')).toBeLessThan(section.indexOf('n.watches'));
+    expect(section.indexOf('n.watches')).toBeLessThan(section.indexOf('n.buyTiming'));
+    expect(section.indexOf('n.buyTiming')).toBeLessThan(section.indexOf('n.silent'));
+  });
+
+  it('renders both as switches: watches on and Buy now off by default', () => {
+    const html = render(DEFAULT_SETTINGS);
+    const watches = inputBefore(html, WATCHES_NOTIFY_LABEL);
+    expect(watches).toContain('role="switch"');
+    expect(watches).toContain('checked=""');
+    const timing = inputBefore(html, BUY_TIMING_NOTIFY_LABEL);
+    expect(timing).toContain('role="switch"');
+    expect(timing).not.toContain('checked=""');
+    const on = render({ ...DEFAULT_SETTINGS, notifications: { ...DEFAULT_SETTINGS.notifications, buyTiming: true, watches: false } });
+    expect(inputBefore(on, BUY_TIMING_NOTIFY_LABEL)).toContain('checked=""');
+    expect(inputBefore(on, WATCHES_NOTIFY_LABEL)).not.toContain('checked=""');
+  });
+});
+
+describe('0.8 (PC-1): the price-move reserve field (profit.exitReservePct)', () => {
+  it('accepts 0 to 50 % locally, as the schema accepts 0 to 0.5', () => {
+    const v = numberValidator(EXIT_RESERVE_PCT.min, EXIT_RESERVE_PCT.max);
+    expect(v('50')).toBeNull();
+    expect(v('0')).toBeNull();
+    expect(v('2.5')).toBeNull();
+    expect(v('50.1')).toBe('Between 0 and 50.');
+    expect(v('-1')).not.toBeNull();
+    expect(v('')).toBe('Enter a number.');
+    // Every value the field accepts is one main accepts, and the field reads the stored ratio back.
+    expect(mainAccepts({ profit: { exitReservePct: pctTextToRatio(String(EXIT_RESERVE_PCT.max)) } })).toBe(true);
+    expect(mainAccepts({ profit: { exitReservePct: pctTextToRatio(String(EXIT_RESERVE_PCT.min)) } })).toBe(true);
+    expect(mainAccepts({ profit: { exitReservePct: 0.501 } })).toBe(false);
+    expect(ratioToPctText(DEFAULT_SETTINGS.profit.exitReservePct)).toBe('0');
+    expect(ratioToPctText(0.05)).toBe('5');
+  });
+
+  it('says it is off at 0, and that the allowance is the user\'s own, never measured', () => {
+    expect(exitReserveHint(0).startsWith('Off.')).toBe(true);
+    expect(exitReserveHint(0.05).startsWith('Off.')).toBe(false);
+    for (const hint of [exitReserveHint(0), exitReserveHint(0.05)]) {
+      expect(hint).toContain('Your own allowance: Flip Desk does not measure price swings.');
+      expect(hint).toContain('A sale into a live buy order');
+    }
+  });
+
+  it('sits in the Profit thresholds grid right after Friction per trade', () => {
+    const page = readFileSync(new URL('../../src/renderer/pages/SettingsPage.tsx', import.meta.url), 'utf8');
+    const friction = page.indexOf('htmlFor="p-friction"');
+    const reserve = page.indexOf('htmlFor="p-reserve"');
+    expect(friction).toBeGreaterThan(0);
+    expect(reserve).toBeGreaterThan(friction);
+    expect(reserve).toBeLessThan(page.indexOf('htmlFor="p-om"'));
+    expect(page).toContain('hint={exitReserveHint(p.exitReservePct)}');
   });
 });
