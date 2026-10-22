@@ -513,6 +513,101 @@ CREATE INDEX IF NOT EXISTS holding_marks_base_from ON holding_marks(base_sku, fr
 CREATE INDEX IF NOT EXISTS holding_marks_to_at ON holding_marks(to_at);
 `;
 
+// 0.9.0: the release's one migration (nullable columns, new tables and indexes only; no row is read or rewritten).
+// Exits (#11): backpack.tf's impersonation flag on a listing. Ranking (#3): risk-aware keys per opportunity. History
+// (#6, #7): buy-order persistence spells, recorded community prices and scrap.tf lows. scrap.tf (#13): a bank page's
+// own notice and a card's price-drop wording. A 0.8 build refuses a V16 database (SchemaVersionError), as for every
+// migration.
+const V16_ROUND_090 = `
+-- 0.9 (exits, #11): backpack.tf's impersonation flag on a listing's user (user.flagImpersonated on the live feed),
+-- treated like a ban: the order or listing is shown, flagged 'impersonator' and never used as an exit or an ask.
+-- NULL: not flagged or not known (every row stored before V16, and snapshot rows, which carry no user object);
+-- 1: flagged. Nullable with no default, so no row is read or rewritten. Retention: the listings table's own (a row goes
+-- when the feed deletes it, it turns inactive, or the book prunes it); nothing new is kept.
+ALTER TABLE listings ADD COLUMN user_impersonated INTEGER;
+
+-- 0.9 (#3, ranking): risk-aware ranking keys per opportunity, written by the engine (exitRiskAt over the row's own
+-- priced book). backup_profit_scrap: flipProfit at the best other buyer seen in the last 24 h ("profit if this buyer
+-- leaves"); NULL: none. profitable_depth: distinct buyers seen in the last 24 h at or above break-even at the row's cost
+-- (at most 20). book_depth: distinct buyers seen in the last 24 h at any price (the book-depth tag). All three are NULL
+-- on every row stored before V16 until the engine's first full sweep rewrites it (materiallyEqual sees the new fields),
+-- as V2's max_cost_scrap was. No row is read or rewritten here. No retention of their own: the rows follow the
+-- opportunities table.
+ALTER TABLE opportunities ADD COLUMN backup_profit_scrap INTEGER;
+ALTER TABLE opportunities ADD COLUMN profitable_depth INTEGER;
+ALTER TABLE opportunities ADD COLUMN book_depth INTEGER;
+
+-- 0.9 (history, RESEARCH #6): buy-order persistence. One row per spell: one buy order at one price, followed from the
+-- live feed while it ran, for watched, held and scrap.tf-priced items' top orders (orderSpellFollows). No SteamID,
+-- listing id or name is stored: the tracker keeps the listing id in memory only. listed_at is backpack.tf's listedAt
+-- (Unix s) on the update that opened the spell; first_seen_at / last_seen_at / end_at are Unix ms. end_kind NULL: still
+-- followed (read as censored at last_seen_at); 'deleted' | 'inactive' | 'lowered' (ends) | 'raised' | 'relisted' |
+-- 'unwatched' (censored). last_seen_at of an ended spell is when it ended. Retention (ended spells only: 60 days, 300
+-- per base, 400,000 in all) is Repo.pruneOrderSpells. Every cut (age, caps, the read's limit) selects by first_seen_at,
+-- the spell's entry, never by when it ended: a cut on the end keeps long spells and drops their short siblings, which
+-- biases the Kaplan-Meier estimate up (review 0.9).
+CREATE TABLE IF NOT EXISTS order_spells (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  base_sku      TEXT NOT NULL,
+  intent        TEXT NOT NULL,
+  is_bot        INTEGER NOT NULL DEFAULT 0,
+  keys          REAL NOT NULL DEFAULT 0,
+  metal_scrap   INTEGER NOT NULL DEFAULT 0,
+  listed_at     INTEGER,
+  first_seen_at INTEGER NOT NULL,
+  last_seen_at  INTEGER NOT NULL,
+  end_at        INTEGER,
+  end_kind      TEXT
+);
+CREATE INDEX IF NOT EXISTS order_spells_base_first ON order_spells(base_sku, first_seen_at);
+CREATE INDEX IF NOT EXISTS order_spells_first_seen ON order_spells(first_seen_at);
+CREATE INDEX IF NOT EXISTS order_spells_open ON order_spells(id) WHERE end_kind IS NULL;
+
+-- 0.9 (history, RESEARCH #7): backpack.tf community prices kept as history: the IGetPrices rows an answer replaced and
+-- the rows that replaced them (source 'prices'), and the live feed's item.price.community of watched, held and priced
+-- items when it changed (source 'feed'). bptf_community is still overwritten as before; nothing here is a reference.
+-- One row per distinct price per SKU and source (the unique expression index; NULLs folded, V10 precedent).
+-- Retention (365 days by recorded_at, 200 per SKU, 300,000 in all) is Repo.pruneCommunityHistory.
+CREATE TABLE IF NOT EXISTS bptf_community_history (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  sku         TEXT NOT NULL,
+  source      TEXT NOT NULL,
+  currency    TEXT NOT NULL,
+  value       REAL NOT NULL,
+  value_high  REAL,
+  last_update INTEGER,
+  recorded_at INTEGER NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS bptf_community_history_point
+  ON bptf_community_history(sku, source, currency, value, IFNULL(value_high, -1), IFNULL(last_update, -1));
+CREATE INDEX IF NOT EXISTS bptf_community_history_recorded ON bptf_community_history(recorded_at);
+
+-- 0.9 (history): the lowest price on sale each scrap.tf copy showed in the user's saves (R10), per bank, written at
+-- import from 0.9 on (ScraptfHistory.recordLows): raw keys + metal, the first and last save at that price, the first
+-- sighting it covers and the newest (retention: 365 days after seen_at, Repo.pruneScraptfLows). Times are Unix ms.
+CREATE TABLE IF NOT EXISTS scraptf_lows (
+  bank        TEXT NOT NULL,
+  sku         TEXT NOT NULL,
+  special_key TEXT NOT NULL DEFAULT '',
+  low_keys    REAL NOT NULL DEFAULT 0,
+  low_scrap   INTEGER NOT NULL,
+  first_at    INTEGER NOT NULL,
+  last_at     INTEGER NOT NULL,
+  since_at    INTEGER NOT NULL,
+  seen_at     INTEGER NOT NULL,
+  PRIMARY KEY (bank, sku, special_key)
+);
+CREATE INDEX IF NOT EXISTS scraptf_lows_seen ON scraptf_lows(seen_at);
+
+-- 0.9 (scrap.tf #13): what a recognised bank page's own text said about its bank when it was saved or read
+-- ('unavailable': a notice such as "Hat Banking is temporarily disabled"); NULL: nothing seen (every batch before V16).
+-- Such a look stored no bank stock save. Kept with its batch (import_batches is never purged).
+ALTER TABLE import_batches ADD COLUMN bank_notice TEXT;
+-- 0.9 (scrap.tf #13): a bank page card's own price-drop wording on this save ('soon', 'off', or 'off soon'); NULL: none
+-- seen (every row before V16, every /items row). Pruned with its save (Repo.pruneBankStock).
+ALTER TABLE bank_stock ADD COLUMN markdown TEXT;
+`;
+
 export const MIGRATIONS: readonly Migration[] = Object.freeze([
   { version: 1, name: 'initial schema', sql: V1_INITIAL },
   { version: 2, name: 'opportunity pay-up-to ceiling', sql: V2_MAX_COST },
@@ -529,6 +624,7 @@ export const MIGRATIONS: readonly Migration[] = Object.freeze([
   { version: 13, name: 'killstreaks looks left with no prices and no bank stock save count no items', sql: V13_BARE_KIT_LOOKS },
   { version: 14, name: 'remove scrap.tf/items list data stored without its craftability', sql: V14_LIST_FAMILY_ROWS },
   { version: 15, name: 'journal fees, scrap.tf watches and recorded exit runs', sql: V15_ROUND_080 },
+  { version: 16, name: 'impersonators, ranking keys, order persistence, community history, scrap.tf lows and notices', sql: V16_ROUND_090 },
 ]);
 
 export const SCHEMA_VERSION: number = MIGRATIONS.reduce((max, m) => Math.max(max, m.version), 0);

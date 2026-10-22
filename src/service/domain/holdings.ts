@@ -13,6 +13,10 @@
 // references, the last snapshot and Sell now / List and wait / Hold / No clear signal advice over the exit
 // runs recorded while the live feed was up (holdingMarks.ts). All of it is read from local data already
 // stored; the runs are written from what a check computed, never from a request of their own.
+//
+// 0.9 (#1, #17): with the 7-day trade lock the user set, rows carry their locked units (Locked advice, left out of
+// Sellable now, no "Sell:" until the unit unlocks); the key-exposure reason quotes the key's 7-day move band from the
+// PriceDB key history already in memory (deps.keyHistory; reading it sends nothing).
 
 import { z } from 'zod';
 import { unverifiedRevenue } from '../../shared/buyerSeen';
@@ -28,10 +32,14 @@ import {
   holdingExitHistory,
   holdingMarkSettingsKey,
   holdingMarkValuesOf,
+  keyMoveBandOf,
+  tradeLockModeOf,
+  withTradeLock,
 } from '../../shared/holdingAdvice';
 import {
   HOLDINGS_CSV_COLUMNS,
   askSideOf,
+  holdingLockedNow,
   holdingRefsOf,
   holdingRow,
   holdingsCsvCells,
@@ -58,8 +66,10 @@ import type {
   HoldingsResult,
   JournalClosedTrade,
   JournalPosition,
+  KeyMoveBand,
   KeyPriceState,
   Listing,
+  LoadedKeyHistory,
   Scrap,
   ScraptfListRow,
   Settings,
@@ -115,7 +125,7 @@ export interface Holdings {
   onBasesChanged(bases: ReadonlySet<string>): void;
   /** A journal row was added or deleted (core's ctx.journalChanged). */
   journalChanged(): void;
-  /** settings.profit / notifications / blocklist / ownSteamIds changed, or the key price moved by 1 scrap or more. */
+  /** settings.profit / notifications / blocklist / ownSteamIds or (0.9) tradeLock.mode changed, or the key price moved by 1 scrap or more. */
   settingsChanged(): void;
   /** Base SKUs (paint removed, currencies excluded) of every open lot; core adds them to watchedSet(). */
   heldBases(): Set<string>;
@@ -124,6 +134,8 @@ export interface Holdings {
    * closed trades, typical hold and the base's recorded runs; local reads only, and a failed read gives empty parts.
    */
   detail(sku: string, now: UnixMs): HoldingDetail;
+  /** 0.9 (#12): when the buyer settings last changed (markSettingsAt), for the reserve suggestion's recorded windows; null when none is known or the settings cannot be read. */
+  buyerSettingsAt?(now: UnixMs): UnixMs | null;
   /** 0.8 (H1, D10): the watched bases changed: they are recorded from the next run. */
   markBasesChanged(): void;
   start(): void;
@@ -151,6 +163,8 @@ export interface HoldingsDeps extends ServiceDeps {
   feedLiveSince?(): UnixMs | null;
   /** 0.8 (H1, G1): base SKUs watched on scrap.tf (the alerts package wires watchCache.bases(), D10), recorded like held ones. Omitted: held bases only. */
   markBases?(): ReadonlySet<string>;
+  /** 0.9 (#17): PriceDB key history already loaded (core: pricedb.loadedKeyHistory). Omitted: no key move band. */
+  keyHistory?(): LoadedKeyHistory | null;
   /** Injected in tests; defaults to unref'd real timers. */
   timers?: TimerApi;
 }
@@ -263,7 +277,8 @@ export function createHoldings(deps: HoldingsDeps): Holdings {
   /**
    * F14: base -> when its 'sell' through scrap.tf ends (its list row turns a day old). Nothing else
    * re-checks an item only scrap.tf buys, so without this the next day's save would find it still
-   * marked in 'sell' and never tell it again; with it, re-entering 'sell' is told like any other.
+   * marked in 'sell' and never tell it again; with it, re-entering 'sell' is told like any other. Or (0.9, #1) when
+   * its next unit's trade lock ends: nothing else re-checks a locked 'sell' row the moment it becomes sellable.
    */
   const listExpiry = new Map<string, number>();
   let expiryTimer: unknown = null;
@@ -286,6 +301,8 @@ export function createHoldings(deps: HoldingsDeps): Holdings {
   let historyFailing = false;
   /** 0.8 (H6): HOLDINGS_MARK_SETTINGS_META_KEY as read or last written; null until first needed. */
   let markSettings: { key: string; at: UnixMs | null } | null = null;
+  /** 0.9 (#17): the key move band of the key history last read, recomputed only when that history changed. */
+  let bandMemo: { loadedAt: UnixMs; n: number; band: KeyMoveBand | null } | null = null;
 
   // ----- reads -----
 
@@ -313,6 +330,32 @@ export function createHoldings(deps: HoldingsDeps): Holdings {
     } catch {
       return null;
     }
+  }
+
+  /**
+   * 0.9 (#17): the key's 7-day move band (keyMoveBandOf) over the PriceDB key history already in memory; null without
+   * the dep, without loaded history or below its span minimum. Reading it sends nothing, and a failed read never takes
+   * the rows down. Memoised on the history's load time and length.
+   */
+  function keyBandNow(): KeyMoveBand | null {
+    if (!deps.keyHistory) return null;
+    let h: LoadedKeyHistory | null;
+    try {
+      h = deps.keyHistory();
+    } catch (err) {
+      log.warn('Holdings could not read the key history', { error: String(err) });
+      return null;
+    }
+    if (!h || !Array.isArray(h.points) || !finite(h.loadedAt)) return null;
+    if (bandMemo && bandMemo.loadedAt === h.loadedAt && bandMemo.n === h.points.length) return bandMemo.band;
+    let band: KeyMoveBand | null = null;
+    try {
+      band = keyMoveBandOf(h.points, h.loadedAt);
+    } catch (err) {
+      log.warn('Holdings could not read the key history', { error: String(err) });
+    }
+    bandMemo = { loadedAt: h.loadedAt, n: h.points.length, band };
+    return band;
   }
 
   /** 0.8 (H1, D10): the watched bases recorded beside the held ones; none without the dep. */
@@ -629,6 +672,9 @@ export function createHoldings(deps: HoldingsDeps): Holdings {
     const own: ReadonlySet<string> = new Set(settings.ownSteamIds ?? []);
     // 0.8 (H6): runs recorded before the buyer settings last changed priced other buyers; the advice leaves them out.
     const settingsAt = markSettingsAt(settings, now);
+    // 0.9 (#1): the trade lock the user set (only '7d' marks rows); (#17) the key band from history already loaded.
+    const lockMode = tradeLockModeOf(settings);
+    const keyBand = keyBandNow();
     // Lots at the key price the revenue is valued at, so profit is what the journal will book (lotCostAt);
     // the saved scrap.tf list row at that same price is the other exit (F14, judged at `now`).
     return list.map((h) => {
@@ -636,23 +682,28 @@ export function createHoldings(deps: HoldingsDeps): Holdings {
         h.base === null
           ? { ask: null, refs: null, snapshotAt: null }
           : { ask: askFor(h.base, paintOf(h.pos.sku), match, Kv, now, own), refs: refsFor(h.base, Kv, settings, now), snapshotAt: snapshotAtOf(h.base) };
-      const row = withTypicalHold(
-        holdingRow(
-          named(h.pos),
-          categoryOf(h),
-          h.base !== null ? (sides.get(h.base) ?? null) : null,
-          settings.profit,
-          K,
-          { list: h.base !== null ? listRowOf(h.base, K) : null, now },
-          extras,
+      const row = withTradeLock(
+        withTypicalHold(
+          holdingRow(
+            named(h.pos),
+            categoryOf(h),
+            h.base !== null ? (sides.get(h.base) ?? null) : null,
+            settings.profit,
+            K,
+            { list: h.base !== null ? listRowOf(h.base, K) : null, now },
+            extras,
+          ),
+          hold,
         ),
-        hold,
+        h.pos.lots,
+        lockMode,
+        now,
       );
       // 0.8 (H6): after withTypicalHold, so the advice can read the typical hold. A currency (no base) has no book to
-      // refresh and records no runs, so its advice says neither.
+      // refresh and records no runs, so its advice says neither. 0.9: after withTradeLock, so the advice reads the lock.
       if (h.base === null) return attachHoldingAdvice(row, null, settings.profit, K, now, { book: false });
       const history = holdingExitHistory(historyFor(h.base, row.heldSince, now), row.heldSince, K, now, settingsAt);
-      return attachHoldingAdvice(row, history, settings.profit, K, now);
+      return attachHoldingAdvice(row, history, settings.profit, K, now, { keyBand });
     });
   }
 
@@ -746,6 +797,9 @@ export function createHoldings(deps: HoldingsDeps): Holdings {
    * list's fresh, not-full price clears the thresholds on its own (scraptfAlternative).
    * 0.8 (H1): what the check saw is recorded as exit runs (recordMarks), watched bases in scope included, even
    * when nothing in scope is held; the notifications are unchanged.
+   * 0.9 (#1): with a 7-day trade lock (Settings.tradeLock.mode '7d'), a row whose next unit is still locked
+   * (holdingLockedNow) is not in 'sell' for the notifications: it is told once it unlocks, when trackListExpiry's timer
+   * re-checks it.
    */
   function check(scope: ReadonlySet<string> | null): void {
     const now = clock.now();
@@ -773,7 +827,8 @@ export function createHoldings(deps: HoldingsDeps): Holdings {
     const last = on ? loadNotified() : null;
     const due: HoldingRow[] = [];
     for (const r of rows) {
-      if (r.status !== 'sell' || !finite(r.profitNowScrap)) {
+      // 0.9 (#1): a unit inside the 7-day trade lock the user set cannot be sold yet: no "Sell:" until it unlocks (trackListExpiry re-checks then).
+      if (r.status !== 'sell' || !finite(r.profitNowScrap) || holdingLockedNow(r)) {
         state.set(r.sku, { inSell: false, baseline: null });
         continue;
       }
@@ -830,17 +885,25 @@ export function createHoldings(deps: HoldingsDeps): Holdings {
     timer = timers.setTimeout(run, HOLDINGS_CHECK_MS);
   }
 
-  /** Records when each checked row's 'sell' through scrap.tf goes stale (rows are in `list` order). */
+  /**
+   * Records when each checked row's 'sell' through scrap.tf goes stale, or (0.9, #1) when a 'sell' row's next unit
+   * leaves the 7-day trade lock (rows are in `list` order); the earliest per base re-checks it.
+   */
   function trackListExpiry(list: readonly Held[], rows: readonly HoldingRow[]): void {
     // Every copy of a base is in the same check, so its old time can go before the new one is set.
     for (const h of list) if (h.base !== null) listExpiry.delete(h.base);
     rows.forEach((r, i) => {
       const base = list[i]?.base ?? null;
-      if (base === null || r.status !== 'sell' || r.bestExit !== 'scraptf' || !finite(r.scraptfListAt)) return;
+      if (base === null) return;
+      const ats: number[] = [];
       // scraptfListFresh: stale once now - observedAt > SCRAPTF_LIST_FRESH_MS.
-      const at = r.scraptfListAt + SCRAPTF_LIST_FRESH_MS + 1;
-      const prev = listExpiry.get(base);
-      listExpiry.set(base, prev === undefined ? at : Math.min(prev, at));
+      if (r.status === 'sell' && r.bestExit === 'scraptf' && finite(r.scraptfListAt)) ats.push(r.scraptfListAt + SCRAPTF_LIST_FRESH_MS + 1);
+      // 0.9 (#1): locked while tradableAt > now, so the re-check comes 1 ms after.
+      if (r.status === 'sell' && holdingLockedNow(r)) ats.push(r.tradeLock!.nextLotTradableAt! + 1);
+      for (const at of ats) {
+        const prev = listExpiry.get(base);
+        listExpiry.set(base, prev === undefined ? at : Math.min(prev, at));
+      }
     });
     armExpiry();
   }
@@ -994,6 +1057,9 @@ export function createHoldings(deps: HoldingsDeps): Holdings {
       pendingMarks = true;
       arm();
     },
+
+    // 0.9 (#12): the stamp the advice reads, for 'profit.reserveSuggestion' (no recorded window is read from before it).
+    buyerSettingsAt: (now) => detailSettingsAt(now),
 
     detail(sku, now) {
       const K = keyScrapNow();

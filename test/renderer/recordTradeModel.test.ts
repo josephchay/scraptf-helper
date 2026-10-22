@@ -142,7 +142,8 @@ describe('prefill', () => {
   });
 
   it('suggests the spec venues and asks item.detail for a local, plain read', () => {
-    expect(VENUE_SUGGESTIONS).toEqual(['scrap.tf', 'backpack.tf', 'marketplace.tf', 'Steam Community Market', 'Direct trade', 'other']);
+    // 0.9 (#2): mannco.store joins the journal venues.
+    expect(VENUE_SUGGESTIONS).toEqual(['scrap.tf', 'backpack.tf', 'marketplace.tf', 'mannco.store', 'Steam Community Market', 'Direct trade', 'other']);
     expect(detailParams('5021;6')).toEqual({ sku: '5021;6', history: false, target: 'plain' });
   });
 });

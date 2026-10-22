@@ -24,7 +24,7 @@ import {
 } from '../shared/check';
 import type { PricedbSides } from '../shared/ceiling';
 import { usableReferences } from './mockData';
-import { buyerDepthOf, exitCostsOf, exitOrdersOfSummaries, flipProfit, maxCostFor, profitStatus, singleExitOf } from '../shared/ceiling';
+import { breakEvensOf, buyerDepthOf, exitCostsOf, exitOrdersOfSummaries, flipProfit, maxCostFor, profitStatus, singleExitOf } from '../shared/ceiling';
 import { parsePrice, refToScrap, valueScrap, type ParsedPrice } from '../shared/currency';
 import { scraptfListCraftProven } from '../shared/scraptfList';
 import { baseSku, fromString, isValidSku } from '../shared/sku';
@@ -310,6 +310,8 @@ export function mockCheckResult(a: {
   const status = price ? profitStatus(profitScrap, price.valueScrap, a.settings.profit) : null;
   // 0.8 (PC-1): what the profit took off, for the popup's breakdown (as the service).
   const exitCosts = rev !== null ? exitCostsOf(rev, a.settings.profit) : null;
+  // 0.9 (#2): the lowest sale price that loses nothing at this price, per exit (as the service).
+  const breakEven = price ? breakEvensOf(price.valueScrap, a.settings.profit, 'buy') : null;
   const verdict = price === null ? 'no-price' : status === 'no-buyers' ? 'no-buyers' : status === 'profitable' ? 'flip' : 'over';
   // 0.8 (PC-2): as the service, a flip only the revenue order's buyer makes, over the detail's own book.
   const singleExit =
@@ -356,6 +358,7 @@ export function mockCheckResult(a: {
     keyScrap,
     checkedAt: now,
     exitCosts,
+    ...(breakEven ? { breakEven } : {}),
     ...(singleExit ? { singleExit } : {}),
   };
 }
@@ -483,6 +486,8 @@ export function mockCheckDemo(kind: CheckDemo, now: UnixMs, keyScrap: Scrap, set
       confidence: 74,
       confidenceLevel: 'high',
       exitCosts: exitCostsOf(revenue.revenueScrap, settings.profit),
+      // 0.9 (#2): as the service, every result with a price carries its break-even.
+      breakEven: breakEvensOf(cost, settings.profit, 'buy')!,
     };
   }
   if (kind === 'over') {
@@ -508,6 +513,7 @@ export function mockCheckDemo(kind: CheckDemo, now: UnixMs, keyScrap: Scrap, set
       confidence: 51,
       confidenceLevel: 'medium',
       exitCosts: exitCostsOf(revenue.revenueScrap, settings.profit),
+      breakEven: breakEvensOf(cost, settings.profit, 'buy')!,
     };
   }
   const revenue = demoRevenue(refToScrap(1.66), keyScrap, now, settings, 4, true);

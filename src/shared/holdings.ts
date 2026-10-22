@@ -18,7 +18,9 @@ import type {
   HoldingStatus,
   HoldingsQuery,
   HoldingsResult,
+  HoldingsValuation,
   JournalLot,
+  JournalLotValue,
   JournalPosition,
   KeyPriceState,
   NextBuyer,
@@ -29,6 +31,7 @@ import type {
   ScraptfListRow,
   UnixMs,
 } from './types';
+import type { JournalLotValuer } from './journal';
 
 function finite(v: unknown): v is number {
   return typeof v === 'number' && Number.isFinite(v);
@@ -210,7 +213,7 @@ export interface AskCandidate {
   valueScrap: Scrap;
   isBot: boolean;
   lastEventAt: UnixMs;
-  /** marketplace.tf, banned or blocklisted: never counted. */
+  /** marketplace.tf, banned, flagged as an impersonator or blocklisted: never counted. */
   excluded: boolean;
 }
 
@@ -305,9 +308,17 @@ export function holdingsMatching(rows: readonly HoldingRow[], q: HoldingsQuery):
   return rows.filter((r) => holdingMatches(r, tokens)).sort(holdingComparator);
 }
 
-/** See HoldingsResult.totals: rows without an exit add to items, units and cost only. */
+/** 0.9 (#1): the row's next unit was inside the trade lock at the read (tradeLock.nextLotTradableAt set). */
+export function holdingLockedNow(r: Partial<Pick<HoldingRow, 'tradeLock'>>): boolean {
+  return typeof r.tradeLock?.nextLotTradableAt === 'number' && Number.isFinite(r.tradeLock.nextLotTradableAt);
+}
+
+/**
+ * See HoldingsResult.totals: rows without an exit add to items, units and cost only. 0.9 (#1): a row whose next unit is
+ * still inside the 7-day trade lock (holdingLockedNow) is not sellable now and counts in `locked` (absent at 0).
+ */
 export function holdingsTotals(rows: readonly HoldingRow[]): HoldingsResult['totals'] {
-  const t = { items: 0, units: 0, costScrap: 0, worthNowScrap: 0, profitNowScrap: 0, sellable: 0 };
+  const t: HoldingsResult['totals'] = { items: 0, units: 0, costScrap: 0, worthNowScrap: 0, profitNowScrap: 0, sellable: 0 };
   for (const r of rows) {
     t.items++;
     t.units += r.qty;
@@ -316,7 +327,10 @@ export function holdingsTotals(rows: readonly HoldingRow[]): HoldingsResult['tot
     const exit = finite(r.exitScrap) ? r.exitScrap : r.revenueScrap;
     if (finite(exit)) t.worthNowScrap += exit * r.qty;
     if (finite(r.profitAllScrap)) t.profitNowScrap += r.profitAllScrap;
-    if (r.status === 'sell') t.sellable++;
+    // 0.9 (#1): with a 7-day trade lock, an item whose next unit is still locked cannot be sold now.
+    const locked = holdingLockedNow(r);
+    if (locked) t.locked = (t.locked ?? 0) + 1;
+    if (r.status === 'sell' && !locked) t.sellable++;
   }
   return t;
 }
@@ -324,6 +338,70 @@ export function holdingsTotals(rows: readonly HoldingRow[]): HoldingsResult['tot
 /** 'holdings.list': the matching rows in order, totals over every row. */
 export function holdingsResult(rows: readonly HoldingRow[], q: HoldingsQuery, keyPrice: KeyPriceState | null, now: UnixMs): HoldingsResult {
   return { rows: holdingsMatching(rows, q), totals: holdingsTotals(rows), keyPrice, generatedAt: now };
+}
+
+// ---------------------------------------------------------------------------
+// 0.9: the valuation of everything held, for the Journal's card and the ledger CSV
+// ---------------------------------------------------------------------------
+
+/** A row's per-unit exit as Worth now counts it (holdingsTotals' rule): exitScrap, else revenueScrap; null without either. */
+function rowExitOf(r: Pick<HoldingRow, 'exitScrap' | 'revenueScrap'>): Scrap | null {
+  return finite(r.exitScrap) ? r.exitScrap : finite(r.revenueScrap) ? r.revenueScrap : null;
+}
+
+/**
+ * 0.9: Holdings' valuation of everything held as of one read, for the Journal's card and the ledger CSV. `res` must be an
+ * unfiltered read (holdings.list {}), so every held SKU has its exit; the totals are over everything either way. Per
+ * row, the exit is holdingsTotals' (exitScrap, else revenueScrap); a row with neither is unpriced. keyScrap is
+ * keyPrice.valueScrap when finite and > 0, else null; lockedItems is totals.locked ?? 0. Unrealised: nothing is booked.
+ */
+export function holdingsValuationOf(res: Pick<HoldingsResult, 'rows' | 'totals' | 'keyPrice' | 'generatedAt'>): HoldingsValuation {
+  const rows = Array.isArray(res?.rows) ? res.rows : [];
+  const exits: [string, Scrap | null][] = [];
+  let unpricedItems = 0;
+  let unpricedUnits = 0;
+  for (const r of rows) {
+    if (!r || typeof r.sku !== 'string') continue;
+    const exit = rowExitOf(r);
+    exits.push([r.sku, exit]);
+    if (exit === null) {
+      unpricedItems++;
+      unpricedUnits += finite(r.qty) ? r.qty : 0;
+    }
+  }
+  const kv = res?.keyPrice?.valueScrap;
+  const t = res.totals;
+  return {
+    at: res.generatedAt,
+    keyScrap: finite(kv) && kv > 0 ? kv : null,
+    worthNowScrap: t.worthNowScrap,
+    profitNowScrap: t.profitNowScrap,
+    costScrap: t.costScrap,
+    items: t.items,
+    units: t.units,
+    unpricedItems,
+    unpricedUnits,
+    lockedItems: finite(t.locked) ? t.locked : 0,
+    exitBySku: Object.fromEntries(exits),
+  };
+}
+
+/**
+ * 0.9: one open lot at its SKU's exit as of `v`: worth = that exit; unrealised = holdingFigures(exit, qty 1, the lot's cost
+ * at v.keyScrap (lotCostAt), p).profitNowScrap (friction only, as a sale into a live order, exactly as the row's
+ * profitAllScrap: over a SKU's lots the unrealised sum to it). Both null without an exit or for a SKU not in `v`.
+ */
+export function lotValueOf(lot: Pick<JournalLot, 'costScrap' | 'keys' | 'scrap'>, sku: string, v: HoldingsValuation, p: CeilingSettings): JournalLotValue {
+  const exit = v && v.exitBySku && Object.prototype.hasOwnProperty.call(v.exitBySku, sku) ? v.exitBySku[sku] : null;
+  if (!finite(exit) || !lot) return { worthScrap: null, unrealisedScrap: null };
+  const cost = lotCostAt(lot, v.keyScrap);
+  const fig = holdingFigures({ revenueScrap: exit, qty: 1, costScrap: cost, nextLotCostScrap: cost }, p);
+  return { worthScrap: exit, unrealisedScrap: fig.profitNowScrap };
+}
+
+/** 0.9: the ledger's valuer over `v` (journalLedger's second argument): each open lot valued by lotValueOf, dated v.at. */
+export function journalValuerOf(v: HoldingsValuation, p: CeilingSettings): JournalLotValuer {
+  return { at: v.at, valueOf: (lot, sku) => lotValueOf(lot, sku, v, p) };
 }
 
 export const HOLDINGS_CSV_COLUMNS: readonly string[] = [

@@ -33,6 +33,8 @@ export const DEFAULT_SETTINGS: Settings = {
     frictionScrap: 0,
     // 0.8 (PC-1): no price-move reserve, so profit and Pay up to are exactly as before.
     exitReservePct: 0,
+    // 0.9 (#2): about 10% (one 2019 forum comment); used for break-even and the journal hint only.
+    marketplaceFeePct: 0.1,
     outlierVsMedian: 1.3,
     outlierVsRef: 1.5,
     unusualRiskKeys: 10,
@@ -63,6 +65,8 @@ export const DEFAULT_SETTINGS: Settings = {
     watches: true,
     // 0.8 (G4): "Buy now" toasts are opt-in; 0.7.4 sent none (D25).
     buyTiming: false,
+    // 0.9 (#3): the risk control is off, so every flip toasts as in 0.8.
+    minProfitableDepth: 0,
   },
   app: { startAtLogin: false, startHidden: false, closeToTray: true, quickEntryHotkey: 'CommandOrControl+Alt+F' },
   // Live check (F16): the watcher reads the clipboard, so it stays off until the user turns it on.
@@ -72,6 +76,8 @@ export const DEFAULT_SETTINGS: Settings = {
   networkPaused: false,
   blocklist: [],
   ownSteamIds: [],
+  // 0.9 (#1): not answered, not sure: Holdings asks once and changes no number (Trade Protection's TF2 scope is contested).
+  tradeLock: { mode: 'unknown', answeredAt: null },
   ui: { theme: 'system', density: 'comfortable' },
 };
 

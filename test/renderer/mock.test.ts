@@ -149,7 +149,8 @@ describe('mock bridge', () => {
     const b = make();
     const r = await b.rpc('opps.exportCsv', { kind: 'opportunities' });
     expect(r.suggestedName).toMatch(/^flipdesk-opportunities-.*\.csv$/);
-    expect(r.csv.split('\r\n')[0]).toBe('sku,name,category,input,cost,revenue,profit,margin,confidence,buyers,status');
+    // 0.9 (#2): a prefix check, so columns appended after break_even (ranking, D10) keep it green.
+    expect(r.csv.split('\r\n')[0]!.startsWith('sku,name,category,input,cost,revenue,profit,margin,confidence,buyers,status,break_even')).toBe(true);
     expect(r.csv).not.toMatch(/(^|,)[=+@]/m);
   });
 });

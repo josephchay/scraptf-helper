@@ -50,7 +50,8 @@ describe('BUDGETS', () => {
     expect(spec('pricedb')).toMatchObject({ host: 'pricedb.io', maxPerMinute: 60, concurrency: 2, minRemaining: 36 });
     expect(spec('sku')).toMatchObject({ host: 'sku.pricedb.io', maxPerMinute: 30 });
     expect(spec('steam-webapi')).toMatchObject({ minIntervalMs: 1_000, maxPerDay: 5_000 });
-    expect(spec('scm')).toMatchObject({ host: 'steamcommunity.com', minIntervalMs: 5_000, on429PauseMs: 6 * HOUR });
+    // 0.9 (#14): the Steam Market gets a daily cap.
+    expect(spec('scm')).toMatchObject({ host: 'steamcommunity.com', minIntervalMs: 5_000, on429PauseMs: 6 * HOUR, maxPerDay: 300 });
     expect(spec('mannco').minIntervalMs).toBeGreaterThanOrEqual(MIN);
     expect(spec('mannco-prices').minIntervalMs).toBeGreaterThanOrEqual(HOUR);
     expect(spec('mptf').minIntervalMs).toBeGreaterThanOrEqual(5_000);
@@ -64,6 +65,8 @@ describe('BUDGETS', () => {
     expect(spec('steam-webapi').maxPerDay!).toBeLessThan(100_000);
     // mannco /item/prices: 1 per 5 minutes published.
     expect(spec('mannco-prices').minIntervalMs).toBeGreaterThan(5 * MIN);
+    // 0.9 (#14): Steam Market priceoverview, community-measured at about 1,000 a day (RESEARCH §4.6).
+    expect(spec('scm').maxPerDay!).toBeLessThan(1_000);
   });
 
   it('allows 2 concurrent requests to pricedb.io and 1 elsewhere', () => {

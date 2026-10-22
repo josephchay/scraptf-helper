@@ -3,10 +3,12 @@
 Source: one read-only connection to `wss://ws.backpack.tf/events` on 2026-10-14 (09:12 UTC, 24 s,
 User-Agent `TF2FlipDesk/0.1.0 (+fixture-capture)`, permessage-deflate negotiated). 17 frames,
 1,556 events, 3.55 MB decompressed. Every frame was a JSON **array** of `{id, event, payload}`
-(no `batch-test` header was sent). `ws-sample.json` holds 300 of these events (sanitised) plus 12
-clearly marked synthetic variants for shapes that did not occur in the window.
+(no `batch-test` header was sent). `ws-sample.json` holds 299 of these events (sanitised; its
+`_meta.eventsSelected`, corrected 2026-10-22 from "300") plus 12 clearly marked synthetic variants for
+shapes that did not occur in the window.
 
-This resolves the fields marked † in DESIGN_BRIEF §4.4. Counts are out of 1,556 events.
+This resolves the fields marked † in DESIGN_BRIEF §4.4. Counts are out of 1,556 events, except where a
+row names `ws-sample.json`: those count its 299 live events (the 0.9 rows).
 
 ## Envelope
 
@@ -15,9 +17,9 @@ This resolves the fields marked † in DESIGN_BRIEF §4.4. Counts are out of 1,5
 | `id` | 24-hex ObjectId; first 4 bytes = Unix **seconds** (matched capture time) |
 | `event` | `listing-update` (1,465) or `listing-delete` (91). No limit events were seen. |
 | `payload.appid` | number, always 440 here |
-| `payload.status` | `"active"` on both updates and deletes |
+| `payload.status` | `"active"` on both updates and deletes. From 0.9 the mapper reads it (`bptfListingActive`): `listingInactive`, `hiddenByUser`, `notEnoughCurrency` and `archived` (any case), or `archived: true`, drop the listing like a delete; an unknown value is kept and counted. All 299 live events of `ws-sample.json` are `active`. |
 | `payload.source` | `"userAgent"` (1,551), `"user"` (4), `"steam"` (1) |
-| `payload.deal` | only on some deletes: `{percent, value}` |
+| `payload.deal` | `{percent, value}`, on sell listings priced below the community price: 9 of the 78 sell events in `ws-sample.json` (8 updates, 1 delete), none of its 221 buy events. On all 9, `value` equals `item.price.community.value` in refined (keys at the feed's 64.555 ref) and `percent` equals `(value - payload.value.raw) / value` (0.088 to 0.252); one sell 2.5% under the community price had none. Meaning undocumented (docs/RESEARCH.md §9, question 22); the mapper does not read it. Corrected 2026-10-22 (earlier: "only on some deletes"). |
 
 ## Listing ids (verified on every event)
 
@@ -40,6 +42,10 @@ All **Unix seconds**: `listedAt`, `bumpedAt`, `userAgent.lastPulse`, `item.price
 - `user`: `{id, name, avatar, avatarFull, premium, online, banned, customNameStyle, class, style,
   role, tradeOfferUrl, bans}` (+ `flagImpersonated` once). `bans` was always `[]`.
   **`tradeOfferUrl` carries a trade token and is removed from the fixture; the mapper never reads it.**
+  From 0.9 `flagImpersonated` (`true` on 1 of the 299 live events of `ws-sample.json`, `events[288]`) marks an
+  impersonator (excluded, like a ban), and `bans` in object form counts only `all`, `steamrep_scammer`, `marketplace`
+  and `valve.economy` (`isBannedFromBans`); a non-empty array still counts. The mapper also reads `userAgent.client`'s
+  service name as a label (`botServiceOf`).
 
 ## Item fields
 
@@ -72,7 +78,7 @@ All **Unix seconds**: `listedAt`, `bumpedAt`, `userAgent.lastPulse`, `item.price
 | `name` | string | bp.tf full name, e.g. "Cloudy Moon Tyrant's Helm", "Non-Craftable Professional Killstreak Scattergun Kit", "The Birdie Bonnet" |
 | `marketName` | string | e.g. "Unusual Tyrant's Helm"; drops "Non-Craftable" |
 | `baseName` | string | "Tyrant's Helm", "Kit", "Fabricator", "War Paint" |
-| `price` | `{steam?, community?, suggested?}` or `[]` | dropped by the mapper |
+| `price` | `{steam?, community?, suggested?}` or `[]` | dropped by the mapper. From 0.9 `community` is read by `wsCommunityPriceOf` for the recorded price history (watched, held and priced items); `steam`, `suggested` and `deal` are not read. |
 
 ## priceindex codes
 

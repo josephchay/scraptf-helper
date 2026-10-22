@@ -166,6 +166,41 @@ describe('frames and batching', () => {
     h.feed.stop();
   });
 
+  it('0.9 (#11): drops an inactive listing-update like a delete and says so in inactive', async () => {
+    const h = harness();
+    h.feed.start();
+    const s = h.last();
+    s.open();
+    const inactiveA = { ...buyA, payload: { ...buyA.payload, status: 'notEnoughCurrency' } };
+    // An inactive update: a delete, reported as inactivity.
+    s.send(inactiveA);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(h.batches).toHaveLength(1);
+    expect(h.batches[0]).toMatchObject({ upserts: [], deletes: [buyA.payload.id], inactive: [buyA.payload.id] });
+    // A plain delete: deletes only.
+    s.send({ id: 'd', event: 'listing-delete', payload: { id: buyA.payload.id } });
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(h.batches).toHaveLength(2);
+    expect(h.batches[1]).toMatchObject({ upserts: [], deletes: [buyA.payload.id], inactive: [] });
+    // Inactive, then a delete of the same id in one window: a delete, no longer inactivity.
+    s.send([inactiveA, { id: 'd2', event: 'listing-delete', payload: { id: buyA.payload.id } }]);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(h.batches[2]).toMatchObject({ deletes: [buyA.payload.id], inactive: [] });
+    // Inactive, then active again in one window: the last event wins, an upsert with inactive empty.
+    s.send([inactiveA, buyA]);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(h.batches).toHaveLength(4);
+    const back = h.batches[3]!;
+    expect(back.upserts.map((l) => l.id)).toEqual([buyA.payload.id]);
+    expect(back.deletes).toEqual([]);
+    expect(back.inactive).toEqual([]);
+    // The next window starts clean.
+    s.send(buyA);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(h.batches[4]!.inactive).toEqual([]);
+    h.feed.stop();
+  });
+
   it('maps a whole captured stream, counting events and bytes', async () => {
     const h = harness();
     h.feed.start();

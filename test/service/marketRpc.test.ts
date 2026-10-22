@@ -181,9 +181,10 @@ describe('marketCsv', () => {
     const lines = csv.slice(CSV_BOM.length).trimEnd().split('\r\n');
     expect(lines[0]).toBe(MARKET_CSV_COLUMNS.join(','));
     expect(lines).toHaveLength(2);
-    // F14 appended the saved scrap.tf/items list's columns (pays, stock, limit, saved) at the end.
+    // F14 appended the saved scrap.tf/items list's columns (pays, stock, limit, saved) at the end. 0.9 (#3) then the
+    // risk keys, the book depth and its tag: blank for a row that carries none.
     expect(lines[1]).toBe(
-      `378;6,Team Captain,hats,flip,1 key 3.55 ref,,4,1 key 1.33 ref,61.11 ref,typed,,,5.55 ref,71,${new Date(NOW - 30_000).toISOString()},62.22 ref,2,6,${new Date(NOW - 120_000).toISOString()}`,
+      `378;6,Team Captain,hats,flip,1 key 3.55 ref,,4,1 key 1.33 ref,61.11 ref,typed,,,5.55 ref,71,${new Date(NOW - 30_000).toISOString()},62.22 ref,2,6,${new Date(NOW - 120_000).toISOString()},,,,`,
     );
   });
 });

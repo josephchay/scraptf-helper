@@ -17,6 +17,8 @@ import { isScraptfVenue } from '../shared/venues';
 import { watchFloorOf } from '../shared/watches';
 import { SNAPSHOT_SIDE_PAGE, createBptfApi } from './connectors/bptfApi';
 import { createBptfSocket, type SocketTimers } from './connectors/bptfSocket';
+import { createOrderSpellTracker } from './domain/orderSpells';
+import { createCommunityFeedRecorder } from './domain/communityFeed';
 import { META_LOAD_ALL_AT, createPriceDb, type PricedbSocketFactory } from './connectors/pricedb';
 import { createSchemaService } from './connectors/schema';
 import { createSteamMarket } from './connectors/steamMarket';
@@ -706,6 +708,8 @@ export function createServiceCore(opts: ServiceCoreOptions): ServiceCore {
     feedLiveSince: () => feedLiveSince(),
     // 0.8 (H1, D10): watched bases' exits are recorded too (the watch cache, built above; ctx.watchesChanged tells holdings).
     markBases: () => watchCache.bases(),
+    // 0.9 (#17): the key history PriceDB already holds in memory (the drawer's history load); reading it sends nothing.
+    keyHistory: () => pricedb.loadedKeyHistory(),
   });
 
   // scrap.tf bank stock (F17): each saved page's two newest saves, diffed in memory and joined to the Live
@@ -728,6 +732,8 @@ export function createServiceCore(opts: ServiceCoreOptions): ServiceCore {
       runsFor: (bank) => scraptfHistory.runsFor(bank),
       timingFor: (bank, key, buy, now, inputs) => scraptfHistory.timingFor(bank, key, buy, now, inputs),
       turnoverFor: (bank) => scraptfHistory.turnoverFor(bank),
+      // 0.9 (history): BankStockRow.low, each copy's lowest price in the bank's saves.
+      lowsFor: (bank) => scraptfHistory.lowsFor(bank),
     },
     // 0.7.4 (F22, F70): page flips and "New on scrap.tf" skip a price the engine's cost checks would flag.
     costSuspect: bankStockCostCheck({ repo, schema, keyPrice: () => engine.keyPrice(), settings: () => settings }),
@@ -768,6 +774,8 @@ export function createServiceCore(opts: ServiceCoreOptions): ServiceCore {
     nameOf: (sku) => schema.nameForSku(sku),
     // 0.8 (T3/T4): the buy-timing EV goes through flipProfit with the user's profit settings, read per call.
     profit: () => settings.profit,
+    // 0.9 (history): each copy's lowest price on sale, kept at import (scraptf_lows) past the saves' thinning.
+    lows: repo,
   });
 
   // 0.7.4 (F78): the highest price scrap.tf showed the plain copy of a base on sale for: its exact row on the
@@ -849,6 +857,19 @@ export function createServiceCore(opts: ServiceCoreOptions): ServiceCore {
     }
   };
 
+  // 0.9 (history, RESEARCH #6/#7): how long the top buy orders of watched, held and scrap.tf-priced items stay, and the
+  // feed's community price of those items, from the batches already arriving: storage only, no request of its own.
+  const orderSpells = createOrderSpellTracker({
+    repo,
+    log,
+    keyScrap: () => engine.keyPrice().valueScrap,
+    topOf: (base) => {
+      const e = market.entryFor(base);
+      return e ? (e.consScrap ?? e.bestScrap) : null;
+    },
+  });
+  const communityFeed = createCommunityFeedRecorder({ repo, log });
+
   const onBatch = (b: FeedBatch): void => {
     rememberFeedDeletes(b);
     const keepAll = settings.liveFeed.keepSellListings === 'all';
@@ -866,6 +887,9 @@ export function createServiceCore(opts: ServiceCoreOptions): ServiceCore {
       }
       if (keep.length > 0) repo.upsertListings(keep);
     });
+    // 0.9 (history): spells of the tracked bases' top buy orders, and their community prices (never throw).
+    orderSpells.onBatch(b, watch, clock.now());
+    if (b.community && b.community.length > 0) communityFeed.record(b.community, watch);
     for (const l of keep) if (l.intent === 'buy') affected.add(l.baseSku);
     if (affected.size > 0) {
       engine.markDirty(affected);
@@ -1518,6 +1542,8 @@ export function createServiceCore(opts: ServiceCoreOptions): ServiceCore {
       market.start();
       holdings.start();
       resaveReminders.start();
+      // 0.9 (history, H4): spells a crash left followed end 'unwatched' at their last sighting, before the feed starts.
+      orderSpells.start();
       statusTimer = timers.setInterval(() => {
         flushOppLog();
         retryFolderWatch();
@@ -1527,6 +1553,8 @@ export function createServiceCore(opts: ServiceCoreOptions): ServiceCore {
         checkStatus();
         // 0.8 (H1): samples the feed, so a break between two Holdings checks is not missed.
         feedLiveSince();
+        // 0.9 (history, H2/H3): settles held deletes; a feed not live ends every followed spell 'unwatched'.
+        orderSpells.tick(feedState() === 'live', clock.now());
       }, STATUS_INTERVAL_MS);
       checkStatus();
       // Cached schema first (a first run downloads it); listings need it for SKUs and names.
@@ -1558,6 +1586,8 @@ export function createServiceCore(opts: ServiceCoreOptions): ServiceCore {
       resaveReminders.stop();
       banks.stop();
       socket.stop();
+      // 0.9 (history): what the feed followed is censored where it was last seen ('unwatched'), before the database closes.
+      orderSpells.stop();
       if (pricedbSocketOn) pricedb.stopSocket();
       pricedbSocketOn = false;
       watcher?.handle.stop();
@@ -1608,7 +1638,8 @@ export function createServiceCore(opts: ServiceCoreOptions): ServiceCore {
       const marketKey = (s: Settings) => JSON.stringify([s.profit, s.blocklist]);
       if (marketKey(prev) !== marketKey(next)) market.markAllDirty();
       // Holdings judge sells with the profit thresholds and gate "Sell:" notifications on settings.notifications.
-      const holdingsKey = (s: Settings) => JSON.stringify([s.profit, s.blocklist, s.ownSteamIds, s.notifications]);
+      // 0.9 (#1): and the trade lock's mode (answeredAt alone re-checks nothing).
+      const holdingsKey = (s: Settings) => JSON.stringify([s.profit, s.blocklist, s.ownSteamIds, s.notifications, s.tradeLock?.mode ?? 'unknown']);
       if (holdingsKey(prev) !== holdingsKey(next)) holdings.settingsChanged();
       if (prev.connectors.bptfApi !== next.connectors.bptfApi || prev.connectors.pricedb !== next.connectors.pricedb) {
         for (const id of ['key-bptf', 'bptf-prices', 'key-pricedb', 'pricedb-all']) scheduler.kick(id);

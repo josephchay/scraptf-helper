@@ -39,6 +39,7 @@ import {
   holdingExitView,
   holdingKeyAction,
   holdingStatusTitle,
+  holdingsLapseAt,
   holdingsQuery,
   holdingsSnapshot,
   noBuyerProfileText,
@@ -48,8 +49,8 @@ import {
   recordSaleInit,
   recordSaleTitle,
   sanitizeHoldingsSearch,
-  scraptfExitLapseAt,
   scraptfLapseDelay,
+  sellableTitle,
   unitsText,
   worthTitle,
   type HoldingFlash,
@@ -62,6 +63,10 @@ import { useDebounced, useDocumentVisible, useNow } from '../hooks/useTimers';
 import { FEED_OFF_UPDATES } from '../marketModel';
 import { isMenuKeyEcho, isSearchShortcut, menuAnchorRect, moveCursor } from '../oppModel';
 import { waitingCounts, waitingSalesText } from '../recordTradeModel';
+import { holdingBreakEvenTitle } from '../breakEvenModel';
+// 0.9 (#1): the Trade lock question and caution.
+import { TradeLockCard, TradeLockCaution } from '../components/TradeLockCard';
+import { tradeLockModeOf } from '../../shared/holdingAdvice';
 
 type MenuPoint = { x: number; y: number };
 
@@ -96,11 +101,12 @@ function useHoldingsFlash(rows: readonly HoldingRow[] | undefined): HoldingsFlas
  * judges freshness per read), so status, profit and the totals would keep counting scrap.tf until some
  * unrelated push. Refetch once when the first scrap.tf exit among `rows` lapses, while the window is
  * shown (a hidden one catches up when shown). A lapse already refetched for is not chased again, so a
- * service that still answers 'scraptf' (another clock) cannot start a loop.
+ * service that still answers 'scraptf' (another clock) cannot start a loop. 0.9 (#1): or, earlier, when
+ * the first unit inside the user's 7-day Trade lock becomes tradable (holdingsLapseAt).
  */
 export function useScraptfExitLapse(rows: readonly HoldingRow[] | undefined, reload: () => Promise<void>): void {
   const visible = useDocumentVisible();
-  const lapseAt = useMemo(() => (rows ? scraptfExitLapseAt(rows) : null), [rows]);
+  const lapseAt = useMemo(() => (rows ? holdingsLapseAt(rows) : null), [rows]);
   const done = useRef<number | null>(null);
   useEffect(() => {
     if (lapseAt === null || !visible || done.current === lapseAt) return;
@@ -152,12 +158,14 @@ export function HoldingsPage() {
   const blocklist = settings?.blocklist;
   // 0.8 (H3): your own accounts' listings leave the rows' asks.
   const ownIds = settings?.ownSteamIds;
+  // 0.9 (#1): the Trade lock's answer changes the advice, Sellable now and the lots' dates.
+  const lockMode = settings ? tradeLockModeOf(settings) : null;
   const settingsSeen = useRef(false);
   useEffect(() => {
     if (!profitSettings) return;
     if (settingsSeen.current) reloadSoon();
     settingsSeen.current = true;
-  }, [profitSettings, blocklist, ownIds, reloadSoon]);
+  }, [profitSettings, blocklist, ownIds, lockMode, reloadSoon]);
 
   const data = list.data;
   useScraptfExitLapse(data?.rows, list.reload);
@@ -248,6 +256,10 @@ export function HoldingsPage() {
           <Icon name="download" size={14} /> Export CSV
         </button>
       </div>
+
+      {/* 0.9 (#1): asked until answered; an answered Not sure leaves one caution line. */}
+      <TradeLockCard />
+      <TradeLockCaution held={held} />
 
       {held && paused ? (
         <Banner tone="warn" icon="pause">
@@ -348,13 +360,15 @@ export function HoldingsTotals({ data, keyScrap, profit }: { data: HoldingsResul
         <div className="stat-label">Unrealised P/L</div>
         <div className="stat-value">{t ? <Money scrap={t.profitNowScrap} keyScrap={keyScrap} tone="profit" signed title={plTitle(t, keyScrap, profit)} /> : DASH}</div>
       </div>
-      <div className={`stat card${t && t.sellable > 0 ? ' holdings-sellable tone-good' : ''}`} title="Items whose oldest unit clears your profit thresholds at its better exit: today's best buyer, or scrap.tf by your saved price list">
+      <div className={`stat card${t && t.sellable > 0 ? ' holdings-sellable tone-good' : ''}`} title={sellableTitle(t ?? {})}>
         <div className="stat-label">Sellable now</div>
         <div className="stat-value">
           {t ? (
             <>
               <span className={`num${t.sellable > 0 ? ' tone-text-good' : ''}`}>{fmtInt(t.sellable)}</span>{' '}
               <span className="muted small">of {fmtInt(t.items)}</span>
+              {/* 0.9 (#1): with a 7-day Trade lock, items whose next unit is locked are left out of Sellable now. */}
+              {t.locked ? <span className="muted small"> · {fmtInt(t.locked)} locked</span> : null}
             </>
           ) : (
             DASH
@@ -607,7 +621,8 @@ const HoldingItemRow = memo(function HoldingItemRow({
   const profileUrl = buyerProfileUrl(r);
   // Flags that should stop a sale get an icon; the drawer explains every flag.
   const bad = r.flags.map(flagInfo).filter((f) => f.tone === 'bad');
-  const cost = costTitle(r, keyScrap);
+  // 0.9 (#2): the cost hover adds the oldest unit's break-even (friction only, as a sale into a live order is judged).
+  const cost = [costTitle(r, keyScrap), holdingBreakEvenTitle(r, keyScrap, profit)].filter((s): s is string => typeof s === 'string').join(' ');
   const profitTitle = profitNowTitle(r, keyScrap, profit);
   // F14: the better exit (a buyer, or scrap.tf by the saved list) and what the other venue offers.
   const exit = holdingExitView(r, keyScrap, now);

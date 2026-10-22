@@ -3,11 +3,12 @@
 // and the backup-buyer check. Shared so the service engine (tiers.ts,
 // confidence.ts), the Live market, bank stock, the Live check, the dashboard
 // (oppModel.ts) and the browser mock classify an opportunity with exactly the
-// same rules.
+// same rules, and (0.9) the break-even price per exit (breakEvenFor, breakEvensOf).
 
 import { fromObject, fromString, isValidSku } from './sku';
 import { CURRENCY_SKUS } from './types';
-import type { ExitCosts, NextBuyer, OpportunityStatus, OrderSummary, ProfitSettings, Scrap, SingleExit, UnixMs } from './types';
+import type { BreakEvenMode, BreakEvens, ExitCosts, NextBuyer, OpportunityStatus, OrderSummary, ProfitSettings, Scrap, SingleExit, UnixMs } from './types';
+import { MANNCO_FEE_BPS, SCM_FEE_RULE, marketplaceFeeOf } from './venues';
 
 /** The settings flipProfit and exitCostsOf read. exitReservePct is optional: absent counts as no reserve (0.8). */
 export type ExitCostSettings = Pick<ProfitSettings, 'frictionScrap'> & Partial<Pick<ProfitSettings, 'exitReservePct'>>;
@@ -134,6 +135,83 @@ export function maxCostFor(revenueScrap: Scrap | null, p: CeilingSettings): Scra
     else hi = mid - 1;
   }
   return lo;
+}
+
+// ---------------------------------------------------------------------------
+// 0.9 (#2): break-even prices. The lowest sale price at which a flip ('buy') or a held lot ('sell') loses nothing:
+// on backpack.tf exactly (whole scrap, the one profit path), and before marketplace.tf's, mannco.store's and the
+// Steam Market's fees as value, since those venues pay cash or wallet funds Flip Desk does not convert. A price to
+// clear, never a forecast that a buyer pays it. Shared by liveCheck, csv, the dashboard and the mock.
+// ---------------------------------------------------------------------------
+
+/** 0.9 (#2): what breakEvensOf reads: friction, the optional reserve and the optional marketplace.tf fee. */
+export type BreakEvenSettings = ExitCostSettings & Partial<Pick<ProfitSettings, 'marketplaceFeePct'>>;
+
+/** 0.9 (#2): profit.marketplaceFeePct as applied (marketplaceFeeOf: [0, 0.5], else 10%). */
+export function marketplaceFeePctOf(p: Partial<Pick<ProfitSettings, 'marketplaceFeePct'>>): number {
+  return marketplaceFeeOf(p.marketplaceFeePct);
+}
+
+/**
+ * 0.9 (#2): the smallest whole-scrap backpack.tf sale price that loses nothing at `costScrap`:
+ * - 'buy' (a buy decision): the smallest R >= 0 with flipProfit(R, cost, p) >= 0 (friction and the price-move reserve);
+ * - 'sell' (a held lot sold into a live order, R-PC1-sell): ceil(cost + friction), never the reserve.
+ * Null for a missing or non-finite cost; 0 when cost + friction <= 0. flipProfit never falls as R grows (the reserve
+ * takes at most 1 scrap per scrap of revenue, pct <= 0.5), so for every whole R: R >= breakEvenFor <=> flipProfit >= 0,
+ * which is what ranking's "Buyers at break-even" counts.
+ */
+export function breakEvenFor(costScrap: Scrap | null | undefined, p: ExitCostSettings, mode: BreakEvenMode = 'buy'): Scrap | null {
+  if (!finiteNumber(costScrap)) return null;
+  const need = costScrap + frictionOf(p);
+  if (need <= 0) return 0;
+  const least = Math.ceil(need - RESERVE_FLOAT_TOLERANCE);
+  const pct = reservePctOf(p);
+  if (mode === 'sell' || pct === 0) return least;
+  // flipProfit(hi) >= 0: an integer above R(1-p) - 1 + tolerance - need >= -p > -1 for R >= need / (1-p) + 1.
+  let lo = least;
+  let hi = Math.ceil(need / (1 - pct) - RESERVE_FLOAT_TOLERANCE) + 1;
+  while (lo < hi) {
+    const mid = lo + Math.floor((hi - lo) / 2);
+    if ((flipProfit(mid, costScrap, p) ?? -1) >= 0) hi = mid;
+    else lo = mid + 1;
+  }
+  return lo;
+}
+
+/** 0.9 (#2): the smallest whole-scrap value G with G x (1 - fee) >= net: ceil(net / (1 - fee)), float noise ignored. fee in [0, 1). */
+export function grossBeforeFee(netScrap: Scrap, feePct: number): Scrap {
+  if (!finiteNumber(netScrap) || netScrap <= 0) return 0;
+  const fee = finiteNumber(feePct) && feePct > 0 && feePct < 1 ? feePct : 0;
+  return Math.max(netScrap, Math.ceil(netScrap / (1 - fee) - RESERVE_FLOAT_TOLERANCE));
+}
+
+/**
+ * 0.9 (#2): what a Steam Market buyer pays, as value, for `netScrap` received: ceil(net x (1 + 5% + 10%)). The cent rule
+ * (scmBuyerPaysCents) floors each fee, so this is an upper bound from 20 cents received; under that the 1-cent
+ * minimums cost more, which the texts say.
+ */
+export function scmGrossValue(netScrap: Scrap): Scrap {
+  if (!finiteNumber(netScrap) || netScrap <= 0) return 0;
+  return Math.ceil((netScrap * (10_000 + SCM_FEE_RULE.steamBps + SCM_FEE_RULE.gameBps)) / 10_000 - RESERVE_FLOAT_TOLERANCE);
+}
+
+/** 0.9 (#2): every exit's break-even (BreakEvens in types.ts); null for a missing cost. */
+export function breakEvensOf(costScrap: Scrap | null | undefined, p: BreakEvenSettings, mode: BreakEvenMode = 'buy'): BreakEvens | null {
+  const backpackScrap = breakEvenFor(costScrap, p, mode);
+  if (backpackScrap === null) return null;
+  const marketplaceFeePct = marketplaceFeePctOf(p);
+  return {
+    mode,
+    costScrap: costScrap as Scrap,
+    frictionScrap: frictionOf(p),
+    reserveScrap: mode === 'buy' ? reserveOf(backpackScrap, p) : 0,
+    reservePct: mode === 'buy' ? reservePctOf(p) : 0,
+    backpackScrap,
+    marketplaceFeePct,
+    marketplaceScrap: grossBeforeFee(backpackScrap, marketplaceFeePct),
+    manncoScrap: grossBeforeFee(backpackScrap, MANNCO_FEE_BPS / 10_000),
+    scmScrap: scmGrossValue(backpackScrap),
+  };
 }
 
 // ---------------------------------------------------------------------------

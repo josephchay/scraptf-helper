@@ -46,7 +46,7 @@ import {
   type CheckCopyPrice,
 } from '../../shared/check';
 import { categoryOfSkuOnly } from '../../shared/categories';
-import { buyerDepthOf, exitCostsOf, exitOrdersOfSummaries, flipProfit, profitStatus, singleExitOf } from '../../shared/ceiling';
+import { breakEvensOf, buyerDepthOf, exitCostsOf, exitOrdersOfSummaries, flipProfit, profitStatus, singleExitOf } from '../../shared/ceiling';
 import { parsePrice, valueScrap } from '../../shared/currency';
 import { scraptfListCraftProven, scraptfListUsePrice } from '../../shared/scraptfList';
 import { fromObject, fromString, isValidSku, looksLikeSku } from '../../shared/sku';
@@ -836,6 +836,8 @@ export function createLiveCheck(deps: LiveCheckDeps): LiveCheck {
     const profitScrap = price !== null ? flipProfit(revenueScrap, price.valueScrap, settings.profit) : null;
     // 0.8 (PC-1): what the profit took off, for the popup's breakdown.
     const exitCosts = revenueScrap !== null ? exitCostsOf(revenueScrap, settings.profit) : null;
+    // 0.9 (#2): the lowest sale price that loses nothing at this price, per exit.
+    const breakEven = price !== null ? breakEvensOf(price.valueScrap, settings.profit, 'buy') : null;
     const verdict = checkVerdict(profitScrap, price, settings);
     // 0.8 (PC-2): a flip only the revenue order's buyer makes, over the detail's own book (buyOrders, revenue.order).
     const singleExit =
@@ -894,6 +896,7 @@ export function createLiveCheck(deps: LiveCheckDeps): LiveCheck {
       keyScrap: K,
       checkedAt: now,
       exitCosts,
+      ...(breakEven ? { breakEven } : {}),
       ...(singleExit ? { singleExit } : {}),
     };
   };

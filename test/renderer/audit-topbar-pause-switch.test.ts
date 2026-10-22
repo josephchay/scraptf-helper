@@ -29,12 +29,22 @@ beforeAll(async () => {
   const g = globalThis as Record<string, unknown>;
   g['HTMLElement'] ??= ShimElement;
   g['Element'] ??= ShimElement;
+  // 0.9 (#3): the Opportunities Sort select is a <select>: React marks its options.
+  if (!Object.getOwnPropertyDescriptor(ShimElement.prototype, 'options')) {
+    Object.defineProperty(ShimElement.prototype, 'options', {
+      configurable: true,
+      get(this: ShimElement) {
+        return this.tagName === 'SELECT' ? this.descendants().filter((e) => e.tagName === 'OPTION') : undefined;
+      },
+    });
+  }
   win()['addEventListener'] = () => undefined;
   win()['removeEventListener'] = () => undefined;
   ({ createRoot } = await import('react-dom/client'));
   ({ Root } = await import('../../src/renderer/App'));
   ({ createMockBridge } = await import('../../src/renderer/mock'));
-});
+  // Importing the whole dashboard takes about 3 s alone and can pass the default 10 s while the suite is busy.
+}, 60_000);
 
 let bridge: MockBridge | null = null;
 const unmounts: (() => void)[] = [];

@@ -345,6 +345,10 @@ describe('service core end to end', () => {
     const before = await h.call<ItemDetail>('item.detail', { sku: ITEM });
     expect(before.snapshot.available).toBe(true);
     expect(before.buyOrders.map((o) => o.keys)).toEqual([39]);
+    // The snapshot's createdAt is in whole seconds, and core keeps an order the feed reported in that same second
+    // (it cannot tell which came first). Under load the feed's frames can arrive under a second before the refresh,
+    // so the snapshot is taken in a later second than the feed's events, as it is in the scenario this test pins.
+    await new Promise((r) => setTimeout(r, 1_000 - (Date.now() % 1_000) + 20));
 
     const r = await h.call<{ queued: boolean; reason: string | null; etaMs: number | null }>('item.refresh', { sku: ITEM });
     expect(r).toMatchObject({ queued: true, reason: null });

@@ -328,7 +328,7 @@ export function RecordTradeForm({ init, opener = null, onClose, keyScrap, profit
   const fieldError = (field: TradeField) => (error?.field === field ? error.text : null);
   // 0.8 (J2): a buy or sale's fee, in both modes; a write-off receives nothing, so it has none.
   const feeField = writeoff ? null : (
-    <Field label="Fees (optional)" htmlFor={ids.fee} error={fieldError('fee')} hint={feeHint(form.venue, form.side)}>
+    <Field label="Fees (optional)" htmlFor={ids.fee} error={fieldError('fee')} hint={feeHint(form.venue, form.side, profit?.marketplaceFeePct)}>
       <PriceInput
         ref={feeRef}
         id={ids.fee}

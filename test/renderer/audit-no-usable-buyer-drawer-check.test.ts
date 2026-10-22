@@ -224,7 +224,8 @@ describe("the drawer's Profit by input card", () => {
   it('still says "no eligible buy order" without eligible buyers', async () => {
     const card = await drawerCard(opp({ buyerCount: 0, bestScrap: null }));
     expect(card.textContent).toContain('— (no eligible buy order)');
-    expect(card.textContent).not.toContain('usable');
+    // 0.9 review: the Buyers at break-even line names its population ("usable buyers"), so only the phrase is checked.
+    expect(card.textContent).not.toContain('no usable buy order');
   });
 });
 

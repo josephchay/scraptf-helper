@@ -13,6 +13,8 @@ import type {
   JournalClosedTrade,
   JournalEntry,
   JournalFee,
+  JournalLot,
+  JournalLotValue,
   JournalPatch,
   JournalPosition,
   JournalSummary,
@@ -123,8 +125,8 @@ export function journalOrder(a: Pick<JournalEntry, 'ts' | 'id' | 'side'>, b: Pic
   return finite(a.ts) - finite(b.ts) || sideRank(a) - sideRank(b) || finite(a.id) - finite(b.id);
 }
 
-/** What journalLedger is told about each row FIFO books (a skipped row is never named). */
-type FifoMark = (e: JournalEntry, fifo: 'open' | 'closed' | 'waiting', closed: JournalClosedTrade | null) => void;
+/** What journalLedger is told about each row FIFO books (a skipped row is never named); 0.9: an open buy's lot too. */
+type FifoMark = (e: JournalEntry, fifo: 'open' | 'closed' | 'waiting', closed: JournalClosedTrade | null, lot?: JournalLot) => void;
 
 /**
  * FIFO per SKU in time order: a sell closes the oldest open buy dated at or before it
@@ -239,7 +241,7 @@ function walkJournal(entries: readonly JournalEntry[], mark?: FifoMark): Journal
     // keys/scrap (the cost basis, fee included) ride along so Holdings can judge a sale the way pairProfit will book it.
     const lotsOpen = queue.map((l) => ({ id: l.id, ts: l.ts, costScrap: valueScrap(l.keys, l.scrap, l.k), keys: l.keys, scrap: l.scrap, keyPriceScrap: l.k }));
     open.push({ sku, name: names.get(sku) ?? sku, qty: queue.length, costScrap: lotsOpen.reduce((t, l) => t + l.costScrap, 0), lots: lotsOpen });
-    if (mark) for (const l of queue) mark(l.entry, 'open', null);
+    if (mark) queue.forEach((l, i) => mark(l.entry, 'open', null, lotsOpen[i]));
   }
   open.sort((a, b) => b.costScrap - a.costScrap || a.sku.localeCompare(b.sku));
 
@@ -334,7 +336,10 @@ export function closedTradesOf(closed: readonly JournalClosedTrade[], sku: strin
 // Ledger CSV (J5)
 // ---------------------------------------------------------------------------
 
-/** The journal CSV's header: 0.7.4's 11 columns, then (0.8) each row's fee and FIFO state and a sale's booked pair. */
+/**
+ * The journal CSV's header: 0.7.4's 11 columns, then (0.8) each row's fee and FIFO state and a sale's booked pair, then
+ * (0.9) an open buy's worth now, unrealised P/L and valuation time (blank without a valuer, and on every other row).
+ */
 export const JOURNAL_CSV_COLUMNS: readonly string[] = [
   'id',
   'time',
@@ -357,6 +362,10 @@ export const JOURNAL_CSV_COLUMNS: readonly string[] = [
   'fees_ref',
   'profit_ref',
   'held_days',
+  // 0.9: an open lot valued at Holdings' exit now (its SKU's better exit), its unrealised P/L, and when that was read.
+  'worth_now_ref',
+  'unrealised_ref',
+  'valued_at',
 ];
 
 /** 0.8 (J5): one journal row with the FIFO state journalSummary gave it. */
@@ -366,16 +375,30 @@ export interface JournalLedgerRow {
   fifo: 'open' | 'closed' | 'waiting' | null;
   /** On a sale or write-off that closed a buy: the pair as booked. */
   closed: JournalClosedTrade | null;
+  /** 0.9: an open buy's value as of a holdings read (journalLedger's valuer); absent otherwise. */
+  value?: JournalLotValue & { at: UnixMs };
 }
 
-/** Every row in journalOrder (FIFO order: at one time a buy before its sale), with its FIFO state. */
-export function journalLedger(entries: readonly JournalEntry[]): JournalLedgerRow[] {
+/** 0.9: values one open lot (shared/holdings.ts journalValuerOf); `at` is when the exits were read. */
+export interface JournalLotValuer {
+  at: UnixMs;
+  valueOf(lot: JournalLot, sku: string): JournalLotValue;
+}
+
+/**
+ * Every row in journalOrder (FIFO order: at one time a buy before its sale), with its FIFO state. 0.9: with a `valuer`,
+ * each open buy (fifo 'open') carries `value`, its lot valued by it and dated valuer.at; other rows, or no valuer, have
+ * no `value` key.
+ */
+export function journalLedger(entries: readonly JournalEntry[], valuer: JournalLotValuer | null = null): JournalLedgerRow[] {
   const list = (Array.isArray(entries) ? entries : []).filter((e): e is JournalEntry => e !== null && typeof e === 'object');
-  const state = new Map<JournalEntry, { fifo: 'open' | 'closed' | 'waiting'; closed: JournalClosedTrade | null }>();
-  walkJournal(list, (e, fifo, closed) => state.set(e, { fifo, closed }));
+  const state = new Map<JournalEntry, { fifo: 'open' | 'closed' | 'waiting'; closed: JournalClosedTrade | null; lot: JournalLot | null }>();
+  walkJournal(list, (e, fifo, closed, lot) => state.set(e, { fifo, closed, lot: lot ?? null }));
   return [...list].sort(journalOrder).map((entry) => {
     const s = state.get(entry);
-    return { entry, fifo: s?.fifo ?? null, closed: s?.closed ?? null };
+    const row: JournalLedgerRow = { entry, fifo: s?.fifo ?? null, closed: s?.closed ?? null };
+    if (valuer && s?.fifo === 'open' && s.lot) row.value = { ...valuer.valueOf(s.lot, entry.sku), at: valuer.at };
+    return row;
   });
 }
 
@@ -416,5 +439,8 @@ export function journalCsvCells(r: JournalLedgerRow): (string | number | null)[]
     c ? ref(c.feesScrap) : null,
     c ? ref(c.profitScrap) : null,
     c ? Number((c.heldMs / 86_400_000).toFixed(2)) : null,
+    r.value ? ref(r.value.worthScrap) : null,
+    r.value ? ref(r.value.unrealisedScrap) : null,
+    r.value ? iso(r.value.at) : '',
   ];
 }

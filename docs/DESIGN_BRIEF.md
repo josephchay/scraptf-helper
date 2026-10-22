@@ -9,6 +9,8 @@ Prepared 2026-10-14 from verified research. Confidence tags:
 
 Platform clauses are paraphrased. Engineers and the user should read the linked pages for exact wording.
 
+Corrections found by the 2026-10-22 research (`docs/RESEARCH.md`) are marked in place as **Correction (2026-10-22)**, under the text they correct, which is kept as written. Changes 0.9 made to a rule stated here are marked **Note (0.9)**.
+
 ---
 
 ## 0. Positioning and hard rules
@@ -163,6 +165,8 @@ That is still the latest entry. API docs are at https://api.backpack.tf/api/inde
 - Cancelling a held trade starts a 7-day trade cooldown.
 - Trade Protection (7-day reversible trades) currently covers only CS2 (https://help.steampowered.com/en/faqs/view/365F-4BEE-2AE2-7BDD).
 
+> **Correction (2026-10-22, RESEARCH §4.6, §9 q15):** contested. Valve's FAQ did not render on 2026-10-22, so the CS2-only reading could not be re-checked. DMarket's API documentation says Steam's 7-day Trade Protection applies to every Steam game (https://docs.dmarket.com/v1/swagger.html), and a 2025-07-17 article said it would later reach other games that use the Community Market (https://www.pcworld.com/article/2851576/steam-thwarts-counter-strike-scammers-with-new-trade-reversal-system.html). If TF2 is covered, every TF2 trade is reversible and the item locked for 7 days. From 0.9 Flip Desk asks the user (Settings → Trade lock: Not sure by default, No lock, 7-day lock), and with a 7-day lock Holdings counts it.
+
 **Scam FAQ.** Source: https://help.steampowered.com/en/faqs/view/70E6-991B-233B-A37B (**H**). Bans can extend to all of a scammer's accounts. The FAQ warns about "quick-sell profit" pitches on price-manipulated unusuals, whose Market transactions may be reversed.
 
 **Community Market priceoverview.** This is an undocumented JSON endpoint. Per-IP limits are unpublished, and community reports describe lockouts of 6 hours or more (**L**).
@@ -237,6 +241,8 @@ That is still the latest entry. API docs are at https://api.backpack.tf/api/inde
 | SCM `priceoverview` | unpublished | on click only, at most 1 per 5 s, cache 60 min; a 429 disables it for 6 h |
 | `api.mannco.store` | about 600 per 60 s; `/item/prices` 1 per 5 min | `/item/prices` at most 1 per hour; bulk at most 1 per minute |
 | `marketplace.tf/api`, `api.stntrading.eu` | none, or credits | on click only |
+
+> **Note (0.9, RESEARCH §4.6, §8 #14):** the SCM `priceoverview` budget also has a daily cap: at most 1 per 5 s and 300 per day, under the community-measured 1,000. On `api.steampowered.com`, an `x-eresult` of 25 or 84 counts as a rate limit, like a 429, and any HTML answer carrying a Cloudflare challenge script stops its host until the user re-enables it.
 
 ### 2.1 backpack.tf websocket (primary live source of buy orders)
 - **URL:** `wss://ws.backpack.tf/events`. No auth, no key.
@@ -384,6 +390,8 @@ Base URL `https://pricedb.io/api`. Read endpoints need no auth. Limits come from
 | `GET /search?q=&limit<=50` | name search fallback | `{success, data:{results, nextCursor, hasMore, limit, total}}` |
 | `GET /graph/{sku}` | HTML graph | **Link only**, opened in the browser |
 | `POST /autob/items/{sku}` | — | **Do not use.** It is intended for TF2Autobot. |
+
+> **Correction (2026-10-22, RESEARCH §4.7):** the about-900 s spacing holds only for the recent tail. PriceDB's `5021;6` history had 328 points from 2025-09-25 to 2026-10-22: 2-6 a month before October 2026, then mostly 900 s apart, with about 220 identical consecutive pairs; `item-stats` gives all-time min, max and average only. 0.9's key move band (Holdings) stops at the first span whose ends have no point within 2 days, so only the dense tail counts and the sparse months never read as a flat key.
 
 **Record shape** (**H**):
 
@@ -718,6 +726,7 @@ The menu also offers "Copy SKU", "Copy name" and "Copy bp.tf name" through `navi
 ### 5.1 Units and conversions
 - All money is stored as **integer scrap**. Keys are separate integers.
 - ref → scrap: `Math.round(ref * 9)`. This is safe for values truncated to 2 decimals: 1.33 → 12, 64.33 → 579, 29.66 → 267.
+  > **Correction (2026-10-22, RESEARCH §4.2):** not safe for every live value. In the 2026-10-14 feed capture (`test/fixtures/bptf/ws-sample.json`), 6 of 293 metal values are half-scrap amounts (4.5, 4.05, 16.38, 18.83, 42.16, 57.05), 5 of them on multi-key buy orders. `Math.round(ref*9)` rounds 4.5 up (40.5 → 41) and the other five down, an error of at most half a scrap per value. 0.9 keeps integer-scrap maths (half-scrap units, RESEARCH #20, are deferred).
 - scrap → ref display: `Math.floor(s/9) + 0.11*(s%9)`, formatted to 2 decimals.
 - keys plus metal → scrap: `keys * K + Math.round(metal*9)`, where K is the key value in scrap for that context (§5.3).
 
@@ -758,6 +767,8 @@ Deduplicate by `(steamid, base SKU, intent)` and keep the newest.
 | mannco | about 95% | Unverified; some sources say 92% |
 | STN | spread is built into its buy/sell prices | — |
 
+> **Correction (2026-10-22, RESEARCH §4.4):** mannco's documentation now states the fee: the seller receives the sale price minus a 5% fee, "rounded in the seller's favor", with a minimum fee of 1 cent except on 1-cent items, and its bulk-pricing guide makes no distinction between instant and listed sales (https://docs.mannco.store/api-reference/deposit/instant-sell.md, https://docs.mannco.store/api-reference/inventory/bulk-pricing.md). So the mannco row is 95% rounded up; 92% is not supported. From 0.9 mannco.store is a journal venue with that fee hint, and break-even prices name it.
+
 - Optional user setting "friction per trade" in scrap (default 0) for the time and trade-hold cost.
 
 ### 5.5 Outliers and the conservative price
@@ -770,6 +781,8 @@ For each X, sort the eligible orders by value: v1 ≥ v2 ≥ …
   - the IGetPrices `value_high` exists and v1 > 1.50 × that value.
 - **Best** = v1. **Conservative** = the first non-outlier order.
 - **Instant** = the best non-outlier order whose `source === 'userAgent'` (a bot, likely to auto-accept). That `userAgent` means "bot" is a heuristic: marketplace.tf listings can carry one too.
+
+> **Correction (2026-10-22, RESEARCH §4.2):** `source` is the weaker signal. In the 2026-10-14 capture, 294 live events carried `source: "userAgent"`, but only 253 carried a `userAgent` object (`{client, lastPulse}`). Flip Desk defines a bot, and so Instant, by that object (`isBot` in `src/service/connectors/bptfItem.ts`), as §5.7's +20 row does with `userAgent.lastPulse`. From 0.9 the drawer also names the bot service the client reports (`OrderSummary.botService`), as a label only.
 
 Profit uses Conservative by default. Best and Instant are shown alongside.
 
@@ -819,6 +832,8 @@ Start at 50, then apply:
 
 Clamp to 0–100. **High** ≥ 70, **Medium** 45–69, **Low** < 45.
 
+> **Correction (2026-10-22, RESEARCH §4.2):** `user.online` carries no signal on the feed: it was true on all 299 live events of the 2026-10-14 capture. From 0.7.4 the +5 needed an event within 2 h (ARCHITECTURE deviation 11). 0.9 no longer adds it for feed rows (RESEARCH #11), and `notifications.minConfidence` stays 45.
+
 ### 5.8 Trade safety helpers
 These are informational only; the app never blocks or accepts anything.
 - If estimated value exceeds 15 keys, prompt for a background check: bp.tf bans via `users/info` and marketplace.tf `GetUserBan/v2`. Do not rely on SteamRep, which has closed.
@@ -826,6 +841,7 @@ These are informational only; the app never blocks or accepts anything.
   - Mobile Authenticator active for under 7 days → up to 15-day holds.
   - A recent password change or new device → trading lock (scrap.tf help cites 7–15 days).
   - If Valve extends Trade Protection to TF2, flips become locked for 7 days; there is a settings flag for this.
+    > **Correction (2026-10-22):** no such flag existed before 0.9 (RESEARCH §1.2). From 0.9 it is Settings → Trade lock (see the §1.5 correction); it changes Holdings (advice, Sellable now, "Sell:" timing), not opportunities.
 - Remind the user to check https://steamcommunity.com/dev/apikey for keys they don't recognise.
 - Show a VPN warning (scrap.tf KB 166; the mannco JWT is IP-bound).
 
@@ -992,6 +1008,8 @@ permissions(id INTEGER PK, grantor TEXT, contact TEXT, granted_at TEXT, scope TE
 | Electron 44/45 `node:sqlite` availability | Startup self-test with the `better-sqlite3` fallback path. |
 | Shared enforcement across scrap.tf, bp.tf and marketplace.tf | Treat them as one risk domain: the same conservative budgets everywhere, no alternate accounts, VPN warning. |
 
+> **Corrections (2026-10-22):** the mannco fee is settled at 5% (see the §5.4 correction). Trade Protection's TF2 scope is contested (see the §1.5 correction); 0.9's Trade lock setting applies to Holdings, not to every opportunity.
+
 ---
 
 ## Appendix A: default config (excerpt)
@@ -1035,5 +1053,7 @@ Body points:
 - Is this acceptable under the ToS?
 - Would you permit importing pages I save myself, for personal use only?
 - I will follow whatever you decide.
+
+> **Correction (2026-10-22):** from 0.7 (F21) Flip Desk can show scrap.tf in a window the user browses, so "never connects to scrap.tf" no longer holds. From 0.9 the email (Import page and About → Unsupported by scrap.tf; `PERMISSION_TEMPLATE` in `src/renderer/aboutModel.ts`) says "never sends requests to scrap.tf on its own" and asks three more questions: (1) is a read-only, user-driven window acceptable; (2) how long do a queue reservation, a bot's trade offer and the missed-offer lockout last; (3) is there a sanctioned feed, export or device key for item data that a personal tool may use.
 
 Do not send it from inside the app; the user sends it.

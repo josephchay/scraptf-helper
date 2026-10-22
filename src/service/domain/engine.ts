@@ -59,7 +59,12 @@ import type { PriceResult, ValuedOrder } from './pricing';
 import { SINGLE_EXIT_TEXT, buyerDepthOf, flipProfit, flipProfitBound, singleExitOf, singleExitReason, type ExitOrder } from '../../shared/ceiling';
 import { boundRuleCost, ruleUnderScraptfReason, type ScraptfSeenPrice } from '../../shared/ruleEvidence';
 import { HOLDING_MARKS_MAX_AGE_MS } from '../../shared/holdingAdvice';
+import { ORDER_SPELLS_MAX_AGE_MS } from '../../shared/orderPersistence';
+import { COMMUNITY_HISTORY_MAX_AGE_MS } from '../../shared/communityHistory';
+import { SCRAPTF_LOWS_MAX_AGE_MS } from '../../shared/scraptfLows';
 import { INPUT_KIND_ORDER, maxCostFor, profitStatus, profitTier } from './tiers';
+import { withCheckoutGuard } from '../../shared/checkoutGuard';
+import { depthGateOk, exitDepthOf, exitRiskAt, minProfitableDepthOf, opportunityRiskFields } from '../../shared/exitRisk';
 
 export const DEBOUNCE_MS = 1000;
 export const SWEEP_INTERVAL_MS = 60_000;
@@ -278,10 +283,13 @@ export function evaluateOpportunity(a: EvaluateArgs): Opportunity {
 
   const flags = bookFlags(book, conf.flags, revenueScrap, keyScrap);
   const status = profitStatus(profitScrap, costScrap, p);
+  // 0.9 (#3): the book read once, on every row, for the next buyer (PC-2) and the risk keys. It was read on profitable rows only.
+  const orders = exitOrdersOfBook(book);
+  const depth = buyerDepthOf(orders, revenueOrder?.listing.id ?? null, p.useOrder);
   // 0.8 (PC-2): the flip rests on the revenue order's buyer alone: a warning and a 0-delta reason, the score unchanged.
-  // Only a profitable row can be one (singleExitOf), so the book is read for its next buyer only then.
-  const single =
-    status === 'profitable' ? singleExitOf(revenueScrap, costScrap, buyerDepthOf(exitOrdersOfBook(book), revenueOrder?.listing.id ?? null, p.useOrder).nextBuyer, p) : null;
+  const single = status === 'profitable' ? singleExitOf(revenueScrap, costScrap, depth.nextBuyer, p) : null;
+  // 0.9 (#3): profit if this buyer leaves, buyers at break-even and the book depth, at this row's cost. Never a probability.
+  const risk = exitRiskAt({ exitDepth: exitDepthOf(orders, p.useOrder), nextBuyer: depth.nextBuyer }, costScrap, p);
   if (single) {
     flags.push('single-exit');
     conf.reasons.push(singleExitReason(single, (v) => formatScrap(v, keyScrap > 0 ? keyScrap : null)));
@@ -306,6 +314,7 @@ export function evaluateOpportunity(a: EvaluateArgs): Opportunity {
     margin,
     // F1: the scrap.tf price this row's revenue still clears the thresholds at.
     maxCostScrap: maxCostFor(revenueScrap, p),
+    ...opportunityRiskFields(risk),
     confidence: conf.score,
     confidenceLevel: conf.level,
     flags,
@@ -509,6 +518,12 @@ export const RETENTION = {
   scraptfListMs: 30 * 24 * 60 * 60 * 1000,
   /** 0.8 (H1): recorded exit runs; each base also keeps at most HOLDING_MARKS_PER_BASE_MAX. */
   holdingMarksMs: HOLDING_MARKS_MAX_AGE_MS,
+  /** 0.9 (history): ended buy-order spells by first_seen_at; also at most 300 per base and 400,000 in all (a ceiling: the caps usually bind first). */
+  orderSpellsMs: ORDER_SPELLS_MAX_AGE_MS,
+  /** 0.9 (history): recorded community price points by recorded_at; also at most 200 per SKU and 300,000 in all. */
+  communityHistoryMs: COMMUNITY_HISTORY_MAX_AGE_MS,
+  /** 0.9 (history): stored scrap.tf lows whose copy was not on sale in a save for this long. */
+  scraptfLowsMs: SCRAPTF_LOWS_MAX_AGE_MS,
 } as const;
 
 /**
@@ -517,15 +532,28 @@ export const RETENTION = {
  * days, bank stock past its retention (F20 thinning: every save of the last day,
  * hourly to 7 days, daily to 90 days, at most 300 per page, a page's newest save and
  * the one it is compared with always kept; rows whose batch is gone too), scrap.tf
- * change events older than 90 days (F20) and (0.8, H1) recorded exit runs older than
- * 180 days or beyond 2,000 per item. Call engine.markAllDirty() afterwards so
- * opportunities built on purged listings are re-evaluated, and refresh the list,
- * bank stock and history caches when their rows went.
+ * change events older than 90 days (F20), (0.8, H1) recorded exit runs older than
+ * 180 days or beyond 2,000 per item, and (0.9) buy-order spells older than 60 days or
+ * beyond 300 per item or 400,000, community price points older than 365 days or beyond
+ * 200 per SKU or 300,000, and scrap.tf lows not on sale in a save for 365 days. Call
+ * engine.markAllDirty() afterwards so opportunities built on purged listings are
+ * re-evaluated, and refresh the list, bank stock and history caches when their rows went.
  */
 export function runMaintenance(
   repo: Repo,
   now: UnixMs,
-): { listings: number; events: number; requests: number; scraptfList: number; bankStock: number; scraptfEvents: number; holdingMarks: number } {
+): {
+  listings: number;
+  events: number;
+  requests: number;
+  scraptfList: number;
+  bankStock: number;
+  scraptfEvents: number;
+  holdingMarks: number;
+  orderSpells: number;
+  communityHistory: number;
+  scraptfLows: number;
+} {
   return {
     listings: repo.purgeListingsOlderThan(now - RETENTION.listingsMs),
     events: repo.purgeEventsOlderThan(now - RETENTION.eventsMs),
@@ -534,6 +562,9 @@ export function runMaintenance(
     bankStock: repo.pruneBankStock(now, { orphans: true }),
     scraptfEvents: repo.pruneScraptfEvents(now),
     holdingMarks: repo.pruneHoldingMarks(now),
+    orderSpells: repo.pruneOrderSpells(now, { maxAgeMs: RETENTION.orderSpellsMs }),
+    communityHistory: repo.pruneCommunityHistory(now, { maxAgeMs: RETENTION.communityHistoryMs }),
+    scraptfLows: repo.pruneScraptfLows(now, RETENTION.scraptfLowsMs),
   };
 }
 
@@ -1167,6 +1198,7 @@ export function createEngine(deps: EngineDeps): Engine {
       const staleMs = inputStaleMsOf(p);
       const last = loadNotified();
       let toldElsewhere = 0;
+      const minDepth = minProfitableDepthOf(n.minProfitableDepth);
       for (const opp of results.values()) {
         if (opp.status !== 'profitable' || opp.profitScrap === null) continue;
         // 0.8 (G1): a watched copy's own profit target is its bar (typed and imported prices; a rule candidate never).
@@ -1192,6 +1224,9 @@ export function createEngine(deps: EngineDeps): Engine {
         // snapshot or a feed event confirms it. Core's snapshotPriority reads the stored row (a profitable one
         // on an unconfirmed order) and the background snapshot job confirms its book first, most profit first.
         if (revenueOrderOf(opp, p.useOrder)?.flags.includes('unverified')) continue;
+        // 0.9 (#3, risk control): fewer buyers seen in the last 24 h clear break-even at this cost than notifications.
+        // minProfitableDepth asks for. Not recorded: the row is told once enough are there (on a later run that evaluates it).
+        if (minDepth > 0 && !depthGateOk(opp.profitableDepth, minDepth)) continue;
         // F17: the "New on scrap.tf" toast already named this item; one toast per find.
         if (deps.toldElsewhere && safeTold(opp, now)) {
           last.set(opp.key, { t: now, f: print });
@@ -1244,7 +1279,11 @@ export function createEngine(deps: EngineDeps): Engine {
       });
       const individual = leads.slice(0, MAX_NOTIFICATIONS_PER_RUN);
       for (const opp of individual) {
-        safeCall(() => events.onNotify({ title: notificationTitle(opp, paintNameOf, watchedKeys.has(opp.key)), body: notificationBody(opp, K, p.useOrder), sku: opp.sku }));
+        // 0.9 (#9): a watch's own toast (G1) suggests buying the scrap.tf copy, so its body gains the checkout guard's
+        // short sentence when it still fits (withCheckoutGuard). "Profit:" and "Candidate:" toasts keep their bodies.
+        const watched = watchedKeys.has(opp.key);
+        const body = notificationBody(opp, K, p.useOrder);
+        safeCall(() => events.onNotify({ title: notificationTitle(opp, paintNameOf, watched), body: watched ? withCheckoutGuard(body) : body, sku: opp.sku }));
       }
       const rest = leads.slice(individual.length);
       if (rest.length > 0) {

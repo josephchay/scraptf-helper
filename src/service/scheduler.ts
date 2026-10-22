@@ -6,7 +6,7 @@
 // enforced by the HTTP client underneath.
 
 import { baseSku as toBaseSku } from '../shared/sku';
-import type { KeyPriceQuote, UnixMs } from '../shared/types';
+import type { CommunityPoint, KeyPriceQuote, SecretName, Settings, UnixMs } from '../shared/types';
 import type { BptfApi, Clock, Engine, HttpClient, Logger, PriceDb, Repo, SchemaService } from './contracts';
 import { BptfCredentialError, BptfNotConfiguredError, BptfSnapshotUnavailableError } from './connectors/bptfApi';
 import { META_LOAD_ALL_AT, loadAllFresh } from './connectors/pricedb';
@@ -20,7 +20,7 @@ import {
   isUnavailableStatus,
   type TimerApi,
 } from './net';
-import type { Settings, SecretName } from '../shared/types';
+import { communityHistoryPointsOf } from '../shared/communityHistory';
 
 const SEC = 1_000;
 const MIN = 60 * SEC;
@@ -490,12 +490,30 @@ export function buildJobs(ctx: JobContext): JobSpec[] {
         const raw = repo.getMeta(META_PRICES_CURRENT_TIME);
         const since = raw !== null && /^\d+$/.test(raw) ? Number(raw) : null;
         const { rows, currentTime } = await bptfApi.prices(since);
+        let kept = 0;
         repo.transaction(() => {
-          if (rows.length > 0) repo.upsertCommunity(rows);
+          if (rows.length > 0) {
+            // 0.9 (history, RESEARCH #7): the prices this answer replaces are kept as history (storage only, H7). A failed
+            // history step costs only the history: nested transactions roll back alone.
+            let points: CommunityPoint[] = [];
+            try {
+              points = communityHistoryPointsOf(repo.communityFor(rows.map((r) => r.sku)), rows, { delta: since !== null, recordedAt: clock.now() });
+            } catch (err) {
+              log.warn(`backpack.tf community prices: could not read the stored prices for the history: ${errorText(err)}`);
+            }
+            repo.upsertCommunity(rows);
+            if (points.length > 0) {
+              try {
+                kept = repo.transaction(() => repo.insertCommunityHistory(points));
+              } catch (err) {
+                log.warn(`backpack.tf community prices: could not keep the price history: ${errorText(err)}`);
+              }
+            }
+          }
           repo.setMeta(META_PRICES_CURRENT_TIME, String(currentTime));
           repo.setMeta(META_PRICES_FETCHED_AT, String(clock.now()));
         });
-        log.info(`backpack.tf community prices: ${rows.length} rows (${since === null ? 'full' : 'delta'})`);
+        log.info(`backpack.tf community prices: ${rows.length} rows (${since === null ? 'full' : 'delta'}), ${kept} kept in the price history`);
         if (rows.length > 0) {
           engine.markAllDirty();
           market?.markAllDirty();
@@ -622,7 +640,7 @@ export function buildJobs(ctx: JobContext): JobSpec[] {
       async run() {
         const r = runMaintenance(repo, clock.now());
         log.info(
-          `maintenance: purged ${r.listings} listings, ${r.events} events, ${r.requests} request-log rows, ${r.scraptfList} scrap.tf list rows, ${r.bankStock} bank stock rows, ${r.scraptfEvents} scrap.tf change events, ${r.holdingMarks} exit runs`,
+          `maintenance: purged ${r.listings} listings, ${r.events} events, ${r.requests} request-log rows, ${r.scraptfList} scrap.tf list rows, ${r.bankStock} bank stock rows, ${r.scraptfEvents} scrap.tf change events, ${r.holdingMarks} exit runs, ${r.orderSpells} buy-order spells, ${r.communityHistory} community price points, ${r.scraptfLows} scrap.tf lows`,
         );
         engine.markAllDirty();
         // Purged listings were deleted without a markDirty: entries built on them must go.
@@ -633,6 +651,8 @@ export function buildJobs(ctx: JobContext): JobSpec[] {
         if (r.bankStock > 0) ctx.bankStockChanged?.();
         // F20: pruned change events only shorten the feed; core refreshes the history's caches.
         if (r.scraptfEvents > 0) ctx.scraptfEventsPruned?.();
+        // 0.9 (history): pruned stored lows; the same refresh drops the history's stored-lows memo.
+        if (r.scraptfLows > 0) ctx.scraptfEventsPruned?.();
       },
     },
   ];

@@ -15,10 +15,10 @@
 
 import WebSocket from 'ws';
 import { z } from 'zod';
-import type { BptfNameRow, BptfSocket, FeedBatch, HandshakeRejection, SchemaService, ServiceDeps, WebSocketLike } from '../contracts';
+import type { BptfNameRow, BptfSocket, FeedBatch, FeedCommunityPrice, HandshakeRejection, SchemaService, ServiceDeps, WebSocketLike } from '../contracts';
 import type { ConnState, ConnectorHealth, Listing, UnixMs } from '../../shared/types';
 import { CONSECUTIVE_429_LIMIT, LONG_PAUSE_MS, MAX_PAUSE_MS, assertAllowed, backoffMs, parseRetryAfter, scrubText } from '../net';
-import { createMapStats, mapWsPayload, type BptfMapStats } from './bptfItem';
+import { createMapStats, mapWsPayload, wsCommunityPriceOf, type BptfMapStats } from './bptfItem';
 
 export const BPTF_WS_URL = 'wss://ws.backpack.tf/events';
 /** Host of the feed, as stored in the HTTP layer's persisted host blocks. */
@@ -215,7 +215,16 @@ export function createBptfSocket(deps: BptfSocketDeps): BptfSocket & { detail():
   const mapStats = createMapStats();
 
   const pending = new Map<string, Listing | typeof DELETE>();
+  /** 0.9 (#11): pending DELETEs that are inactivity, not deletes. */
+  const inactive = new Set<string>();
   const names = new Map<string, BptfNameRow>();
+  /** 0.9 (history): per base SKU, the newest item.price.community of this batch's updates (storage only; core filters). */
+  const community = new Map<string, FeedCommunityPrice>();
+  /**
+   * 0.9 (history, H3): the stream batches come from. It grows on every new connection and on every
+   * buffer-limit-exceeded, after a flush, so one batch never mixes two streams (a spell never spans a gap).
+   */
+  let epoch = 0;
 
   const setState = (s: ConnState, detail: string): void => {
     state = s;
@@ -325,14 +334,19 @@ export function createBptfSocket(deps: BptfSocketDeps): BptfSocket & { detail():
   // ----- batching -----
 
   const flush = (): void => {
-    if (pending.size === 0 && names.size === 0) return;
-    const batch: FeedBatch = { upserts: [], deletes: [], names: [...names.values()] };
+    if (pending.size === 0 && names.size === 0 && community.size === 0) return;
+    const batch: FeedBatch = { upserts: [], deletes: [], inactive: [], names: [...names.values()], community: [...community.values()], epoch };
     for (const [id, v] of pending) {
-      if (v === DELETE) batch.deletes.push(id);
-      else batch.upserts.push(v);
+      if (v === DELETE) {
+        batch.deletes.push(id);
+        // 0.9 (#11): which deletes were a listing-update reporting the listing not live.
+        if (inactive.has(id)) batch.inactive.push(id);
+      } else batch.upserts.push(v);
     }
     pending.clear();
+    inactive.clear();
     names.clear();
+    community.clear();
     try {
       deps.onBatch(batch);
     } catch (err) {
@@ -485,8 +499,19 @@ export function createBptfSocket(deps: BptfSocketDeps): BptfSocket & { detail():
         eventsToday++;
         const r = mapWsPayload(env.data.payload, schema, now, mapStats);
         if (r.ok) {
-          pending.set(r.listing.id, r.listing);
+          if (r.active) {
+            pending.set(r.listing.id, r.listing);
+            inactive.delete(r.listing.id);
+          } else {
+            // 0.9 (#11): bp.tf says the listing is not live (notEnoughCurrency, hiddenByUser, listingInactive, archived): it
+            // leaves the book like a delete; a later active update brings it back.
+            pending.set(r.listing.id, DELETE);
+            inactive.add(r.listing.id);
+          }
           if (r.name.name.trim() !== '') names.set(r.name.sku, r.name);
+          // 0.9 (history): the item's community price as the feed reports it, newest per base (storage only; core filters).
+          const price = wsCommunityPriceOf(env.data.payload, mapStats);
+          if (price) community.set(r.listing.baseSku, { sku: r.listing.baseSku, ...price, seenAt: now });
         } else if (r.reason === 'invalid') {
           parseFailures++;
         }
@@ -502,9 +527,13 @@ export function createBptfSocket(deps: BptfSocketDeps): BptfSocket & { detail():
         const appid = d.data.appid;
         if (appid !== undefined && Number(appid) !== 440) return;
         pending.set(d.data.id, DELETE);
+        inactive.delete(d.data.id);
         return;
       }
       case 'buffer-limit-exceeded':
+        // 0.9 (history, H3): the server dropped events: what came before goes out as one stream, the rest as the next.
+        flush();
+        epoch++;
         bufferLimitEvents++;
         log.warn('bp.tf feed: buffer-limit-exceeded; some events were dropped by the server');
         return;
@@ -630,6 +659,9 @@ export function createBptfSocket(deps: BptfSocketDeps): BptfSocket & { detail():
 
     socket.on('open', () => {
       if (socket !== ws) return;
+      // 0.9 (history, H3): the closed connection's events go out under its own epoch; this connection is a new stream.
+      flush();
+      epoch++;
       openedAt = clock.now();
       lastActivityAt = openedAt;
       rejections = 0;

@@ -724,11 +724,11 @@ describe('0.8 (PC-1): the price-move reserve field (profit.exitReservePct)', () 
     expect(ratioToPctText(0.05)).toBe('5');
   });
 
-  it('says it is off at 0, and that the allowance is the user\'s own, never measured', () => {
+  it('says it is off at 0, and that the allowance is the user\'s own, never set by Flip Desk', () => {
     expect(exitReserveHint(0).startsWith('Off.')).toBe(true);
     expect(exitReserveHint(0.05).startsWith('Off.')).toBe(false);
     for (const hint of [exitReserveHint(0), exitReserveHint(0.05)]) {
-      expect(hint).toContain('Your own allowance: Flip Desk does not measure price swings.');
+      expect(hint).toContain('Your own allowance: Flip Desk never sets it.');
       expect(hint).toContain('A sale into a live buy order');
     }
   });

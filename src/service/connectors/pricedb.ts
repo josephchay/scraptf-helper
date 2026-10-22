@@ -8,7 +8,7 @@ import { io } from 'socket.io-client';
 import { z } from 'zod';
 import { refToScrap } from '../../shared/currency';
 import { canonical, fromObject, fromString, looksLikeSku, toLegacy } from '../../shared/sku';
-import type { ConnState, ConnectorHealth, HistoryPoint, KeyPriceQuote, PricedbRow, Scrap, UnixMs, UnixSec } from '../../shared/types';
+import type { ConnState, ConnectorHealth, HistoryPoint, KeyPriceQuote, LoadedKeyHistory, PricedbRow, Scrap, UnixMs, UnixSec } from '../../shared/types';
 import { KEY_SKU } from '../../shared/types';
 import type { HttpRequestOptions, HttpResponse, PriceDb, ServiceDeps } from '../contracts';
 import {
@@ -581,6 +581,20 @@ export function createPriceDb(deps: ServiceDeps, options: PriceDbOptions = {}): 
     return out.sort((a, b) => (a.time ?? 0) - (b.time ?? 0));
   };
 
+  /** The key's records as a curve: each record's metal-only buy and sell (a side priced in keys has no key value). */
+  const keyPointsOf = (recs: readonly PricedbRecord[]): KeyPoint[] =>
+    recs.map((r) => ({
+      t: Math.floor(r.time ?? 0),
+      buy: (r.buy.keys ?? 0) === 0 && (r.buy.metal ?? 0) > 0 ? refToScrap(r.buy.metal ?? 0) : null,
+      sell: (r.sell.keys ?? 0) === 0 && (r.sell.metal ?? 0) > 0 ? refToScrap(r.sell.metal ?? 0) : null,
+    }));
+
+  /** Keeps a key curve under its window's cache key, stamped now (the cache is bounded: past 20 windows it starts over). */
+  const rememberKeyCurve = (cacheKey: string, points: KeyPoint[]): void => {
+    if (keyHistoryCache.size > 20) keyHistoryCache.clear();
+    keyHistoryCache.set(cacheKey, { at: clock.now(), points });
+  };
+
   const keyCurve = async (startSec?: UnixSec, endSec?: UnixSec): Promise<KeyPoint[]> => {
     const cacheKey = `${startSec ?? ''}|${endSec ?? ''}`;
     const hit = keyHistoryCache.get(cacheKey);
@@ -588,14 +602,21 @@ export function createPriceDb(deps: ServiceDeps, options: PriceDbOptions = {}): 
     // 0.7.3: one cached in the future (the clock moved back) has no known age: fetched again, not kept.
     if (hit && hit.at <= now && now - hit.at < KEY_HISTORY_TTL_MS) return hit.points;
     const recs = (await fetchHistory(KEY_SKU, startSec, endSec)) ?? [];
-    const points: KeyPoint[] = recs.map((r) => ({
-      t: Math.floor(r.time ?? 0),
-      buy: (r.buy.keys ?? 0) === 0 && (r.buy.metal ?? 0) > 0 ? refToScrap(r.buy.metal ?? 0) : null,
-      sell: (r.sell.keys ?? 0) === 0 && (r.sell.metal ?? 0) > 0 ? refToScrap(r.sell.metal ?? 0) : null,
-    }));
-    if (keyHistoryCache.size > 20) keyHistoryCache.clear();
-    keyHistoryCache.set(cacheKey, { at: clock.now(), points });
+    const points = keyPointsOf(recs);
+    rememberKeyCurve(cacheKey, points);
     return points;
+  };
+
+  /**
+   * 0.9 (#17): the key history already in memory (the key curve cache), for Holdings' key move band: the window-less
+   * curve ('|', what the drawer's history load fills), else the newest cached window; null when none or empty. It ignores
+   * the TTL (the band says when the history was loaded) and never sends a request.
+   */
+  const loadedKeyHistory = (): LoadedKeyHistory | null => {
+    let best = keyHistoryCache.get('|') ?? null;
+    if (best === null) for (const v of keyHistoryCache.values()) if (best === null || v.at > best.at) best = v;
+    if (best === null || best.points.length === 0) return null;
+    return { loadedAt: best.at, points: best.points.map((p) => ({ t: p.t, buyScrap: p.buy, sellScrap: p.sell })) };
   };
 
   const latestKey = (): { buy: Scrap | null; sell: Scrap | null } => {
@@ -633,6 +654,8 @@ export function createPriceDb(deps: ServiceDeps, options: PriceDbOptions = {}): 
     if (!canon) return [];
     const recs = await fetchHistory(repo.getSkuAlias(canon) ?? toLegacy(canon), startSec, endSec);
     if (!recs || recs.length === 0) return [];
+    // 0.9 (#17): the key's own history is the key curve: kept like one, so Holdings' key move band can read it (no request).
+    if (canon === KEY_SKU) rememberKeyCurve(`${startSec ?? ''}|${endSec ?? ''}`, keyPointsOf(recs));
 
     const needKeys = canon !== KEY_SKU && recs.some((r) => (r.buy.keys ?? 0) > 0 || (r.sell.keys ?? 0) > 0);
     const curve = needKeys ? await keyCurve(startSec, endSec) : [];
@@ -1121,5 +1144,6 @@ export function createPriceDb(deps: ServiceDeps, options: PriceDbOptions = {}): 
     stopSocket,
     resumeSocket,
     health: () => [restHealth(), socketHealth()],
+    loadedKeyHistory,
   };
 }

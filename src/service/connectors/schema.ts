@@ -231,17 +231,20 @@ export function buildSchemaSnapshot(raw: unknown, paintList: unknown, fetchedAt:
     }
     particles.push({ id: p.data.id, name });
   }
+  // 0.9 (#22): twins are of one kind; a name shared by effects of two kinds (as Northern Nights was) never merges them.
   const lowestByName = new Map<string, number>();
   for (const p of particles) {
-    const prev = lowestByName.get(p.name);
-    if (prev === undefined || p.id < prev) lowestByName.set(p.name, p.id);
+    const key = `${effectType(p.id)}|${p.name}`;
+    const prev = lowestByName.get(key);
+    if (prev === undefined || p.id < prev) lowestByName.set(key, p.id);
   }
   const effectIds = new Set<number>();
   const effects: EffectRow[] = [];
   for (const p of particles) {
     if (effectIds.has(p.id)) continue;
     effectIds.add(p.id);
-    effects.push({ id: p.id, name: p.name, canonicalId: lowestByName.get(p.name) ?? p.id, type: effectType(p.id) });
+    const type = effectType(p.id);
+    effects.push({ id: p.id, name: p.name, canonicalId: lowestByName.get(`${type}|${p.name}`) ?? p.id, type });
   }
 
   const paintkits: PaintkitRow[] = [];
@@ -1019,7 +1022,8 @@ export function createSchemaService(deps: ServiceDeps): SchemaService {
     search,
     categoryForSku,
     effectName: (id) => index?.effectName(id) ?? null,
-    effectIdByName: (name) => index?.effectIdByName(name) ?? null,
+    // 0.9 (#22): `type` picks that kind's effect of a name first (EFFECT_NAME_ALIASES); without it, as before.
+    effectIdByName: (name, type) => index?.effectIdByName(name, type ?? null) ?? null,
     canonicalEffectId: (id) => index?.canonicalEffectId(id) ?? id,
     paintByDecimal: (d): PaintRow | null => index?.paintByDecimal(d) ?? null,
     paintDecimalByHex: (hex) => index?.paintDecimalByHex(hex) ?? null,

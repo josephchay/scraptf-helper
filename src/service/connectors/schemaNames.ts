@@ -274,6 +274,23 @@ function levenshtein(a: string, b: string, max: number): number {
 // Index
 // ---------------------------------------------------------------------------
 
+/**
+ * 0.9 (#22): effects Valve renamed: every name resolves to the effect, for items of the effect's own kind, wherever
+ * the schema does not give that name to an effect of that kind itself. The 2026-07-14 TF2 update renamed the hat effect
+ * Northern Nights to Polar Prism (RESEARCH.md §4.6, a third-party summary); sku.pricedb.io on 2026-10-14 lists 408
+ * "Polar Prism" (cosmetic) and 3221 "Northern Nights" (a taunt effect), so "Northern Nights" on a hat is 408 and on a
+ * taunt stays 3221. An alias whose id the schema lacks is ignored.
+ */
+export const EFFECT_NAME_ALIASES: readonly { id: number; names: readonly string[] }[] = Object.freeze([{ id: 408, names: ['Polar Prism', 'Northern Nights'] }]);
+
+/** 0.9 (#22): the effect kind an item carries: 'weapon' for a skin, 'taunt' for slot taunt, 'cosmetic' for a tf_wearable, else null (any). */
+export function effectTypeForItem(item: Pick<SchemaItemRow, 'itemClass' | 'slot'> | null | undefined, skin: boolean): EffectRow['type'] | null {
+  if (skin) return 'weapon';
+  if (!item) return null;
+  if (item.slot === 'taunt') return 'taunt';
+  return item.itemClass === 'tf_wearable' ? 'cosmetic' : null;
+}
+
 export interface SchemaData {
   items: readonly SchemaItemRow[];
   effects: readonly EffectRow[];
@@ -328,6 +345,8 @@ interface ParseState {
   paint: number | null;
   number: number | null;
   warnings: string[];
+  /** 0.9 (#22): the name key the effect token matched (finish re-reads it for the item's kind); null without. */
+  effectKey: string | null;
 }
 
 export class SchemaIndex {
@@ -340,6 +359,8 @@ export class SchemaIndex {
   private readonly paintkitById = new Map<number, string>();
   private readonly paintkitByKey = new Map<string, number>();
   private readonly effectByKey = new Map<string, number>();
+  /** 0.9 (#22): `${type}|${name key}` -> the lowest effect of that kind with that name (aliases after the schema's own). */
+  private readonly effectByTypeKey = new Map<string, number>();
   private readonly paintByKey = new Map<string, number>();
   private readonly redHex = new Map<string, number>();
   private readonly bluHex = new Map<string, number>();
@@ -373,6 +394,21 @@ export class SchemaIndex {
     for (const e of [...data.effects].sort((a, b) => a.id - b.id)) {
       const key = normKey(e.name);
       if (key && !this.effectByKey.has(key)) this.effectByKey.set(key, e.canonicalId);
+      const typeKey = `${e.type}|${key}`;
+      if (key && !this.effectByTypeKey.has(typeKey)) this.effectByTypeKey.set(typeKey, e.canonicalId);
+    }
+    // 0.9 (#22): renamed effects' names, after the schema's own (which always win), and before the tokens are built so
+    // an alias the schema lacks still reads in a name.
+    for (const a of EFFECT_NAME_ALIASES) {
+      const e = this.effects.get(a.id);
+      if (!e) continue;
+      for (const name of a.names) {
+        const key = normKey(name);
+        if (!key) continue;
+        const typeKey = `${e.type}|${key}`;
+        if (!this.effectByTypeKey.has(typeKey)) this.effectByTypeKey.set(typeKey, e.canonicalId);
+        if (!this.effectByKey.has(key)) this.effectByKey.set(key, e.canonicalId);
+      }
     }
     for (const p of data.paints) {
       this.paintByKey.set(normKey(p.name), p.decimal);
@@ -452,8 +488,18 @@ export class SchemaIndex {
     return this.effects.get(id)?.name ?? null;
   }
 
-  effectIdByName(name: string): number | null {
-    return this.effectByKey.get(normKey(name)) ?? null;
+  /**
+   * The effect id a name (any case) stands for, else null. 0.9 (#22): with `type` (the kind of item the effect is on),
+   * that kind's effect of the name first (a renamed effect's old name, EFFECT_NAME_ALIASES), then any kind's; without
+   * it, exactly 0.8's answer on a schema without a cross-kind name.
+   */
+  effectIdByName(name: string, type: EffectRow['type'] | null = null): number | null {
+    const key = normKey(name);
+    if (type !== null) {
+      const t = this.effectByTypeKey.get(`${type}|${key}`);
+      if (t !== undefined) return t;
+    }
+    return this.effectByKey.get(key) ?? null;
   }
 
   canonicalEffectId(id: number): number {
@@ -711,6 +757,7 @@ export class SchemaIndex {
       paint: null,
       number: null,
       warnings: [],
+      effectKey: null,
     };
 
     rest = this.takeSuffixes(rest, st);
@@ -836,7 +883,8 @@ export class SchemaIndex {
 
     for (const [key, id] of this.effectByKey) {
       const type = this.effects.get(id)?.type;
-      tokens.push({ key, kind: 'effect', needsWear: type === 'weapon', apply: set({ effect: id }) });
+      // 0.9 (#22): the key travels with the id, so finish can pick the effect of the item's kind for that name.
+      tokens.push({ key, kind: 'effect', needsWear: type === 'weapon', apply: set({ effect: id, effectKey: key }) });
     }
     for (const [key, id] of this.paintkitByKey) {
       tokens.push({ key, kind: 'paintkit', apply: set({ paintkit: id }) });
@@ -1065,6 +1113,8 @@ export class SchemaIndex {
     const warnings = st.warnings;
     const it = this.items.get(defindex);
     const isSkin = st.paintkit !== null || this.isWarPaint(defindex) || this.skinSpecific.has(defindex);
+    // 0.9 (#22): a name's effect for this kind of item: a renamed hat effect's old name ("Northern Nights" on a hat).
+    if (st.effectKey !== null && st.effect !== null) st.effect = this.effectIdByName(st.effectKey, effectTypeForItem(it ?? null, isSkin)) ?? st.effect;
     let quality: number | null = r.quality ?? null;
     let quality2: number | null = null;
 

@@ -167,6 +167,11 @@ export interface Listing {
   uaLastPulse: UnixSec | null;
   userOnline: boolean | null;
   userBanned: boolean;
+  /**
+   * 0.9 (#11): backpack.tf's impersonation flag on this user (user.flagImpersonated on the live feed), treated like a
+   * ban (the 'impersonator' order flag excludes it). Absent: not flagged or not known (snapshot rows carry no user).
+   */
+  userImpersonated?: boolean;
   /** Listing mirrored from marketplace.tf (USD priced); never used as an exit. */
   isMarketplace: boolean;
   special: SpecialAttrs;
@@ -359,6 +364,195 @@ export interface ReferencePrices {
 }
 
 // ---------------------------------------------------------------------------
+// 0.9 (history): buy-order persistence, recorded community prices, scrap.tf lows
+// ---------------------------------------------------------------------------
+
+/**
+ * 0.9 (RESEARCH #6): how a followed buy order's spell at one price ended. 'deleted': the feed deleted the order (it
+ * bought an item, or its owner removed it, or it ran out of currency: never known which); 'inactive': the feed reported
+ * it not live (an inactive status or archived: FeedBatch.inactive); 'lowered' / 'raised': an update at another price;
+ * 'unwatched': Flip Desk stopped seeing the feed (a break, a gap the server reported, a clock moved back, the app
+ * closed) while it was still up, so it is censored there, never an end; 'relisted': the feed deleted the order (or
+ * reported it inactive) and, within ORDER_SPELL_RELIST_GRACE_MS, sent it again under the same id at the same or a higher
+ * price (bots relist; buy-order ids are deterministic), so it was never gone: censored at the delete, and a new spell
+ * opens at the new listedAt. 'deleted', 'inactive' and 'lowered' are ends of "still up at its price or higher";
+ * 'raised', 'relisted' and 'unwatched' are censored.
+ */
+export type OrderSpellEnd = 'deleted' | 'inactive' | 'lowered' | 'raised' | 'relisted' | 'unwatched';
+/** 0.9 (RESEARCH #6): every OrderSpellEnd, in the order above (the repo reads any other stored text as null). */
+export const ORDER_SPELL_ENDS: readonly OrderSpellEnd[] = ['deleted', 'inactive', 'lowered', 'raised', 'relisted', 'unwatched'];
+
+/** 0.9 (RESEARCH #6): one buy order at one price as the live feed showed it (order_spells). No SteamID, listing id or name. */
+export interface OrderSpell {
+  id: number;
+  baseSku: string;
+  intent: Intent;
+  isBot: boolean;
+  /** Raw price as listed (valued per read at the key price then). */
+  keys: number;
+  metalScrap: Scrap;
+  /**
+   * backpack.tf's listedAt on the update that opened the spell (Unix s): the order's listing time. A relist (delete and
+   * re-create) moves it; a price edit need not (ws-sample's two repriced listings kept theirs, review). Not the time at
+   * the current price. Null when the feed gave none.
+   */
+  listedAt: UnixSec | null;
+  /** When Flip Desk first saw the order at this price (the spell's entry). */
+  firstSeenAt: UnixMs;
+  /** Still up at this price at least until then; for an ended spell, when it ended (deleted / inactive / lowered / raised; relisted: the delete) or was last confirmed (unwatched). */
+  lastSeenAt: UnixMs;
+  /** null while followed. */
+  endAt: UnixMs | null;
+  /** null while followed (read as censored at lastSeenAt). */
+  endKind: OrderSpellEnd | null;
+}
+
+/** 0.9: which followed orders an estimate pools: 'like' (same bot flag, value within ORDER_PERSISTENCE_VALUE_BAND), 'band' (value only), 'all'. */
+export type PersistenceScope = 'like' | 'band' | 'all';
+/** 0.9: why no estimate: no listedAt on the order; too few followed at its age; too few followed through the window. */
+export type PersistenceShort = 'no-listed-time' | 'few-at-risk' | 'past-the-data';
+
+/** 0.9: one horizon of an order's persistence (persistenceWindowOf). */
+export interface PersistenceWindow {
+  horizonMs: number;
+  /** Kaplan-Meier estimate (delayed entry) of still up at its price or higher at age + horizon, given up at age; 0..1. Not a probability of a sale. */
+  p: number;
+  /** Spells followed just after the order's age (order-price spells: one order can count more than once). */
+  atRisk: number;
+  /** Fewest spells followed at any point of the window, its end included. */
+  minAtRisk: number;
+  /** Deleted, inactive or lowered inside the window. */
+  ended: number;
+}
+
+/** 0.9: one order's persistence (orderPersistenceOf). */
+export interface OrderPersistence {
+  /** now - listedAt: time since backpack.tf's listing time (a price edit need not reset it), not time at the current price; null without listedAt. */
+  ageMs: number | null;
+  /** null when no scope passed the shortest horizon. */
+  scope: PersistenceScope | null;
+  /** The horizons (ORDER_PERSISTENCE_HORIZONS_MS) that passed in `scope`, ascending. */
+  windows: PersistenceWindow[];
+  /** Why there is no window at all; null when there is one. */
+  short: PersistenceShort | null;
+}
+
+/** 0.9: the followed spells of an item's book (orderSpellSummaryOf). */
+export interface OrderSpellSummary {
+  followed: number;
+  /** Still followed now (endKind null). */
+  open: number;
+  deleted: number;
+  /** 0.9 (D9): reported not live by the feed (FeedBatch.inactive). */
+  inactive: number;
+  lowered: number;
+  raised: number;
+  /** 0.9 (review): deleted then sent again under the same id within the grace, at the same or a higher price (censored). */
+  relisted: number;
+  unwatched: number;
+  /** Spells with no listedAt (counted, never estimated). */
+  noListedTime: number;
+  /** Oldest firstSeenAt; null with none. */
+  since: UnixMs | null;
+  /** Sum of lastSeenAt - firstSeenAt. */
+  observedMs: number;
+}
+
+/** 0.9: one of the drawer's buy orders with its persistence ('item.bookHistory'). */
+export interface BookOrderPersistence {
+  listingId: string;
+  isBot: boolean;
+  valueScrap: Scrap;
+  listedAt: UnixSec | null;
+  persistence: OrderPersistence;
+}
+
+/** 0.9 (RESEARCH #7): where a recorded community price came from. */
+export type CommunityPointSource = 'prices' | 'feed';
+
+/** 0.9 (RESEARCH #7): one recorded backpack.tf community price (bptf_community_history). A price suggestion bp.tf accepted, never a sale. */
+export interface CommunityPoint {
+  sku: string;
+  source: CommunityPointSource;
+  /** Lower case: 'metal', 'keys', 'usd', 'hat'. */
+  currency: string;
+  value: number;
+  valueHigh: number | null;
+  /** bp.tf's own time of the price (IGetPrices last_update, the feed's updatedAt; Unix s); null when not given. */
+  lastUpdate: UnixSec | null;
+  /** When Flip Desk recorded it. */
+  recordedAt: UnixMs;
+}
+
+/** 0.9: one distinct community price of an item (communityHistoryOf), the sources that reported it joined. */
+export interface CommunityHistoryStep {
+  /** lastUpdate * 1000, else recordedAt. */
+  at: UnixMs;
+  currency: string;
+  value: number;
+  valueHigh: number | null;
+  lastUpdate: UnixSec | null;
+  /** Sorted, unique. */
+  sources: CommunityPointSource[];
+  /** First recorded; null for the current IGetPrices row never kept in the history. */
+  recordedAt: UnixMs | null;
+}
+
+/** 0.9 (RESEARCH #7): an item's recorded community prices as the drawer reads them (communityHistoryOf). Accepted price suggestions, not sales. */
+export interface CommunityHistory {
+  /** Oldest first, at most COMMUNITY_HISTORY_DETAIL_MAX. */
+  steps: CommunityHistoryStep[];
+  /** Oldest recordedAt of the stored points; null with none. */
+  since: UnixMs | null;
+  /** Stored points read (before joining). */
+  recorded: number;
+}
+
+/** 0.9 (history): 'item.bookHistory'. */
+export interface ItemBookHistory {
+  /** The base SKU asked for (paint dropped). */
+  sku: string;
+  /** Every base of its book read (bookBasesOf: the base first). */
+  bases: string[];
+  summary: OrderSpellSummary;
+  /** The asked orders found in the local book as buy orders of this item, in the asked order. */
+  orders: BookOrderPersistence[];
+  community: CommunityHistory;
+  keyScrap: Scrap | null;
+  generatedAt: UnixMs;
+}
+
+/** 0.9 (history): the lowest on-sale price of one copy in one bank's saves (raw as saved). */
+export interface ScraptfLowCore {
+  keys: number;
+  scrap: Scrap;
+  /** First and last save that showed it at that price. */
+  firstAt: UnixMs;
+  lastAt: UnixMs;
+  /** The oldest on-sale sighting the low covers. */
+  since: UnixMs;
+  /** The newest on-sale sighting (retention). */
+  seenAt: UnixMs;
+}
+
+/** 0.9 (history): a scraptf_lows row. */
+export interface ScraptfLowStored extends ScraptfLowCore {
+  bank: ScraptfBank;
+  sku: string;
+  specialKey: string;
+}
+
+/** 0.9 (history): a copy's low as a read shows it (scraptfCopyLowOf), valued at the read's key price. */
+export interface ScraptfCopyLow {
+  keys: number;
+  scrap: Scrap;
+  valueScrap: Scrap;
+  firstAt: UnixMs;
+  lastAt: UnixMs;
+  since: UnixMs;
+}
+
+// ---------------------------------------------------------------------------
 // Opportunities
 // ---------------------------------------------------------------------------
 
@@ -385,10 +579,15 @@ export interface OrderSummary {
   valueScrap: Scrap;
   isBot: boolean;
   online: boolean | null;
+  /**
+   * 0.9 (#11): the bot service its userAgent.client names (botServiceOf in src/shared/buyerSeen.ts), e.g.
+   * 'TF2Autobot (PriceDB)'; absent for a human, an unknown client or the generic 'User Agent'. A label only.
+   */
+  botService?: string;
   lastEventAt: UnixMs;
   bumpedAt: UnixSec | null;
   details: string;
-  /** e.g. 'outlier', 'notes-flag', 'attribute-specific', 'has-extras', 'unverified', 'banned', 'marketplace', 'blocklisted' */
+  /** e.g. 'outlier', 'notes-flag', 'attribute-specific', 'has-extras', 'unverified', 'banned', 'impersonator', 'marketplace', 'blocklisted' */
   flags: string[];
   /** false when the order is shown for context but excluded from profit. */
   eligible: boolean;
@@ -404,6 +603,38 @@ export interface ExitCosts {
   reservePct: number;
   /** frictionScrap + reserveScrap. */
   totalScrap: Scrap;
+}
+
+/** 0.9 (#2): which cost a break-even price is judged for (breakEvenFor in src/shared/ceiling.ts). */
+export type BreakEvenMode = 'buy' | 'sell';
+
+/**
+ * 0.9 (#2): the lowest sale prices at which a flip ('buy': the scrap.tf price, friction and the price-move reserve)
+ * or the oldest held unit ('sell': its cost and friction, R-PC1-sell) loses nothing, per exit (breakEvensOf in
+ * src/shared/ceiling.ts). backpack.tf is exact in whole scrap. marketplace.tf and mannco.store pay cash and the Steam
+ * Market Steam Wallet funds, which Flip Desk does not convert: theirs are the value a sale must bring in before the
+ * venue's fee, at the user's own key value (their 1-cent minimums aside). A price to clear, never a forecast.
+ */
+export interface BreakEvens {
+  mode: BreakEvenMode;
+  /** The cost judged: the scrap.tf price ('buy') or the oldest unit's cost at today's key price ('sell'). */
+  costScrap: Scrap;
+  /** frictionOf(settings.profit). Readers destructure it (profitPath rule (1), D7). */
+  frictionScrap: Scrap;
+  /** 'buy': reserveOf(backpackScrap) (0 without a reserve); 'sell': 0. */
+  reserveScrap: Scrap;
+  /** 'buy': reservePctOf(settings.profit); 'sell': 0. */
+  reservePct: number;
+  /** backpack.tf (no platform fee): the smallest whole-scrap sale price with profit >= 0. */
+  backpackScrap: Scrap;
+  /** marketplaceFeePctOf(settings.profit): the marketplace.tf fee as applied. */
+  marketplaceFeePct: number;
+  /** marketplace.tf: grossBeforeFee(backpackScrap, marketplaceFeePct). */
+  marketplaceScrap: Scrap;
+  /** mannco.store: grossBeforeFee(backpackScrap, 5%). */
+  manncoScrap: Scrap;
+  /** Steam Community Market, as wallet value: scmGrossValue(backpackScrap), what the buyer pays before 5% + 10%. */
+  scmScrap: Scrap;
 }
 
 /**
@@ -430,6 +661,14 @@ export interface SingleExit {
   /** flipProfit(next.valueScrap, cost, settings.profit); null without a next buyer. */
   nextProfitScrap: Scrap | null;
 }
+
+/**
+ * 0.9 (#3): the book-depth tag (liquidityTagOf in src/shared/exitRisk.ts) from the distinct buyers seen in the last
+ * 24 h with a usable order at any price: 0 'none', 1 'one', 2-4 'few', 5 or more 'many'. Demand, not sales.
+ */
+export type LiquidityTag = 'none' | 'one' | 'few' | 'many';
+/** 0.9 (#3): every LiquidityTag, fewest buyers first (the CSV's book_depth_tag values). */
+export const LIQUIDITY_TAGS: readonly LiquidityTag[] = ['none', 'one', 'few', 'many'];
 
 export interface Opportunity {
   /** `${sku}|${inputRef}` */
@@ -466,6 +705,20 @@ export interface Opportunity {
    * Null when there is no revenue or no cost qualifies.
    */
   maxCostScrap: Scrap | null;
+  /**
+   * 0.9 (#3): "If this buyer leaves": flipProfit at the best other buyer seen in the last 24 h (buyerDepthOf's verified
+   * pick; exitRiskAt in src/shared/exitRisk.ts). Absent when there is no such buyer or no revenue order, and on a row
+   * stored before V16 until the engine's next full sweep rewrites it.
+   */
+  backupProfitScrap?: Scrap;
+  /**
+   * 0.9 (#3): "Buyers at break-even": distinct buyers seen in the last 24 h whose best usable order (eligible, not an
+   * outlier, worth more than 0, a bot under Instant) clears break-even at costScrap (flipProfit >= 0: friction and the
+   * price-move reserve taken off), at most EXIT_DEPTH_CAP (20). Absent on a row stored before V16.
+   */
+  profitableDepth?: number;
+  /** 0.9 (#3): distinct buyers seen in the last 24 h with a usable order at any price (the book-depth tag). Absent before V16. */
+  bookDepth?: number;
   confidence: number;
   confidenceLevel: ConfidenceLevel;
   /**
@@ -525,6 +778,15 @@ export interface GroupSummary {
   totalProfitScrap: Scrap;
 }
 
+/**
+ * 0.9 (#3): the Opportunities sorts. 'backup' is "If this buyer leaves" (Opportunity.backupProfitScrap), 'depth' is
+ * "Buyers at break-even" (Opportunity.profitableDepth). Both default to descending; missing values sort last (repo
+ * OPP_SORT, oppModel compareOpps).
+ */
+export type OppSort = 'profit' | 'backup' | 'depth' | 'margin' | 'confidence' | 'updated' | 'name';
+/** 0.9 (#3): every OppSort, in the Sort select's order (the 'opps.list' zod reads it). */
+export const OPP_SORTS: readonly OppSort[] = ['profit', 'backup', 'depth', 'margin', 'confidence', 'updated', 'name'];
+
 export interface OppQuery {
   status?: OpportunityStatus[];
   categories?: Category[];
@@ -532,7 +794,7 @@ export interface OppQuery {
   minConfidence?: number;
   inputKinds?: InputKind[];
   search?: string;
-  sort?: 'profit' | 'margin' | 'confidence' | 'updated' | 'name';
+  sort?: OppSort;
   dir?: 'asc' | 'desc';
   limit?: number;
   offset?: number;
@@ -641,8 +903,11 @@ export const MARKET_VERDICTS: readonly MarketVerdict[] = ['flip', 'rule-flip', '
 export type MarketSource = 'typed' | 'page' | 'none';
 export const MARKET_SOURCES: readonly MarketSource[] = ['page', 'typed', 'none'];
 
-/** 'seen' (0.7.1): when the user's own price was observed (knownObservedAt), freshest first; ties by profit. */
-export type MarketSort = 'ceiling' | 'revenue' | 'buyers' | 'profit' | 'updated' | 'name' | 'seen';
+/**
+ * 'seen' (0.7.1): when the user's own price was observed (knownObservedAt), freshest first; ties by profit. 0.9 (#3):
+ * 'backup' (MarketRow.backupProfitScrap) and 'depth' (MarketRow.profitableDepth), missing last.
+ */
+export type MarketSort = 'ceiling' | 'revenue' | 'buyers' | 'profit' | 'backup' | 'depth' | 'updated' | 'name' | 'seen';
 
 export interface MarketQuery {
   search?: string;
@@ -714,6 +979,12 @@ export interface MarketRow {
   ruleCostScrap: Scrap | null;
   /** flipProfit(revenue, known cost, settings.profit), when both exist. */
   profitScrap: Scrap | null;
+  /** 0.9 (#3): as Opportunity.backupProfitScrap at marketRiskCost (your price, else a rule flip's estimate); absent: none, no such price, or no book. */
+  backupProfitScrap?: Scrap;
+  /** 0.9 (#3): as Opportunity.profitableDepth at marketRiskCost; null: no price to judge (no price of yours and no rule flip); absent: no book. */
+  profitableDepth?: number | null;
+  /** 0.9 (#3): as Opportunity.bookDepth; absent: no book (a known-only row). */
+  bookDepth?: number;
   verdict: MarketVerdict;
   /** Newest lastEventAt among the eligible orders. */
   lastOrderChangeAt: UnixMs | null;
@@ -947,6 +1218,11 @@ export interface HoldingRow {
   snapshotAt?: UnixMs | null;
   /** 0.8 (H6): Sell now / List and wait / Hold / No clear signal, with dated reasons (holdingAdvice). Never a forecast. */
   advice?: HoldingAdvice;
+  /**
+   * 0.9 (#1): with Settings.tradeLock.mode '7d', the units still inside Steam's 7-day trade lock, counted from each buy's
+   * journal time (holdingTradeLockOf); absent with another mode or when no unit is locked. Never changes a price or a profit.
+   */
+  tradeLock?: HoldingTradeLock;
 }
 
 export interface HoldingsResult {
@@ -955,9 +1231,10 @@ export interface HoldingsResult {
   /**
    * Over everything held, whatever the search: items (SKUs), units, cost of all open lots;
    * worthNowScrap (at exitScrap, F14) and profitNowScrap (unrealised P/L, the sum of profitAllScrap)
-   * count only rows with an exit; sellable counts rows in status 'sell'.
+   * count only rows with an exit; sellable counts rows in status 'sell'. 0.9 (#1): with a 7-day trade lock,
+   * `sellable` leaves out and `locked` counts (absent at 0) the items whose next unit is still locked.
    */
-  totals: { items: number; units: number; costScrap: Scrap; worthNowScrap: Scrap; profitNowScrap: Scrap; sellable: number };
+  totals: { items: number; units: number; costScrap: Scrap; worthNowScrap: Scrap; profitNowScrap: Scrap; sellable: number; locked?: number };
   keyPrice: KeyPriceState | null;
   generatedAt: UnixMs;
 }
@@ -1001,6 +1278,16 @@ export interface HoldingRefs {
   communityHighScrap: Scrap | null;
   /** One reason per reference left out for its age ("PriceDB price is 400 days old, ignored"), usableReferences' words. */
   ignored: string[];
+}
+
+/** 0.9 (#1) HoldingRow.tradeLock: the open lots still inside the 7-day lock at the read. */
+export interface HoldingTradeLock {
+  /** Open units whose buy is less than TRADE_LOCK_MS old. */
+  lockedQty: number;
+  /** When the next lot (the one a sale closes, lots[0]) becomes tradable; null when it already is. */
+  nextLotTradableAt: UnixMs | null;
+  /** The earliest time a locked unit becomes tradable (equals nextLotTradableAt when that one is locked). */
+  firstTradableAt: UnixMs;
 }
 
 /**
@@ -1074,6 +1361,26 @@ export interface HoldingTrend {
   direction: 'falling' | 'rising' | 'mixed';
   /** With a direction: the exit before those 3 changes, the newest, and when the first of the 3 was seen. */
   streak: { fromScrap: Scrap; toScrap: Scrap; sinceAt: UnixMs } | null;
+  /** 0.9 (#17): how big the recorded move is (holdingExitHistory); absent with too few stretches. Measured, never a forecast. */
+  size?: HoldingTrendSize;
+}
+
+/**
+ * 0.9 (#17): a Theil-Sen line (median of pairwise slopes) through the newest HOLDING_TREND_SIZE_MAX_POINTS stretches with an
+ * exit that observed the same sources as the newest one, each at its midpoint (clamped to the holding and now).
+ */
+export interface HoldingTrendSize {
+  /** The line's slope, scrap per day (unrounded). */
+  slopeScrapPerDay: number;
+  /** The line's change from the first to the last point: round(slope x span). 0: level. */
+  changeScrap: Scrap;
+  /** Median absolute residual about the line (the MAD, as the line's intercept is the median): half the points sat within ± this. */
+  spreadScrap: Scrap;
+  /** Points (stretches) it rests on. */
+  points: number;
+  /** The first and last point's time (stretch midpoints). */
+  fromAt: UnixMs;
+  toAt: UnixMs;
 }
 
 /** 0.8 (H6): the recorded runs behind a holding (holdingExitHistory). */
@@ -1097,9 +1404,9 @@ export interface HoldingExitHistory {
 }
 
 /** 0.8 (H6): what a holding's advice says: Sell now, List and wait, Hold, or No clear signal. Never a forecast. */
-export type HoldingAdviceKind = 'sell-now' | 'list' | 'hold' | 'unclear';
-/** Display order of the advice kinds. */
-export const HOLDING_ADVICE_KINDS: readonly HoldingAdviceKind[] = ['sell-now', 'list', 'hold', 'unclear'];
+export type HoldingAdviceKind = 'sell-now' | 'list' | 'hold' | 'unclear' | 'locked';
+/** Display order of the advice kinds. 0.9 (#1): 'locked' only with a 7-day trade lock. */
+export const HOLDING_ADVICE_KINDS: readonly HoldingAdviceKind[] = ['sell-now', 'list', 'hold', 'unclear', 'locked'];
 
 /**
  * 0.8 (H6): one reason behind a piece of advice: an observed fact with its numbers and dates, worded by the
@@ -1132,9 +1439,12 @@ export type HoldingAdviceReason =
   | { code: 'resave-list'; highScrap: Scrap; highAt: UnixMs; listAt: UnixMs | null }
   | { code: 'falling'; fromScrap: Scrap; toScrap: Scrap; sinceAt: UnixMs }
   | { code: 'held-vs-typical'; heldMs: number; typicalMs: number; count: number; scope: TypicalHold['scope']; stillHeld: number }
-  | { code: 'key-exposure'; netKeys: number; boughtKeyScrap: Scrap; nowKeyScrap: Scrap }
+  | { code: 'key-exposure'; netKeys: number; boughtKeyScrap: Scrap; nowKeyScrap: Scrap; /** 0.9 (#17): the key's 7-day move band from PriceDB history already loaded; absent without one. */ band?: KeyMoveBand }
   | { code: 'list-age'; listAt: UnixMs }
   | { code: 'has-extras' }
+  | { code: 'trade-locked'; tradableAt: UnixMs; boughtAt: UnixMs; /** What the advice would be without the lock (today's book). */ todayKind: Exclude<HoldingAdviceKind, 'locked'> }
+  | { code: 'units-locked'; lockedQty: number; qty: number; firstTradableAt: UnixMs }
+  | { code: 'trend-size'; changeScrap: Scrap; spreadScrap: Scrap; points: number; fromAt: UnixMs; toAt: UnixMs }
   | { code: 'no-history'; runs: number; observedMs: number; firstAt: UnixMs | null; /** HoldingExitHistory.settingsAt, when the history starts there. */ settingsAt?: UnixMs };
 
 /** 0.8 (H6) HoldingRow.advice: the advice on a holding, its reasons and the recorded history it rests on. */
@@ -1170,6 +1480,56 @@ export interface HoldingDetail {
   /** The key price the money is valued at (the engine's). */
   keyScrap: Scrap;
   generatedAt: UnixMs;
+}
+
+/**
+ * 0.9 (#17): the key's PriceDB buy price (else sell) moved this much over 7-day spans ending a day apart, in the key history
+ * Flip Desk already loaded (keyMoveBandOf). A description of past moves, never a forecast.
+ */
+export interface KeyMoveBand {
+  /** 10th and 90th percentile of the 7-day change, scrap per key (negative: the key fell). */
+  lowScrap: Scrap;
+  highScrap: Scrap;
+  /** Spans it rests on. */
+  spans: number;
+  /** The earliest span start and the newest point used. */
+  fromAt: UnixMs;
+  toAt: UnixMs;
+  /** When that history was loaded (the cache time). */
+  loadedAt: UnixMs;
+}
+
+/** 0.9 (#17) PriceDb.loadedKeyHistory: PriceDB 5021;6 history already in memory; reading it sends nothing. */
+export interface LoadedKeyHistory {
+  loadedAt: UnixMs;
+  points: HistoryPoint[];
+}
+
+/** 0.9: Holdings' valuation of everything held as of one read (holdingsValuationOf), for the Journal's card and ledger CSV. */
+export interface HoldingsValuation {
+  /** HoldingsResult.generatedAt. */
+  at: UnixMs;
+  /** The key price the rows were valued at (HoldingsResult.keyPrice.valueScrap when > 0); null when unknown. */
+  keyScrap: Scrap | null;
+  worthNowScrap: Scrap;
+  profitNowScrap: Scrap;
+  costScrap: Scrap;
+  items: number;
+  units: number;
+  /** Items (and their units) with no exit: counted at nothing in worthNowScrap and left out of profitNowScrap. */
+  unpricedItems: number;
+  unpricedUnits: number;
+  /** HoldingsResult.totals.locked ?? 0. */
+  lockedItems: number;
+  /** Per held SKU (as journaled): the per-unit exit Worth now counts (exitScrap, else revenueScrap); null: none. */
+  exitBySku: Readonly<Record<string, Scrap | null>>;
+}
+
+/** 0.9: one open lot valued at its SKU's exit as of a HoldingsValuation (lotValueOf). */
+export interface JournalLotValue {
+  worthScrap: Scrap | null;
+  /** worth - the lot's cost at the valuation's key price - friction (holdingFigures); null without an exit. */
+  unrealisedScrap: Scrap | null;
 }
 
 export interface EventQuery {
@@ -1375,6 +1735,18 @@ export interface BulkPriceRow {
 
 export type ImportPageKind = 'buy' | 'unusuals' | 'items-list' | 'unknown';
 
+/**
+ * 0.9 (#13): scrap.tf's own price-drop wording on a bank page card: 'soon' ("This item will decrease in price
+ * shortly."), 'off' ("… off original price … original price of …"). 2018 markup; no real save has confirmed either.
+ */
+export type ScraptfMarkdown = 'off' | 'soon';
+/** 0.9 (#13): every ScraptfMarkdown, in the order stored and shown (bankStockMarkdownText, bankStockMarkdownOf). */
+export const SCRAPTF_MARKDOWNS: readonly ScraptfMarkdown[] = ['off', 'soon'];
+/** 0.9 (#13): what a recognised bank page's own text said about its bank ('unavailable': "Hat Banking is temporarily disabled"). */
+export type ScraptfBankNotice = 'unavailable';
+/** 0.9 (#13): every ScraptfBankNotice (the repo reads any other stored text as none). */
+export const SCRAPTF_BANK_NOTICES: readonly ScraptfBankNotice[] = ['unavailable'];
+
 export interface ParsedScrapItem {
   title: string;
   sku: string | null;
@@ -1395,6 +1767,8 @@ export interface ParsedScrapItem {
   stockLimit?: number | null;
   /** 0.7.4, /items list rows only: which copies the row is proven to price (ScraptfListCraft); absent on cards. */
   listCraft?: ScraptfListCraft;
+  /** 0.9 (#13): bank page cards only: the price-drop wording the card showed, in SCRAPTF_MARKDOWNS order; absent when none. */
+  markdown?: ScraptfMarkdown[];
 }
 
 // ---------------------------------------------------------------------------
@@ -1574,14 +1948,23 @@ export interface ImportReport {
   format: 'html' | 'mhtml' | 'window';
   /** The batch the import recorded; 0 when it recorded none (a refused read, a throw). */
   batchId: number;
-  /** 0.8 (LC-6): reserved / notTradable count parsed items carrying the 'reserved' / 'not-tradable' warning code (report only). */
-  counts: { dataDefindex: number; cards: number; rows: number; selectedSkipped: number; duplicates: number; lookalikes: number; reserved: number; notTradable: number };
+  /**
+   * 0.8 (LC-6): reserved / notTradable count parsed items carrying the 'reserved' / 'not-tradable' warning code (report only).
+   * 0.9 (#13), report only: cards with 'soon' / 'off' wording, cards with a countdown-like text, "recently traded" phrases,
+   * cards inside a "recent" element, bank-unavailable phrases.
+   */
+  counts: {
+    dataDefindex: number; cards: number; rows: number; selectedSkipped: number; duplicates: number; lookalikes: number; reserved: number; notTradable: number;
+    markdownSoon: number; markdownOff: number; countdownCards: number; recentlyTraded: number; recentCards: number; bankNotices: number;
+  };
   /** The /items table's header cells as the parser read them. */
   headerColumns: string[];
   /** Page and item warnings by code (importWarningCode), counted. */
   warningCodes: Record<string, number>;
   /** At most IMPORT_REPORT_MAX_ITEMS: refused cards and stored cards with a guess or mismatch code. */
   items: ImportReportItem[];
+  /** 0.9 (#13): at most IMPORT_REPORT_NOTICES_MAX matched page phrases ('bank notice: "…"', 'recently traded: "…"', 'countdown in a "recent" section: "…"'), scrubbed; absent when none or countsOnly. */
+  notices?: string[];
 }
 
 /** 0.7.1 (P4): one card or /items row of an ImportReport, as the parser read it (whitelisted fields only). */
@@ -1657,6 +2040,8 @@ export interface ImportBatch {
    * predate it store null.
    */
   origin?: ImportOrigin | null;
+  /** 0.9 (#13, schema V16 bank_notice): 'unavailable' when the page said its bank was not trading; absent or null otherwise and before V16. */
+  bankNotice?: ScraptfBankNotice | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -1710,6 +2095,8 @@ export interface ScraptfBankSummary {
    * has fewer than 2 saves (one save: "First save…"; never saved: lastSavedAt is null too).
    */
   whatsNew: ScraptfBankWhatsNew | null;
+  /** 0.9 (#13): the time of the bank's newest look whose page said it was not trading, when no newer save exists (bankUnavailableAt); absent otherwise. */
+  unavailableAt?: UnixMs;
 }
 
 /** ScraptfBankSummary.whatsNew (F17): BankStockResult.counts' change counts, and the previous save's time. */
@@ -1779,6 +2166,8 @@ export interface BankStockStored {
    * (bankStockListFamily).
    */
   craft?: ScraptfListCraft | null;
+  /** 0.9 (#13, bank_stock.markdown): a bank page card's price-drop wording on this save; absent or null when none (and on /items rows). */
+  markdown?: ScraptfMarkdown[] | null;
 }
 
 /** One save (import batch) of a bank in bank_stock (Repo.bankStockSaves), newest first. */
@@ -1860,6 +2249,10 @@ export interface BankStockRow {
   timing?: ScraptfTimingBrief;
   /** 0.8 (G1): the enabled watch on this copy (watchJoinOf: a copy's own watch before an any-copy one); absent when none. */
   watch?: BankStockRowWatch;
+  /** 0.9 (history): the copy's lowest price on sale in this bank's saves (joined at read time); absent with none. */
+  low?: ScraptfCopyLow;
+  /** 0.9 (#13): the card's price-drop wording on the newest save (an on-sale row only; never gone or family rows); absent when none. */
+  markdown?: ScraptfMarkdown[];
 }
 
 /** 'scraptf.bankStock' (and opps.exportCsv kind 'bankStock'). */
@@ -2106,6 +2499,8 @@ export interface ScraptfItemHistory {
   cycles?: ScraptfItemCycles;
   /** 0.8 (T3/T4): the buy-timing verdict now; null when not on sale on its newest observation (or a family row, or no profit settings known); absent from an older service. */
   timing?: ScraptfBuyTiming | null;
+  /** 0.9 (history): the copy's lowest price on sale in `bank`'s saves (ScraptfHistory.lowsFor); absent with none or from an older service. */
+  low?: ScraptfCopyLow;
   keyPrice: KeyPriceState | null;
   generatedAt: UnixMs;
 }
@@ -2224,16 +2619,59 @@ export type ScraptfTimingVerdict = 'buy-now' | 'wait' | 'over' | 'no-buyers' | '
 /**
  * Why, per verdict.
  * - wait: 'drop-likely' | 'drop-makes-flip'
- * - buy-now: 'flip-now' | 'gone-risk'
- * - over: 'over'
+ * - buy-now: 'flip-now' | 'gone-risk' | 'unsure-gain'
+ * - over: 'over' | 'unsure-gain'
  * - no-buyers: 'no-buyers'
  * - not-enough-data: 'stale-save' | 'left-censored' | 'few-drops' | 'few-ended' | 'few-at-risk' | 'sparse-saves' | 'past-data'
+ * 0.9 (#10) 'unsure-gain': waiting looked worth it on the estimate (within Pay up to, over the gain bar) but not at the
+ * gain's low end (SCRAPTF_WAIT_MIN_GAIN_LOW_SCRAP), so the verdict is not Wait.
  */
 export type ScraptfTimingWhy =
   | 'drop-likely' | 'drop-makes-flip'
-  | 'flip-now' | 'gone-risk'
+  | 'flip-now' | 'gone-risk' | 'unsure-gain'
   | 'over' | 'no-buyers'
   | 'stale-save' | 'left-censored' | 'few-drops' | 'few-ended' | 'few-at-risk' | 'sparse-saves' | 'past-data';
+
+/** 0.9 (#10): a share's range allowing for chance: 0 <= low <= share <= high <= 1. */
+export interface ScraptfShareRange {
+  low: number;
+  high: number;
+}
+
+/**
+ * 0.9 (#10): how sure the picked horizon's figures are (scraptfTimingSpreadOf: the infinitesimal jackknife of the pooled
+ * table, each copy's states summed, times copies / (copies - 1)). Ranges allow for chance between the items in the
+ * user's saves only: not for where in a bracket a change happened (saveTiming says when that matters), not for when
+ * the user chose to save, not for scrap.tf changing its prices.
+ */
+export interface ScraptfTimingUncertainty {
+  /** 90 % ranges (Wilson at the effective sample size) of pDrop and of pGone + pRise ('went or rose first'). */
+  pDrop: ScraptfShareRange;
+  pGoneOrRose: ScraptfShareRange;
+  /** The items (distinct copies) behind the ranges: copies with a price state still at its price past the copy's age. */
+  copies: number;
+  /**
+   * The gain of waiting over the better of buying now and not buying, at its one-sided 95 % low end, in whole scrap
+   * rounded down; null when Wait's other two conditions failed (neither today's nor the dropped price within Pay up to,
+   * or the gain on the estimate under the bar), so the low end was never needed.
+   */
+  gainLowScrap: Scrap | null;
+  /**
+   * T9-3b: the drop size the low end used (a one-sided 95 % lower bound of the median single-step drop, as a
+   * fraction of the price) and where the sizes came from ('short-brackets': only drops whose bracket was no longer
+   * than the median look gap, at least 5; 'all' otherwise). Absent when the low end was never needed.
+   */
+  dropLow?: number;
+  dropSizeFrom?: 'all' | 'short-brackets';
+}
+
+/** 0.9 (#10): the decision the same rules give with every price change at the left end of its bracket. */
+export interface ScraptfSaveTimingAlt {
+  verdict: 'wait' | 'buy-now' | 'over';
+  why: ScraptfTimingWhy;
+  /** The horizon that read picked (for "waiting about 1 d"). */
+  horizonMs: number | null;
+}
 
 /**
  * 0.8 (T3): whether to buy a copy now or wait for another drop, an estimate from the user's own saves
@@ -2312,6 +2750,17 @@ export interface ScraptfBuyTiming {
    * (scraptfGapLimitMs, at most SCRAPTF_TIMING_MAX_BRACKET_MS); imprecise: left out on the start side.
    */
   n: { states: number; copies: number; ended: number; drops: number; dropCopies: number; gone: number; rose: number; atRisk: number; atRiskEnd: number | null; ownDrops: number; imprecise: number; wideGap: number };
+  /**
+   * 0.9 (#10): the ranges behind pDrop / pGone + pRise and the Wait gate's low end, for the picked horizon. Present
+   * whenever horizonMs is (wait, buy-now, over); absent on not-enough-data, no-buyers and a hand-built timing.
+   */
+  uncertainty?: ScraptfTimingUncertainty;
+  /**
+   * 0.9 (#10): set only when the verdict depends on save timing: with every price change dated at the user's last save
+   * before it (the left end of its bracket) instead of the save that showed it, the same rules give this other
+   * decision. Never changes `verdict`.
+   */
+  saveTiming?: ScraptfSaveTimingAlt;
 }
 
 /** 0.8 (T4): what a row (BankStockRow, MarketRow, Opportunity) carries of a ScraptfBuyTiming (scraptfTimingBrief). */
@@ -2343,6 +2792,10 @@ export interface ScraptfTimingBrief {
    */
   costScrap?: Scrap;
   maxCostScrap?: Scrap | null;
+  /** 0.9 (#10): as ScraptfBuyTiming.uncertainty (the tag and Verdict titles quote the ranges and their items). */
+  uncertainty?: ScraptfTimingUncertainty;
+  /** 0.9 (#10): as ScraptfBuyTiming.saveTiming (the tag reads 'Wait ~1 d?' / 'Buy now?'). */
+  saveTiming?: ScraptfSaveTimingAlt;
 }
 
 /** 0.8 (LC-4) BankStockResult.turnover: how long items stayed listed in a bank (Kaplan-Meier over listing runs, flap chains joined). */
@@ -2564,6 +3017,11 @@ export interface CheckResult {
    * revenue. Absent from an older service and on blank results.
    */
   exitCosts?: ExitCosts | null;
+  /**
+   * 0.9 (#2): breakEvensOf(price, settings.profit, 'buy') when the check has a scrap.tf price; absent otherwise (and from
+   * an older service).
+   */
+  breakEven?: BreakEvens;
   /** 0.8 (PC-2): with verdict 'flip', the flip rests on the revenue order's buyer alone (singleExitOf). Absent otherwise. */
   singleExit?: SingleExit;
 }
@@ -2727,6 +3185,58 @@ export interface TypicalHold {
   stillHeld: number;
 }
 
+/** 0.9 (#12): the value bands a reserve is suggested for (reserveBandOf): under 10 ref, 10 ref to 1 key, 1 key and up. */
+export type ReserveBand = 'under-10-ref' | 'to-1-key' | 'key-plus';
+
+/** 0.9 (#12): how many hold-long windows of one source fell in a band, and from how many items. */
+export interface ReserveSampleCount {
+  windows: number;
+  items: number;
+}
+
+/** 0.9 (#12): one band's suggestion. */
+export interface ReserveBandSuggestion {
+  band: ReserveBand;
+  /**
+   * The source the figure rests on: 'recorded' (holding_marks: the revenue order Flip Desk saw while it ran), else
+   * 'pricedb' (PriceDB history 'item.detail' loaded this session); null: neither has RESERVE_MIN_WINDOWS windows from
+   * RESERVE_MIN_ITEMS items.
+   */
+  source: 'recorded' | 'pricedb' | null;
+  /** The 10th percentile (lowerQuantile) of that source's relative changes (-0.06 = a 6% fall); null with source null. */
+  p10: number | null;
+  /** suggestedPctOf(p10): a whole percent, 0 when p10 >= 0, at most EXIT_RESERVE_MAX_PCT; null with source null. */
+  suggestedPct: number | null;
+  recorded: ReserveSampleCount;
+  pricedb: ReserveSampleCount;
+}
+
+/** 0.9 (#12): 'profit.reserveSuggestion' (reserveSuggestionOf in src/shared/reserveSuggest.ts). Never applied. */
+export interface ReserveSuggestion {
+  /** The horizon: the journal's typical hold over every sale, clamped to [1 h, 14 d], else RESERVE_DEFAULT_HOLD_MS (1 d). */
+  holdMs: number;
+  holdFrom: 'journal' | 'default';
+  /** Sales behind the typical hold (0 with the default). */
+  holdSales: number;
+  /** Units still open that the typical hold leaves out (TypicalHold.stillHeld). */
+  holdStillHeld: number;
+  /**
+   * The journal's typical hold when the [1 h, 14 d] clamp changed it (holdMs is then the bound, not the user's hold);
+   * null when holdMs is the typical hold itself or the default. Optional: absent reads as null.
+   */
+  holdClampedFromMs?: number | null;
+  lookbackMs: number;
+  /**
+   * When the buyer settings last changed: recorded windows start at it, none from before it (only the latest change is
+   * kept, so an earlier one is unknown); null when no change is known.
+   */
+  settingsAt: UnixMs | null;
+  /** RESERVE_BANDS order. */
+  bands: ReserveBandSuggestion[];
+  keyScrap: Scrap;
+  generatedAt: UnixMs;
+}
+
 export interface JournalSummary {
   /** Sum of closed[].profitScrap. */
   realizedProfitScrap: Scrap;
@@ -2841,6 +3351,11 @@ export interface ProfitSettings {
    * pays today (a listing, a recorded high, a reference).
    */
   exitReservePct: number;
+  /**
+   * 0.9 (#2): what marketplace.tf keeps of a sale (0 to 0.5), the user's own figure: about 10% rests on one 2019 forum
+   * comment. Used for marketplace.tf's break-even price and the journal's fee hint only, never for profit.
+   */
+  marketplaceFeePct: number;
   outlierVsMedian: number;
   outlierVsRef: number;
   unusualRiskKeys: number;
@@ -2984,6 +3499,19 @@ export interface PermissionRecord {
 /** 0.7.3: each field's longest value, shared by the settings schema (main) and the Import page's inputs, so the page never accepts a value main refuses. */
 export const PERMISSION_FIELD_MAX: Readonly<Record<keyof PermissionRecord, number>> = { grantor: 200, contact: 200, grantedAt: 100, scope: 1000 };
 
+/** 0.9 (#1): what Steam does to a TF2 item the user receives, as the user says: not sure, no lock, or Trade Protection's 7 days. */
+export type TradeLockMode = 'unknown' | 'none' | '7d';
+/** 0.9 (#1): every TradeLockMode, in Settings' order (settingsSchema's enum reads it). */
+export const TRADE_LOCK_MODES: readonly TradeLockMode[] = ['unknown', 'none', '7d'];
+
+/** 0.9 (#1) Settings.tradeLock. Flip Desk cannot read the user's account; this is the user's answer. */
+export interface TradeLockSettings {
+  /** Default 'unknown': only a caution. '7d': Holdings counts the lock (advice, Sellable now, "Sell:" timing); prices unchanged. */
+  mode: TradeLockMode;
+  /** When the user last answered (Holdings' card or Settings); null: never, so Holdings asks. */
+  answeredAt: UnixMs | null;
+}
+
 export interface Settings {
   /** Shown in the User-Agent so API operators can reach the user. */
   contactUrl: string;
@@ -3034,6 +3562,15 @@ export interface Settings {
      * 0.7.4 sent no such toast (D25). Needs newOnScraptf too.
      */
     buyTiming: boolean;
+    /**
+     * 0.9 (#3, risk control): 0 (the default) is off. 1-10: the toasts that tell a flip (the engine's Profit, Watch and
+     * Candidate; the scrap.tf notifier's New, Cheaper and Back flips and Buy now) wait until at least this many
+     * distinct buyers seen in the last 24 h clear break-even at the flip's cost (Opportunity.profitableDepth). 2 asks for
+     * a backup buyer. Rows and verdicts are unchanged; a held-back flip is not recorded as told. The scrap.tf notifier's
+     * watch price/profit hits, Sell toasts and the Live check are not held back; the engine's Watch toast (a typed or
+     * imported price at a watch's profit target) is.
+     */
+    minProfitableDepth: number;
   };
   app: { startAtLogin: boolean; startHidden: boolean; closeToTray: boolean; quickEntryHotkey: string };
   /** Live check (F16): the check hotkey, the opt-in clipboard watcher and the popup. */
@@ -3049,6 +3586,8 @@ export interface Settings {
    * A filter only: the app signs in to nothing and acts for no account (R4, R5). Stored in settings.json, never sent.
    */
   ownSteamIds: string[];
+  /** 0.9 (#1): Steam's Trade Protection as the user knows it (Holdings only). */
+  tradeLock: TradeLockSettings;
   ui: { theme: 'system' | 'dark' | 'light'; density: 'comfortable' | 'compact' };
 }
 

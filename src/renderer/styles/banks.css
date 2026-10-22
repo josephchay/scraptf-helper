@@ -127,6 +127,11 @@
   color: var(--text-muted);
 }
 
+/* 0.9 (#13): the bank's newest look said it was not trading. */
+.bank-unavailable {
+  margin: 2px 0 0;
+}
+
 .bank-about {
   margin: 0;
 }

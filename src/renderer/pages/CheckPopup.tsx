@@ -43,6 +43,8 @@ import { useApp } from '../hooks/appContext';
 import { usePush } from '../hooks/useRpc';
 import { useDocumentVisible, useNow } from '../hooks/useTimers';
 import { afterBoughtUndo, boughtButton, boughtItText, type BoughtState } from '../quickModel';
+import { checkBreakEvenView } from '../breakEvenModel';
+import { checkGuardLine } from '../checkoutGuardModel';
 
 /** The popup hides itself through main ('app.hideWindow'); in a plain browser that call is a no-op. */
 function hide(): void {
@@ -333,6 +335,8 @@ function CheckItemView({
   onHide: () => void;
 }) {
   const line = checkPriceLine(r, now);
+  // 0.9 (#2): CheckResult.breakEven, valued at the result's key price; null without one.
+  const be = checkBreakEvenView(r);
   // 0.7.4 (F23): the buyer's presence as of the check, as the rest of the result.
   const sells = checkSellsLine(r, Number.isFinite(r.checkedAt) ? r.checkedAt : now);
   const pay = checkPayUpTo(r);
@@ -346,6 +350,8 @@ function CheckItemView({
   // 0.7.4 (F41): an undecided craftability is a warning, not a muted aside: Save price and Bought it are off.
   // 0.7.4 review (R14): so is a price the cost check flagged as probably another copy's.
   const warnNote = checkCraftUndecided(r) || checkCostSuspect(r);
+  // 0.9 (#9): what to know before buying, on a flip only (the popup suggests buying).
+  const guard = checkGuardLine(r);
   return (
     <>
       <header className="cp-head">
@@ -369,6 +375,14 @@ function CheckItemView({
         {line.source ? <span className="muted small">({line.source})</span> : null}
         {line.stock ? <span className="cp-stock small">· {line.stock}</span> : null}
         {line.full ? <TonePill tone="warn">Full</TonePill> : null}
+        {/* 0.9 (#2): the lowest backpack.tf sale price that loses nothing at this price; the hover gives every exit.
+            Last on the line and the first to give way (check.css ellipses it), so the stock and Full, which 0.8
+            showed, are never clipped off the nowrap line. */}
+        {be ? (
+          <span className="muted small cp-be" title={be.title}>
+            · {be.text}
+          </span>
+        ) : null}
       </div>
 
       <div className="cp-line" title={sells.title}>
@@ -433,8 +447,15 @@ function CheckItemView({
         </button>
       </div>
       {/* The window is 220 px tall: with a note the key legend gives way (the buttons' tooltips and
-          aria-keyshortcuts still carry the keys), so the buttons are never pushed off the bottom. */}
-      {note ? null : (
+          aria-keyshortcuts still carry the keys), so the buttons are never pushed off the bottom.
+          0.9 (#9): on a flip the guard takes the legend's line, as a note does (keys stay in the buttons' titles and
+          aria-keyshortcuts). */}
+      {note ? null : guard ? (
+        <p className="cp-guard small" title={guard.title}>
+          <Icon name="info" size={12} />
+          {guard.text}
+        </p>
+      ) : (
         <p className="cp-keys muted small" aria-hidden="true">
           <kbd>Enter</kbd> save · <kbd>B</kbd> bought · <kbd>D</kbd> details · <kbd>Esc</kbd> hide
         </p>

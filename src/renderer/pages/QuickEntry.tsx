@@ -18,6 +18,7 @@ import { usePersistentState } from '../hooks/usePersistentState';
 import { usePush, useThrottled, useVisiblePush } from '../hooks/useRpc';
 import { useNow } from '../hooks/useTimers';
 import { REVENUE_ORDER_TITLES, revenueOrderOf } from '../oppModel';
+import { quickBreakEvenView } from '../breakEvenModel';
 import {
   PREVIEW_DEBOUNCE_MS,
   afterBoughtUndo,
@@ -572,6 +573,8 @@ function QuickPreview({
   // Keys are valued with the key price the service used for this item, as the engine does.
   const cost = parsedValueScrap(parsed, k);
   const pv = rev && cost !== null ? profitPreview(cost, rev, profit) : null;
+  // 0.9 (#2): the 'buy' break-even of the typed price (friction and the price-move reserve); null without one.
+  const be = quickBreakEvenView(cost, profit, k);
   const tone = pv ? previewTone(pv) : null;
   const links = d ? compactLinks(d.links) : [];
 
@@ -658,6 +661,16 @@ function QuickPreview({
             <span className="muted small">Type the scrap.tf price to see it.</span>
           )}
         </div>
+        {/* 0.9 (#2): the lowest backpack.tf sale price that loses nothing at the typed price; the hover gives every exit. */}
+        {be ? (
+          <div className="qp-line" title={be.title}>
+            <span className="qp-label">Break-even</span>
+            <strong>
+              <Money scrap={be.scrap} keyScrap={k} />
+            </strong>
+            <span className="muted small">to lose nothing at this price</span>
+          </div>
+        ) : null}
         {listHint ? (
           <div className="qp-line qp-list" title={listHint.title}>
             <span className="qp-label">scrap.tf list</span>

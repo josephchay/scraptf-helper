@@ -148,6 +148,14 @@ html[data-window='check'] body {
   flex-shrink: 0;
 }
 
+/* 0.9 (#2): the break-even comes after the stock and Full and gives way first: it ellipses, and its hover holds the
+   whole figure. */
+.cp-be {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .cp-count {
   margin-left: auto;
 }
@@ -225,6 +233,21 @@ html[data-window='check'] body {
 
 .cp-keys kbd {
   font-size: 10px;
+}
+
+/* 0.9 (#9): on a flip the checkout guard takes the key legend's line (its title holds the full guard). */
+.cp-guard {
+  margin: 0;
+  flex-shrink: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  color: var(--text-muted);
+}
+
+.cp-guard > .icon {
+  margin-right: 4px;
+  vertical-align: -2px;
 }
 
 .check-popup .btn:focus-visible,

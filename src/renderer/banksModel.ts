@@ -382,6 +382,8 @@ export interface BankCardView {
   /** null for the list card. */
   lookFor: { title: { text: string; title: string }; rows: BankLookForRow[]; empty: string | null; seeAll: string | null; seeAllTitle: string } | null;
   openTitle: string;
+  /** 0.9 (#13): the bank's newest look said it was not trading (bankUnavailableText); null otherwise. */
+  unavailable: { text: string; title: string } | null;
 }
 
 function validRow(r: unknown): r is { sku: string; name: string } {
@@ -439,8 +441,22 @@ export function bankCards(result: Pick<ScraptfBanksResult, 'banks'> | null | und
             ...bankLookForText({ unchecked: s.unchecked, lookFor: look }),
           },
       openTitle: `Opens ${path} in your own browser. ${SCRAPTF_BOUNDARY_SHORT} ${isList ? LIST_SAVE_TIP : BANK_SAVE_TIP}`,
+      unavailable: bankUnavailableText(s, now, path),
     };
   });
+}
+
+/**
+ * 0.9 (#13): the card's warning line when the bank's newest look said it was not trading
+ * (ScraptfBankSummary.unavailableAt); null otherwise (also a missing or non-finite time).
+ */
+export function bankUnavailableText(s: Pick<ScraptfBankSummary, 'unavailableAt'>, now: UnixMs, path: string): { text: string; title: string } | null {
+  const at = timeOf(s.unavailableAt);
+  if (at === null) return null;
+  return {
+    text: `scrap.tf said it was not trading at your look ${fmtAgo(Math.min(at, now), now)}`,
+    title: `Your look at ${path} of ${fmtDateTime(at)} showed scrap.tf's notice that this bank is not trading (for example "Hat Banking is temporarily disabled"). That look stored no bank stock save, so nothing on it reads as sold; the stock, changes and flips here are from your save before it. Flip Desk reads the notice from the page's text, a form no real save has confirmed yet: if it is wrong, copy the parser report on the Import page. ${SCRAPTF_BOUNDARY_SHORT}`,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -536,7 +552,9 @@ export function unsavedLookText(u: UnsavedLook, now: UnixMs): { text: string; ti
  * removed later, so neither timing nor the save type is to blame. 0.7.3 `unusualsIndex`
  * (importUnusualsIndex of the result): the page was scrap.tf's bare Unusuals index, which lists no items,
  * so the remedy is to open one of its pages; an ImportBatch keeps no warnings, so an empty Unusuals save
- * in the history only adds that alternative to its hedge.
+ * in the history only adds that alternative to its hedge. 0.9 (#13) `bankUnavailable` (importBankUnavailable of the
+ * result, or ImportBatch.bankNotice 'unavailable'): the page said its bank was not trading, so the look stored no bank
+ * stock save; that is said first, whatever it stored.
  */
 export function importBankText(
   bank: ScraptfBank | null | undefined,
@@ -545,6 +563,7 @@ export function importBankText(
   fromWindow = false,
   removedByUpdate = false,
   unusualsIndex = false,
+  bankUnavailable = false,
 ): { text: string; title: string } | null {
   if (bank === undefined) return null;
   const info = scraptfBankInfo(bank);
@@ -555,6 +574,12 @@ export function importBankText(
     };
   }
   const path = bankPath(info.url);
+  if (bankUnavailable) {
+    return {
+      text: `${info.label} · ${path} · bank not trading`,
+      title: `scrap.tf's page said this bank was not trading when it was ${fromWindow ? 'read' : 'saved'} (a notice such as "Hat Banking is temporarily disabled"), so this look stores no bank stock save and nothing on it reads as sold. ${typeof stored === 'number' && stored > 0 ? 'The prices it showed were stored as usual.' : 'It stored no prices.'} Look again once scrap.tf trades again.`,
+    };
+  }
   if (typeof stored === 'number' && isEmptyBankSave({ itemCount: stored }, info.bank)) {
     if (removedByUpdate) {
       return {

@@ -5,7 +5,7 @@
 // fetches: switching Month, Week or Venues regroups what the page already has.
 
 import { medianOf } from '../shared/journal';
-import type { JournalClosedTrade, JournalEntry, JournalPosition, JournalSide, JournalSummary, Scrap, UnixMs } from '../shared/types';
+import type { HoldingsValuation, JournalClosedTrade, JournalEntry, JournalPosition, JournalSide, JournalSummary, Scrap, UnixMs } from '../shared/types';
 import { WRITE_OFF_VENUE, venueKey, venueLabel } from '../shared/venues';
 import { DASH, fmtDate, fmtDateTime, fmtHold, fmtMoney, fmtPct, fmtSignedMoney, type Tone } from './format';
 import type { RecordTradeInit } from './recordTradeModel';
@@ -311,6 +311,29 @@ export function holdStat(t: JournalTotals): StatView {
     sub: t.sales > 0 ? `avg ${fmtHold(t.avgHeldMs)} · ${plural(t.sales, 'sale', 'sales')}` : 'no sales yet',
     muted: t.sales < MIN_RATE_TRADES,
     title: 'Median time between the logged buy and the logged sale; write-offs are not counted.',
+  };
+}
+
+/** 0.9: the Journal's "Unrealised P/L" card's hover: what Holdings values the open lots at, and that nothing is booked. */
+export const INVENTORY_TITLE =
+  "What Holdings values your open lots at: every unit at its item's better exit now (a backpack.tf buyer, or scrap.tf by your saved price list), less what it cost at today's key price and your friction. Items with neither count at nothing and are left out of the P/L. Unrealised: nothing is booked until you record a sale. The ledger CSV carries the same per open lot (worth_now_ref, unrealised_ref, valued_at).";
+
+/**
+ * 0.9: the Journal's "Unrealised P/L" card from one holdings read (holdingsValuationOf), with its as-of time; never a
+ * sale. An error reads "Holdings could not be read", no read yet "reading Holdings…", nothing held "nothing held";
+ * otherwise the signed P/L, the worth now, the read's time and the items with no exit (left out of the P/L).
+ */
+export function inventoryStat(v: HoldingsValuation | null, keyScrap: Scrap | null, error: string | null = null): StatView {
+  if (error) return { value: DASH, sub: 'Holdings could not be read', muted: true, title: INVENTORY_TITLE };
+  if (v === null) return { value: DASH, sub: 'reading Holdings…', muted: true, title: INVENTORY_TITLE };
+  if (v.items === 0) return { value: DASH, sub: 'nothing held', muted: true, title: INVENTORY_TITLE };
+  const k = v.keyScrap ?? keyScrap;
+  const unpriced = v.unpricedItems ? ` · ${plural(v.unpricedItems, 'item', 'items')} with no exit` : '';
+  return {
+    value: fmtSignedMoney(v.profitNowScrap, k),
+    sub: `worth ${fmtMoney(v.worthNowScrap, k)} · as of ${fmtDateTime(v.at)}${unpriced}`,
+    muted: false,
+    title: `${INVENTORY_TITLE} Read ${fmtDateTime(v.at)}.`,
   };
 }
 

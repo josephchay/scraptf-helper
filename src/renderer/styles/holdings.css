@@ -500,3 +500,19 @@
     animation: none;
   }
 }
+
+/* 0.9 (#1): the Trade lock question on Holdings, its caution line, and the drawer's dated caution. */
+.trade-lock-card {
+  margin-bottom: 12px;
+}
+.trade-lock-card h2 {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.trade-lock-caution {
+  margin: 0 0 8px;
+}
+.holding-lock-caution {
+  margin-top: 4px;
+}

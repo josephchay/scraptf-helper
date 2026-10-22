@@ -477,6 +477,8 @@ const FLAGS: Record<string, FlagInfo> = {
   'has-extras': { label: 'Has extras', help: 'Your copy has extras (paint, spells, a sheen or killstreaker) but this order is generic. It still matches, but you may be underselling.', tone: 'warn' },
   unverified: { label: 'Unverified', help: 'Not confirmed by the live feed or a snapshot for over 24 hours.', tone: 'warn' },
   banned: { label: 'Banned', help: 'The buyer is banned on backpack.tf. Excluded.', tone: 'bad' },
+  // 0.9 (#11): user.flagImpersonated on the live feed (E-D5).
+  impersonator: { label: 'Impersonator', help: 'backpack.tf flags this account as impersonating another user. Excluded, like a ban.', tone: 'bad' },
   marketplace: { label: 'Marketplace', help: 'Mirrored from marketplace.tf and priced in USD. Never used as an exit.', tone: 'bad' },
   blocklisted: { label: 'Blocklisted', help: 'The buyer is on your blocklist (Settings). Excluded.', tone: 'bad' },
   duplicate: { label: 'Duplicate', help: 'An older order from the same buyer for the same item. Only their newest order counts.', tone: 'muted' },

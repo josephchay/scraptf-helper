@@ -146,7 +146,9 @@ function denyPath(host: string, rawPath: string, decodedLower: string): string |
     }
   }
   if (host === 'api.stntrading.eu') {
-    // STN's API is GET with ?apikey=, so the method rule alone cannot stop its trade calls.
+    // STN's trade calls (RequestKeyTrade, RequestItemTrade, CancelQueueRequest) are POSTs in its spec (RESEARCH §4.5),
+    // which the method rule already refuses (POST_ALLOWED); this path rule refuses them on any method, in case STN also
+    // answers them on GET.
     if (decodedLower.split('/').some((s) => s.startsWith('request') || s.startsWith('cancel'))) {
       return 'STN trade endpoints (RequestKeyTrade, RequestItemTrade, CancelQueueRequest) are never called (R4, §2.14)';
     }

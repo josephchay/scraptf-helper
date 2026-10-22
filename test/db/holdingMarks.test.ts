@@ -80,7 +80,7 @@ describe('holding_marks (V15)', () => {
     cleanups.push(() => db.close());
     migrate(db, MIGRATIONS.slice(0, 14));
     expect(all(db, "SELECT name FROM sqlite_master WHERE name LIKE 'holding_marks%'")).toEqual([]);
-    expect(migrate(db).applied).toEqual([15]);
+    expect(migrate(db, MIGRATIONS.slice(0, 15)).applied).toEqual([15]);
     expect(all(db, "SELECT type, name FROM sqlite_master WHERE name LIKE 'holding_marks%' ORDER BY name")).toEqual([
       { type: 'table', name: 'holding_marks' },
       { type: 'index', name: 'holding_marks_base_from' },

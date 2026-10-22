@@ -6,6 +6,7 @@
 
 import { formatScrap } from './currency';
 import { flipProfit, type ExitCostSettings } from './ceiling';
+import { liquidityTagOf } from './exitRisk';
 import { SCRAPTF_BANK_PAGES, isScraptfBank } from './links';
 import type {
   BankNewestSave,
@@ -30,7 +31,8 @@ export const MARKET_MAX_SEARCH_CHARS = 200;
 /** Search words past this many are ignored (a pasted paragraph must not cost a scan per word). */
 const MAX_SEARCH_TOKENS = 20;
 
-export const MARKET_SORTS: readonly MarketSort[] = ['ceiling', 'revenue', 'buyers', 'profit', 'updated', 'name', 'seen'];
+/** The Sort select's order. 0.9 (#3): 'backup' and 'depth' after 'profit' (ranking, Wave 2, fills their values). */
+export const MARKET_SORTS: readonly MarketSort[] = ['ceiling', 'revenue', 'buyers', 'profit', 'backup', 'depth', 'updated', 'name', 'seen'];
 
 function finite(v: unknown): v is number {
   return typeof v === 'number' && Number.isFinite(v);
@@ -54,6 +56,15 @@ export function marketVerdict(r: { buyerCount: number; maxCostScrap: Scrap | nul
 /** flipProfit (friction and the price-move reserve, 0.8), when both exist. */
 export function marketProfit(revenueScrap: Scrap | null, knownCostScrap: Scrap | null, p: ExitCostSettings): Scrap | null {
   return flipProfit(revenueScrap, knownCostScrap, p);
+}
+
+/**
+ * 0.9 (#3): the cost a row's risk keys are judged at: your price, else a rule flip's estimate (the verdict's own cost),
+ * else null. The service's select() and toRow() and the mock all call it, so the sort and the shown values agree.
+ */
+export function marketRiskCost(r: Pick<MarketRow, 'knownCostScrap' | 'ruleCostScrap' | 'verdict'>): Scrap | null {
+  if (finite(r.knownCostScrap)) return r.knownCostScrap;
+  return r.verdict === 'rule-flip' && finite(r.ruleCostScrap) ? r.ruleCostScrap : null;
 }
 
 export function emptyMarketCounts(): Record<MarketVerdict, number> {
@@ -114,7 +125,10 @@ export function marketRowMatches(r: BuySide & UserSide, q: MarketQuery, tokens: 
   return marketUserSideMatches(r, q) && marketBuySideMatches(r, q, tokens);
 }
 
-type SortSide = Pick<MarketRow, 'sku' | 'name' | 'maxCostScrap' | 'revenueScrap' | 'buyerCount' | 'profitScrap' | 'lastOrderChangeAt' | 'knownObservedAt'>;
+type SortSide = Pick<
+  MarketRow,
+  'sku' | 'name' | 'maxCostScrap' | 'revenueScrap' | 'buyerCount' | 'profitScrap' | 'backupProfitScrap' | 'profitableDepth' | 'lastOrderChangeAt' | 'knownObservedAt'
+>;
 
 function sortValue(r: SortSide, sort: Exclude<MarketSort, 'name'>): number | null {
   switch (sort) {
@@ -126,6 +140,11 @@ function sortValue(r: SortSide, sort: Exclude<MarketSort, 'name'>): number | nul
       return finite(r.buyerCount) ? r.buyerCount : null;
     case 'profit':
       return finite(r.profitScrap) ? r.profitScrap : null;
+    // 0.9 (#3): absent or null (no book, no price to judge, a row before ranking fills it) sorts last.
+    case 'backup':
+      return finite(r.backupProfitScrap) ? r.backupProfitScrap : null;
+    case 'depth':
+      return finite(r.profitableDepth) ? r.profitableDepth : null;
     case 'updated':
       return marketUpdatedAt(r);
     case 'seen':
@@ -145,16 +164,26 @@ export function marketProfitTie(a: Scrap | null, b: Scrap | null): number {
 }
 
 /**
+ * The sorts whose ties go by profit (marketProfitTie) before the name: 'seen' (0.7.1) and the 0.9 (#3) risk keys
+ * 'backup' and 'depth', whose few distinct values (0-3 buyers) tie often; Opportunities ties those by profit too.
+ * Shared with the market index so both agree.
+ */
+export function marketProfitTiesFirst(key: MarketSort): boolean {
+  return key === 'seen' || key === 'backup' || key === 'depth';
+}
+
+/**
  * Comparator for q.sort / q.dir (default: ceiling, descending; name defaults to ascending).
  * Missing values sort last in both directions; ties go by name, then SKU, so paging is stable.
- * 'seen' ties go by profit first (marketProfitTie), then by name.
+ * 'seen' ties go by profit first (marketProfitTie), then by name; so do the 0.9 risk keys 'backup' and 'depth'
+ * (marketProfitTiesFirst), as the repo's OPP_SORT and the renderer's compareOpps.
  */
 export function marketComparator(sort: MarketSort | undefined, dir: 'asc' | 'desc' | undefined): (a: SortSide, b: SortSide) => number {
   const key: MarketSort = sort && MARKET_SORTS.includes(sort) ? sort : 'ceiling';
   const sign = (dir ?? (key === 'name' ? 'asc' : 'desc')) === 'asc' ? 1 : -1;
   const byName = (a: SortSide, b: SortSide): number => a.name.localeCompare(b.name) || (a.sku < b.sku ? -1 : a.sku > b.sku ? 1 : 0);
   if (key === 'name') return (a, b) => sign * byName(a, b);
-  const tie = key === 'seen' ? (a: SortSide, b: SortSide): number => marketProfitTie(a.profitScrap, b.profitScrap) || byName(a, b) : byName;
+  const tie = marketProfitTiesFirst(key) ? (a: SortSide, b: SortSide): number => marketProfitTie(a.profitScrap, b.profitScrap) || byName(a, b) : byName;
   return (a, b) => {
     const va = sortValue(a, key);
     const vb = sortValue(b, key);
@@ -187,6 +216,11 @@ export const MARKET_CSV_COLUMNS: readonly string[] = [
   'scraptf_stock',
   'scraptf_limit',
   'scraptf_list_saved',
+  // 0.9 (#3): the risk keys at your price (else a rule flip's estimate), the book depth and its tag (D10).
+  'backup_profit',
+  'profitable_depth',
+  'book_depth',
+  'book_depth_tag',
 ];
 
 /**
@@ -218,6 +252,10 @@ export function marketCsvCells(r: MarketRow, keyScrap: Scrap | null): (string | 
     finite(r.scraptfStock) ? r.scraptfStock : null,
     finite(r.scraptfStockLimit) ? r.scraptfStockLimit : null,
     finite(r.scraptfListAt) ? new Date(r.scraptfListAt).toISOString() : '',
+    money(finite(r.backupProfitScrap) ? r.backupProfitScrap : null),
+    finite(r.profitableDepth) ? r.profitableDepth : null,
+    finite(r.bookDepth) ? r.bookDepth : null,
+    liquidityTagOf(r.bookDepth) ?? '',
   ];
 }
 

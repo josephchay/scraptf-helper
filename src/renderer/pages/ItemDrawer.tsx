@@ -3,6 +3,9 @@ import { DEFAULT_SETTINGS } from '../../shared/defaults';
 import { SCRAPTF_ITEMS_URL } from '../../shared/links';
 import type { BuyerCheck, HoldingAskSide, ItemDetail, LinkSpec, Opportunity, OrderSummary, PriceRule, ProfitSettings, Scrap, ScrapPrice, ScraptfListRow } from '../../shared/types';
 import { profitBreakdown } from '../../shared/ceiling';
+// 0.9 (#2, #11): the input card's break-even, the Steam Market net line and the buyer icon's bot-service hover.
+import { inputBreakEvenView, scmNetView } from '../breakEvenModel';
+import { botServiceTitle } from '../../shared/buyerSeen';
 import { rpc } from '../api';
 import { seenOnText, unsavedLookOf, unsavedLookText } from '../banksModel';
 import { copyText } from '../clipboard';
@@ -18,6 +21,7 @@ import { NEXT_BUYER_HELP, inputCardLabel, nextBuyerLine, otherCopyName, profitBr
 import { PriceInput, parsedValueScrap, readPrice, type BareUnit } from '../components/PriceInput';
 import { useRecordTrade, type RecordTradeInit } from '../components/RecordTradeDialog';
 import { ScraptfHistory } from '../components/ScraptfHistory';
+import { BookHistorySection } from '../components/BookHistorySection';
 import { HoldingSection } from '../components/HoldingSection';
 import { WatchSection } from '../components/WatchSection';
 import { askSideText } from '../holdingsModel';
@@ -84,6 +88,8 @@ import { drawerBankStockLine } from '../marketModel';
 import { listRowIsOtherCopy, noRevenueTextOf, previewRevenue } from '../quickModel';
 import { listBoundaryNote } from '../scraptfListModel';
 import { scraptfLinksInWindow, scraptfWindowOn } from '../scraptfWindowModel';
+// 0.9 (#3): the input card's "Buyers at break-even" line.
+import { DRAWER_RISK_HELP, drawerRiskLine } from '../riskModel';
 
 export function ItemDrawer() {
   const { itemSku, itemCopy, closeItem } = useApp();
@@ -378,6 +384,9 @@ function ItemDetailView({ sku, copyKey = null }: { sku: string; copyKey?: string
       />
       <OrderBook title="Sell listings" orders={d.sellListings} keyScrap={keyScrap} now={now} kind="sell" ask={d.ask ?? null} />
 
+      {/* 0.9 (history): how long buy orders stay and the recorded community price (one local read). */}
+      <BookHistorySection sku={d.sku} orders={d.buyOrders} keyScrap={keyScrap} now={now} />
+
       <section className="drawer-section" aria-labelledby="sec-refs">
         <h3 id="sec-refs">Reference prices</h3>
         <References d={d} keyScrap={keyScrap} now={now} />
@@ -439,6 +448,10 @@ function InputCard({
   const verdict = ceilingVerdict(o.costScrap, o.maxCostScrap);
   // 0.8 (PC-2): the best other buyer if the revenue order's buyer fills or withdraws; null claims nothing.
   const next = nextBuyerLine(o, buyOrders, profit, keyScrap, now);
+  // 0.9 (#3): buyers at break-even over the same book and buyerDepthOf result as the Next buyer line; null claims nothing.
+  const risk = drawerRiskLine(o, buyOrders, profit, keyScrap);
+  // 0.9 (#2): the 'buy' break-even (friction and the price-move reserve); null without a cost.
+  const be = inputBreakEvenView(o, profit, keyScrap);
   return (
     <div className={`input-card status-${o.status}`}>
       <div className="input-card-head">
@@ -498,11 +511,30 @@ function InputCard({
           </strong>
           <span className="muted small"> · margin {fmtPct(o.margin)}</span>
         </dd>
+        {/* 0.9 (#2): the lowest backpack.tf sale price that loses nothing at this cost; the hover gives every exit. */}
+        {be ? (
+          <>
+            <dt>Break-even</dt>
+            <dd title={be.title}>
+              <Money scrap={be.scrap} keyScrap={keyScrap} />
+              <span className="muted small"> · loses nothing at this cost</span>
+            </dd>
+          </>
+        ) : null}
         {next ? (
           <>
             <dt title={NEXT_BUYER_HELP}>Next buyer</dt>
             <dd title={next.title} className={next.tone === 'warn' ? 'tone-text-warn' : undefined}>
               {next.text}
+            </dd>
+          </>
+        ) : null}
+        {/* 0.9 (#3, D11): distinct buyers seen in 24 h at or above break-even at this cost, and the profit if this buyer leaves. */}
+        {risk ? (
+          <>
+            <dt title={DRAWER_RISK_HELP}>Buyers at break-even</dt>
+            <dd title={risk.title} className={risk.tone === 'warn' ? 'tone-text-warn' : undefined}>
+              {risk.text}
             </dd>
           </>
         ) : null}
@@ -1109,10 +1141,12 @@ function OrderBook({
                       <td>
                         <span className="buyer-type">
                           <OnlineDot online={o.online} seenAt={o.lastEventAt} now={now} />
-                          {o.isBot ? <Icon name="bolt" size={12} title="Bot (user agent)" /> : <Icon name="user" size={12} title="Human" />}
+                          {/* 0.9 (#11): the hover names the bot service its client names, a label only (E-D8). */}
+                          {o.isBot ? <Icon name="bolt" size={12} title={botServiceTitle(o)} /> : <Icon name="user" size={12} title={botServiceTitle(o)} />}
                           <span className="buyer-name" title={o.steamid}>
                             {o.userName ?? 'unknown'}
                           </span>
+                          {o.botService ? <span className="muted small bot-service">{o.botService}</span> : null}
                         </span>
                       </td>
                       <td className="num" title={`Last event ${fmtDateTime(o.lastEventAt)}${o.bumpedAt ? `, bumped ${fmtDateTime(o.bumpedAt * 1000)}` : ''}`}>
@@ -1281,6 +1315,8 @@ function SteamMarketCheck({ sku, unusual }: { sku: string; unusual: boolean }) {
     }
   };
   const r = state.result;
+  // 0.9 (#2): what the seller would receive, exact to the cent, from the one priceoverview this click returned.
+  const net = r ? scmNetView(r) : null;
   return (
     <div className="scm-check">
       <button type="button" className="btn small" disabled={state.busy} onClick={() => void check()}>
@@ -1292,13 +1328,20 @@ function SteamMarketCheck({ sku, unusual }: { sku: string; unusual: boolean }) {
         r.marketHashName === null ? (
           <span className="muted small">This item is not sold on the Steam Market.</span>
         ) : (
-          <span className="small">
-            Lowest {r.lowest ?? '—'} · median {r.median ?? '—'} · {r.volume ?? '0'} sold in 24 h
-            <span className="muted">
-              {' '}
-              (USD, Steam Wallet funds, about 15% fees{unusual ? '; one price for every effect' : ''})
+          <>
+            <span className="small">
+              Lowest {r.lowest ?? '—'} · median {r.median ?? '—'} · {r.volume ?? '0'} sold in 24 h
+              <span className="muted">
+                {' '}
+                (USD, Steam Wallet funds{unusual ? '; one price for every effect' : ''})
+              </span>
             </span>
-          </span>
+            {net ? (
+              <p className="small muted scm-net" title={net.title}>
+                {net.text}
+              </p>
+            ) : null}
+          </>
         )
       ) : null}
     </div>

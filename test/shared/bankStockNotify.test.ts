@@ -305,12 +305,17 @@ describe('the candidate list', () => {
     const at = (i: number): number => T + i * 30 * MIN;
 
     /** Told looks of one unchanged flip, one after another, with G4's memory carried as the service does. */
-    function tell(seq: { verdict: ScraptfTimingVerdict; drops?: number; horizonMs?: number | null; at: number }[], timing = true): BankStockNotifyKind[][] {
+    function tell(
+      seq: { verdict: ScraptfTimingVerdict; drops?: number; horizonMs?: number | null; at: number; saveTiming?: ScraptfTimingBrief['saveTiming'] }[],
+      timing = true,
+    ): BankStockNotifyKind[][] {
       let memo = new Map<string, BankStockWaitMemo>();
       let prev: number | null = at(-1);
       const out: BankStockNotifyKind[][] = [];
       for (const s of seq) {
-        const r = row(BASE, { change: null, timing: brief(s.verdict, s.drops ?? 0, s.horizonMs === undefined ? 6 * HOUR : s.horizonMs) });
+        const h = s.horizonMs === undefined ? 6 * HOUR : s.horizonMs;
+        // 0.9 (#10): a brief whose verdict depends on save timing carries the other decision.
+        const r = row(BASE, { change: null, timing: { ...brief(s.verdict, s.drops ?? 0, h), ...(s.saveTiming ? { saveTiming: s.saveTiming } : {}) } });
         const lk = look([lr(r)], { savedAt: s.at, previousSavedAt: prev });
         const memoNow = memo;
         out.push(kinds(bankStockNotifyCandidates(args([], { look: lk, timing, waitOf: (x) => memoNow.get(bankStockWaitKey('hats', x.key)) ?? null }))));
@@ -373,6 +378,25 @@ describe('the candidate list', () => {
       expect(kinds(bankStockNotifyCandidates(args([lr(row(BASE, { timing: brief('buy-now', 1) }))], { timing: true, waitOf })))).toEqual(['new']);
       expect(kinds(bankStockNotifyCandidates(args([lr(row(BASE, { change: null, confidence: 10, timing: brief('buy-now', 1) }))], { timing: true, waitOf })))).toEqual([]);
       expect(kinds(bankStockNotifyCandidates(args([lr(row(BASE, { change: null, timing: brief('buy-now', 1) }))], { timing: true, flips: false, waitOf })))).toEqual([]);
+    });
+
+    it('never fires on a Buy now that depends on save timing (0.9)', () => {
+      expect(
+        tell([
+          { verdict: 'wait', at: at(0) },
+          { verdict: 'buy-now', drops: 1, at: at(1), saveTiming: { verdict: 'wait', why: 'drop-likely', horizonMs: DAY } },
+        ]),
+      ).toEqual([[], []]);
+      // The unflagged twin still fires.
+      expect(tell([{ verdict: 'wait', at: at(0) }, { verdict: 'buy-now', drops: 1, at: at(1) }])).toEqual([[], ['timing']]);
+      // A flagged Buy now ends the Wait streak like any non-wait, so the next unflagged Buy now does not toast either.
+      expect(
+        tell([
+          { verdict: 'wait', at: at(0) },
+          { verdict: 'buy-now', drops: 1, at: at(1), saveTiming: { verdict: 'wait', why: 'drop-likely', horizonMs: DAY } },
+          { verdict: 'buy-now', drops: 2, at: at(2) },
+        ]),
+      ).toEqual([[], [], []]);
     });
   });
 

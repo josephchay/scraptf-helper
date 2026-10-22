@@ -38,6 +38,9 @@ import {
 import { useRpcQuery, useThrottled, useVisiblePush } from '../hooks/useRpc';
 import { Icon } from './Icon';
 import { StepSparkline } from './Sparkline';
+import { CheckoutGuard } from './CheckoutGuard';
+import { timingGuardShown } from '../checkoutGuardModel';
+import { scraptfLowLine } from '../bookHistoryModel';
 
 export interface ScraptfHistoryProps {
   /** The drawer's SKU ('scraptf.itemHistory' { sku }; a painted SKU reads its own copy). */
@@ -93,6 +96,8 @@ export function ScraptfHistory({ sku, special, keyScrap, now, unsaved }: Scraptf
   } else {
     const listed = historyListedLine(h, now);
     const current = historyNowText(h, key, unsaved);
+    // 0.9 (history): the copy's lowest price on sale in the bank's saves, with when and since when.
+    const low = scraptfLowLine(h, key);
     const chips = historyChips(h, key, unsaved);
     const lines = historyEventLines(groups.price, key, now, allEvents ? groups.price.length : HISTORY_EVENTS_SHOWN, h.bank);
     const stockLines = historyEventLines(groups.stock, key, now, allStock ? groups.stock.length : HISTORY_EVENTS_SHOWN, h.bank);
@@ -110,6 +115,11 @@ export function ScraptfHistory({ sku, special, keyScrap, now, unsaved }: Scraptf
         {current ? (
           <p className={`stf-hist-now small${current.tone === 'muted' ? ' muted' : ''}`} title={current.title}>
             {current.text}
+          </p>
+        ) : null}
+        {low ? (
+          <p className={`stf-hist-now small ${low.tone === 'muted' ? 'muted' : `tone-text-${low.tone}`}`} title={low.title}>
+            {low.text}
           </p>
         ) : null}
         <div className="stf-hist-chips" role="list" aria-label="Price change on scrap.tf">
@@ -133,6 +143,8 @@ export function ScraptfHistory({ sku, special, keyScrap, now, unsaved }: Scraptf
             <p className="muted small">{timing.note}</p>
           </div>
         ) : null}
+        {/* 0.9 (#9): under a Buy now verdict, what to know before joining the queue (a sibling, never inside the timing block). */}
+        {timingGuardShown(h.timing) ? <CheckoutGuard variant="list" /> : null}
         {geom ? (
           <StepSparkline
             geom={geom}

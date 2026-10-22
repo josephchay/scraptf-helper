@@ -1476,6 +1476,38 @@ textarea.input {
   margin: 0;
 }
 
+/* 0.9 (#9): the checkout guard (CheckoutGuard.tsx): the drawer's list under a Buy now verdict, the Shopping list's line. */
+.checkout-guard {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 8px 0 0;
+  padding: 6px 0 6px 10px;
+  border-left: 2px solid var(--border);
+  color: var(--text-muted);
+}
+
+.checkout-guard-head {
+  font-weight: 600;
+  color: var(--text);
+}
+
+.checkout-guard-list {
+  gap: 2px;
+}
+
+.checkout-guard-line {
+  margin: 6px 0 10px;
+  padding-left: 10px;
+  border-left: 2px solid var(--border);
+  color: var(--text-muted);
+}
+
+.checkout-guard-line > .icon {
+  margin-right: 4px;
+  vertical-align: -2px;
+}
+
 .template {
   margin: 0 0 10px;
   padding: 10px 12px;

@@ -13,18 +13,20 @@ import type {
   Repo,
   SchemaItemRow,
 } from '../contracts';
-import { bankStockThinning, type BankStockThinSave } from '../../shared/bankStock';
+import { bankStockMarkdownOf, bankStockMarkdownText, bankStockThinning, type BankStockThinSave } from '../../shared/bankStock';
 import { opportunityCopyKey } from '../../shared/copyExtras';
 import { cleanCategoryCounts } from '../../shared/market';
 import { SCRAPTF_CHANGES_DEFAULT_LIMIT, SCRAPTF_EVENTS_MAX_AGE_MS, SCRAPTF_ITEM_EVENTS } from '../../shared/scraptfHistory';
 import { HOLDING_DETAIL_MAX_MARKS, HOLDING_MARKS_MAX_AGE_MS, HOLDING_MARKS_PER_BASE_MAX } from '../../shared/holdingAdvice';
 import { feePatchOf } from '../../shared/journal';
 import { WATCH_ANY_COPY_SENTINEL, WATCH_COPY_TAKEN } from '../../shared/watches';
-import { CATEGORIES, IMPORT_ORIGINS, JOURNAL_SIDES, SCRAPTF_BANK_IDS, SCRAPTF_CHANGE_KINDS, SCRAPTF_LIST_CRAFTS } from '../../shared/types';
+import { CATEGORIES, IMPORT_ORIGINS, JOURNAL_SIDES, ORDER_SPELL_ENDS, SCRAPTF_BANK_IDS, SCRAPTF_BANK_NOTICES, SCRAPTF_CHANGE_KINDS, SCRAPTF_LIST_CRAFTS } from '../../shared/types';
 import type {
   BankNewestSave,
   BankStockSave,
   BankStockStored,
+  CommunityPoint,
+  CommunityPointSource,
   CommunityRow,
   ConfidenceLevel,
   GroupBy,
@@ -43,6 +45,8 @@ import type {
   OpportunityEvent,
   OpportunityEventKind,
   OpportunityStatus,
+  OrderSpell,
+  OrderSpellEnd,
   OrderSummary,
   PriceRule,
   PricedbRow,
@@ -53,15 +57,29 @@ import type {
   RuleFilter,
   ScrapPrice,
   ScraptfBank,
+  ScraptfBankNotice,
   ScraptfChangeKind,
   ScraptfEventStored,
   ScraptfListStored,
+  ScraptfLowStored,
   ScraptfWatch,
   SpecialAttrs,
   UnixMs,
 } from '../../shared/types';
-import { chunk, escapeLike, placeholders } from './db';
+import { chunk, escapeLike, MAX_IN_PARAMS, placeholders } from './db';
 import type { SqlRow, SqlValue, SqliteDb } from './db';
+// 0.9 (schema V16): the release's retention defaults and read caps.
+import { RESERVE_MAX_MARKS } from '../../shared/reserveSuggest';
+import { ORDER_SPELLS_DETAIL_MAX, ORDER_SPELLS_MAX_AGE_MS, ORDER_SPELLS_MAX_ROWS, ORDER_SPELLS_PER_BASE_MAX } from '../../shared/orderPersistence';
+import {
+  COMMUNITY_CURRENCY_MAX,
+  COMMUNITY_HISTORY_DETAIL_MAX,
+  COMMUNITY_HISTORY_MAX_AGE_MS,
+  COMMUNITY_HISTORY_MAX_ROWS,
+  COMMUNITY_HISTORY_PER_SKU_MAX,
+  communityHighOf,
+} from '../../shared/communityHistory';
+import { SCRAPTF_LOWS_MAX_AGE_MS } from '../../shared/scraptfLows';
 
 // ---------------------------------------------------------------------------
 // Value helpers
@@ -83,6 +101,12 @@ const EFFECT_TYPES: readonly EffectRow['type'][] = ['cosmetic', 'weapon', 'taunt
 
 const META_SCHEMA_FETCHED_AT = 'schema.fetchedAt';
 const META_SCHEMA_ETAG = 'schema.etag';
+/**
+ * 0.9 (history, review): the newest first_seen_at the whole-table cap of order_spells ever deleted (it only moves
+ * forward). That cap prunes ended spells only, so a followed spell first seen at or before it lost its ended siblings:
+ * Repo.orderSpells reads only spells first seen after it.
+ */
+const META_ORDER_SPELLS_ENTRY_CUT = 'orderSpells.entryCut';
 
 const EVENTS_DEFAULT_LIMIT = 200;
 const EVENTS_MAX_LIMIT = 5000;
@@ -136,6 +160,11 @@ function bankOrNull(v: unknown): ScraptfBank | null {
 /** F21: a stored import origin, or null for anything else (batches before V9, an unknown value). */
 function originOrNull(v: unknown): ImportOrigin | null {
   return typeof v === 'string' && (IMPORT_ORIGINS as readonly string[]).includes(v) ? (v as ImportOrigin) : null;
+}
+
+/** 0.9 (#13, V16): a stored or incoming bank notice; null for anything else (batches before V16, a newer build's value). */
+function bankNoticeOrNull(v: unknown): ScraptfBankNotice | null {
+  return typeof v === 'string' && (SCRAPTF_BANK_NOTICES as readonly string[]).includes(v) ? (v as ScraptfBankNotice) : null;
 }
 
 function bindNum(v: unknown, fallback = 0): number {
@@ -358,6 +387,8 @@ const LISTING_COLS = [
   'origin',
   'item_name',
   'market_name',
+  // 0.9 (#11, V16): backpack.tf's impersonation flag; NULL is "not flagged or not known".
+  'user_impersonated',
 ] as const;
 
 function listingParams(l: Listing): SqlValue[] {
@@ -384,6 +415,7 @@ function listingParams(l: Listing): SqlValue[] {
     String(l.origin),
     bindStrOrNull(l.itemName),
     bindStrOrNull(l.marketName),
+    l.userImpersonated === true ? 1 : null,
   ];
 }
 
@@ -411,6 +443,8 @@ function rowToListing(r: SqlRow): Listing {
     origin: oneOf(r['origin'], ORIGINS, 'ws'),
     itemName: strOrNull(r['item_name']),
     marketName: strOrNull(r['market_name']),
+    // 0.9 (#11, V16): only a flagged row carries the key, so every row stored before V16 reads back as it did.
+    ...(bool(r['user_impersonated']) ? { userImpersonated: true } : {}),
   };
 }
 
@@ -445,6 +479,10 @@ const OPP_COLS = [
   'first_seen_at',
   'updated_at',
   'max_cost_scrap',
+  // 0.9 (#3, V16): the risk-aware ranking keys (exitRiskAt over the row's own book).
+  'backup_profit_scrap',
+  'profitable_depth',
+  'book_depth',
 ] as const;
 
 function oppParams(o: Opportunity): SqlValue[] {
@@ -479,6 +517,9 @@ function oppParams(o: Opportunity): SqlValue[] {
     bindNum(o.firstSeenAt),
     bindNum(o.updatedAt),
     bindNumOrNull(o.maxCostScrap),
+    bindNumOrNull(o.backupProfitScrap ?? null),
+    bindNumOrNull(o.profitableDepth ?? null),
+    bindNumOrNull(o.bookDepth ?? null),
   ];
 }
 
@@ -502,6 +543,9 @@ function copyKeyOfRow(r: SqlRow): string {
 
 function rowToOpportunity(r: SqlRow): Opportunity {
   const copyKey = copyKeyOfRow(r);
+  const backup = numOrNull(r['backup_profit_scrap']);
+  const depth = numOrNull(r['profitable_depth']);
+  const book = numOrNull(r['book_depth']);
   return {
     key: str(r['key']),
     sku: str(r['sku']),
@@ -521,6 +565,10 @@ function rowToOpportunity(r: SqlRow): Opportunity {
     margin: numOrNull(r['margin']),
     // Migration V2; NULL for rows written before it, until the engine re-evaluates them.
     maxCostScrap: numOrNull(r['max_cost_scrap']),
+    // 0.9 (#3, V16): NULL reads absent: a row stored before V16 (until the engine rewrites it), and a backup of none.
+    ...(backup !== null ? { backupProfitScrap: backup } : {}),
+    ...(depth !== null ? { profitableDepth: depth } : {}),
+    ...(book !== null ? { bookDepth: book } : {}),
     confidence: num(r['confidence']),
     confidenceLevel: oneOf(r['confidence_level'], CONFIDENCE_LEVELS, 'low'),
     flags: parseStringArray(r['flags']),
@@ -709,6 +757,8 @@ function rowToPaintkit(r: SqlRow): PaintkitRow {
 }
 
 function rowToImportBatch(r: SqlRow): ImportBatch {
+  // 0.9 (#13, V16): NULL or unknown reads absent, so every batch before V16 reads back as it did.
+  const notice = bankNoticeOrNull(r['bank_notice']);
   return {
     id: num(r['id']),
     fileName: str(r['file_name']),
@@ -719,6 +769,7 @@ function rowToImportBatch(r: SqlRow): ImportBatch {
     categories: cleanCategoryCounts(parseJson(r['categories'])),
     bank: bankOrNull(r['bank']),
     origin: originOrNull(r['origin']),
+    ...(notice !== null ? { bankNotice: notice } : {}),
   };
 }
 
@@ -748,6 +799,8 @@ function bindCountOrNull(v: unknown): number | null {
 
 function rowToBankStock(r: SqlRow): BankStockStored {
   const costScrap = numOrNull(r['cost_scrap']);
+  // 0.9 (#13, V16): a card's price-drop wording; NULL (every row before V16, every /items row) reads absent.
+  const marks = bankStockMarkdownOf(r['markdown']);
   return {
     sku: str(r['sku']),
     specialKey: str(r['special_key']),
@@ -759,6 +812,7 @@ function rowToBankStock(r: SqlRow): BankStockStored {
     assetId: strOrNull(r['asset_id']),
     // 0.7.4 (V14): the /items list's rows only; a card's NULL is left out, an unknown value reads as unproven.
     ...(r['craft'] === null || r['craft'] === undefined ? {} : { craft: oneOf(r['craft'], SCRAPTF_LIST_CRAFTS, 'any') }),
+    ...(marks !== null ? { markdown: marks } : {}),
   };
 }
 
@@ -825,6 +879,68 @@ function rowToHoldingMark(r: SqlRow): HoldingMark {
   };
 }
 
+/** 0.9 (history, V16): an end kind this build knows; anything else (damage, a newer build's) is null. */
+function orderSpellEndOrNull(v: unknown): OrderSpellEnd | null {
+  return typeof v === 'string' && (ORDER_SPELL_ENDS as readonly string[]).includes(v) ? (v as OrderSpellEnd) : null;
+}
+
+/** 0.9 (history, V16): a stored buy-order spell; an unknown end kind reads null, as a followed spell. */
+function rowToOrderSpell(r: SqlRow): OrderSpell {
+  return {
+    id: num(r['id']),
+    baseSku: str(r['base_sku']),
+    intent: oneOf(r['intent'], INTENTS, 'buy'),
+    isBot: bool(r['is_bot']),
+    keys: num(r['keys']),
+    metalScrap: num(r['metal_scrap']),
+    listedAt: numOrNull(r['listed_at']),
+    firstSeenAt: num(r['first_seen_at']),
+    lastSeenAt: num(r['last_seen_at']),
+    endAt: numOrNull(r['end_at']),
+    endKind: orderSpellEndOrNull(r['end_kind']),
+  };
+}
+
+const COMMUNITY_SOURCES: readonly CommunityPointSource[] = ['prices', 'feed'];
+
+/** 0.9 (history, V16): a recorded community price; an unknown source reads 'prices'. */
+function rowToCommunityPoint(r: SqlRow): CommunityPoint {
+  return {
+    sku: str(r['sku']),
+    source: oneOf(r['source'], COMMUNITY_SOURCES, 'prices'),
+    currency: str(r['currency']),
+    value: num(r['value']),
+    valueHigh: numOrNull(r['value_high']),
+    lastUpdate: numOrNull(r['last_update']),
+    recordedAt: num(r['recorded_at']),
+  };
+}
+
+/** 0.9 (history, V16): a stored scrap.tf low; a row with an unknown bank (a newer build's, damage) is left out. */
+function rowToScraptfLow(r: SqlRow): ScraptfLowStored[] {
+  const bank = bankOrNull(r['bank']);
+  if (bank === null) return [];
+  return [
+    {
+      bank,
+      sku: str(r['sku']),
+      specialKey: str(r['special_key']),
+      keys: num(r['low_keys']),
+      scrap: num(r['low_scrap']),
+      firstAt: num(r['first_at']),
+      lastAt: num(r['last_at']),
+      since: num(r['since_at']),
+      seenAt: num(r['seen_at']),
+    },
+  ];
+}
+
+/** 0.9 (history): a retention option, a finite number of 0 or more (whole for a count), else the default. */
+function retentionOpt(v: unknown, fallback: number, whole: boolean): number {
+  if (typeof v !== 'number' || !Number.isFinite(v)) return fallback;
+  return Math.max(0, whole ? Math.floor(v) : v);
+}
+
 /** 0.8 (H1): a side's metal to bind, whole scrap; NULL when not finite (the side then had nothing). */
 function bindMetalOrNull(v: unknown): number | null {
   return typeof v === 'number' && Number.isFinite(v) ? Math.round(v) : null;
@@ -834,6 +950,22 @@ const HOLDING_MARK_INSERT =
   'INSERT INTO holding_marks (base_sku, from_at, to_at, rev_keys, rev_metal_scrap, rev_is_bot, rev_verified, best_keys, best_metal_scrap, ' +
   'next_keys, next_metal_scrap, buyer_count, verified_buyer_count, ask_keys, ask_metal_scrap, ask_count, scraptf_pays_keys, scraptf_pays_scrap, key_scrap) ' +
   `VALUES (${placeholders(19)})`;
+
+/** 0.9 (history, V16): an order spell as the tracker appends it. */
+const ORDER_SPELL_INSERT =
+  'INSERT INTO order_spells (base_sku, intent, is_bot, keys, metal_scrap, listed_at, first_seen_at, last_seen_at, end_at, end_kind) ' +
+  'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)';
+/** 0.9 (history, V16): one row per distinct price per SKU and source; the unique expression index ignores a repeat. */
+const COMMUNITY_HISTORY_INSERT =
+  'INSERT OR IGNORE INTO bptf_community_history (sku, source, currency, value, value_high, last_update, recorded_at) VALUES (?, ?, ?, ?, ?, ?, ?)';
+/** 0.9 (history, V16): one low per bank, SKU and extras. */
+const SCRAPTF_LOWS_UPSERT = upsertSql(
+  'scraptf_lows',
+  ['bank', 'sku', 'special_key', 'low_keys', 'low_scrap', 'first_at', 'last_at', 'since_at', 'seen_at'],
+  ['bank', 'sku', 'special_key'],
+);
+/** 0.9 (history): Repo.orderSpells and Repo.communityHistory read at most this many rows per call. */
+const HISTORY_READ_MAX_LIMIT = 5000;
 
 /** 0.8 (G1): one copy's watch; a NULL special key (every copy) compares as '*', as the unique index does. */
 const WATCH_COPY = "sku = ? AND IFNULL(special_key, '*') = IFNULL(?, '*')";
@@ -877,8 +1009,8 @@ const BANK_STOCK_NEWEST_BANK =
   'AND EXISTS (SELECT 1 FROM bank_stock b WHERE b.batch_id = s.batch_id AND b.sku = ?) ' +
   'ORDER BY saved_at DESC, s.batch_id DESC LIMIT 1';
 const BANK_STOCK_INSERT =
-  'INSERT INTO bank_stock (batch_id, bank, sku, special_key, name, cost_keys, cost_scrap, stock, asset_id, page, craft) ' +
-  'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(batch_id, sku, special_key) DO NOTHING';
+  'INSERT INTO bank_stock (batch_id, bank, sku, special_key, name, cost_keys, cost_scrap, stock, asset_id, page, craft, markdown) ' +
+  'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(batch_id, sku, special_key) DO NOTHING';
 /** bank_stock.page longer than this is clipped (the parser clips it already: a page key is a short path). */
 const BANK_STOCK_PAGE_MAX_CHARS = 200;
 // The save queries below read bank_stock_saves first and seek each batch: CROSS JOIN keeps that order
@@ -939,6 +1071,9 @@ const LISTING_ORDER =
 
 const OPP_SORT: Record<NonNullable<OppQuery['sort']>, { expr: string; nullable: string | null; defaultDir: 'asc' | 'desc' }> = {
   profit: { expr: 'profit_scrap', nullable: 'profit_scrap', defaultDir: 'desc' },
+  // 0.9 (#3, V16): "If this buyer leaves" and "Buyers at break-even"; missing (NULL) last in both directions.
+  backup: { expr: 'backup_profit_scrap', nullable: 'backup_profit_scrap', defaultDir: 'desc' },
+  depth: { expr: 'profitable_depth', nullable: 'profitable_depth', defaultDir: 'desc' },
   margin: { expr: 'margin', nullable: 'margin', defaultDir: 'desc' },
   confidence: { expr: 'confidence', nullable: 'confidence', defaultDir: 'desc' },
   updated: { expr: 'updated_at', nullable: 'updated_at', defaultDir: 'desc' },
@@ -1854,7 +1989,7 @@ export function createRepo(db: SqliteDb): Repo {
     createImportBatch(b) {
       const categories = cleanCategoryCounts(b.categories);
       return insertId(
-        'INSERT INTO import_batches (file_name, page_kind, file_mtime, imported_at, item_count, categories, bank, origin) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+        'INSERT INTO import_batches (file_name, page_kind, file_mtime, imported_at, item_count, categories, bank, origin, bank_notice) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
         String(b.fileName ?? ''),
         String(b.pageKind),
         bindNum(b.fileMtime),
@@ -1863,6 +1998,8 @@ export function createRepo(db: SqliteDb): Repo {
         categories ? JSON.stringify(categories) : null,
         bankOrNull(b.bank),
         originOrNull(b.origin),
+        // 0.9 (#13, V16): what the page said about its bank; NULL when nothing was seen.
+        bankNoticeOrNull(b.bankNotice),
       );
     },
 
@@ -1999,6 +2136,8 @@ export function createRepo(db: SqliteDb): Repo {
               pageKey,
               // 0.7.4 (V14): the /items list's rows only; anything but a known value is stored unproven.
               b === 'list' && r.craft !== undefined && r.craft !== null ? oneOf(r.craft, SCRAPTF_LIST_CRAFTS, 'any') : null,
+              // 0.9 (#13, V16): a bank page card's price-drop wording; the /items list has no cards, so never on its rows.
+              b === 'list' ? null : bankStockMarkdownText(r.markdown),
             ).changes,
           );
         }
@@ -2224,6 +2363,16 @@ export function createRepo(db: SqliteDb): Repo {
       ).map(rowToHoldingMark);
     },
 
+    holdingMarksSince(sinceTs, limit) {
+      // 0.9 (#12): the newest runs by to_at (the holding_marks_to_at index), then grouped per base in time order.
+      const lim = Math.max(1, clampLimit(limit, RESERVE_MAX_MARKS, RESERVE_MAX_MARKS));
+      return all(
+        'SELECT * FROM (SELECT * FROM holding_marks WHERE to_at >= ? ORDER BY to_at DESC, id DESC LIMIT ?) ORDER BY base_sku, from_at, id',
+        bindNum(sinceTs),
+        lim,
+      ).map(rowToHoldingMark);
+    },
+
     pruneHoldingMarks(now, opts) {
       const maxAge = typeof opts?.maxAgeMs === 'number' && Number.isFinite(opts.maxAgeMs) ? Math.max(0, opts.maxAgeMs) : HOLDING_MARKS_MAX_AGE_MS;
       const perBase = typeof opts?.perBaseMax === 'number' && Number.isFinite(opts.perBaseMax) ? Math.max(0, Math.floor(opts.perBaseMax)) : HOLDING_MARKS_PER_BASE_MAX;
@@ -2236,6 +2385,211 @@ export function createRepo(db: SqliteDb): Repo {
         );
         return old + over;
       });
+    },
+
+    // ----- buy-order persistence (0.9 history, RESEARCH #6, V16) -----
+    // Every cut (the read's limit and the three prunes) selects by first_seen_at, the spell's entry, never by when it
+    // ended: a cut on the end keeps long spells and drops their short siblings, which biases Kaplan-Meier up. The prunes
+    // take ended spells only, so the read leaves out what they leave behind: by age, the caller's sinceAt; the whole
+    // table, META_ORDER_SPELLS_ENTRY_CUT; per base, spellsEntryCutOf.
+
+    insertOrderSpell(s) {
+      const base = requireText('baseSku', s.baseSku);
+      const first = requireFinite('firstSeenAt', s.firstSeenAt);
+      const last = requireFinite('lastSeenAt', s.lastSeenAt);
+      const endAt = s.endAt === null || s.endAt === undefined ? null : requireFinite('endAt', s.endAt);
+      const endKind = s.endKind === null || s.endKind === undefined ? null : orderSpellEndOrNull(s.endKind);
+      if (endKind === null && s.endKind !== null && s.endKind !== undefined) throw new TypeError(`endKind must be one of ${ORDER_SPELL_ENDS.join(', ')} or null`);
+      return insertId(
+        ORDER_SPELL_INSERT,
+        base,
+        oneOf(s.intent, INTENTS, 'buy'),
+        bindBool(s.isBot),
+        bindNum(s.keys),
+        bindNum(s.metalScrap),
+        bindNumOrNull(s.listedAt),
+        first,
+        last,
+        endAt,
+        endKind,
+      );
+    },
+
+    endOrderSpell(id, endAt, kind) {
+      const at = requireFinite('endAt', endAt);
+      const k = orderSpellEndOrNull(kind);
+      if (k === null) throw new TypeError(`kind must be one of ${ORDER_SPELL_ENDS.join(', ')}`);
+      // An ended spell is never ended again, and its last_seen_at is its end (review: a touch that reached past the
+      // end never outlives it).
+      return run('UPDATE order_spells SET end_at = ?, end_kind = ?, last_seen_at = ? WHERE id = ? AND end_kind IS NULL', at, k, at, bindNum(id, -1)) > 0;
+    },
+
+    touchOpenOrderSpells(at, exceptIds) {
+      const t = requireFinite('at', at);
+      // Review: the tracker's held rows (a delete waiting out the relist grace) are skipped, so a crash in the grace
+      // censors them where they were last confirmed, never after the delete.
+      const skip = Array.isArray(exceptIds) ? [...new Set(exceptIds.filter((id) => Number.isSafeInteger(id)))] : [];
+      // The partial index order_spells_open: only followed rows are visited.
+      if (skip.length === 0) return run('UPDATE order_spells SET last_seen_at = MAX(last_seen_at, ?) WHERE end_kind IS NULL', t);
+      return run('UPDATE order_spells SET last_seen_at = MAX(last_seen_at, ?) WHERE end_kind IS NULL AND id NOT IN (SELECT value FROM json_each(?))', t, JSON.stringify(skip));
+    },
+
+    endOpenOrderSpells() {
+      // Censored where they were last confirmed up (a feed break, a clock step, the app closing): never an end.
+      return run("UPDATE order_spells SET end_kind = 'unwatched', end_at = last_seen_at WHERE end_kind IS NULL");
+    },
+
+    orderSpells(bases, sinceAt, limit) {
+      const unique = uniqueStrings(bases)
+        .filter((b) => b !== '')
+        .slice(0, MAX_IN_PARAMS);
+      if (unique.length === 0) return [];
+      const lim = Math.max(1, clampLimit(limit, ORDER_SPELLS_DETAIL_MAX, HISTORY_READ_MAX_LIMIT));
+      // Review: the whole-table cap's entry cut (strictly after it, so a tie at the cut instant goes too).
+      const cut = Number(getMeta(META_ORDER_SPELLS_ENTRY_CUT) ?? Number.NaN);
+      const after = Number.isFinite(cut) ? 'AND first_seen_at > ? ' : '';
+      return all(
+        `SELECT * FROM (SELECT * FROM order_spells WHERE base_sku IN (${placeholders(unique.length)}) AND first_seen_at >= ? ${after}` +
+          'ORDER BY first_seen_at DESC, id DESC LIMIT ?) ORDER BY first_seen_at, id',
+        ...unique,
+        bindNum(sinceAt),
+        ...(Number.isFinite(cut) ? [cut] : []),
+        lim,
+      ).map(rowToOrderSpell);
+    },
+
+    pruneOrderSpells(now, opts) {
+      const maxAge = retentionOpt(opts?.maxAgeMs, ORDER_SPELLS_MAX_AGE_MS, false);
+      const perBase = retentionOpt(opts?.perBaseMax, ORDER_SPELLS_PER_BASE_MAX, true);
+      const maxRows = retentionOpt(opts?.maxRows, ORDER_SPELLS_MAX_ROWS, true);
+      // Ended spells only: a followed one is never pruned.
+      return db.transaction(() => {
+        const old = run('DELETE FROM order_spells WHERE end_kind IS NOT NULL AND first_seen_at < ?', bindNum(now) - maxAge);
+        const over = run(
+          'DELETE FROM order_spells WHERE id IN (SELECT id FROM (SELECT id, ROW_NUMBER() OVER (PARTITION BY base_sku ORDER BY first_seen_at DESC, id DESC) AS rn ' +
+            'FROM order_spells WHERE end_kind IS NOT NULL) WHERE rn > ?)',
+          perBase,
+        );
+        // Review: the newest entry this cap deletes becomes the read's entry cut (it never moves back), since the
+        // followed spells it leaves would otherwise read as survivors of siblings it removed.
+        const newestCut = num(
+          get('SELECT first_seen_at FROM order_spells WHERE end_kind IS NOT NULL ORDER BY first_seen_at DESC, id DESC LIMIT 1 OFFSET ?', maxRows)?.['first_seen_at'],
+          Number.NaN,
+        );
+        const rows = run(
+          'DELETE FROM order_spells WHERE id IN (SELECT id FROM order_spells WHERE end_kind IS NOT NULL ORDER BY first_seen_at DESC, id DESC LIMIT -1 OFFSET ?)',
+          maxRows,
+        );
+        if (rows > 0 && Number.isFinite(newestCut)) {
+          const prev = Number(getMeta(META_ORDER_SPELLS_ENTRY_CUT) ?? Number.NaN);
+          if (!(Number.isFinite(prev) && prev >= newestCut)) setMeta(META_ORDER_SPELLS_ENTRY_CUT, String(newestCut));
+        }
+        return old + over + rows;
+      });
+    },
+
+    // ----- recorded community prices (0.9 history, RESEARCH #7, V16) -----
+
+    communityFor(skus) {
+      const out = new Map<string, CommunityRow>();
+      for (const part of chunk(uniqueStrings(skus))) {
+        for (const r of all(`SELECT * FROM bptf_community WHERE sku IN (${placeholders(part.length)})`, ...part)) {
+          const c = rowToCommunity(r);
+          out.set(c.sku, c);
+        }
+      }
+      return out;
+    },
+
+    insertCommunityHistory(points) {
+      if (!Array.isArray(points) || points.length === 0) return 0;
+      return db.transaction(() => {
+        const stmt = db.prepare(COMMUNITY_HISTORY_INSERT);
+        let written = 0;
+        for (const p of points) {
+          if (!p || typeof p.sku !== 'string' || p.sku.trim() === '') continue;
+          if (typeof p.value !== 'number' || !Number.isFinite(p.value)) continue;
+          if (typeof p.recordedAt !== 'number' || !Number.isFinite(p.recordedAt)) continue;
+          written += Number(
+            stmt.run(
+              p.sku,
+              p.source === 'feed' ? 'feed' : 'prices',
+              // Lower case and short, so one price never splits into two rows by its spelling.
+              (String(p.currency ?? '').trim().toLowerCase() || 'metal').slice(0, COMMUNITY_CURRENCY_MAX),
+              p.value,
+              // A high equal to the low is no range (communityHighOf): one row per price whichever way it came.
+              communityHighOf(p),
+              bindNumOrNull(p.lastUpdate),
+              p.recordedAt,
+            ).changes,
+          );
+        }
+        return written;
+      });
+    },
+
+    communityHistory(skus, limit) {
+      const unique = uniqueStrings(skus)
+        .filter((s) => s !== '')
+        .slice(0, MAX_IN_PARAMS);
+      if (unique.length === 0) return [];
+      const lim = Math.max(1, clampLimit(limit, COMMUNITY_HISTORY_DETAIL_MAX, HISTORY_READ_MAX_LIMIT));
+      return all(
+        `SELECT * FROM (SELECT * FROM bptf_community_history WHERE sku IN (${placeholders(unique.length)}) ` +
+          'ORDER BY recorded_at DESC, id DESC LIMIT ?) ORDER BY recorded_at, id',
+        ...unique,
+        lim,
+      ).map(rowToCommunityPoint);
+    },
+
+    pruneCommunityHistory(now, opts) {
+      const maxAge = retentionOpt(opts?.maxAgeMs, COMMUNITY_HISTORY_MAX_AGE_MS, false);
+      const perSku = retentionOpt(opts?.perSkuMax, COMMUNITY_HISTORY_PER_SKU_MAX, true);
+      const maxRows = retentionOpt(opts?.maxRows, COMMUNITY_HISTORY_MAX_ROWS, true);
+      return db.transaction(() => {
+        const old = run('DELETE FROM bptf_community_history WHERE recorded_at < ?', bindNum(now) - maxAge);
+        const over = run(
+          'DELETE FROM bptf_community_history WHERE id IN (SELECT id FROM (SELECT id, ROW_NUMBER() OVER (PARTITION BY sku ORDER BY recorded_at DESC, id DESC) AS rn ' +
+            'FROM bptf_community_history) WHERE rn > ?)',
+          perSku,
+        );
+        const rows = run(
+          'DELETE FROM bptf_community_history WHERE id IN (SELECT id FROM bptf_community_history ORDER BY recorded_at DESC, id DESC LIMIT -1 OFFSET ?)',
+          maxRows,
+        );
+        return old + over + rows;
+      });
+    },
+
+    // ----- scrap.tf lows (0.9 history, V16) -----
+
+    scraptfLows(bank) {
+      const b = bankOrNull(bank);
+      if (b === null) return [];
+      return all('SELECT * FROM scraptf_lows WHERE bank = ? ORDER BY sku, special_key', b).flatMap(rowToScraptfLow);
+    },
+
+    upsertScraptfLows(rows) {
+      if (!Array.isArray(rows) || rows.length === 0) return 0;
+      return db.transaction(() => {
+        const stmt = db.prepare(SCRAPTF_LOWS_UPSERT);
+        let written = 0;
+        for (const r of rows) {
+          const bank = bankOrNull(r?.bank);
+          if (!r || bank === null || typeof r.sku !== 'string' || r.sku.trim() === '') continue;
+          const nums = [r.keys, r.scrap, r.firstAt, r.lastAt, r.since, r.seenAt];
+          if (!nums.every((n) => typeof n === 'number' && Number.isFinite(n))) continue;
+          written += Number(
+            stmt.run(bank, r.sku, typeof r.specialKey === 'string' ? r.specialKey : '', r.keys, Math.round(r.scrap), r.firstAt, r.lastAt, r.since, r.seenAt).changes,
+          );
+        }
+        return written;
+      });
+    },
+
+    pruneScraptfLows(now, maxAgeMs) {
+      const maxAge = retentionOpt(maxAgeMs, SCRAPTF_LOWS_MAX_AGE_MS, false);
+      return run('DELETE FROM scraptf_lows WHERE seen_at < ?', bindNum(now) - maxAge);
     },
 
     // ----- request log -----

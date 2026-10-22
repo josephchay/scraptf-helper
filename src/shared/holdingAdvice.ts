@@ -1,13 +1,18 @@
 // 0.8 Holdings advice (H1, H6, H7): valuing recorded exit runs, the history behind a holding, and Sell now / List and
 // wait / Hold / No clear signal with dated reasons. Pure, shared by the holdings service, the dashboard and the
 // browser mock. It states only what was recorded or is in the book now; it never predicts a price or a time to sell.
+// 0.9 (#1, #17): the trade lock the user set (Locked advice while the next unit is inside it; prices and profits
+// unchanged), the size of a recorded trend (a Theil-Sen line with its spread, context only) and the key's 7-day move
+// band from PriceDB history already loaded (context only). Each is measured from what was recorded, never a forecast.
 
 import { ORDER_UNVERIFIED_AFTER_MS, unverifiedRevenue } from './buyerSeen';
 import { flipProfit, minProfitFor, profitStatus, type CeilingSettings } from './ceiling';
 import { valueScrap } from './currency';
 import { holdingFigures, scraptfAlternative, type HoldingBuySide } from './holdings';
+import { median, quantile, theilSen } from './robustStats';
 import { scraptfListFresh } from './scraptfList';
 import type {
+  HistoryPoint,
   HoldingAdvice,
   HoldingAdviceKind,
   HoldingAdviceReason,
@@ -16,10 +21,15 @@ import type {
   HoldingMark,
   HoldingMarkValues,
   HoldingRow,
+  HoldingTradeLock,
   HoldingTrend,
+  HoldingTrendSize,
+  JournalLot,
+  KeyMoveBand,
   ProfitSettings,
   Scrap,
   ScraptfListRow,
+  TradeLockMode,
   UnixMs,
 } from './types';
 
@@ -86,9 +96,139 @@ export const HOLDING_MARK_VALUE_KEYS: readonly (keyof HoldingMarkValues)[] = [
 ];
 /** The counts a run carries as the latest seen (extendHoldingMark's `counts`). */
 export const HOLDING_MARK_COUNT_KEYS = ['buyerCount', 'verifiedBuyerCount', 'askCount'] as const;
+/** 0.9 (#1): Steam's Trade Protection lock as the user set it ('7d'): a unit received is not tradable for this long. */
+export const TRADE_LOCK_MS = 7 * DAY;
+/** 0.9 (#17): a trend's size needs at least this many points (stretches with an exit at the newest stretch's sources)… */
+export const HOLDING_TREND_SIZE_MIN_POINTS = 5;
+/** …spanning at least HOLDING_TREND_MIN_OBSERVED_MS, and uses at most the newest this many (1,770 pairs per row). */
+export const HOLDING_TREND_SIZE_MAX_POINTS = 60;
+/** 0.9 (#17): the key move band measures 7-day spans… */
+export const KEY_BAND_SPAN_MS = 7 * DAY;
+/** …ending this far apart, from the newest point back… */
+export const KEY_BAND_STEP_MS = DAY;
+/**
+ * …each counted only when both ends have a PriceDB point at most this old; the first span failing that ends the walk, so
+ * only the newest unbroken run counts (the sparse months are skipped, never read as a flat key)…
+ */
+export const KEY_BAND_MAX_POINT_AGE_MS = 2 * DAY;
+/**
+ * …needs at least this many spans, and uses at most the newest this many. Neighbouring spans share 6 of their 7 days, so
+ * 28 daily spans cover 34 days: about 4 separate weeks (14 covered about 3, too few for a 10th-90th percentile band).
+ */
+export const KEY_BAND_MIN_SPANS = 28;
+/** The most daily spans the band looks back over (about 6 months of span ends). */
+export const KEY_BAND_MAX_SPANS = 180;
+/** The band's percentiles: the middle 8 in 10 of the measured 7-day moves. */
+export const KEY_BAND_LOW_Q = 0.1;
+export const KEY_BAND_HIGH_Q = 0.9;
 
 function finite(v: unknown): v is number {
   return typeof v === 'number' && Number.isFinite(v);
+}
+
+// ---------------------------------------------------------------------------
+// 0.9 (#1): the trade lock the user set (Settings.tradeLock); Flip Desk cannot read the account
+// ---------------------------------------------------------------------------
+
+/** 0.9 (#1): Settings.tradeLock.mode, anything unreadable (or a settings object without the group) as 'unknown'. */
+export function tradeLockModeOf(s: { tradeLock?: { mode?: unknown } | null } | null | undefined): TradeLockMode {
+  const m = s?.tradeLock?.mode;
+  return m === 'none' || m === '7d' ? m : 'unknown';
+}
+
+/** When a unit bought at `boughtAt` (its journal time) becomes tradable: boughtAt + TRADE_LOCK_MS with '7d'; null otherwise or for a time ≤ 0. */
+export function tradableAtOf(boughtAt: UnixMs, mode: TradeLockMode): UnixMs | null {
+  return mode === '7d' && finite(boughtAt) && boughtAt > 0 ? boughtAt + TRADE_LOCK_MS : null;
+}
+
+/**
+ * The open lots (oldest first, lots[0] the next a sale closes) still locked at `now` (tradableAtOf > now; a unit
+ * exactly TRADE_LOCK_MS old is tradable): their count, the next lot's unlock when it is one of them, and the earliest
+ * unlock; null with mode other than '7d' or no locked lot.
+ */
+export function holdingTradeLockOf(lots: readonly Pick<JournalLot, 'ts'>[], mode: TradeLockMode, now: UnixMs): HoldingTradeLock | null {
+  if (mode !== '7d' || !Array.isArray(lots) || lots.length === 0) return null;
+  let lockedQty = 0;
+  let first: UnixMs | null = null;
+  for (const l of lots) {
+    const at = l ? tradableAtOf(l.ts, mode) : null;
+    if (at === null || !(at > now)) continue;
+    lockedQty++;
+    if (first === null || at < first) first = at;
+  }
+  if (lockedQty === 0 || first === null) return null;
+  const next = lots[0] ? tradableAtOf(lots[0].ts, mode) : null;
+  return { lockedQty, nextLotTradableAt: next !== null && next > now ? next : null, firstTradableAt: first };
+}
+
+/** The row with tradeLock set when holdingTradeLockOf gives one, else the row itself (no key added: 0.8's toEqual tests hold). */
+export function withTradeLock<T extends HoldingRow>(row: T, lots: readonly Pick<JournalLot, 'ts'>[], mode: TradeLockMode, now: UnixMs): T {
+  const lock = holdingTradeLockOf(lots, mode, now);
+  return lock === null ? row : { ...row, tradeLock: lock };
+}
+
+// ---------------------------------------------------------------------------
+// 0.9 (#17): the key's 7-day move band, from PriceDB key history already loaded (no request)
+// ---------------------------------------------------------------------------
+
+/**
+ * 0.9 (#17): the 10th and 90th percentile of the key's 7-day move in history already loaded: from the newest point back in
+ * KEY_BAND_STEP_MS steps (at most KEY_BAND_MAX_SPANS, stopping where a span would start before the oldest point), move =
+ * value(t) - value(t - KEY_BAND_SPAN_MS), where value(x) is the last point at or before x (buyScrap, else sellScrap, > 0)
+ * and only when that point is at most KEY_BAND_MAX_POINT_AGE_MS older than x. The first span with an end failing that
+ * ends the walk (never read as a flat key): only the newest unbroken run counts, so the sparse months never count and
+ * fromAt..toAt has no gap. A span resolving to the same two points as the previous counted one is not counted again.
+ * Null below KEY_BAND_MIN_SPANS spans or 2 points. Rounded to scrap. fromAt is the earliest span start used, toAt the
+ * newest point, loadedAt when the history was loaded. A description of past moves, never a forecast.
+ */
+export function keyMoveBandOf(points: readonly HistoryPoint[], loadedAt: UnixMs): KeyMoveBand | null {
+  const pts: { at: UnixMs; v: Scrap }[] = [];
+  for (const p of Array.isArray(points) ? points : []) {
+    if (!p || !finite(p.t)) continue;
+    const v = finite(p.buyScrap) && p.buyScrap > 0 ? p.buyScrap : finite(p.sellScrap) && p.sellScrap > 0 ? p.sellScrap : null;
+    if (v !== null) pts.push({ at: p.t * 1000, v });
+  }
+  if (pts.length < 2) return null;
+  pts.sort((a, b) => a.at - b.at);
+  /** The index of the last point at or before x when it is at most KEY_BAND_MAX_POINT_AGE_MS older than x, else -1. */
+  const indexAt = (x: UnixMs): number => {
+    let lo = 0;
+    let hi = pts.length - 1;
+    let found = -1;
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1;
+      if (pts[mid]!.at <= x) {
+        found = mid;
+        lo = mid + 1;
+      } else hi = mid - 1;
+    }
+    return found >= 0 && x - pts[found]!.at <= KEY_BAND_MAX_POINT_AGE_MS ? found : -1;
+  };
+  const start = pts[0]!.at;
+  const toAt = pts[pts.length - 1]!.at;
+  const moves: number[] = [];
+  let fromAt: UnixMs | null = null;
+  let prev: [number, number] | null = null;
+  for (let i = 0; i < KEY_BAND_MAX_SPANS; i++) {
+    const t1 = toAt - i * KEY_BAND_STEP_MS;
+    const t0 = t1 - KEY_BAND_SPAN_MS;
+    if (t0 < start) break;
+    const i1 = indexAt(t1);
+    const i0 = indexAt(t0);
+    // Review fix: the first span with an end failing the age test ends the walk, so only the newest unbroken run counts
+    // and fromAt..toAt has no gap; sparse points a week apart further back never count (nor stretch the dates).
+    if (i1 < 0 || i0 < 0) break;
+    // Review fix: a span resolving to the same two points as the previous counted one measures nothing new.
+    if (prev !== null && prev[0] === i0 && prev[1] === i1) continue;
+    prev = [i0, i1];
+    moves.push(pts[i1]!.v - pts[i0]!.v);
+    fromAt = t0;
+  }
+  if (moves.length < KEY_BAND_MIN_SPANS || fromAt === null) return null;
+  const low = quantile(moves, KEY_BAND_LOW_Q);
+  const high = quantile(moves, KEY_BAND_HIGH_Q);
+  if (low === null || high === null) return null;
+  return { lowScrap: Math.round(low), highScrap: Math.round(high), spans: moves.length, fromAt, toAt, loadedAt };
 }
 
 /** Two runs' values are the same (=== on every HOLDING_MARK_VALUE_KEYS field; raw prices, so a key move is no change; counts ignored). */
@@ -266,6 +406,8 @@ function exitStretchesOf(runs: readonly HoldingMark[], keyScrap: Scrap | null): 
  * the newest stretch at that value; recentHigh is over stretches-with-exit lasting at least
  * HOLDING_RECENT_HIGH_MIN_RUN_MS (toAt - fromAt) whose toAt >= now - HOLDING_RECENT_HIGH_MS, and recentHighFrom names
  * the source that gave it (the revenue order when it paid that exit in any run of the stretch, else the pays price).
+ * 0.9 (#17): trend.size (trendSizeOf) is set when the newest stretch's sources give a Theil-Sen line (at least
+ * HOLDING_TREND_SIZE_MIN_POINTS points over HOLDING_TREND_MIN_OBSERVED_MS); absent otherwise.
  */
 export function holdingExitHistory(
   marks: readonly HoldingMark[],
@@ -323,6 +465,8 @@ export function holdingExitHistory(
   }
   // backpack.tf wins a tie, as bestExitOf.
   const recentHighFrom: HoldingTrend['recentHighFrom'] = recent === null ? null : recent.m.fromBackpack ? 'backpack' : 'scraptf';
+  // 0.9 (#17): how big the move is, context only (never read by a verdict).
+  const size = trendSizeOf(withExit, since, now);
   return {
     ...base,
     trend: {
@@ -338,7 +482,43 @@ export function holdingExitHistory(
       lastChangeAt: changes.length > 0 ? changes[changes.length - 1]!.at : null,
       direction,
       streak,
+      ...(size ? { size } : {}),
     },
+  };
+}
+
+/**
+ * 0.9 (#17): the Theil-Sen line through the stretches with an exit that observed the newest one's sources (markExitSources),
+ * the newest HOLDING_TREND_SIZE_MAX_POINTS of them, each at its midpoint clamped to [since, now]; null below
+ * HOLDING_TREND_SIZE_MIN_POINTS points, a span under HOLDING_TREND_MIN_OBSERVED_MS or no pair at distinct times. The
+ * spread is the median absolute residual about the line. Measured, never a forecast.
+ */
+function trendSizeOf(
+  withExit: readonly { m: ExitStretch; exit: Scrap; src: { backpack: boolean; scraptf: boolean } }[],
+  since: UnixMs,
+  now: UnixMs,
+): HoldingTrendSize | null {
+  const last = withExit[withExit.length - 1];
+  if (!last) return null;
+  const same = withExit.filter((w) => w.src.backpack === last.src.backpack && w.src.scraptf === last.src.scraptf).slice(-HOLDING_TREND_SIZE_MAX_POINTS);
+  if (same.length < HOLDING_TREND_SIZE_MIN_POINTS) return null;
+  const xs = same.map((w) => (Math.max(w.m.fromAt, since) + Math.min(w.m.toAt, now)) / 2);
+  const x0 = Math.min(...xs);
+  const x1 = Math.max(...xs);
+  if (!(x1 - x0 >= HOLDING_TREND_MIN_OBSERVED_MS)) return null;
+  // Centred on the first point, so the intercept stays in scrap and keeps its precision.
+  const pts = same.map((w, i) => ({ x: xs[i]! - x0, y: w.exit }));
+  const fit = theilSen(pts);
+  if (fit === null) return null;
+  const spread = median(pts.map((p) => Math.abs(p.y - (fit.intercept + fit.slope * p.x)))) ?? 0;
+  // `|| 0`: a level line reads 0, never -0.
+  return {
+    slopeScrapPerDay: fit.slope * DAY || 0,
+    changeScrap: Math.round(fit.slope * (x1 - x0)) || 0,
+    spreadScrap: Math.round(spread),
+    points: pts.length,
+    fromAt: Math.round(x0),
+    toAt: Math.round(x1),
   };
 }
 
@@ -358,6 +538,13 @@ export function holdingExitHistory(
  * `opts.book` false: the row has no backpack.tf book Flip Desk prices or records (a currency, a SKU it cannot read),
  * so there is nothing to refresh first and no exit history to wait for: no refreshFirst, no refresh-first and no
  * no-history reason.
+ * 0.9 (#17): a trend with a size (HoldingTrend.size) adds the trend-size reason after falling; it never changes the kind.
+ * 0.9 (#1): a row whose later units are still inside the trade lock (r.tradeLock, next unit tradable) adds units-locked
+ * after held-vs-typical; a row whose next unit is still locked at `now` reads 'locked', with a first trade-locked reason
+ * naming the tradable date and the kind today's book would give (todayKind), the other reasons unchanged after it.
+ * 0.9 (#17): `opts.keyBand` (keyMoveBandOf) is quoted on the key-exposure reason as its `band` when given.
+ * The context order: reference-above, resave-list, refresh-first, falling, trend-size, held-vs-typical, units-locked,
+ * key-exposure, list-age, has-extras, no-history.
  */
 export function holdingAdvice(
   r: HoldingRow,
@@ -387,7 +574,8 @@ export function holdingAdvice(
   const profitNow = finite(r.profitNowScrap) ? r.profitNowScrap : 0;
   const sellers = ask ? { sellers: ask.count, bots: ask.botCount, mayIncludeOwn: ask.mayIncludeOwn } : null;
 
-  let kind: HoldingAdviceKind;
+  // 0.9 (#1): 'locked' is only ever the final wrap below; the book's own verdict is one of the four 0.8 kinds.
+  let kind: Exclude<HoldingAdviceKind, 'locked'>;
   const reasons: HoldingAdviceReason[] = [];
   if (r.bestExit === 'backpack' && unverifiedRevenue(r.revenueOrder, now)) {
     // (0) The backpack.tf buyer is stale.
@@ -493,26 +681,44 @@ export function holdingAdvice(
     add({ code: 'refresh-first', why: o ? 'unverified-order' : 'idle-book', seenAt: o ? (finite(o.lastEventAt) ? o.lastEventAt : null) : idleAt.length > 0 ? Math.max(...idleAt) : null });
   }
   if (trend?.direction === 'falling' && trend.streak) add({ code: 'falling', fromScrap: trend.streak.fromScrap, toScrap: trend.streak.toScrap, sinceAt: trend.streak.sinceAt });
+  // 0.9 (#17): how big the recorded move was; context only, never a decision input.
+  const size = trend?.size;
+  if (size) add({ code: 'trend-size', changeScrap: size.changeScrap, spreadScrap: size.spreadScrap, points: size.points, fromAt: size.fromAt, toAt: size.toAt });
   const t = r.typicalHold;
   if (t && finite(r.heldSince) && r.heldSince > 0) {
     add({ code: 'held-vs-typical', heldMs: Math.max(0, now - r.heldSince), typicalMs: t.medianMs, count: t.count, scope: t.scope, stillHeld: t.stillHeld });
   }
+  const lock = r.tradeLock ?? null;
+  const lockedNow = lock !== null && finite(lock.nextLotTradableAt) && lock.nextLotTradableAt > now;
+  // 0.9 (#1): the next unit is tradable, later ones are not yet.
+  if (lock && !lockedNow && lock.lockedQty > 0 && lock.firstTradableAt > now) {
+    add({ code: 'units-locked', lockedQty: lock.lockedQty, qty: r.qty, firstTradableAt: lock.firstTradableAt });
+  }
   if (r.exitScrap !== null && finite(r.nextLotKeys) && finite(r.nextLotKeyPriceScrap) && finite(keyScrap) && keyScrap > 0) {
     const exitKeys = r.bestExit === 'scraptf' ? (r.scraptfPaysKeys ?? 0) : (r.revenueOrder?.keys ?? 0);
     const netKeys = (finite(exitKeys) ? exitKeys : 0) - r.nextLotKeys;
-    if (Math.abs(netKeys) >= HOLDING_KEY_EXPOSURE_MIN_KEYS) add({ code: 'key-exposure', netKeys, boughtKeyScrap: r.nextLotKeyPriceScrap, nowKeyScrap: keyScrap });
+    if (Math.abs(netKeys) >= HOLDING_KEY_EXPOSURE_MIN_KEYS) {
+      add({ code: 'key-exposure', netKeys, boughtKeyScrap: r.nextLotKeyPriceScrap, nowKeyScrap: keyScrap, ...(opts.keyBand ? { band: opts.keyBand } : {}) });
+    }
   }
   if (r.bestExit === 'scraptf' && finite(r.scraptfListAt)) add({ code: 'list-age', listAt: r.scraptfListAt });
   if (r.flags.includes('has-extras')) add({ code: 'has-extras' });
   if (trend === null && book) add(noHistory(history));
 
-  return { kind, reasons, basis: history && history.firstAt !== null ? { runs: history.runs, firstAt: history.firstAt } : null, refreshFirst };
+  const basis = history && history.firstAt !== null ? { runs: history.runs, firstAt: history.firstAt } : null;
+  // 0.9 (#1): the 7-day lock the user set keeps the next unit: what the book says now becomes a reason, never a forecast for the unlock day.
+  if (lockedNow) {
+    return { kind: 'locked', reasons: [{ code: 'trade-locked', tradableAt: lock!.nextLotTradableAt!, boughtAt: r.heldSince, todayKind: kind }, ...reasons], basis, refreshFirst };
+  }
+  return { kind, reasons, basis, refreshFirst };
 }
 
 /** holdingAdvice's options. */
 export interface HoldingAdviceOptions {
   /** False: the row has no book Flip Desk prices or records (a currency, an unreadable SKU). Default true. */
   book?: boolean;
+  /** 0.9 (#17): the key move band (keyMoveBandOf) the key-exposure reason quotes; absent or null: none. */
+  keyBand?: KeyMoveBand | null;
 }
 
 /**

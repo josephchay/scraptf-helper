@@ -3,9 +3,9 @@
 // and the user's typical hold, all from 'holdings.detail'. A run is what the app saw while it ran with the live
 // feed on (H1); a gap is "not watched", never filled in or interpolated. Nothing here loads or opens anything.
 
-import { HOLDING_MARK_GAP_MS, markExitScrap } from '../shared/holdingAdvice';
+import { HOLDING_MARK_GAP_MS, markExitScrap, tradableAtOf } from '../shared/holdingAdvice';
 import { venueLabel } from '../shared/venues';
-import type { HoldingDetail, HoldingMark, JournalClosedTrade, JournalLot, Scrap, TypicalHold, UnixMs } from '../shared/types';
+import type { HoldingDetail, HoldingMark, JournalClosedTrade, JournalLot, Scrap, TradeLockMode, TypicalHold, UnixMs } from '../shared/types';
 import { fmtSaveTime } from './changesModel';
 import { fmtAge, fmtDateTime, fmtHold, fmtInt, fmtKeysMetal, fmtMoney, fmtRefOnly, fmtSignedMoney } from './format';
 import { stepChartGeom, type StepGeom } from './historyModel';
@@ -82,12 +82,18 @@ export function recordedSinceText(d: Pick<HoldingDetail, 'marks' | 'truncated'>)
   return `Exit prices recorded since ${fmtDay(first)} (${runs}). Gaps: Flip Desk was closed or the live feed was off; nothing is filled in.`;
 }
 
-/** One line per open lot: "Bought Oct 12 · 1 key 2.00 ref · key 63.11 ref then · held 4 d" (the key price only for a lot paid in keys). */
-export function holdingLotLines(lots: readonly JournalLot[], keyScrap: Scrap | null, now: UnixMs): string[] {
+/**
+ * One line per open lot: "Bought Oct 12 · 1 key 2.00 ref · key 63.11 ref then · held 4 d" (the key price only for a lot
+ * paid in keys). 0.9 (#1): with the user's 7-day Trade lock (`mode` '7d'), a lot still inside it adds
+ * " · tradable 2026-10-19 12:00" (tradableAtOf > now); any other mode adds nothing.
+ */
+export function holdingLotLines(lots: readonly JournalLot[], keyScrap: Scrap | null, now: UnixMs, mode: TradeLockMode = 'unknown'): string[] {
   return (Array.isArray(lots) ? lots : []).map((l) => {
     const price = finite(l.keys) && finite(l.scrap) ? fmtKeysMetal(l.keys, l.scrap) : fmtMoney(l.costScrap, keyScrap);
     const key = finite(l.keys) && l.keys > 0 && finite(l.keyPriceScrap) && l.keyPriceScrap > 0 ? ` · key ${fmtRefOnly(l.keyPriceScrap)} then` : '';
-    return `Bought ${finite(l.ts) ? fmtDay(l.ts) : '?'} · ${price}${key} · held ${fmtAge(now - l.ts)}`;
+    const at = tradableAtOf(l.ts, mode);
+    const lock = at !== null && at > now ? ` · tradable ${fmtDateTime(at)}` : '';
+    return `Bought ${finite(l.ts) ? fmtDay(l.ts) : '?'} · ${price}${key} · held ${fmtAge(now - l.ts)}${lock}`;
   });
 }
 

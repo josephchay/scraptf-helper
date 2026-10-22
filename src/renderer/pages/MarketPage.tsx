@@ -23,7 +23,7 @@
 import { memo, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent, type MouseEvent } from 'react';
 import { CHECK_HINT, CHECK_MAX_CHARS, CHECK_PRIVACY_SENTENCE } from '../../shared/check';
 import { marketUpdatedAt, MARKET_MAX_SEARCH_CHARS, MARKET_SORTS } from '../../shared/market';
-import type { CheckResult, MarketListResult, MarketRow, MarketSort, MarketStats, Scrap, UnixMs } from '../../shared/types';
+import type { CheckResult, MarketListResult, MarketRow, MarketSort, MarketStats, ProfitSettings, Scrap, UnixMs } from '../../shared/types';
 import { CATEGORIES, CATEGORY_LABELS, MARKET_SOURCES, MARKET_VERDICTS } from '../../shared/types';
 import { rpc, saveCsv } from '../api';
 import { banksPath } from '../banksModel';
@@ -86,7 +86,6 @@ import {
   marketPollMs,
   marketRouteIntent,
   marketScraptfButton,
-  marketSellsForTitle,
   marketSourceCount,
   marketWindowQuery,
   nextPageRequest,
@@ -119,6 +118,8 @@ import { allItemsChip, listPaysCell, listStockCell } from '../scraptfListModel';
 import { scraptfLinksInWindow, scraptfWindowOn } from '../scraptfWindowModel';
 import { MIN_CEILING_PRESETS, readMinCeiling } from '../shoppingModel';
 import { timingBadge } from '../timingModel';
+// 0.9 (#3): the Sells for and Buyers hovers' risk figures (buyers at break-even, if this buyer leaves, book depth).
+import { marketRiskTitle, marketSellsTitle } from '../riskModel';
 
 type MenuPoint = { x: number; y: number };
 
@@ -653,6 +654,7 @@ export function MarketPage() {
               dataKey={win.data?.key ?? ''}
               keyScrap={keyScrap}
               reservePct={settings?.profit.exitReservePct ?? null}
+              useOrder={settings?.profit.useOrder ?? null}
               now={now}
               density={settings?.ui.density ?? 'comfortable'}
               selectedId={selectedId}
@@ -1252,6 +1254,11 @@ export interface MarketTableProps {
   keyScrap: Scrap | null;
   /** 0.8 (PC-1): Settings' price-move reserve, named in the Flip hover (verdictPill) only when above 0; absent: none. */
   reservePct?: number | null;
+  /**
+   * Recheck: Settings' profit.useOrder, which names who the Sells for and Buyers hovers' depth counts ("bot buyers"
+   * under Instant), as the Opportunities hover; absent: both rules.
+   */
+  useOrder?: ProfitSettings['useOrder'] | null;
   now: number;
   density: 'comfortable' | 'compact';
   selectedId: string | null;
@@ -1280,6 +1287,7 @@ export function MarketTable({
   dataKey,
   keyScrap,
   reservePct = null,
+  useOrder = null,
   now,
   density,
   selectedId,
@@ -1498,6 +1506,7 @@ export function MarketTable({
               selected={selected}
               keyScrap={keyScrap}
               reservePct={reservePct}
+              useOrder={useOrder}
               now={now}
               flash={dir}
               // Only flashing rows see the parity, so a flash re-renders just them.
@@ -1611,6 +1620,7 @@ const ItemRow = memo(function ItemRow({
   selected,
   keyScrap,
   reservePct,
+  useOrder,
   now,
   flash,
   flashOdd,
@@ -1626,6 +1636,7 @@ const ItemRow = memo(function ItemRow({
   selected: boolean;
   keyScrap: Scrap | null;
   reservePct: number | null;
+  useOrder: ProfitSettings['useOrder'] | null;
   now: number;
   flash: FlashDir | null;
   /** Alternates the animation name, so a row that changes again restarts its flash. */
@@ -1714,7 +1725,7 @@ const ItemRow = memo(function ItemRow({
       <div role="gridcell" className="m-cat muted" title={categoryLabel(r.category)}>
         {categoryLabel(r.category)}
       </div>
-      <div role="gridcell" className="m-sells" title={marketSellsForTitle(r, keyScrap)}>
+      <div role="gridcell" className="m-sells" title={marketSellsTitle(r, keyScrap, undefined, useOrder)}>
         <Money scrap={r.revenueScrap} keyScrap={keyScrap} />
         {order ? (
           <span className="buyer-type">
@@ -1724,7 +1735,7 @@ const ItemRow = memo(function ItemRow({
         ) : null}
         {order ? <span className="buyer-name muted">{order.userName || (order.isBot ? 'Bot' : 'Human')}</span> : null}
       </div>
-      <div role="gridcell" className={`m-buyers num${r.buyerCount === 0 ? ' muted' : ''}`}>
+      <div role="gridcell" className={`m-buyers num${r.buyerCount === 0 ? ' muted' : ''}`} title={marketRiskTitle(r, keyScrap, useOrder) ?? undefined}>
         {fmtInt(r.buyerCount)}
       </div>
       <div role="gridcell" className="m-pay num">

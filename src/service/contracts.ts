@@ -8,6 +8,7 @@ import type {
   BankStockSave,
   BankStockStored,
   Category,
+  CommunityPoint,
   CommunityRow,
   ConnectorHealth,
   EventQuery,
@@ -23,9 +24,12 @@ import type {
   KeyPriceQuote,
   KeyPriceState,
   Listing,
+  LoadedKeyHistory,
   OppQuery,
   Opportunity,
   OpportunityEvent,
+  OrderSpell,
+  OrderSpellEnd,
   PriceRule,
   PriceRuleInput,
   PricedbRow,
@@ -39,6 +43,7 @@ import type {
   ScraptfChangeKind,
   ScraptfEventStored,
   ScraptfListStored,
+  ScraptfLowStored,
   ScraptfWatch,
   ScraptfWatchWrite,
   SecretName,
@@ -495,11 +500,53 @@ export interface Repo {
   extendHoldingMark(id: number, toAt: UnixMs, counts?: Pick<HoldingMark, 'buyerCount' | 'verifiedBuyerCount' | 'askCount'>): boolean;
   /** One base's runs with to_at >= sinceTs, oldest first, the newest `limit` of them (default HOLDING_DETAIL_MAX_MARKS, at most 5000). */
   holdingMarks(baseSku: string, sinceTs: UnixMs, limit?: number): HoldingMark[];
+  /** 0.9 (#12): every base's runs with to_at >= sinceTs (the newest `limit` by to_at; default and cap RESERVE_MAX_MARKS), ordered by base_sku, from_at, id. */
+  holdingMarksSince(sinceTs: UnixMs, limit?: number): HoldingMark[];
   /**
    * Retention: deletes runs whose to_at is older than now - maxAgeMs (default HOLDING_MARKS_MAX_AGE_MS), then each
    * base's oldest runs beyond perBaseMax (default HOLDING_MARKS_PER_BASE_MAX); one transaction; returns rows deleted.
    */
   pruneHoldingMarks(now: UnixMs, opts?: { maxAgeMs?: number; perBaseMax?: number }): number;
+
+  // buy-order persistence (0.9 history, RESEARCH #6, schema V16)
+  /** Appends a spell; returns its id. A TypeError for an empty baseSku, a non-finite time or an endKind outside OrderSpellEnd (null: followed); keys/metal bound finite or 0. */
+  insertOrderSpell(s: Omit<OrderSpell, 'id'>): number;
+  /** Ends a followed spell: end_at, end_kind and last_seen_at = endAt (an ended spell's last_seen_at is its end); false when the row is gone or already ended (a TypeError for a non-finite endAt or an unknown kind). */
+  endOrderSpell(id: number, endAt: UnixMs, kind: OrderSpellEnd): boolean;
+  /** last_seen_at = MAX(last_seen_at, at) on every followed spell (end_kind NULL) but `exceptIds` (the tracker's held rows); returns rows touched. */
+  touchOpenOrderSpells(at: UnixMs, exceptIds?: readonly number[]): number;
+  /** Every followed spell ends 'unwatched' at its last_seen_at; returns how many. */
+  endOpenOrderSpells(): number;
+  /**
+   * Spells of these bases (at most MAX_IN_PARAMS) with first_seen_at >= sinceAt and after the whole-table cap's entry
+   * cut (pruneOrderSpells), the newest `limit` by first_seen_at (default ORDER_SPELLS_DETAIL_MAX, at most 5000), oldest
+   * first by first_seen_at, id. Selected on entry only (KM stays unbiased).
+   */
+  orderSpells(bases: readonly string[], sinceAt: UnixMs, limit?: number): OrderSpell[];
+  /**
+   * Retention, ended spells only: first_seen_at older than maxAgeMs, then each base's beyond perBaseMax, then the table's
+   * beyond maxRows (newest by first_seen_at kept; the newest first_seen_at it deleted becomes orderSpells' entry cut,
+   * never moved back); one transaction; rows deleted.
+   */
+  pruneOrderSpells(now: UnixMs, opts?: { maxAgeMs?: number; perBaseMax?: number; maxRows?: number }): number;
+
+  // recorded community prices (0.9 history, RESEARCH #7, schema V16)
+  /** The stored bptf_community rows of these SKUs (chunked by MAX_IN_PARAMS); absent SKUs have none. */
+  communityFor(skus: readonly string[]): Map<string, CommunityRow>;
+  /** INSERT OR IGNORE each point (one transaction); skips a point without a SKU, a finite value or a finite recordedAt; returns rows written. */
+  insertCommunityHistory(points: readonly CommunityPoint[]): number;
+  /** Points of these SKUs (at most MAX_IN_PARAMS), the newest `limit` (default COMMUNITY_HISTORY_DETAIL_MAX, at most 5000) by recorded_at then id, oldest first. */
+  communityHistory(skus: readonly string[], limit?: number): CommunityPoint[];
+  /** Retention: older than maxAgeMs by recorded_at, each SKU's beyond perSkuMax, the table's beyond maxRows; one transaction; rows deleted. */
+  pruneCommunityHistory(now: UnixMs, opts?: { maxAgeMs?: number; perSkuMax?: number; maxRows?: number }): number;
+
+  // scrap.tf lows (0.9 history, schema V16)
+  /** One bank's stored lows ([] for an unknown bank). */
+  scraptfLows(bank: ScraptfBank): ScraptfLowStored[];
+  /** Upserts by (bank, sku, special_key) in one transaction; skips rows with a bad bank or a non-finite price or time; returns rows written. */
+  upsertScraptfLows(rows: readonly ScraptfLowStored[]): number;
+  /** Retention: deletes lows whose seen_at is older than now - maxAgeMs (default SCRAPTF_LOWS_MAX_AGE_MS); returns how many. */
+  pruneScraptfLows(now: UnixMs, maxAgeMs?: number): number;
 
   // request log
   appendRequestLog(row: RequestLogRow): void;
@@ -540,7 +587,11 @@ export interface SchemaService {
   search(q: string, limit: number): ItemSuggestion[];
   categoryForSku(sku: string): Category;
   effectName(id: number): string | null;
-  effectIdByName(name: string): number | null;
+  /**
+   * The effect id a name (any case) stands for, else null. 0.9 (#22): `type`, the kind of item the effect is on, picks
+   * the effect of that kind when a name is used by several (a renamed effect's old name).
+   */
+  effectIdByName(name: string, type?: EffectRow['type'] | null): number | null;
   canonicalEffectId(id: number): number;
   paintByDecimal(decimal: number): PaintRow | null;
   /** Accepts RED or BLU hex ("#B8383B" or "b8383b"); returns the RED decimal. */
@@ -591,10 +642,34 @@ export interface WebSocketLike {
   readonly readyState: number;
 }
 
+/** 0.9 (history): the newest item.price.community of one base SKU in a batch's updates (wsCommunityPriceOf). */
+export interface FeedCommunityPrice {
+  sku: string;
+  currency: string;
+  value: number;
+  valueHigh: number | null;
+  lastUpdate: UnixSec | null;
+  seenAt: UnixMs;
+}
+
 export interface FeedBatch {
   upserts: Listing[];
   deletes: string[];
   names: BptfNameRow[];
+  /**
+   * 0.9 (#11): ids among `deletes` that came from a listing-update reporting the listing not live (an inactive
+   * status or archived), not from a listing-delete. Their order is not demand any more; the history package records
+   * the end kind from it.
+   */
+  inactive: string[];
+  /** 0.9 (history): the batch's community prices, one per base (the newest); absent from hand-built batches. */
+  community?: FeedCommunityPrice[];
+  /**
+   * 0.9 (history): the stream the batch came from. The socket adds one on every new connection and on every
+   * buffer-limit-exceeded (the server dropped events), flushing first, so batches of one epoch form one unbroken
+   * stream. Absent (hand-built batches): the same stream as the batch before.
+   */
+  epoch?: number;
 }
 
 export interface BptfSocket {
@@ -669,6 +744,8 @@ export interface PriceDb {
   /** The user re-enabled a PriceDB host (net.unblock): a started socket that is blocked tries again now. */
   resumeSocket(): void;
   health(): ConnectorHealth[];
+  /** 0.9 (#17): the newest PriceDB key (5021;6) history already in memory (the key curve cache); null when none. Sends nothing. */
+  loadedKeyHistory(): LoadedKeyHistory | null;
 }
 
 /** Optional Steam Community Market lookup, on click only. */

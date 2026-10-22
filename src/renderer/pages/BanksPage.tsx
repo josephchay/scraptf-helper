@@ -400,6 +400,12 @@ function BankCard(p: {
       <p id={savedId} className="bank-saved" title={c.saved.title}>
         {c.saved.text}
       </p>
+      {/* 0.9 (#13): the bank's newest look said it was not trading: that look stored no save (nothing reads as sold). */}
+      {c.unavailable ? (
+        <p className="bank-unavailable small tone-text-warn" title={c.unavailable.title}>
+          <Icon name="warning" size={12} /> {c.unavailable.text}
+        </p>
+      ) : null}
       {/* F17: what changed since the previous save, and every item on the newest one. */}
       <div className="bank-stock-line">
         {c.whatsNew ? (

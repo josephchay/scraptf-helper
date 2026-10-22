@@ -96,9 +96,10 @@ describe('Recent batches: a batch whose items an update removed', () => {
 
   it('the Import page passes the signal for Recent batches only', () => {
     const page = read('pages/ImportPage.tsx');
-    expect(page).toContain("importBankText(b.bank, b.itemCount, undefined, b.origin === 'window', importBatchItemsRemoved(b))");
+    // 0.9 (#13): then false for the Unusuals index and the batch's own "not trading" notice.
+    expect(page).toContain("importBankText(b.bank, b.itemCount, undefined, b.origin === 'window', importBatchItemsRemoved(b), false, b.bankNotice === 'unavailable')");
     // A result from this session ran after every migration, so the Last import line passes false (it names
-    // the bare Unusuals index instead, from the result's own warnings).
-    expect(page).toContain("importBankText(r.bank, r.stored, importSavedWithoutCards(r), r.origin === 'window', false, importUnusualsIndex(r));");
+    // the bare Unusuals index instead, from the result's own warnings, and from 0.9 a bank that is not trading).
+    expect(page).toContain("importBankText(r.bank, r.stored, importSavedWithoutCards(r), r.origin === 'window', false, importUnusualsIndex(r), importBankUnavailable(r));");
   });
 });

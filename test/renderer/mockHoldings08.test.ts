@@ -6,8 +6,8 @@
 
 import { afterEach, describe, expect, it } from 'vitest';
 import { createMockBridge, type MockBridge } from '../../src/renderer/mock';
-import { usableReferences } from '../../src/renderer/mockData';
-import { HOLDING_DETAIL_LEAD_MS, HOLDING_DETAIL_MAX_CLOSED, HOLDING_DETAIL_UNHELD_MS, HOLDING_MARK_GAP_MS, holdingAdvice, holdingExitHistory } from '../../src/shared/holdingAdvice';
+import { MOCK_KEY_SCRAP, mockKeyHistory, usableReferences } from '../../src/renderer/mockData';
+import { HOLDING_DETAIL_LEAD_MS, HOLDING_DETAIL_MAX_CLOSED, HOLDING_DETAIL_UNHELD_MS, HOLDING_MARK_GAP_MS, holdingAdvice, holdingExitHistory, keyMoveBandOf } from '../../src/shared/holdingAdvice';
 import { HOLDINGS_CSV_COLUMNS, askSideOf, holdingRefsOf, holdingsCsvCells, type AskCandidate } from '../../src/shared/holdings';
 import { closedTradesOf, typicalHold } from '../../src/shared/journal';
 import type { HoldingRow, ItemDetail, Settings } from '../../src/shared/types';
@@ -54,6 +54,8 @@ describe("'holdings.list' rows (0.8)", () => {
   it('carry the ask, the references, the snapshot and the advice, the advice being holdingAdvice over the detail history', async () => {
     const b = make();
     const { rows, settings, K } = await heldWithDetails(b);
+    // 0.9 (#17): the mock's book rows quote the key band of its key history, as the service's rows do.
+    const keyBand = keyMoveBandOf(mockKeyHistory(T0, MOCK_KEY_SCRAP), T0);
     expect(rows.length).toBeGreaterThan(3);
     for (const r of rows) {
       expect(r).toHaveProperty('ask');
@@ -64,8 +66,11 @@ describe("'holdings.list' rows (0.8)", () => {
       expect(d.row).toEqual(r);
       expect(d.history).toEqual(holdingExitHistory(d.marks, r.heldSince, K, T0));
       const { advice, ...plain } = r;
-      expect(advice).toEqual(holdingAdvice(plain, d.history, settings.profit, K, T0));
+      expect(advice).toEqual(holdingAdvice(plain, d.history, settings.profit, K, T0, d.baseSku === null ? { book: false } : { keyBand }));
     }
+    // The band reaches the rows: a held row netting keys quotes it.
+    expect(keyBand).not.toBeNull();
+    expect(rows.some((r) => r.advice!.reasons.some((x) => x.code === 'key-exposure' && x.band !== undefined))).toBe(true);
     // The seeded runs give the preview more than one answer, and the reasons say what they rest on.
     expect(new Set(rows.map((r) => r.advice!.kind)).size).toBeGreaterThan(1);
     expect(rows.some((r) => r.advice!.basis !== null)).toBe(true);
@@ -188,12 +193,14 @@ describe('review fixes (holdings), as the service', () => {
     }
     const settings = await b.rpc('settings.set', { blocklist: ['76561198000000009'] });
     const rows = (await b.rpc('holdings.list', {})).rows;
+    // 0.9 (#17): the same options the mock passes (a book row's key band; a currency keeps { book: false }).
+    const keyBand = keyMoveBandOf(mockKeyHistory(T0, MOCK_KEY_SCRAP), T0);
     for (const r of rows) {
       const d = await b.rpc('holdings.detail', { sku: r.sku });
       expect(d.history).toEqual(holdingExitHistory(d.marks, r.heldSince, K, T0, T0));
       expect(d.history!.settingsAt).toBe(T0);
       const { advice, ...plain } = r;
-      expect(advice).toEqual(holdingAdvice(plain, d.history, settings.profit, K, T0));
+      expect(advice).toEqual(holdingAdvice(plain, d.history, settings.profit, K, T0, d.baseSku === null ? { book: false } : { keyBand }));
     }
     // Nothing recorded since the change can decide a hold yet.
     expect(rows.some((r) => r.advice!.kind === 'hold')).toBe(false);

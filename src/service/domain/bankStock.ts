@@ -68,6 +68,7 @@ import type {
   Scrap,
   ScraptfBank,
   ScraptfBankSummary,
+  ScraptfCopyLow,
   ScraptfKeyRun,
   ScraptfTimingBrief,
   ScraptfTurnover,
@@ -84,7 +85,7 @@ import { lookupReferences, lookupTwinReferences, referencePrices, usableReferenc
 import type { ScraptfHistory, ScraptfTimingInputs } from './scraptfHistory';
 import { scraptfTimingBrief } from '../../shared/scraptfTiming';
 import {
-  bankStockNoticeOf,
+  bankStockNoticeWithGuard,
   bankStockNotifyCandidates,
   bankStockNotifyKey,
   bankStockOldSaveSummary,
@@ -99,6 +100,7 @@ import {
 } from '../../shared/bankStockNotify';
 import { scraptfIsRestock, scraptfSeenBefore } from '../../shared/scraptfHistory';
 import { EMPTY_WATCH_INDEX, watchJoinOf, type ScraptfWatchIndex, type WatchPageRows } from '../../shared/watches';
+import { minProfitableDepthOf, profitableDepthAt } from '../../shared/exitRisk';
 
 /**
  * Repo meta key of the S3 notification dedupe: JSON { "<bank>|<sku>": notifiedAt }, entries older than
@@ -129,8 +131,9 @@ export interface BankStockDeps {
    * firstSeenAt and changeSinceListed come from runsFor(bank), one Map per read, never a query per row.
    * Omitted (tests, 0.6): those fields are null. 0.8 (T4, LC-4): timingFor, when given, joins each on-sale row's
    * buy-timing brief (BankStockRow.timing) in list() and all(), and turnoverFor the result's turnover in list().
+   * 0.9 (history): lowsFor, when given, joins each row's lowest price in the bank's saves (BankStockRow.low).
    */
-  history?: Pick<ScraptfHistory, 'runsFor'> & Partial<Pick<ScraptfHistory, 'timingFor' | 'turnoverFor'>>;
+  history?: Pick<ScraptfHistory, 'runsFor'> & Partial<Pick<ScraptfHistory, 'timingFor' | 'turnoverFor' | 'lowsFor'>>;
   /**
    * 0.7.4 (F22, F70): whether a row's scrap.tf price is probably another copy's (costSanity's
    * 'variant-suspect' or 'cost-below-market' against the item's age-gated PriceDB price and its craftability
@@ -246,6 +249,8 @@ export interface BankStock {
   lookOf(bank: ScraptfBank, batchId: number, opts?: { timing?: boolean }): BankStockLook | null;
   /** 0.8: 'flip': F5's suspect margin or the cost checks (what newFlips leaves out); 'cost': the cost checks only. Never throws. */
   isSuspect(r: BankStockRow, what: 'flip' | 'cost'): boolean;
+  /** 0.9 (#3): buyers at break-even at the row's cost (profitableDepthAt over the market entry's exitDepth); null for a family row, no entry or a failed read. Never throws. */
+  depthOf?(r: BankStockRow): number | null;
   /** 0.8 (G2): newFlips' look rule (a previous save needed) for rows this read dropped under Pay up to (bankStockDroppedIntoFlip), not suspect, most profit first. */
   droppedFlips(bank: ScraptfBank, batchId: number): BankStockRow[];
   /** 0.8 ('watches.list'): per shown page, its newest save's on-sale rows whose base is in `bases`, joined now. Never throws. */
@@ -666,6 +671,21 @@ export function createBankStock(deps: BankStockDeps): BankStock {
     }
   }
 
+  let lowsFailing = false;
+  /** 0.9 (history): the bank's lowest prices per copy key, read once per call; a failed read joins none (logged once per streak). */
+  function lowsOf(bank: ScraptfBank): ReadonlyMap<string, ScraptfCopyLow> | null {
+    if (!deps.history?.lowsFor) return null;
+    try {
+      const lows = deps.history.lowsFor(bank) ?? null;
+      lowsFailing = false;
+      return lows;
+    } catch (err) {
+      if (!lowsFailing) log.warn('Bank stock could not read the lowest prices', { bank, error: errorText(err) });
+      lowsFailing = true;
+      return null;
+    }
+  }
+
   let timingFailing = false;
   /** 0.8 (T4): an on-sale row's buy-timing brief from the history; a failed read shows none (logged once per streak). */
   function timingOf(bank: ScraptfBank, key: string, buy: BankStockBuySide | null, at: UnixMs, inputs?: ScraptfTimingInputs): ScraptfTimingBrief | null {
@@ -745,11 +765,16 @@ export function createBankStock(deps: BankStockDeps): BankStock {
     checkSchema();
     const runs = runsOf(bank);
     const joins = joinsAt(timingAt);
+    // 0.9 (history): the copies' lowest prices in the bank's saves, read once (after the watch join: BankStockRow.low).
+    const lows = lowsOf(bank);
     const out: BankStockRow[] = [];
     for (const d of diff) {
       if (changedOnly && d.change === null) continue;
       const row = joinRow(bank, d, K, profit, runs, joins);
-      if (row) out.push(row);
+      if (row) {
+        const low = lows?.get(d.key);
+        out.push(low ? { ...row, low } : row);
+      }
     }
     return out;
   }
@@ -946,6 +971,17 @@ export function createBankStock(deps: BankStockDeps): BankStock {
       }
     },
 
+    depthOf(r) {
+      try {
+        if (r.listFamily === true) return null;
+        const e = entryOf(r.sku);
+        return e ? profitableDepthAt(e.exitDepth, r.costScrap, deps.settings().profit) : null;
+      } catch (err) {
+        log.warn('Bank stock could not count the buyers at break-even', { error: errorText(err) });
+        return null;
+      }
+    },
+
     droppedFlips(bank, batchId) {
       try {
         ensure();
@@ -1014,7 +1050,7 @@ export interface BankStockNotifyDeps {
    * look, every kind's rows) and isSuspect; without lookOf (older fakes) the newFlips rows are told as new flips only.
    * The look is read untimed ({ timing: false }) while notifications.buyTiming is off: nothing else reads a verdict.
    */
-  stock: Pick<BankStock, 'newFlips'> & Partial<Pick<BankStock, 'savedAtOf' | 'lookOf' | 'isSuspect'>>;
+  stock: Pick<BankStock, 'newFlips'> & Partial<Pick<BankStock, 'savedAtOf' | 'lookOf' | 'isSuspect' | 'depthOf'>>;
   /** 0.8 (G1): the enabled watches by base (core: the watch cache's index()). Omitted or failing: no watch hit. */
   watches?(): ScraptfWatchIndex;
   settings(): Settings;
@@ -1113,6 +1149,16 @@ function isSuspect(deps: BankStockNotifyDeps, r: BankStockRow, what: 'flip' | 'c
   }
 }
 
+/** 0.9 (#3): BankStock.depthOf, never throwing; absent (older fakes): unknown. */
+function depthOfSafe(deps: BankStockNotifyDeps, r: BankStockRow): number | null {
+  if (!deps.stock.depthOf) return null;
+  try {
+    return deps.stock.depthOf(r);
+  } catch {
+    return null;
+  }
+}
+
 /**
  * A stock without lookOf (an older stand-in): its newFlips rows as a look of new, never-seen flips, told as before.
  * previousSavedAt 0: a look after a save (newFlips needs one); savedAt from savedAtOf, else now.
@@ -1157,7 +1203,8 @@ function saveTiming(deps: BankStockNotifyDeps, next: Map<string, BankStockWaitMe
  * - 'timing' (G4, opt-in: notifications.buyTiming, off by default): "Buy now (<Bank>): <name>", Wait on the read before
  *   and Buy now on this one, with a drop or the Wait's horizon passing in between.
  * Gates: notifications.enabled; the S3 kinds need .newOnScraptf and 'import' in .inputKinds, the buy side's
- * .minConfidence, .minProfitScrap, a verified buy order and no suspect margin or cost. One dedupe in repo meta
+ * .minConfidence, .minProfitScrap, a verified buy order and no suspect margin or cost. 0.9: and, with
+ * notifications.minProfitableDepth set, that many buyers at break-even (depthOf). One dedupe in repo meta
  * (BANK_STOCK_NOTIFY_META_KEY) for BANK_STOCK_NOTIFY_DEDUP_MS across restarts: per bank and base SKU, a watch hit per
  * watch (exempt from that key, and recording the S3 key, so the S3 kinds stay quiet after it). An item another
  * notification already told of (deps.toldBefore; for a watch hit only a toast at or after the look's save) is only
@@ -1198,6 +1245,9 @@ export function notifyNewBankFlips(deps: BankStockNotifyDeps, imported: { bank: 
       suspect: (r, what) => isSuspect(deps, r, what),
       timing: timingOn,
       waitOf: (r) => timing.get(bankStockWaitKey(look.bank, r.key)) ?? null,
+      // 0.9 (#3): the risk control (0, the default: off); depthOf is read only when a minimum is set.
+      minDepth: minProfitableDepthOf(n.minProfitableDepth),
+      depthOf: (r) => depthOfSafe(deps, r),
     });
     // After the candidates were built from the memories before this look.
     if (timingOn) saveTiming(deps, bankStockTimingNext(timing, look, now));
@@ -1258,7 +1308,8 @@ export function notifyNewBankFlips(deps: BankStockNotifyDeps, imported: { bank: 
     const individual = due.slice(0, BANK_STOCK_MAX_NOTIFICATIONS);
     for (const c of individual) {
       // The Wait note is part of the opt-in G4 (timingOn): off, the default, a toast's text is 0.7.4's.
-      send({ ...bankStockNoticeOf(c, info.label, K, ago, timingOn), sku: c.row.sku });
+      // 0.9 (#9): a watch hit or G4 "Buy now" that tells a flip gains the checkout guard's short sentence when it fits.
+      send({ ...bankStockNoticeWithGuard(c, info.label, K, ago, timingOn), sku: c.row.sku });
     }
     const rest = due.slice(individual.length);
     // G5: the summary opens the bank's stock page on the chip its items show under (an in-app route, never a URL).

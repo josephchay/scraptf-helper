@@ -35,6 +35,18 @@ export const DUPLICATE_ROW = 'duplicate-row';
  * scrap.tf sells at its price (a family row). A note for the parser report, never a refusal.
  */
 export const CRAFT_UNVERIFIED = 'craft-unverified';
+/** 0.9 (#13): a recognised bank page whose own text says its bank is not trading: no bank stock save, nothing reads as sold. */
+export const BANK_UNAVAILABLE = 'bank-unavailable';
+/** 0.9 (#13): the page warning a bank-unavailable look carries (the parser's; main ranks its code first). */
+export const BANK_UNAVAILABLE_WARNING = `${BANK_UNAVAILABLE}: the page says this scrap.tf bank is not trading right now, so this look stores no bank stock save and nothing on it reads as sold`;
+/** 0.9 (#13): a card showing scrap.tf's own price-drop wording (report and the bank stock tag; never a refusal). */
+export const PRICE_MARKDOWN = 'price-markdown';
+/** 0.9 (#13): a card whose own text shows a countdown-like time (report only). */
+export const PRICE_COUNTDOWN = 'price-countdown';
+/** 0.9 (#13): a card inside an element whose id or class names "recent" (report only). */
+export const RECENT_SECTION = 'recent-section';
+/** 0.9 (#13): ImportReport.notices holds at most this many phrases. */
+export const IMPORT_REPORT_NOTICES_MAX = 5;
 
 /** Warning codes that mean an item was refused (not stored as a price), not just noted. */
 export const IMPORT_REFUSAL_CODES: readonly string[] = Object.freeze([

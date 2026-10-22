@@ -70,7 +70,7 @@ describe('migration V15: journal fees', () => {
     const { db } = v14();
     seed(db);
     const before = all(db, 'SELECT * FROM journal ORDER BY id');
-    expect(migrate(db).applied).toEqual([15]);
+    expect(migrate(db, MIGRATIONS.slice(0, 15)).applied).toEqual([15]);
     expect(userVersion(db)).toBe(15);
     const cols = all(db, 'PRAGMA table_info(journal)') as { name: string; type: string; notnull: number; dflt_value: unknown }[];
     expect(cols.find((c) => c.name === 'fee_keys')).toMatchObject({ type: 'REAL', notnull: 0, dflt_value: null });
@@ -161,8 +161,8 @@ describe('migration V15: journal fees', () => {
   it('is applied once', () => {
     const { db, file } = v14();
     seed(db);
-    expect(migrate(db).applied).toEqual([15]);
-    expect(migrate(db).applied).toEqual([]);
+    expect(migrate(db, MIGRATIONS.slice(0, 15)).applied).toEqual([15]);
+    expect(migrate(db, MIGRATIONS.slice(0, 15)).applied).toEqual([]);
     db.close();
     const repo = openRepo(file);
     cleanups.push(() => repo.close());

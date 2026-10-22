@@ -28,13 +28,14 @@ import type {
   ScraptfBank,
   ScraptfBankWhatsNew,
   ScraptfKeyRun,
+  ScraptfMarkdown,
   ScraptfPriceChange,
   ScraptfTimingBrief,
   ScraptfTurnover,
   SpecialAttrs,
   UnixMs,
 } from './types';
-import { BANK_STOCK_FILTERS, BANK_STOCK_SORTS } from './types';
+import { BANK_STOCK_FILTERS, BANK_STOCK_SORTS, SCRAPTF_MARKDOWNS } from './types';
 
 /**
  * Saves per page the F17 diff counts (BankStockResult.saves): a page's newest save is compared with its
@@ -521,6 +522,18 @@ export function bankStockListFamily(bank: ScraptfBank | null | undefined, row: P
   return bank === 'list' && row?.craft !== 'craftable' && row?.craft !== 'uncraftable';
 }
 
+/** 0.9 (#13): BankStockStored.markdown as bank_stock.markdown stores it: the known marks, unique, in SCRAPTF_MARKDOWNS order, joined by ' '; null for none. */
+export function bankStockMarkdownText(marks: readonly unknown[] | null | undefined): string | null {
+  const known = SCRAPTF_MARKDOWNS.filter((m) => Array.isArray(marks) && marks.includes(m));
+  return known.length > 0 ? known.join(' ') : null;
+}
+/** 0.9 (#13): bank_stock.markdown (a string split on spaces or commas, or an array) read back: the known marks in SCRAPTF_MARKDOWNS order; null when none (an unknown word, a newer build's, is dropped). */
+export function bankStockMarkdownOf(v: unknown): ScraptfMarkdown[] | null {
+  const words: readonly unknown[] = typeof v === 'string' ? v.split(/[\s,]+/) : Array.isArray(v) ? v : [];
+  const known = SCRAPTF_MARKDOWNS.filter((m) => words.includes(m));
+  return known.length > 0 ? known : null;
+}
+
 /** profitStatus of the row's profit: profitable is 'flip', no revenue 'no-buyers', anything else 'over'. */
 export function bankStockVerdict(profitScrap: Scrap | null, costScrap: Scrap, p: CeilingSettings): BankStockVerdict {
   const s = profitStatus(profitScrap, costScrap, p);
@@ -539,6 +552,7 @@ export function bankStockVerdict(profitScrap: Scrap | null, costScrap: Scrap, p:
  * 0.7.4: with `bank`, a row of the /items list not proven to price one copy (bankStockListFamily, read on the
  * row shown) gets no buy side whatever `buy` holds, and `listFamily`: never a flip. 0.8 (T4): `timing` (the copy's
  * buy-timing brief, scraptfTimingBrief) is carried by an on-sale row only: never by a gone row or a family row.
+ * 0.9 (#13): `markdown` (the newest save's card wording) likewise, on an on-sale row only.
  */
 export function bankStockRow(
   d: BankStockDiffRow,
@@ -598,6 +612,8 @@ export function bankStockRow(
     ...(listedSince !== null && run && finite(run.lastSeenAt) ? { lastSeenAt: run.lastSeenAt } : goneRun ? { lastSeenAt: goneRun.lastSeenAt } : {}),
     ...(family ? { listFamily: true as const } : {}),
     ...(a.timing && d.change !== 'gone' && !family ? { timing: a.timing } : {}),
+    // 0.9 (#13): the card's own price-drop wording on the newest save: an on-sale row only, never a gone or family row.
+    ...(d.onSale && d.change !== 'gone' && !family && Array.isArray(d.current?.markdown) && d.current.markdown.length > 0 ? { markdown: [...d.current.markdown] } : {}),
   };
 }
 

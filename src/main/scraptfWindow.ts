@@ -23,7 +23,7 @@
 import { createHash } from 'node:crypto';
 import { BrowserWindow, session, WebContentsView, type Session, type WebContents, type WebPreferences } from 'electron';
 import type { Logger } from '../service/contracts';
-import { IMPORT_SCHEMA_LOADING_CODE, LAYOUT_CHANGED, NO_PRICE_COLUMN, NO_STOCK_LIMIT, PARTIAL_READ, UNUSUALS_INDEX } from '../shared/importCodes';
+import { BANK_UNAVAILABLE, IMPORT_SCHEMA_LOADING_CODE, LAYOUT_CHANGED, NO_PRICE_COLUMN, NO_STOCK_LIMIT, PARTIAL_READ, UNUSUALS_INDEX } from '../shared/importCodes';
 import { SCRAPTF_HOME_URL } from '../shared/links';
 import type { PushContract, PushEvent } from '../shared/rpc';
 import { scraptfImportablePath } from '../shared/scraptfPaths';
@@ -46,6 +46,7 @@ import {
   SCRAPTF_READ_REASONS,
   SCRAPTF_WINDOW_NOTICES,
   SCRAPTF_WINDOW_OFF,
+  scraptfChallengeIn,
   scraptfPathOf,
   shouldReadUrl,
   subframeNavigationDecision,
@@ -87,8 +88,9 @@ const SKU_SHAPE = /^\d+;\d+(;[a-z0-9-]+)*$/i;
  * The import's warning codes the toolbar shows, most important first (F21-10): a partial look, a page whose
  * layout changed, unreadable stock, unknown items, a missing price column, an unknown bank, a missing pays
  * column. Any other code follows them, but duplicate copies and a guessed page kind are no news on screen.
+ * 0.9 (#13): a page saying its bank is not trading outranks them all (such a read now records its batch).
  */
-const WARNING_ORDER: readonly string[] = [PARTIAL_READ, LAYOUT_CHANGED, NO_STOCK_LIMIT, 'no-sku', NO_PRICE_COLUMN, 'unknown-bank', 'no-pays-column'];
+const WARNING_ORDER: readonly string[] = [BANK_UNAVAILABLE, PARTIAL_READ, LAYOUT_CHANGED, NO_STOCK_LIMIT, 'no-sku', NO_PRICE_COLUMN, 'unknown-bank', 'no-pays-column'];
 const QUIET_WARNINGS: ReadonlySet<string> = new Set(['duplicate-cards', 'page-kind-guessed']);
 /**
  * Codes whose counts the toolbar shows, and how many of them lead the service's own text ("3 of ~48 items",
@@ -1103,6 +1105,20 @@ export function createScraptfWindowManager(deps: ScraptfWindowDeps): ScraptfWind
       if (viewContents() !== wc) return skipped(failed ? SCRAPTF_READ_REASONS.notOpen : SCRAPTF_READ_REASONS.failed);
       if (!failed && documentUrl(wc) !== url) return skipped(SCRAPTF_READ_REASONS.failed);
       const html = failed ? null : readResultHtml(value);
+      // 0.9 (#14): a check page served with an unexpected status (a 200) carries its own words: nothing of it is imported,
+      // held or remembered; the page notice stops the automatic reads until the next document (the user solves it).
+      if (html !== null && scraptfChallengeIn(html)) {
+        if (held !== null && held.key === key) held = null;
+        // This cycle's settle read would only read the check again.
+        if (cycleKey === key) clearSettle();
+        setNotice(SCRAPTF_WINDOW_NOTICES.challenge);
+        log.warn('scrap.tf window: a check page was on screen, so nothing was imported');
+        // The pushed read carries the page notice, a READ_FAILURE_LINES key the toolbar already words as
+        // "Could not read …" (never "Read 0 items … imported like a saved page"); readNow() gets the read reason.
+        const read = failedRead(url, SCRAPTF_WINDOW_NOTICES.challenge);
+        pushRead(read);
+        return { read, reason: SCRAPTF_READ_REASONS.challenge };
+      }
       const snap: Snapshot | null = html === null ? null : { key, url, html, hash: sha256(html), notice: noticeNow };
       if (trigger === 'load' && settleTimer !== null && cycleKey === key) {
         // Held for the settle read (nothing to show yet: the toolbar says Reading…).

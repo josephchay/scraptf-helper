@@ -142,7 +142,8 @@ describe('journal RPCs (0.8)', () => {
     const lines = csv.replace(/^﻿/, '').trim().split('\r\n');
     expect(lines[0]).toBe(JOURNAL_CSV_COLUMNS.join(','));
     expect(lines).toHaveLength(3);
-    // The sale closes the buy: fifo, matched buy and booked profit (15 scrap = 1.66 ref) appended.
-    expect(lines[2]).toMatch(/,closed,1,10,11\.66,0\.33,1\.66,1$/);
+    // The sale closes the buy: fifo, matched buy and booked profit (15 scrap = 1.66 ref) appended; 0.9: then the open-lot
+    // valuation columns, blank on a sale (and here no Holdings answers at all).
+    expect(lines[2]).toMatch(/,closed,1,10,11\.66,0\.33,1\.66,1,,,$/);
   });
 });

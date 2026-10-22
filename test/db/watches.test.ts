@@ -45,7 +45,7 @@ describe('scraptf_watches (V15)', () => {
     cleanups.push(() => db.close());
     migrate(db, MIGRATIONS.slice(0, 14));
     expect(all(db, "SELECT name FROM sqlite_master WHERE name = 'scraptf_watches'")).toEqual([]);
-    expect(migrate(db).applied).toEqual([15]);
+    expect(migrate(db, MIGRATIONS.slice(0, 15)).applied).toEqual([15]);
     expect(all(db, "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'scraptf_watches'")).toEqual([{ name: 'scraptf_watches' }]);
     const index = all(db, "SELECT name, sql FROM sqlite_master WHERE type = 'index' AND name = 'scraptf_watches_copy'") as { sql: string }[];
     expect(index).toHaveLength(1);

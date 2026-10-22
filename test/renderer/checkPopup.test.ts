@@ -9,6 +9,7 @@ import { CHECK_MATCHED_NOTE } from '../../src/renderer/checkModel';
 import { createMockBridge, type MockBridge } from '../../src/renderer/mock';
 import { mockCheckDemo } from '../../src/renderer/mockCheck';
 import { CHECK_HINT, CHECK_NOT_ITEM_REASON, checkHintedNote } from '../../src/shared/check';
+import { CHECKOUT_GUARD_POPUP, checkoutGuardTitle } from '../../src/shared/checkoutGuard';
 import { DEFAULT_SETTINGS } from '../../src/shared/defaults';
 import type { FlipdeskBridge, PushContract, PushEvent } from '../../src/shared/rpc';
 import type { CheckResult } from '../../src/shared/types';
@@ -238,15 +239,50 @@ describe('the check popup', () => {
 
   it("an item's notes show (all of them in the tooltip) and the key legend gives way, so the buttons fit", async () => {
     const t = await mount();
-    await t.show(demo('flip'));
+    // 0.9 (#9): on a flip the checkout guard takes the legend's line; any other verdict keeps the legend.
+    await t.show(demo('over'));
     expect(t.all().some((e) => cls(e).includes('cp-keys'))).toBe(true);
+    expect(t.all().some((e) => cls(e).includes('cp-guard'))).toBe(false);
+    await t.show({ ...demo('flip'), checkedAt: T0 + 500 });
+    const guard = t.all().find((e) => cls(e).includes('cp-guard'));
+    expect(guard?.textContent).toBe(CHECKOUT_GUARD_POPUP);
+    expect(guard?.getAttribute('title')).toBe(checkoutGuardTitle());
+    expect(t.all().some((e) => cls(e).includes('cp-keys'))).toBe(false);
     const reason = 'Closest match only: check that this is the item you copied. Sold out on scrap.tf when you copied it, so there is no price to compare.';
     await t.show({ ...demo('flip'), reason, checkedAt: T0 + 1_000 });
     const note = t.all().find((e) => cls(e).includes('cp-note'));
     expect(note?.textContent).toBe(reason);
     expect(note?.getAttribute('title')).toBe(reason);
+    // With a note, neither the legend nor the guard.
     expect(t.all().some((e) => cls(e).includes('cp-keys'))).toBe(false);
+    expect(t.all().some((e) => cls(e).includes('cp-guard'))).toBe(false);
     expect(t.button('Save price')?.getAttribute('aria-keyshortcuts')).toBe('Enter');
+  });
+
+  it('0.9 (#2): on the scrap.tf line the break-even comes after the stock and Full, and it is the part that gives way', async () => {
+    const t = await mount();
+    // 'over': a saved-list price, 12/12 (Full) and a break-even: the longest scrap.tf line the demos make.
+    await t.show(demo('over'));
+    const line = t.all().find((e) => cls(e).includes('cp-line') && e.descendants().some((d) => cls(d).includes('cp-be')));
+    expect(line).toBeDefined();
+    const kids = line!.descendants();
+    const at = (pred: (e: ShimElement) => boolean) => kids.findIndex(pred);
+    const stock = at((e) => cls(e).includes('cp-stock'));
+    const full = at((e) => e.textContent === 'Full');
+    const be = at((e) => cls(e).includes('cp-be'));
+    expect(stock).toBeGreaterThanOrEqual(0);
+    expect(full).toBeGreaterThanOrEqual(0);
+    // The nowrap line clips at its end: the stock and Full (0.8's) must come first, the break-even last.
+    expect(stock).toBeLessThan(be);
+    expect(full).toBeLessThan(be);
+    expect(kids[be]!.textContent).toMatch(/^· break-even /);
+    expect(kids[be]!.getAttribute('title')).toBeTruthy();
+    // It may shrink (ellipsis); the stock may not.
+    const css = readFileSync(new URL('../../src/renderer/styles/check.css', import.meta.url), 'utf8');
+    const rule = /\.cp-be\s*\{([^}]*)\}/.exec(css)?.[1] ?? '';
+    expect(rule).toMatch(/min-width:\s*0/);
+    expect(rule).toMatch(/overflow:\s*hidden/);
+    expect(rule).toMatch(/text-overflow:\s*ellipsis/);
   });
 
   it('ignores check.done (the Recent checks panel uses it), and never reads the clipboard', async () => {

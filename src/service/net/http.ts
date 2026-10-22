@@ -386,6 +386,34 @@ function looksLikeHtml(contentType: string, text: string): boolean {
   return /^\s*(?:<!doctype\s+html|<html|<head|<body)/i.test(text.slice(0, 512));
 }
 
+/**
+ * 0.9 (#14): what marks an HTML answer as Cloudflare's challenge even without cf-mitigated: the interstitial's
+ * orchestrate script (/cdn-cgi/challenge-platform/[h/<x>/]orchestrate/), its options object and form ids, the Turnstile
+ * host and the "Just a moment..." title. A JSON API answering with one (a backpack.tf 429 can be an nginx page carrying
+ * such a script, RESEARCH §4.2) takes R7's challenge path, never the retry path.
+ * Only challenge-specific signatures count: Cloudflare injects its JavaScript-detections snippet (`__CF$cv$params`,
+ * /cdn-cgi/challenge-platform/scripts/jsd/main.js) into ordinary, unchallenged pages, an nginx 429 or a 5xx outage
+ * page included, so the bare challenge-platform path is no marker and such a page keeps its status's own path.
+ */
+export const CHALLENGE_BODY_MARKERS =
+  /\/cdn-cgi\/challenge-platform\/(?:h\/[a-z]\/)?orchestrate\/|_cf_chl_opt|\bcf[-_]chl[-_]|challenges\.cloudflare\.com|<title>\s*just a moment/i;
+const CHALLENGE_SCAN_CHARS = 262_144;
+
+/** 0.9 (#14): `text` (an HTML answer's start) carries one of CHALLENGE_BODY_MARKERS. */
+export function hasChallengeMarkers(text: string): boolean {
+  return CHALLENGE_BODY_MARKERS.test(text.slice(0, CHALLENGE_SCAN_CHARS));
+}
+
+/** 0.9 (#14): Steam Web API results that mean a rate limit (xpaw: 25 LimitExceeded, 84 RateLimitExceeded). */
+export const STEAM_RATE_LIMIT_ERESULTS: ReadonlySet<string> = new Set(['25', '84']);
+
+/** 0.9 (#14): the x-eresult of an api.steampowered.com answer when it is a rate limit, else null. */
+export function steamRateLimitEresult(host: string, headers: Record<string, string>): string | null {
+  if (normalizeHost(host) !== 'api.steampowered.com') return null;
+  const v = (headers['x-eresult'] ?? '').trim();
+  return STEAM_RATE_LIMIT_ERESULTS.has(v) ? v : null;
+}
+
 function formatDuration(ms: number): string {
   if (ms < 60_000) return `${Math.round(ms / 1000)} s`;
   if (ms < 3_600_000) return `${Math.round(ms / 60_000)} min`;
@@ -843,10 +871,15 @@ export function createHttpClient(opts: CreateHttpClientOptions): SeedableHttpCli
         // Challenge pages disable the host until the user re-enables it (R7).
         const cf = resHeaders['cf-mitigated'] ?? '';
         const challenged = /challenge/i.test(cf);
-        if (challenged || ((status === 403 || status === 503) && looksLikeHtml(resHeaders['content-type'] ?? '', text))) {
+        const html = looksLikeHtml(resHeaders['content-type'] ?? '', text);
+        // 0.9 (#14): an HTML answer carrying Cloudflare's challenge script is a challenge whatever its status (a 429 too).
+        const scripted = html && hasChallengeMarkers(text);
+        if (challenged || scripted || ((status === 403 || status === 503) && html)) {
           const reason = challenged
             ? `challenge page (cf-mitigated: challenge, HTTP ${status}); re-enable after checking in a browser`
-            : `HTML error page (HTTP ${status}) instead of JSON; re-enable after checking in a browser`;
+            : scripted
+              ? `challenge page (Cloudflare challenge script, HTTP ${status}); re-enable after checking in a browser`
+              : `HTML error page (HTTP ${status}) instead of JSON; re-enable after checking in a browser`;
           if (blocked.get(hopHost) !== reason) {
             blocked.set(hopHost, reason);
             blocksChanged();
@@ -880,7 +913,11 @@ export function createHttpClient(opts: CreateHttpClientOptions): SeedableHttpCli
         // outage is not polled at the budget's spacing and a 5xx between two 429s does not end their streak. A 5xx
         // the caller reads as its answer about this request (ropts.isAnswer: Steam Market's 500 {"success":false},
         // no listing under that name) is no outage and counts as a success, as before F52; never a 429.
-        if (status === 429 || (isUnavailableStatus(status) && !callerAnswer(ropts, status, data))) {
+        // 0.9 (#14): Steam reports its rate limits in x-eresult (25, 84), even on a 200: counted as a 429.
+        const eresult = steamRateLimitEresult(hopHost, resHeaders);
+        const limited = status === 429 || eresult !== null;
+        const statusText = `${status}${eresult ? ` (x-eresult ${eresult})` : ''}`;
+        if (limited || (isUnavailableStatus(status) && !callerAnswer(ropts, status, data))) {
           if (parsedForHints === null && text.trim().startsWith('{')) {
             try {
               parsedForHints = JSON.parse(text);
@@ -889,11 +926,11 @@ export function createHttpClient(opts: CreateHttpClientOptions): SeedableHttpCli
             }
           }
           const hinted = retryDelayFromResponse(resHeaders, parsedForHints, text, now);
-          const result = status === 429 ? scheduler.record429(hinted, now) : scheduler.recordUnavailable(hinted, now, status);
+          const result = limited ? scheduler.record429(hinted, now) : scheduler.recordUnavailable(hinted, now, status);
           // A 503 (or another unavailable answer) neither counts toward nor ends a host's 429 streak, like the
           // per-budget counter.
-          const hostStreak = status === 429 ? (host429.get(budgetHost) ?? 0) + 1 : 0;
-          if (status === 429) host429.set(budgetHost, hostStreak);
+          const hostStreak = limited ? (host429.get(budgetHost) ?? 0) + 1 : 0;
+          if (limited) host429.set(budgetHost, hostStreak);
           const longPause = result.longPause || hostStreak >= CONSECUTIVE_429_LIMIT;
           const streak = Math.max(result.consecutive429, hostStreak);
           const until = longPause ? Math.max(result.until, now + LONG_PAUSE_MS) : result.until;
@@ -901,10 +938,10 @@ export function createHttpClient(opts: CreateHttpClientOptions): SeedableHttpCli
           const why = hinted !== null ? 'server-requested' : 'backoff';
           notes.push(
             longPause
-              ? `HTTP 429 x${streak}: ${spec.host} paused ${formatDuration(until - now)}`
-              : `HTTP ${status}: ${spec.id} paused ${formatDuration(result.pauseMs)} (${why})`,
+              ? `HTTP ${statusText} x${streak}: ${spec.host} paused ${formatDuration(until - now)}`
+              : `HTTP ${statusText}: ${spec.id} paused ${formatDuration(result.pauseMs)} (${why})`,
           );
-          safeLog('warn', `HTTP ${status} from ${hopHost}; ${spec.id} paused ${formatDuration(until - now)} (${why})`, {
+          safeLog('warn', `HTTP ${statusText} from ${hopHost}; ${spec.id} paused ${formatDuration(until - now)} (${why})`, {
             consecutive429: streak,
           });
         } else {
@@ -927,7 +964,8 @@ export function createHttpClient(opts: CreateHttpClientOptions): SeedableHttpCli
 
         return {
           status,
-          ok: status >= 200 && status < 300,
+          // 0.9 (#14): a Steam rate limit in x-eresult is no success, though the status stays the true one.
+          ok: status >= 200 && status < 300 && eresult === null,
           data,
           text: outText,
           headers: resHeaders,

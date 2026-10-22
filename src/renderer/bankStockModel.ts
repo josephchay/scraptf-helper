@@ -38,6 +38,7 @@ import { SAVE_MODE } from './importModel';
 import type { RecordBuyCopy } from './itemMenuModel';
 import { exitCostsWords } from './oppModel';
 import { buyerCountLabel, noRevenueText } from './quickModel';
+import { scraptfLowSentence } from './bookHistoryModel';
 import { DASH, PAINT_NAMES, errorMessage, fmtAgo, fmtDateTime, fmtInt, fmtKeysMetal, fmtMoney, fmtPct, fmtSignedMoney, paintHex, type Tone } from './format';
 
 /** Rows per read; "Load more" adds as many, up to BANK_STOCK_MAX_LIMIT (a whole bank page). */
@@ -693,9 +694,12 @@ export function bankStockTurnoverText(t: ScraptfTurnover | null | undefined, pat
   };
 }
 
-/** The price cell's hover: the price as listed (keys and metal), and its value at today's key price. */
+/**
+ * The price cell's hover: the price as listed (keys and metal), and its value at today's key price. 0.9 (history):
+ * with the row's low (BankStockRow.low), a last sentence on the lowest price the bank's saves showed (scraptfLowSentence).
+ */
 export function bankStockPriceTitle(
-  r: Pick<BankStockRow, 'costKeys' | 'costScrapRaw' | 'costScrap' | 'change' | 'hasExtras'> & Partial<Pick<BankStockRow, 'lastSeenAt'>>,
+  r: Pick<BankStockRow, 'costKeys' | 'costScrapRaw' | 'costScrap' | 'change' | 'hasExtras'> & Partial<Pick<BankStockRow, 'lastSeenAt' | 'low'>>,
   keyScrap: Scrap | null,
 ): string {
   // 0.7.3: a gone row's price is from the last save that listed it on sale, when the history knows it.
@@ -710,7 +714,7 @@ export function bankStockPriceTitle(
     // Only a listing with more metal than a key reads differently once valued.
     listed = raw === valued ? ` Listed as ${raw}.` : ` Listed as ${raw}: ${valued} at today's key price.`;
   }
-  return `${what}.${listed}${r.hasExtras ? ' This copy has extras.' : ''}`;
+  return `${what}.${listed}${r.hasExtras ? ' This copy has extras.' : ''}${scraptfLowSentence(r.low, r.costScrap, keyScrap)}`;
 }
 
 function buyerOf(o: NonNullable<BankStockRow['revenueOrder']>): string {
@@ -1005,4 +1009,22 @@ export function bankStockWatchTag(r: Pick<BankStockRow, 'watch' | 'change'>, key
   else if (over !== null && finite(over) && over > 0) tag = { text: `${fmtMoney(over, keyScrap)} over`, tone: 'warn', state: `It costs ${fmtMoney(over, keyScrap)} more than your price target.` };
   else tag = { text: 'Watched', tone: 'muted', state: w.maxCostScrap === null && w.minProfitScrap === null ? 'You asked to be told when it is back on sale.' : 'It meets neither target now.' };
   return { text: tag.text, title: `${head} ${tag.state} Told when a page you read or save shows it; nothing is bought for you.`, tone: tag.tone };
+}
+
+/**
+ * 0.9 (#13): the row's tag when its card on the newest save showed scrap.tf's price-drop wording: 'Drops soon' ('soon',
+ * also when both), 'Marked down' ('off' only), tone info; null without. Evidence only: the title says no real save has
+ * confirmed the wording and that buy timing, profit and alerts do not use it.
+ */
+export function bankStockMarkdownTag(r: Pick<BankStockRow, 'markdown'>): { text: string; title: string; tone: Tone } | null {
+  const marks = Array.isArray(r.markdown) ? r.markdown : [];
+  const soon = marks.includes('soon');
+  const off = marks.includes('off');
+  if (!soon && !off) return null;
+  const parts = [soon ? '"This item will decrease in price shortly."' : null, off ? 'that it is marked down from an original price' : null].filter(Boolean).join(' and ');
+  return {
+    text: soon ? 'Drops soon' : 'Marked down',
+    tone: 'info',
+    title: `scrap.tf's card said ${parts} on your newest save. Evidence only: Flip Desk has not seen this wording on a real save yet, does not know when or by how much the price changes, and buy timing, profit and alerts do not use it. The parser report (Import page) shows the card.`,
+  };
 }

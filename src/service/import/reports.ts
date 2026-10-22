@@ -5,7 +5,7 @@
 // text is clipped and scrubbed again here, so a long digit run (a SteamID64, an asset id) or a link never
 // lands in a report.
 
-import { IMPORT_REPORT_MAX_ITEMS, IMPORT_REPORT_RING, importWarningCode } from '../../shared/importCodes';
+import { IMPORT_REPORT_MAX_ITEMS, IMPORT_REPORT_NOTICES_MAX, IMPORT_REPORT_RING, importWarningCode } from '../../shared/importCodes';
 import type { ImportOrigin, ImportPageKind, ImportReport, ImportReportItem, ScraptfBank, UnixMs } from '../../shared/types';
 import type { ParseDiagnostics } from './scraptfHtml';
 
@@ -76,7 +76,23 @@ export interface ImportReportInput {
   countsOnly?: boolean;
 }
 
-const ZERO_COUNTS: ImportReport['counts'] = { dataDefindex: 0, cards: 0, rows: 0, selectedSkipped: 0, duplicates: 0, lookalikes: 0, reserved: 0, notTradable: 0 };
+const ZERO_COUNTS: ImportReport['counts'] = {
+  dataDefindex: 0,
+  cards: 0,
+  rows: 0,
+  selectedSkipped: 0,
+  duplicates: 0,
+  lookalikes: 0,
+  reserved: 0,
+  notTradable: 0,
+  // 0.9 (#13): the parser evidence counts (scraptf, Wave 1, computes them).
+  markdownSoon: 0,
+  markdownOff: 0,
+  countdownCards: 0,
+  recentlyTraded: 0,
+  recentCards: 0,
+  bankNotices: 0,
+};
 
 let ring: ImportReport[] = [];
 let nextId = 1;
@@ -106,6 +122,10 @@ export function recordImportReport(input: ImportReportInput): ImportReport {
     headerColumns: d ? d.headerColumns.slice(0, 20).map((h) => scrubReportText(h, 40)) : [],
     warningCodes,
     items: d && input.countsOnly !== true ? d.items.slice(0, IMPORT_REPORT_MAX_ITEMS).map(cleanItem) : [],
+    // 0.9 (#13): the page phrases the probes matched (scrubbed again); absent when none or counts only.
+    ...(d && input.countsOnly !== true && Array.isArray(d.notices) && d.notices.length > 0
+      ? { notices: d.notices.slice(0, IMPORT_REPORT_NOTICES_MAX).map((s) => scrubReportText(s, 80)) }
+      : {}),
   };
   ring = [report, ...ring].slice(0, IMPORT_REPORT_RING);
   return report;

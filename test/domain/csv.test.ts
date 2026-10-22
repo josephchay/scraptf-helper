@@ -3,6 +3,8 @@ import type { JournalEntry, Opportunity, OpportunityEvent } from '../../src/shar
 import { CSV_BOM, csvCell, eventsCsv, journalCsv, opportunitiesCsv, toCsv } from '../../src/service/domain/csv';
 import { JOURNAL_CSV_COLUMNS } from '../../src/shared/journal';
 import { T0 } from './helpers';
+import { breakEvenFor } from '../../src/shared/ceiling';
+import { scrapToRef } from '../../src/shared/currency';
 
 /** Minimal RFC 4180 reader for round-trip checks. */
 function parseCsv(text: string): string[][] {
@@ -152,6 +154,22 @@ describe('exports', () => {
     ]);
   });
 
+  it('0.9 (#2): appends break_even_ref after updated_at, from the buy settings, empty without them', () => {
+    const profit = { frictionScrap: 2, exitReservePct: 0.05 };
+    const rows = parseCsv(opportunitiesCsv([opp, { ...opp, key: 'k2', costScrap: 81 }], 567, profit));
+    const [header, first, second] = rows;
+    const col = (name: string) => header!.indexOf(name);
+    expect(col('break_even_ref')).toBe(col('updated_at') + 1);
+    const be579 = breakEvenFor(579, profit, 'buy')!;
+    expect(be579).toBeGreaterThan(579 + 2);
+    expect(first![col('break_even_ref')]).toBe(String(scrapToRef(be579)));
+    expect(second![col('break_even_ref')]).toBe(String(scrapToRef(breakEvenFor(81, profit, 'buy')!)));
+    // Without settings the column is there and empty.
+    const bare = parseCsv(opportunitiesCsv([opp], 567));
+    expect(bare[0]![bare[0]!.indexOf('updated_at') + 1]).toBe('break_even_ref');
+    expect(bare[1]![bare[0]!.indexOf('break_even_ref')]).toBe('');
+  });
+
   it('exports events', () => {
     const ev: OpportunityEvent = {
       id: 7,
@@ -211,9 +229,13 @@ describe('exports', () => {
       '',
       '62',
       '0',
+      // 0.9: no valuer, so the open-lot valuation columns are blank.
+      '',
+      '',
+      '',
     ]);
     // The buy it closed carries its state and no pair.
-    expect(rows[1]!.slice(11)).toEqual(['', '', 'closed', '', '', '', '', '', '']);
+    expect(rows[1]!.slice(11)).toEqual(['', '', 'closed', '', '', '', '', '', '', '', '', '']);
   });
 
   it('0.8 (J5): lists a same-minute buy before its sale, marks waiting sales, and still guards text cells', () => {
@@ -245,10 +267,10 @@ describe('exports', () => {
     expect(at(rows[1]!, 'fee_metal_ref')).toBe('0.22');
     expect(at(rows[1]!, 'fifo')).toBe('closed');
     // The sale: cost 12 + 2 fee, proceeds 10 - 1 fee, a negative profit written as a plain number.
-    expect(rows[2]!.slice(11)).toEqual(['0', '0.11', 'closed', '2', '1.55', '1', '0.33', '-0.55', '0']);
+    expect(rows[2]!.slice(11)).toEqual(['0', '0.11', 'closed', '2', '1.55', '1', '0.33', '-0.55', '0', '', '', '']);
     expect(at(rows[2]!, 'venue')).toBe(`'@bp`);
     // The waiting sale: no pair, and its venue and note keep their formula guard.
-    expect(rows[3]!.slice(11)).toEqual(['', '', 'waiting', '', '', '', '', '', '']);
+    expect(rows[3]!.slice(11)).toEqual(['', '', 'waiting', '', '', '', '', '', '', '', '', '']);
     expect(at(rows[3]!, 'venue')).toBe(`'=venue`);
     expect(at(rows[3]!, 'note')).toBe(`'-note`);
   });

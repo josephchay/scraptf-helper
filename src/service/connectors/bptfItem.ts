@@ -23,6 +23,8 @@ import type {
 import { KEY_SKU } from '../../shared/types';
 import { baseSku, canonicalUnusualSkin, fromObject, fromString, looksLikeSku, normalizeSkuObject } from '../../shared/sku';
 import { refToScrap } from '../../shared/currency';
+import { effectTypeForItem } from './schemaNames';
+import { COMMUNITY_CURRENCY_MAX } from '../../shared/communityHistory';
 
 // ---------------------------------------------------------------------------
 // Stats
@@ -38,10 +40,12 @@ export interface BptfMapStats {
   priceindexMismatches: number;
   /** Sub-fields whose shape was not understood, by field name. */
   unknownShapes: Record<string, number>;
+  /** 0.9 (#11): listings left out as not live (bptfListingActive false). */
+  inactive: number;
 }
 
 export function createMapStats(): BptfMapStats {
-  return { mapped: 0, skipped: 0, invalid: 0, priceindexChecked: 0, priceindexMismatches: 0, unknownShapes: {} };
+  return { mapped: 0, skipped: 0, invalid: 0, priceindexChecked: 0, priceindexMismatches: 0, unknownShapes: {}, inactive: 0 };
 }
 
 function noteShape(stats: BptfMapStats | undefined, field: string): void {
@@ -179,6 +183,8 @@ const userSchema = z.looseObject({
   online: z.boolean().optional(),
   banned: z.boolean().optional(),
   bans: z.unknown().optional(),
+  // 0.9 (#11): bp.tf's impersonation banner (1 event of the 2026-10-14 capture); only === true counts.
+  flagImpersonated: z.unknown().optional(),
 });
 const particleSchema = z.looseObject({ id: int, type: z.string().optional() });
 const paintSchema = z.looseObject({ id: int.optional(), name: z.string().optional(), color: z.string().optional() });
@@ -307,10 +313,47 @@ function paintDecimalFromWs(
   return null;
 }
 
-function bansNonEmpty(bans: unknown): boolean {
+/** A ban flag: 1/true/"1", a non-empty array, or a ban object such as `{end, reason}`. */
+export function truthyBan(v: unknown): boolean {
+  if (v === undefined || v === null || v === false || v === 0 || v === '0' || v === '') return false;
+  if (Array.isArray(v)) return v.length > 0;
+  return true;
+}
+
+/**
+ * bp.tf user `bans` (classic docs): `all` = site ban, `steamrep_scammer`,
+ * `valve.economy` = Steam trade ban. Cautions, VAC and suggestion bans do not count.
+ * 0.9 (#11, E-D6): also the feed's and the snapshot's `user.bans` (an array: any entry; an object: only these keys).
+ */
+export function isBannedFromBans(bans: unknown): boolean {
   if (Array.isArray(bans)) return bans.length > 0;
-  if (isRecord(bans)) return Object.keys(bans).length > 0;
-  return false;
+  if (!isRecord(bans)) return false;
+  if (truthyBan(bans['all']) || truthyBan(bans['steamrep_scammer']) || truthyBan(bans['marketplace'])) return true;
+  const valve = bans['valve'];
+  return isRecord(valve) && truthyBan(valve['economy']);
+}
+
+/** 0.9 (#11): listing statuses known to mean "not live" (a third-party client and a 2023 fixture, RESEARCH §4.2). */
+const INACTIVE_STATUSES: ReadonlySet<string> = new Set(['listinginactive', 'hiddenbyuser', 'notenoughcurrency', 'archived']);
+
+/**
+ * 0.9 (#11, E-D4): whether a feed or snapshot listing is live: not `archived: true`, and its `status` absent, 'active', or a
+ * value not known to mean inactive. An unknown status is kept and counted (unknownShapes.status), so a renamed
+ * status never empties the book. Case and spaces are ignored.
+ */
+export function bptfListingActive(raw: Record<string, unknown>, stats?: BptfMapStats): boolean {
+  if (raw['archived'] === true) return false;
+  const s = raw['status'];
+  if (s === undefined || s === null) return true;
+  if (typeof s !== 'string') {
+    noteShape(stats, 'status');
+    return true;
+  }
+  const key = s.trim().toLowerCase();
+  if (key === '' || key === 'active') return true;
+  if (INACTIVE_STATUSES.has(key)) return false;
+  noteShape(stats, 'status');
+  return true;
 }
 
 function hasMarketplaceKey(o: unknown): boolean {
@@ -477,7 +520,14 @@ function nameHints(fullName: string | undefined, baseName: string | null, effect
 // ---------------------------------------------------------------------------
 
 export type WsMapResult =
-  | { ok: true; listing: Listing; name: BptfNameRow; priceindexMismatch: boolean }
+  | {
+      ok: true;
+      listing: Listing;
+      name: BptfNameRow;
+      priceindexMismatch: boolean;
+      /** 0.9 (#11): bptfListingActive; false: the socket drops it like a delete. */
+      active: boolean;
+    }
   | { ok: false; reason: 'invalid' | 'not-tf2'; detail: string };
 
 interface ParsedWsItem {
@@ -680,7 +730,8 @@ export function mapWsPayload(payload: unknown, schema: SchemaService, nowMs: Uni
     uaClient: userAgent?.client !== undefined ? userAgent.client.slice(0, MAX_UA_CLIENT) : null,
     uaLastPulse: toUnixSec(userAgent?.lastPulse),
     userOnline: typeof user?.online === 'boolean' ? user.online : null,
-    userBanned: user?.banned === true || bansNonEmpty(user?.bans),
+    userBanned: user?.banned === true || isBannedFromBans(user?.bans),
+    ...(user?.flagImpersonated === true ? { userImpersonated: true } : {}),
     isMarketplace:
       currencies?.usd !== undefined || hasMarketplaceKey(item) || hasMarketplaceKey(raw) || /marketplace/i.test(String(raw['source'] ?? '')),
     special: parts.special,
@@ -692,6 +743,9 @@ export function mapWsPayload(payload: unknown, schema: SchemaService, nowMs: Uni
     itemName,
     marketName,
   };
+  // 0.9 (#11): an inactive status or archived listing still maps (its name is learned); the socket drops it.
+  const active = bptfListingActive(raw, stats);
+  if (!active && stats) stats.inactive++;
   if (stats) stats.mapped++;
   // 0.7.4 (F46): a medal's or numbered item's "#N" is that one copy's craft number, which the base SKU has no part
   // of (backpack.tf keys "Gentle Manne's Service Medal #4243" as the plain 121;6): learned without it, so the
@@ -703,6 +757,7 @@ export function mapWsPayload(payload: unknown, schema: SchemaService, nowMs: Uni
     listing,
     name: { sku: base, name: learned, marketName, lastSeen: nowMs },
     priceindexMismatch: parts.priceindexMismatch,
+    active,
   };
 }
 
@@ -719,6 +774,43 @@ export function listingFromWsPayload(
 ): { listing: Listing; name: BptfNameRow } | null {
   const r = mapWsPayload(payload, schema, nowMs, stats);
   return r.ok ? { listing: r.listing, name: r.name } : null;
+}
+
+// ---------------------------------------------------------------------------
+// 0.9 (history, RESEARCH #7): the feed's community price
+// ---------------------------------------------------------------------------
+
+const wsCommunitySchema = z.looseObject({ value: num, valueHigh: num.optional(), currency: z.string().optional(), updatedAt: z.unknown().optional() });
+
+/** 0.9 (history): a websocket payload's item.price.community as Flip Desk keeps it (wsCommunityPriceOf). */
+export interface WsCommunityPrice {
+  currency: string;
+  value: number;
+  valueHigh: number | null;
+  lastUpdate: UnixSec | null;
+}
+
+/**
+ * 0.9 (history): a websocket listing payload's item.price.community (on 249 of the 299 live events of ws-sample.json:
+ * value, valueHigh, currency 'metal' or 'keys', updatedAt in Unix seconds; a valueHigh equal to value reads null, as
+ * IGetPrices gives a single price). Null when the item has no price object
+ * (`price: []` on 22 of them), no community entry, or a value that is not a positive finite number. A community object of
+ * another shape is counted in stats.unknownShapes ('item.price.community') and ignored. Reads nothing of `user`, and
+ * neither `steam` nor `deal` (their meaning is unverified, RESEARCH §9 q22).
+ */
+export function wsCommunityPriceOf(payload: unknown, stats?: BptfMapStats): WsCommunityPrice | null {
+  if (!isRecord(payload)) return null;
+  const item = payload['item'];
+  if (!isRecord(item)) return null;
+  const price = item['price'];
+  if (!isRecord(price)) return null;
+  const c = soft(wsCommunitySchema, price['community'], 'item.price.community', stats);
+  if (!c || !(c.value > 0)) return null;
+  const currency = (c.currency ?? 'metal').trim().toLowerCase().slice(0, COMMUNITY_CURRENCY_MAX) || 'metal';
+  // The feed always sends valueHigh, equal to value for a single price (84 of the 249); IGetPrices leaves value_high
+  // out then. A high equal to the low is no range, so one price keys the same from both sources.
+  const high = c.valueHigh !== undefined && Number.isFinite(c.valueHigh) && c.valueHigh !== c.value ? c.valueHigh : null;
+  return { currency, value: c.value, valueHigh: high, lastUpdate: toUnixSec(c.updatedAt) };
 }
 
 // ---------------------------------------------------------------------------
@@ -870,6 +962,11 @@ export function listingFromSnapshot(
     if (stats) stats.skipped++;
     return null;
   }
+  // 0.9 (#11, E-D4): a snapshot row bp.tf reports not live is skipped, as the feed drops it.
+  if (!bptfListingActive(r, stats)) {
+    if (stats) stats.inactive++;
+    return null;
+  }
   const item = r['item'] as Record<string, unknown>;
   const { defindex, quality } = parsed.data.item;
   const attrs = readAttributes(item['attributes'], stats);
@@ -883,7 +980,8 @@ export function listingFromSnapshot(
       prev = cleaned;
       cleaned = cleaned.replace(/^(Non-Craftable|Strange|Unusual)\s+/i, '').trim();
     }
-    if (cleaned) effect = canonicalEffect(schema, safeCall(() => schema.effectIdByName(cleaned), null));
+    // 0.9 (#22): the name's effect for this kind of item ("Northern Nights" on a hat is 408, Polar Prism).
+    if (cleaned) effect = canonicalEffect(schema, safeCall(() => schema.effectIdByName(cleaned, effectTypeForItem(safeCall(() => schema.itemByDefindex(defindex), null), false)), null));
   }
   // 0.7.4 (F18): the name read without the effect's own name ("Festivized Formation" festivizes nothing).
   const hints = nameHints(itemName, baseName, effect !== null ? safeCall(() => schema.effectName(effect!), null) : null);
@@ -966,7 +1064,8 @@ export function listingFromSnapshot(
     uaClient: userAgent?.client !== undefined ? userAgent.client.slice(0, MAX_UA_CLIENT) : null,
     uaLastPulse: toUnixSec(userAgent?.lastPulse),
     userOnline: typeof user?.online === 'boolean' ? user.online : null,
-    userBanned: user?.banned === true || bansNonEmpty(user?.bans),
+    userBanned: user?.banned === true || isBannedFromBans(user?.bans),
+    ...(user?.flagImpersonated === true ? { userImpersonated: true } : {}),
     isMarketplace: currencies?.usd !== undefined || hasMarketplaceKey(item) || hasMarketplaceKey(r),
     special,
     details: cleanText(r['details'], MAX_DETAILS),

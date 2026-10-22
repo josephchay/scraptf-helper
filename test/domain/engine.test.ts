@@ -914,7 +914,37 @@ describe('runMaintenance', () => {
     const run = { baseSku: '378;6', revKeys: 0, revMetalScrap: 60, revIsBot: true, revVerified: true, bestKeys: 0, bestMetalScrap: 60, nextKeys: null, nextMetalScrap: null, buyerCount: 1, verifiedBuyerCount: 1, askKeys: null, askMetalScrap: null, askCount: null, scraptfPaysKeys: null, scraptfPaysScrap: null, keyScrap: 567 };
     repo.insertHoldingMark({ ...run, fromAt: now - RETENTION.holdingMarksMs - 2, toAt: now - RETENTION.holdingMarksMs - 1 });
     repo.insertHoldingMark({ ...run, fromAt: now - 2, toAt: now - 1 });
-    expect(runMaintenance(repo, now)).toEqual({ listings: 1, events: 1, requests: 1, scraptfList: 1, bankStock: 1, scraptfEvents: 1, holdingMarks: 1 });
+    // 0.9 (history): an ended buy-order spell first seen past its 60 days goes, a fresh one stays.
+    const spell = { baseSku: '378;6', intent: 'buy' as const, isBot: true, keys: 0, metalScrap: 60, listedAt: null, endKind: 'deleted' as const };
+    repo.insertOrderSpell({ ...spell, firstSeenAt: now - RETENTION.orderSpellsMs - 2, lastSeenAt: now - RETENTION.orderSpellsMs - 1, endAt: now - RETENTION.orderSpellsMs - 1 });
+    repo.insertOrderSpell({ ...spell, firstSeenAt: now - 2, lastSeenAt: now - 1, endAt: now - 1 });
+    // 0.9 (history): a community price point recorded past its 365 days goes, a fresh one stays.
+    const point = { sku: '378;6', source: 'prices' as const, currency: 'metal', valueHigh: null, lastUpdate: null };
+    repo.insertCommunityHistory([
+      { ...point, value: 1, recordedAt: now - RETENTION.communityHistoryMs - 1 },
+      { ...point, value: 2, recordedAt: now - 1 },
+    ]);
+    // 0.9 (history): a scrap.tf low not on sale in a save for 365 days goes, a fresh one stays.
+    const low = { bank: 'hats' as const, specialKey: '', keys: 0, scrap: 30, firstAt: now - 2, lastAt: now - 2, since: now - 2 };
+    repo.upsertScraptfLows([
+      { ...low, sku: '378;6', seenAt: now - RETENTION.scraptfLowsMs - 1 },
+      { ...low, sku: '126;6', seenAt: now - 1 },
+    ]);
+    expect(runMaintenance(repo, now)).toEqual({
+      listings: 1,
+      events: 1,
+      requests: 1,
+      scraptfList: 1,
+      bankStock: 1,
+      scraptfEvents: 1,
+      holdingMarks: 1,
+      orderSpells: 1,
+      communityHistory: 1,
+      scraptfLows: 1,
+    });
+    expect(repo.orderSpells(['378;6'], 0).map((s) => s.endAt)).toEqual([now - 1]);
+    expect(repo.communityHistory(['378;6']).map((p) => p.value)).toEqual([2]);
+    expect(repo.scraptfLows('hats').map((l) => l.sku)).toEqual(['126;6']);
     expect(repo.holdingMarks('378;6', 0).map((m) => m.toAt)).toEqual([now - 1]);
     expect(repo.scraptfEvents().map((e) => e.at)).toEqual([now - 1]);
     expect(repo.getListing('new')).not.toBeNull();

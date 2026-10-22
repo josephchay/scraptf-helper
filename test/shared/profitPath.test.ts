@@ -36,6 +36,8 @@ const FLIP_PROFIT_CALLERS: readonly string[] = [
   // 0.8 cycles (T3: evBuy / evWait) and holdings (H6: an exit nobody pays today).
   'shared/scraptfTiming.ts',
   'shared/holdingAdvice.ts',
+  // 0.9 ranking (#3): break-even and the profit if this buyer leaves.
+  'shared/exitRisk.ts',
 ];
 
 /** `file:line: text` for every match of `re` in `files` outside `allowed`. */

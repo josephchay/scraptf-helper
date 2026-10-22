@@ -17,7 +17,17 @@
 // and a bank with no stock save, count the profitable opportunities on its prices.
 
 import { BANK_STOCK_MAX_LIMIT } from '../../shared/bankStock';
-import { BANK_LOOK_FOR, NO_BANK_FLIPS, bankFlips, bankLookFor, bankStockFlips, type BankFlips, type BankLookFor } from '../../shared/banks';
+import {
+  BANK_LOOK_FOR,
+  NO_BANK_FLIPS,
+  bankFlips,
+  bankLookFor,
+  bankNoticeNewestAt,
+  bankStockFlips,
+  bankUnavailableAt,
+  type BankFlips,
+  type BankLookFor,
+} from '../../shared/banks';
 import { SCRAPTF_BANKS, isScraptfBank, type ScraptfBankInfo } from '../../shared/links';
 import { batchItemCounts, mergeBankNewestSaves, scraptfBankSaves, wholeLookNewestSaves } from '../../shared/market';
 import type {
@@ -129,6 +139,8 @@ interface Saves {
   priceBank: Map<number, ScraptfBank>;
   /** Per bank, from its batches and prices. 'list' only stands in while the saved list holds no rows (listCard). */
   perBank: Map<ScraptfBank, SavedState>;
+  /** 0.9 (#13): per bank, bankNoticeNewestAt over the batches read (absent: no "not trading" look among them). */
+  bankNoticeAt: Map<ScraptfBank, UnixMs>;
 }
 
 const PRICE_REF = /^price:(\d+)$/;
@@ -187,6 +199,13 @@ export function createBanksSummary(deps: BanksSummaryDeps): BanksSummary {
 
   function readSaves(): Saves {
     const batches = repo.listImportBatches(COVERAGE_BATCHES);
+    // 0.9 (#13): each bank's newest look whose page said the bank was not trading (the summary compares it with
+    // the bank's newest save).
+    const bankNoticeAt = new Map<ScraptfBank, UnixMs>();
+    for (const info of SCRAPTF_BANKS) {
+      const at = bankNoticeNewestAt(batches, info.bank);
+      if (at !== null) bankNoticeAt.set(info.bank, at);
+    }
     const prices = repo.listScrapPrices();
     // Only a batch from before 0.3 with no bank asks for the categories of the rows carrying its id.
     let rowsOf: Map<number, string[]> | null = null;
@@ -276,7 +295,7 @@ export function createBanksSummary(deps: BanksSummaryDeps): BanksSummary {
       const h = row && typeof row.importBatch === 'number' ? held.get(row.importBatch) : undefined;
       perBank.set(info.bank, { lastSavedAt: row?.observedAt ?? null, pages, items: h?.rows ?? 0, inStock: h ? h.rows - h.soldOut : 0 });
     }
-    return { priceBank, perBank };
+    return { priceBank, perBank, bankNoticeAt };
   }
 
   function readFlips(s: Saves): Map<ScraptfBank, BankFlips> {
@@ -401,7 +420,7 @@ export function createBanksSummary(deps: BanksSummaryDeps): BanksSummary {
 
   return {
     summary(now) {
-      const s = read<Saves>(saves, 'the saved pages', { priceBank: new Map(), perBank: new Map() }, readSaves);
+      const s = read<Saves>(saves, 'the saved pages', { priceBank: new Map(), perBank: new Map(), bankNoticeAt: new Map() }, readSaves);
       // Flips map through the saves' price -> bank map: while that read fails they are not rebuilt
       // (an empty map would be kept as "no flips"); the last good ones show.
       const noFlips = new Map<ScraptfBank, BankFlips>();
@@ -413,6 +432,8 @@ export function createBanksSummary(deps: BanksSummaryDeps): BanksSummary {
         // UX-2b: a bank page counts what its stock page shows; only the All items card keeps the price rule.
         const flip = stockFlipsOf(info.bank, now) ?? f.get(info.bank) ?? NO_BANK_FLIPS;
         const look = l.get(info.bank) ?? NOTHING_TO_LOOK_FOR;
+        // 0.9 (#13): the bank's newest look said it was not trading (no save since): the card says so.
+        const unavailableAt = bankUnavailableAt(s.bankNoticeAt.get(info.bank) ?? null, saved.lastSavedAt);
         // Copies: the cached parts serve every later call until invalidated.
         return {
           ...emptyBankSummary(info),
@@ -424,6 +445,7 @@ export function createBanksSummary(deps: BanksSummaryDeps): BanksSummary {
           lookFor: look.lookFor.map((x) => ({ ...x })),
           // Live, not cached: new flips follow the market, which only invalidates 'market'.
           whatsNew: whatsNewOf(info.bank),
+          ...(unavailableAt !== null ? { unavailableAt } : {}),
         };
       });
       return { banks, ...switches(), generatedAt: now };

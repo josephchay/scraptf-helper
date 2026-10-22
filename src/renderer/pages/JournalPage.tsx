@@ -1,5 +1,5 @@
 import { useMemo, useRef, useState } from 'react';
-import { positionCostAt } from '../../shared/holdings';
+import { holdingsValuationOf, positionCostAt } from '../../shared/holdings';
 import { feeOf } from '../../shared/journal';
 import type { JournalEntry, JournalSide } from '../../shared/types';
 import { WRITE_OFF_VENUE } from '../../shared/venues';
@@ -24,6 +24,7 @@ import {
   feesCell,
   fmtHold,
   holdStat,
+  inventoryStat,
   journalEditInit,
   journalIndex,
   journalLosses,
@@ -88,6 +89,15 @@ export function JournalPage() {
   // the push is the one refresh: calling after() as well would read the whole journal twice.
   const reload = useThrottled(after, 300);
   useVisiblePush('journal.changed', reload);
+  // 0.9: Holdings' worth now and unrealised P/L as of their read (local; holdings.list sends no request).
+  const holdings = useRpcQuery('holdings.list', {});
+  const reloadHoldings = useThrottled(() => void holdings.reload(), 2000);
+  const reloadHoldingsSoon = useThrottled(() => void holdings.reload(), 300);
+  useVisiblePush('journal.changed', reloadHoldingsSoon);
+  useVisiblePush('market.changed', reloadHoldings);
+  useVisiblePush('prices.changed', reloadHoldings);
+  useVisiblePush('scraptf.listChanged', reloadHoldings);
+  const valuation = useMemo(() => (holdings.data ? holdingsValuationOf(holdings.data) : null), [holdings.data]);
 
   const remove = async (e: JournalEntry) => {
     try {
@@ -147,6 +157,8 @@ export function JournalPage() {
             )}
           </div>
         </div>
+        {/* 0.9: what Holdings values the open lots at now, with the read's time; nothing is booked. */}
+        <StatCard label="Unrealised P/L" v={inventoryStat(valuation, keyScrap, holdings.data ? null : holdings.error)} />
         {s ? (
           <>
             <StatCard label="Win rate" v={winRateStat(totals)} />
@@ -483,7 +495,8 @@ export function JournalPage() {
 }
 
 function JournalForm() {
-  const { keyScrap, toast } = useApp();
+  // 0.9 (#2): settings for the marketplace.tf fee hint (the user's profit.marketplaceFeePct).
+  const { keyScrap, toast, settings } = useApp();
   const [side, setSide] = useState<JournalSide>('buy');
   const [venue, setVenue] = useState('scrap.tf');
   const [item, setItem] = useState<PickedItem | null>(null);
@@ -620,7 +633,7 @@ function JournalForm() {
           <Field label="Price" htmlFor="jf-price">
             <PriceInput ref={priceRef} id="jf-price" text={text} onText={setText} unit={unit} onUnit={setUnit} keyScrap={keyScrap} />
           </Field>
-          <Field label="Fees (optional)" htmlFor="jf-fee" hint={feeHint(venue, side)}>
+          <Field label="Fees (optional)" htmlFor="jf-fee" hint={feeHint(venue, side, settings?.profit.marketplaceFeePct)}>
             <PriceInput id="jf-fee" compact text={feeText} onText={setFeeText} unit={feeUnit} onUnit={setFeeUnit} keyScrap={keyScrap} placeholder="0 for none" />
           </Field>
           <Field label="Venue" htmlFor="jf-venue">

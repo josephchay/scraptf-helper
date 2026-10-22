@@ -6,8 +6,9 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import type { Repo } from '../../src/service/contracts';
 import { openRepo } from '../../src/service/db';
-import { createEngine, notificationTitle, type EngineDeps } from '../../src/service/domain/engine';
+import { createEngine, notificationBody, notificationTitle, type EngineDeps } from '../../src/service/domain/engine';
 import { bankStockSpecialKey } from '../../src/shared/bankStock';
+import { CHECKOUT_GUARD_TOAST, withCheckoutGuard } from '../../src/shared/checkoutGuard';
 import { DEFAULT_SETTINGS, mergeSettings } from '../../src/shared/defaults';
 import type { DeepPartial, Settings } from '../../src/shared/types';
 import { FakeClock, FakeTimers, MIN, T0, createStubSchema, makeDeps, makeListing, recordingEvents, recordingLogger, special } from './helpers';
@@ -144,6 +145,31 @@ describe('the engine\'s watch floor (G1 path B)', () => {
       // Profit 14 under the 18 bar: held, as without a watch.
       expect(h.titles(), String(bad)).toEqual([]);
     }
+  });
+
+  it("0.9 (#9): the engine's Watch toast carries the checkout guard; a Profit toast does not", async () => {
+    const R = await revenueOf108();
+    const h = setup({ watchFloorFor: () => 12 });
+    h.book('378;6', 108);
+    h.repo.upsertScrapPrice({ sku: '378;6', name: '', costScrap: R - 14, source: 'import', observedAt: T0 - MIN });
+    await h.engine.runNow();
+    const watched = h.events.notified[0]!;
+    expect(watched.title).toBe('Watch: Team Captain');
+    const keyScrap = h.engine.keyPrice().valueScrap;
+    const body = notificationBody(h.repo.allOpportunities()[0]!, keyScrap, h.settings.profit.useOrder);
+    expect(watched.body).toBe(withCheckoutGuard(body));
+    expect(watched.body.endsWith(CHECKOUT_GUARD_TOAST)).toBe(true);
+    expect(watched.body).not.toBe(body);
+
+    // No watch: a profit at or over the 18 bar is a "Profit:" toast whose body is notificationBody's, word for word.
+    const plain = setup();
+    plain.book('378;6', 108);
+    plain.repo.upsertScrapPrice({ sku: '378;6', name: '', costScrap: R - 30, source: 'user', observedAt: T0 - 10 * MIN });
+    await plain.engine.runNow();
+    const profit = plain.events.notified[0]!;
+    expect(profit.title).toBe('Profit: Team Captain');
+    expect(profit.body).toBe(notificationBody(plain.repo.allOpportunities()[0]!, plain.engine.keyPrice().valueScrap, plain.settings.profit.useOrder));
+    expect(profit.body).not.toContain(CHECKOUT_GUARD_TOAST);
   });
 
   it('keeps every other gate: a watched copy under notifications.minConfidence is not toasted', async () => {

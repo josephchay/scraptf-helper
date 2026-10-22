@@ -168,3 +168,23 @@ describe('0.8 defaults keep 0.7.4 behaviour', () => {
     expect(b.ownSteamIds).not.toBe(DEFAULT_SETTINGS.ownSteamIds);
   });
 });
+
+describe('0.9 defaults keep 0.8 behaviour (B.4)', () => {
+  it('a 10% marketplace.tf fee (break-even and hints only), the risk control off, the trade lock not answered', () => {
+    expect(DEFAULT_SETTINGS.profit.marketplaceFeePct).toBe(0.1);
+    expect(DEFAULT_SETTINGS.notifications.minProfitableDepth).toBe(0);
+    expect(DEFAULT_SETTINGS.tradeLock).toEqual({ mode: 'unknown', answeredAt: null });
+  });
+
+  it('merges a partial tradeLock field by field', () => {
+    const answered = mergeSettings(base(), { tradeLock: { mode: '7d' } });
+    expect(answered.tradeLock).toEqual({ mode: '7d', answeredAt: null });
+    expect(answered.tradeLock).not.toBe(DEFAULT_SETTINGS.tradeLock);
+    const dated = mergeSettings(answered, { tradeLock: { answeredAt: 1_000 } });
+    expect(dated.tradeLock).toEqual({ mode: '7d', answeredAt: 1_000 });
+    // An unknown key inside the group is ignored, as at every level.
+    const junk = mergeSettings(base(), { tradeLock: { mode: 'none', extra: 1 } } as unknown as DeepPartial<Settings>);
+    expect(junk.tradeLock).toEqual({ mode: 'none', answeredAt: null });
+    expect(DEFAULT_SETTINGS.tradeLock).toEqual({ mode: 'unknown', answeredAt: null });
+  });
+});

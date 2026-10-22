@@ -2,12 +2,12 @@
 // Development only: none of these prices, buyers or listings are real.
 
 import { bankStockSpecialKey, marketNewSideMatches } from '../shared/bankStock';
-import { ORDER_UNVERIFIED_AFTER_MS, orderSeenRecently } from '../shared/buyerSeen';
+import { ORDER_UNVERIFIED_AFTER_MS } from '../shared/buyerSeen';
 import { scraptfBankForItem } from '../shared/categories';
 import { opportunityCopyKey } from '../shared/copyExtras';
 import { boundRuleCost, type ScraptfSeenPrice } from '../shared/ruleEvidence';
 import { buyerDepthOf, costSanity, costSanityReason, costSuspectFlagged, exitOrdersOfSummaries, flipProfit, maxCostFor, singleExitOf, singleExitReason } from '../shared/ceiling';
-import { parsePrice, refToScrap, formatScrap, type ParsedPrice } from '../shared/currency';
+import { parsePrice, refToScrap, formatScrap, scrapToRef, type ParsedPrice } from '../shared/currency';
 import { bankForCategory, scraptfBankInfo, scraptfLinkFor, scraptfPageFor, type ScraptfSeen } from '../shared/links';
 import {
   emptyMarketCounts,
@@ -15,6 +15,7 @@ import {
   marketComparator,
   marketPage,
   marketProfit,
+  marketRiskCost,
   marketSearchTokens,
   marketUserSideMatches,
   marketVerdict,
@@ -35,6 +36,7 @@ import type {
   BankStockStored,
   BulkPriceRow,
   Category,
+  CommunityPoint,
   ConfidenceLevel,
   HistoryPoint,
   HoldingAskSide,
@@ -53,6 +55,8 @@ import type {
   MarketRow,
   MarketVerdict,
   Opportunity,
+  OrderSpell,
+  OrderSpellEnd,
   OrderSummary,
   PriceRule,
   PriceRuleInput,
@@ -71,9 +75,12 @@ import type {
   ShoppingRow,
   SpecialAttrs,
   UnixMs,
+  UnixSec,
 } from '../shared/types';
 import { confidenceLevelOf } from './format';
 import { matchesSearch, revenueOrderOf, statusFor, tierForProfit } from './oppModel';
+// 0.9 ranking (#3): the risk keys, as the engine and the Live market.
+import { exitDepthOf, exitRiskAt, marketRiskFields, opportunityRiskFields } from '../shared/exitRisk';
 
 export const MOCK_KEY_SCRAP = 568; // 63.11 ref
 
@@ -660,8 +667,7 @@ export function evaluateOpportunity(
   if (cons) {
     const pulse = book.meta.get(cons.listingId)?.pulseAgeMs ?? null;
     if (cons.isBot && pulse !== null && pulse <= 30 * 60_000) add(20, `Buyer is a bot that pulsed ${Math.round(pulse / 60_000)} min ago`);
-    // 0.7.4: the online flag counts only while the order was seen in the last 2 h, as the service.
-    if (cons.online === true && orderSeenRecently(cons.lastEventAt, now)) add(5, 'Buyer is online');
+    // 0.9 (#11): no bonus for the online flag, as the service (it was true on every captured feed event).
     const confirmedAge = now - cons.lastEventAt;
     if (confirmedAge <= 2 * 3_600_000) add(10, 'Order confirmed by the live feed in the last 2 h');
     else if (confirmedAge > 24 * 3_600_000) {
@@ -735,7 +741,11 @@ export function evaluateOpportunity(
     reasons.push(input.ruleUnderScraptf);
   }
   // 0.8 (PC-2): as the engine, a flip only the revenue order's buyer makes: a warning and a 0-delta reason, last.
-  const single = singleExitOf(revenue, costScrap, buyerDepthOf(exitOrdersOfSummaries(eligible, outlierIds), chosen?.listingId ?? null, settings.profit.useOrder).nextBuyer, settings.profit);
+  // 0.9 (#3): as the engine, the book read once for the next buyer (PC-2) and the risk keys.
+  const orders = exitOrdersOfSummaries(eligible, outlierIds);
+  const depth = buyerDepthOf(orders, chosen?.listingId ?? null, settings.profit.useOrder);
+  const single = singleExitOf(revenue, costScrap, depth.nextBuyer, settings.profit);
+  const risk = exitRiskAt({ exitDepth: exitDepthOf(orders, settings.profit.useOrder), nextBuyer: depth.nextBuyer }, costScrap, settings.profit);
   if (single) {
     flags.push('single-exit');
     reasons.push(singleExitReason(single, (v) => formatScrap(v, keyScrap > 0 ? keyScrap : null)));
@@ -763,6 +773,7 @@ export function evaluateOpportunity(
     profitScrap: profit,
     margin,
     maxCostScrap: maxCostFor(revenue, settings.profit),
+    ...opportunityRiskFields(risk),
     confidence: score,
     confidenceLevel: level,
     flags,
@@ -1045,6 +1056,15 @@ export function mockMarketRow(args: {
   let lastOrderChangeAt: UnixMs | null = null;
   for (const o of eligible) if (lastOrderChangeAt === null || o.lastEventAt > lastOrderChangeAt) lastOrderChangeAt = o.lastEventAt;
   const verdict: MarketVerdict = marketVerdict({ buyerCount, maxCostScrap, knownCostScrap, ruleCostScrap });
+  // 0.9 (#3): as evaluateMarketBase and the service's toRow: the usable buyers seen in 24 h and the next buyer, judged at marketRiskCost.
+  const orders = priced && buyerCount > 0 ? exitOrdersOfSummaries(eligible, priced.outlierIds) : null;
+  const risk = orders
+    ? exitRiskAt(
+        { exitDepth: exitDepthOf(orders, useOrder), nextBuyer: buyerDepthOf(orders, order?.listingId ?? null, useOrder).nextBuyer },
+        marketRiskCost({ knownCostScrap, ruleCostScrap, verdict }),
+        settings.profit,
+      )
+    : null;
   // 0.7.4 (F36): as the service, an item no save showed links the bank its kind is sold on.
   const kindBank = mockBankOf(item.sku, item.category);
   const scraptfLink = scraptfLinkFor(item.category, args.seen ?? null, kindBank);
@@ -1068,6 +1088,7 @@ export function mockMarketRow(args: {
     stock: knownPrice?.source === 'import' ? knownPrice.stock : null,
     ruleCostScrap,
     profitScrap: marketProfit(revenueScrap, knownCostScrap, settings.profit),
+    ...marketRiskFields(risk),
     verdict,
     lastOrderChangeAt,
     evaluatedAt: now,
@@ -1434,7 +1455,23 @@ export function mockImportReport(now: UnixMs): ImportReport {
     page: '/buy/hats',
     format: 'html',
     batchId: 6,
-    counts: { dataDefindex: 50, cards: 50, rows: 0, selectedSkipped: 0, duplicates: 0, lookalikes: 0, reserved: 0, notTradable: 0 },
+    counts: {
+      dataDefindex: 50,
+      cards: 50,
+      rows: 0,
+      selectedSkipped: 0,
+      duplicates: 0,
+      lookalikes: 0,
+      reserved: 0,
+      notTradable: 0,
+      // 0.9 (#13): the parser evidence counts.
+      markdownSoon: 0,
+      markdownOff: 0,
+      countdownCards: 0,
+      recentlyTraded: 0,
+      recentCards: 0,
+      bankNotices: 0,
+    },
     headerColumns: [],
     warningCodes: { 'unknown-quality': 1, 'unusual-without-effect': 1 },
     items: [
@@ -1839,4 +1876,105 @@ export function mockSeedWatches(hatsRows: readonly BankStockRow[], now: UnixMs):
     });
   }
   return out;
+}
+
+// ---------------------------------------------------------------------------
+// 0.9 (holdings-ledger)
+// ---------------------------------------------------------------------------
+
+/** Daily points in mockKeyHistory: 45 give 38 overlapping 7-day spans, past KEY_BAND_MIN_SPANS (28), so the preview has a band. */
+const MOCK_KEY_HISTORY_DAYS = 45;
+
+/**
+ * 0.9 (#17): a deterministic PriceDB key history for the browser preview (45 daily points to `t0`, no RNG), as if the drawer had
+ * loaded it: buy = keyScrap - 9 + round(9·sin(i/4)) - (i % 5 === 0 ? 4 : 0), sell = buy + 12; i = 0 is the oldest point
+ * (44 days before t0), the newest is at t0. Times in UnixSec, as PriceDB's.
+ */
+export function mockKeyHistory(t0: UnixMs, keyScrap: Scrap): HistoryPoint[] {
+  const end = Math.floor(t0 / 1000);
+  const out: HistoryPoint[] = [];
+  for (let i = 0; i < MOCK_KEY_HISTORY_DAYS; i++) {
+    const buy = keyScrap - 9 + Math.round(9 * Math.sin(i / 4)) - (i % 5 === 0 ? 4 : 0);
+    out.push({ t: end - (MOCK_KEY_HISTORY_DAYS - 1 - i) * 86_400, buyScrap: buy, sellScrap: buy + 12 });
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// 0.9 (history): buy-order spells and recorded community prices (RESEARCH #6, #7)
+// ---------------------------------------------------------------------------
+
+/** Spells seeded per eligible buy order (seedOrderSpells). */
+const MOCK_SPELLS_PER_ORDER = 8;
+/** seedCommunityHistory's points: days before now, and the community reference's scale at each. */
+const MOCK_COMMUNITY_DAYS: readonly number[] = [120, 60, 20, 3];
+const MOCK_COMMUNITY_SCALE: readonly number[] = [0.9, 0.95, 1.0, 1.0];
+
+/** 0.9 (history): a mock order's listedAt (Unix s): 30 min to about 5 d before now, from its id. */
+export function mockOrderListedAt(listingId: string, now: UnixMs): UnixSec {
+  return Math.floor((now - (30 + (hashOf(listingId) % 7170)) * 60_000) / 1000);
+}
+
+/**
+ * 0.9 (history): eight spells per eligible buy order of a book, within 10 % of its value, deterministic per SKU (its own
+ * RNG, so no other seed moves): listed 2 h to 20 d ago, first seen up to 2 d later (at the latest 1 h ago), followed
+ * 1 h to 6 d (to now at most); one still followed at now is open, else it ended deleted / inactive / lowered / raised
+ * or unwatched at its last sighting. Fake data, shaped like what the tracker writes (no SteamID, id or name).
+ */
+export function seedOrderSpells(book: MockBook, now: UnixMs): OrderSpell[] {
+  const rng = createRng(hashOf(`spells:${book.item.sku}`));
+  const out: OrderSpell[] = [];
+  let id = 1;
+  for (const o of book.buy) {
+    if (!o.eligible) continue;
+    for (let i = 0; i < MOCK_SPELLS_PER_ORDER; i++) {
+      const listedAt = now - rng.int(2 * HOUR, 20 * DAY_MS);
+      const firstSeenAt = Math.min(now - HOUR, listedAt + rng.int(0, 2 * DAY_MS));
+      const lastSeenAt = Math.min(now, firstSeenAt + rng.int(HOUR, 6 * DAY_MS));
+      const r = rng.next();
+      const endKind: OrderSpellEnd | null =
+        lastSeenAt >= now ? null : r < 0.3 ? 'deleted' : r < 0.35 ? 'inactive' : r < 0.5 ? 'lowered' : r < 0.6 ? 'raised' : 'unwatched';
+      const { keys, metalScrap } = splitValue(Math.max(1, Math.round(o.valueScrap * (0.9 + rng.next() * 0.2))));
+      out.push({
+        id: id++,
+        baseSku: book.item.sku,
+        intent: 'buy',
+        isBot: o.isBot,
+        keys,
+        metalScrap,
+        listedAt: Math.floor(listedAt / 1000),
+        firstSeenAt,
+        lastSeenAt,
+        endAt: endKind === null ? null : lastSeenAt,
+        endKind,
+      });
+    }
+  }
+  return out;
+}
+
+/**
+ * 0.9 (history): four community prices over the last 120 days around the book's community reference (none without one):
+ * 0.9, 0.95, 1 and 1 times it at 120, 60, 20 and 3 days ago, in keys (2 decimals) when the reference is at least a key,
+ * else in ref; single prices (valueHigh null, as both sources are stored: communityHighOf), bp.tf's time = the recorded
+ * time, sources alternating IGetPrices and the live feed.
+ */
+export function seedCommunityHistory(book: MockBook, now: UnixMs): CommunityPoint[] {
+  const ref = book.references.community?.valueScrap;
+  if (ref === null || ref === undefined || !Number.isFinite(ref) || ref <= 0) return [];
+  const inKeys = ref >= K;
+  return MOCK_COMMUNITY_DAYS.map((days, i) => {
+    const at = now - days * DAY_MS;
+    const v = ref * MOCK_COMMUNITY_SCALE[i]!;
+    const value = inKeys ? Math.round((v / K) * 100) / 100 : scrapToRef(Math.round(v));
+    return {
+      sku: book.item.sku,
+      source: i % 2 === 0 ? ('prices' as const) : ('feed' as const),
+      currency: inKeys ? 'keys' : 'metal',
+      value,
+      valueHigh: null,
+      lastUpdate: Math.floor(at / 1000),
+      recordedAt: at,
+    };
+  });
 }

@@ -220,9 +220,12 @@ export const FEE_UNREADABLE = "Can't read that fee. Try 0.22, 2 scrap or 0 for n
 /** 0.8 (J2): readFee's refusal of a fee over journal.add's caps (JOURNAL_MAX_FEE_KEYS / _SCRAP). */
 export const FEE_TOO_HIGH = 'That fee is higher than any trade could cost. Check the amount and its unit.';
 
-/** 0.8 (J2): the hint under the Fees field: the venue's own (venueFeeHint, text only), else FEE_FIELD_HINT. */
-export function feeHint(venue: string, side: JournalSide): string {
-  return venueFeeHint(venue, side) ?? FEE_FIELD_HINT;
+/**
+ * 0.8 (J2): the hint under the Fees field: the venue's own (venueFeeHint, text only), else FEE_FIELD_HINT. 0.9 (#2):
+ * marketplace.tf's names the user's profit.marketplaceFeePct (absent: the 10% default).
+ */
+export function feeHint(venue: string, side: JournalSide, marketplaceFeePct?: number): string {
+  return venueFeeHint(venue, side, marketplaceFeePct) ?? FEE_FIELD_HINT;
 }
 
 /** 0.8 (J2): the typed fee: null when empty (not recorded); an error when it can't be read. */

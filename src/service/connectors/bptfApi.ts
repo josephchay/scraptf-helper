@@ -12,7 +12,7 @@ import { orderSeenRecently } from '../../shared/buyerSeen';
 import { scrapToRef } from '../../shared/currency';
 import { BPTF_API_ACCESS_URL } from '../../shared/links';
 import { HttpStatusError, NetworkPausedError, RateLimitedError, scrubText } from '../net';
-import { createMapStats, listingFromSnapshot, parseIGetCurrencies, parseIGetPrices, type BptfMapStats } from './bptfItem';
+import { createMapStats, isBannedFromBans, listingFromSnapshot, parseIGetCurrencies, parseIGetPrices, truthyBan as truthy, type BptfMapStats } from './bptfItem';
 
 export const BPTF_API_BASE = 'https://api.backpack.tf/api';
 export const SNAPSHOT_URL = `${BPTF_API_BASE}/classifieds/listings/snapshot`;
@@ -142,24 +142,9 @@ function rawSides(raws: readonly unknown[]): { buy: number; sell: number } {
   return { buy, sell };
 }
 
-/** A ban flag: 1/true/"1", a non-empty array, or a ban object such as `{end, reason}`. */
-function truthy(v: unknown): boolean {
-  if (v === undefined || v === null || v === false || v === 0 || v === '0' || v === '') return false;
-  if (Array.isArray(v)) return v.length > 0;
-  return true;
-}
-
-/**
- * bp.tf user `bans` (classic docs): `all` = site ban, `steamrep_scammer`,
- * `valve.economy` = Steam trade ban. Cautions, VAC and suggestion bans do not count.
- */
-export function isBannedFromBans(bans: unknown): boolean {
-  if (Array.isArray(bans)) return bans.length > 0;
-  if (!isRecord(bans)) return false;
-  if (truthy(bans['all']) || truthy(bans['steamrep_scammer']) || truthy(bans['marketplace'])) return true;
-  const valve = bans['valve'];
-  return isRecord(valve) && truthy(valve['economy']);
-}
+// 0.9 (#11, E-D6): `truthy` and isBannedFromBans moved to bptfItem.ts (the feed and snapshots read bans the same way);
+// re-exported here so users/info callers and tests keep their import.
+export { isBannedFromBans } from './bptfItem';
 
 /** The bans isBannedFromBans counts, in that order. */
 const COUNTED_BANS: readonly [string, string][] = [
@@ -570,6 +555,7 @@ export function createBptfApi(deps: ServiceDeps & { schema: SchemaService }): Bp
    * never passes the flag on: its recent stamp is the snapshot's, not the feed's,
    * so a carried flag lasts at most until the next snapshot (a feed event sets it
    * afresh). Runs on every call (cached results too), against the rows stored now.
+   * And (0.9) the impersonation flag, as a ban.
    */
   const withStoredUserData = (result: SnapshotResult): SnapshotResult => {
     let changed = false;
@@ -580,12 +566,14 @@ export function createBptfApi(deps: ServiceDeps & { schema: SchemaService }): Bp
       const merged: Listing = {
         ...l,
         userBanned: l.userBanned || old.userBanned,
+        ...(l.userImpersonated === true || old.userImpersonated === true ? { userImpersonated: true } : {}),
         userOnline: l.userOnline ?? (old.origin === 'ws' && orderSeenRecently(old.lastEventAt, now) ? old.userOnline : null),
         userName: l.userName ?? old.userName,
         marketName: l.marketName ?? old.marketName,
       };
       const same =
         merged.userBanned === l.userBanned &&
+        (merged.userImpersonated === true) === (l.userImpersonated === true) &&
         merged.userOnline === l.userOnline &&
         merged.userName === l.userName &&
         merged.marketName === l.marketName;

@@ -45,7 +45,8 @@ beforeAll(async () => {
   ({ createRoot } = await import('react-dom/client'));
   ({ Root } = await import('../../src/renderer/App'));
   ({ createMockBridge } = await import('../../src/renderer/mock'));
-});
+  // Importing the whole dashboard takes about 3 s alone and can pass the default 10 s while the suite is busy.
+}, 60_000);
 
 let bridge: MockBridge | null = null;
 const unmounts: (() => void)[] = [];

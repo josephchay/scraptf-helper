@@ -661,6 +661,9 @@ export const SORT_LABELS: Record<MarketSort, string> = {
   revenue: 'Sells for',
   buyers: 'Buyers',
   profit: 'Profit',
+  // 0.9 (#3): ranking (Wave 2) fills the values; until then both sort by name.
+  backup: 'If this buyer leaves',
+  depth: 'Buyers at break-even',
   updated: 'Updated',
   name: 'Name',
   seen: 'Seen on scrap.tf',

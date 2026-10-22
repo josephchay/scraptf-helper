@@ -977,6 +977,43 @@
   list-style: none;
 }
 
+/* 0.9 (#25): "Unsupported by scrap.tf": one row per thing, its sources as copy buttons, then the email. */
+.unsupported-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 8px 0 12px;
+  padding: 0;
+  list-style: none;
+}
+
+.unsupported-list li {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.unsupported-sources {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 12px;
+  margin-top: 2px;
+}
+
+.unsupported-sources .icon {
+  margin-right: 3px;
+  vertical-align: -2px;
+}
+
+.unsupported-email {
+  margin: 0 0 10px;
+}
+
+.unsupported-email > summary {
+  cursor: pointer;
+  margin-bottom: 6px;
+}
+
 /* ---------- quick entry window ---------- */
 
 html[data-window='quick-entry'] body {

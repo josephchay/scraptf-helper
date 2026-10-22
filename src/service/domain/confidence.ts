@@ -1,7 +1,7 @@
 // Confidence score 0–100 (design brief §5.7). Every adjustment adds a reason of
 // the form "<signed delta> <plain English>", which the dashboard renders.
 
-import { ORDER_CONFIRMED_MS, orderSeenRecently } from '../../shared/buyerSeen';
+import { ORDER_CONFIRMED_MS } from '../../shared/buyerSeen';
 import { costSanity, costSanityReason } from '../../shared/ceiling';
 import { formatScrap } from '../../shared/currency';
 import type { ConfidenceLevel, InputKind, ProfitSettings, ReferencePrices, Scrap, UnixMs } from '../../shared/types';
@@ -96,8 +96,7 @@ export function scoreConfidence(input: ConfidenceInput): ConfidenceResult {
     const l = order.listing;
     const pulse = typeof l.uaLastPulse === 'number' && Number.isFinite(l.uaLastPulse) ? l.uaLastPulse * 1000 : null;
     if (l.isBot && pulse !== null && now - pulse <= BOT_PULSE_MS) add(20, 'Buyer is a bot that was active in the last 30 min');
-    // 0.7.4 (F23): the online flag is as old as the order's last event, so it counts only while that is recent.
-    if (l.userOnline === true && orderSeenRecently(l.lastEventAt, now)) add(5, 'Buyer is online');
+    // 0.9 (#11): no bonus for the buyer's online flag: the live feed sent true on all 299 events of its capture (RESEARCH §4.2), so it says nothing. Presence stays a display (buyerPresenceText).
 
     const age = now - l.lastEventAt;
     if (age <= CONFIRMED_MS) add(10, 'Order confirmed by the live feed or a snapshot in the last 2 h');

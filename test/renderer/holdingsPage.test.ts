@@ -73,7 +73,8 @@ describe('the page', () => {
   it('refetches when the profit thresholds or the blocklist change (status and Pay up to follow them)', () => {
     expect(page).toMatch(/useEffect\(\(\) => \{\s*if \(!profitSettings\) return;\s*if \(settingsSeen\.current\) reloadSoon\(\);/);
     // 0.8 (H3): and when your own accounts change (their listings leave the rows' asks).
-    expect(page).toContain('}, [profitSettings, blocklist, ownIds, reloadSoon]);');
+    // 0.9 (#1): and when the Trade lock's answer changes (advice, Sellable now and the lots' dates follow it).
+    expect(page).toContain('}, [profitSettings, blocklist, ownIds, lockMode, reloadSoon]);');
   });
 
   it('answers the buyer key on a row without a buyer profile, instead of doing nothing', () => {

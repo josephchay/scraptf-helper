@@ -663,7 +663,8 @@ describe("the Live market's scrap.tf link opens only static pages (F19, R1)", ()
  * drawer's history and its step chart, the Live log's changes tab (U3, which shows each event's untrusted
  * `page` as text only), and Settings' reminder fields (U4)). From 0.8 also the buy timing built on the history
  * (cycles), the holdings advice, its recorded exits and the ask side (holdings), and the watches and their notifier
- * (alerts).
+ * (alerts). From 0.9 also the robust statistics (holdings-ledger), the checkout guard (scrap.tf), the risk keys and
+ * the reserve suggestion (ranking), and buy-order persistence, recorded community prices and scrap.tf lows (history).
  */
 const F20_FILES = [
   'service/domain/scraptfHistory.ts',
@@ -690,6 +691,21 @@ const F20_FILES = [
   'renderer/components/WatchSection.tsx',
   'renderer/components/WatchDialog.tsx',
   'renderer/components/WatchesCard.tsx',
+  'shared/robustStats.ts',
+  'shared/checkoutGuard.ts',
+  'renderer/checkoutGuardModel.ts',
+  'renderer/components/CheckoutGuard.tsx',
+  'shared/exitRisk.ts',
+  'shared/reserveSuggest.ts',
+  'renderer/riskModel.ts',
+  'shared/orderPersistence.ts',
+  'shared/communityHistory.ts',
+  'shared/scraptfLows.ts',
+  'service/domain/orderSpells.ts',
+  'service/domain/communityFeed.ts',
+  'service/domain/bookHistory.ts',
+  'renderer/bookHistoryModel.ts',
+  'renderer/components/BookHistorySection.tsx',
 ];
 /**
  * U4's reminder fields sit in the whole Settings page, whose help text names http://localhost (the request
@@ -1980,5 +1996,145 @@ describe('0.8 journal (J1-J6, write-offs)', () => {
     expect(offenders(URL_OPENERS, () => false, scoped())).toEqual([]);
     expect(offenders(LOADERS, () => false, scoped())).toEqual([]);
     expect(offenders(/\b(?:https?|wss?):\/\//i, () => false, scoped())).toEqual([]);
+  });
+});
+
+/**
+ * 0.9 (#14): scrap.tf automation signatures (RESEARCH §4.1, §5.1, §8 #14): the internal /ajax actions third-party bots
+ * call, a queue-confirmation hook, the old and current session cookie by name, the page's CSRF hash object and the
+ * anti-detection drivers those bots run. None may appear in src/ (R1, R3, R4, R9). `scraptf=` only as a cookie: the
+ * dashboard's JSX prop `scraptf={…}` is no cookie.
+ */
+const AUTOMATION_SIGNATURES: readonly RegExp[] = [
+  /EnterRaffle/i,
+  /AutoScrap/i,
+  /\bitems\/Sell\b/,
+  /mm-queue-trade-confirmed/i,
+  /\bscr_session\b/i,
+  /ScrapTF\.User\.Hash/i,
+  /\bnodriver\b/i,
+  /undetected[-_]?chromedriver/i,
+  /\bseleniumbase\b/i,
+  /['"`;]\s*scraptf=|\bscraptf=[A-Za-z0-9%]/,
+];
+/** 0.9 (#14): browser-automation packages, never a dependency. */
+const AUTOMATION_PACKAGES = /puppeteer|playwright|selenium|nodriver|chromedriver|undetected|webdriver/i;
+
+/** 0.9 (#14): `file:line: match` for every automation signature in `files`. */
+function automationHits(files: readonly SourceFile[] = FILES): string[] {
+  return AUTOMATION_SIGNATURES.flatMap((re) => offenders(re, () => false, files));
+}
+
+describe('0.9 exits (#14): the automation deny-list', () => {
+  it('finds no scrap.tf automation signature anywhere in src/', () => {
+    expect(automationHits()).toEqual([]);
+  });
+
+  it('depends on no browser-automation package', () => {
+    const pkg = JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8')) as {
+      dependencies?: Record<string, string>;
+      devDependencies?: Record<string, string>;
+    };
+    const names = [...Object.keys(pkg.dependencies ?? {}), ...Object.keys(pkg.devDependencies ?? {})];
+    expect(names.length).toBeGreaterThan(0);
+    expect(names.filter((n) => AUTOMATION_PACKAGES.test(n))).toEqual([]);
+  });
+
+  it('catches what it claims to (one hit per planted line), and not the JSX prop scraptf={…}', () => {
+    const planted = [
+      "post('/ajax/raffles/EnterRaffle', data);",
+      "const mode = 'autoscrap';",
+      "const sell = '/ajax/items/Sell';",
+      "on('mm-queue-trade-confirmed', go);",
+      "const c = cookies.get('scr_session');",
+      'const hash = ScrapTF.User.Hash;',
+      "import uc from 'nodriver';",
+      "const d = require('undetected-chromedriver');",
+      "run('seleniumbase');",
+      "document.cookie = 'scraptf=abc123';",
+      'const header = `Cookie: a=1;scraptf=${v}`;',
+    ];
+    const bad = sourceFile('service/Bad.ts', planted.join('\n'));
+    const hits = automationHits([bad]);
+    expect(hits).toHaveLength(planted.length);
+    expect(new Set(hits.map((h) => h.split(':')[1])).size).toBe(planted.length);
+    expect(automationHits([sourceFile('renderer/Ok.tsx', 'const A = () => <Strip scraptf={x} />;')])).toEqual([]);
+    // Every package-name pattern names its tool.
+    for (const name of ['puppeteer-core', 'playwright', 'selenium-webdriver', 'nodriver', 'undetected-chromedriver', 'webdriverio']) {
+      expect(AUTOMATION_PACKAGES.test(name), name).toBe(true);
+    }
+    expect(AUTOMATION_PACKAGES.test('socket.io-client')).toBe(false);
+  });
+});
+
+/** 0.9 (#2): the break-even model: arithmetic and text over data already in memory. */
+const EXIT_FILES = ['renderer/breakEvenModel.ts'];
+describe('0.9 exits (#2): the break-even model', () => {
+  const scoped = () => EXIT_FILES.map((rel) => FILES.find((f) => f.rel === rel)!);
+  it('opens and loads nothing and names no web address', () => {
+    expect(scoped().every((f) => f !== undefined)).toBe(true);
+    expect(offenders(URL_OPENERS, () => false, scoped())).toEqual([]);
+    expect(offenders(LOADERS, () => false, scoped())).toEqual([]);
+    expect(offenders(/\b(?:https?|wss?):\/\//i, () => false, scoped())).toEqual([]);
+  });
+});
+
+// 0.9 (#25, #9): the About page's "Unsupported by scrap.tf" panel copies its sources' addresses for the user's own
+// browser and opens none of them (most are not on the links.open allowlist, so externalLinks.test skips aboutModel.ts),
+// and the checkout guard is text only: no address, no link, no opener (R1, R3).
+/** An ExternalLink whose url comes from a panel row or source (`s.url`, `src.url`, `source.url`, `row.…`). */
+const PANEL_SOURCE_OPENER = /ExternalLink[^>]*url=\{\s*(?:s|src|source|row)\./;
+/** Every `url=` attribute of an ExternalLink in a file: About's TERMS (`{t.url}`) and its static credit links only. */
+function externalLinkUrls(code: string): string[] {
+  return [...code.matchAll(/<ExternalLink\b[^>]*?\burl=(\{[^}]*\}|"[^"]*"|'[^']*')/g)].map((m) => m[1]!);
+}
+describe('0.9 scrap.tf boundary panel and guard (R1, R3)', () => {
+  const file = (rel: string) => FILES.find((f) => f.rel === rel)!;
+  const ABOUT = ['renderer/aboutModel.ts', 'renderer/pages/AboutPage.tsx'];
+
+  it("calls no loader and no opener in the panel's files, besides About's existing ExternalLinks", () => {
+    const files = ABOUT.map(file);
+    expect(files.every((f) => f !== undefined)).toBe(true);
+    expect(offenders(LOADERS, () => false, files)).toEqual([]);
+    expect(offenders(URL_OPENERS, () => false, files)).toEqual([]);
+    expect(offenders(PANEL_SOURCE_OPENER, () => false, files)).toEqual([]);
+    // About's ExternalLinks are the TERMS list and the static credit links, as before 0.9.
+    const urls = externalLinkUrls(file('renderer/pages/AboutPage.tsx').code);
+    expect(urls).toContain('{t.url}');
+    expect(urls.filter((u) => u !== '{t.url}' && !/^["']https:\/\/[^"']+["']$/.test(u))).toEqual([]);
+    // The panel itself names no ExternalLink, openOrCopy or links.open: it only copies.
+    const panel = functionBody(file('renderer/pages/AboutPage.tsx').code, 'UnsupportedPanel') ?? '';
+    expect(panel).toContain('copyText(');
+    expect(panel).not.toMatch(/ExternalLink|openOrCopy|openLink|links\.open/);
+    expect(externalLinkUrls(file('renderer/aboutModel.ts').code)).toEqual([]);
+  });
+
+  it('gives every panel source an https address and keeps the guard free of addresses and links', async () => {
+    const { SCRAPTF_UNSUPPORTED } = await import('../../src/renderer/aboutModel');
+    const urls = SCRAPTF_UNSUPPORTED.flatMap((r) => r.sources.map((s) => s.url));
+    expect(urls.length).toBeGreaterThan(0);
+    expect(urls.filter((u) => !/^https:\/\/[^\s?#]+$/.test(u))).toEqual([]);
+    const guard = file('shared/checkoutGuard.ts');
+    expect(guard).toBeDefined();
+    expect(offenders(/\bhttps?:\/\//i, () => false, [guard])).toEqual([]);
+    expect(offenders(/['"`]scrap\.tf\//i, () => false, [guard])).toEqual([]);
+    const view = ['renderer/components/CheckoutGuard.tsx', 'renderer/checkoutGuardModel.ts'].map(file);
+    expect(view.every((f) => f !== undefined)).toBe(true);
+    expect(offenders(/\b(?:href|src)\s*=/, () => false, view)).toEqual([]);
+    expect(offenders(URL_OPENERS, () => false, view)).toEqual([]);
+  });
+
+  it('catches what it claims to', () => {
+    const planted = sourceFile(
+      'renderer/pages/AboutPage.tsx',
+      ['{row.sources.map((s) => (', '  <ExternalLink url={s.url} showUrl>', '    {s.label}', '  </ExternalLink>', '))}'].join('\n'),
+    );
+    expect(offenders(PANEL_SOURCE_OPENER, () => false, [planted])).toHaveLength(1);
+    expect(externalLinkUrls(planted.code)).toEqual(['{s.url}']);
+    const opener = sourceFile('renderer/aboutModel.ts', "export const open = (u: string) => openOrCopy(u, toast);\nconst a = <a href={u}>x</a>;");
+    expect(offenders(URL_OPENERS, () => false, [opener])).toHaveLength(2);
+    const guard = sourceFile('shared/checkoutGuard.ts', "export const HELP = 'https://scrap.tf/help/kb/114';\nconst p = 'scrap.tf/help';");
+    expect(offenders(/\bhttps?:\/\//i, () => false, [guard])).toHaveLength(1);
+    expect(offenders(/['"`]scrap\.tf\//i, () => false, [guard])).toHaveLength(1);
   });
 });

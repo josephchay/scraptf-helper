@@ -65,7 +65,8 @@ describe('migration V5 on an existing version 4 database', () => {
       .all()
       .map((r) => r['name']);
     // V9 (F21) adds origin after bank.
-    expect(cols).toEqual(['id', 'file_name', 'page_kind', 'file_mtime', 'imported_at', 'item_count', 'categories', 'bank', 'origin']);
+    // V16 (0.9, #13) adds bank_notice after origin.
+    expect(cols).toEqual(['id', 'file_name', 'page_kind', 'file_mtime', 'imported_at', 'item_count', 'categories', 'bank', 'origin', 'bank_notice']);
   });
 
   it('stores the bank of batches imported after the upgrade next to the old ones', () => {

@@ -232,11 +232,15 @@ export const ALLOWED_EXTERNAL_HOSTS: readonly string[] = Object.freeze([
   'mannco.store',
 ]);
 
+/** 0.9 (#1): Valve's Trade Protection FAQ, linked from Holdings' trade lock question and Settings; opened only in the user's browser. */
+export const STEAM_TRADE_PROTECTION_FAQ_URL = 'https://help.steampowered.com/en/faqs/view/365F-4BEE-2AE2-7BDD';
+
 /**
- * The only other pages the app opens, matched as exact URLs: platform terms and
+ * The only other pages the app opens, matched as exact URLs: platform terms and help pages and
  * attribution (§7.5.8), the static scrap.tf bank pages and the scrap.tf/items price
  * list (F14). Nothing else on these hosts (a GitHub release download, for example)
- * can be opened.
+ * can be opened. 0.9 (#1): Valve's Trade Protection FAQ, a link the user clicks (the
+ * app's HTTP client never contacts help.steampowered.com).
  */
 export const STATIC_EXTERNAL_URLS: readonly string[] = Object.freeze([
   ...new Set([
@@ -244,6 +248,7 @@ export const STATIC_EXTERNAL_URLS: readonly string[] = Object.freeze([
     ...Object.values(SCRAPTF_PAGES),
     SCRAPTF_ITEMS_URL,
     'https://store.steampowered.com/subscriber_agreement/english/',
+    STEAM_TRADE_PROTECTION_FAQ_URL,
     'https://github.com/NetroScript/scrap.tf-item-information',
     'https://github.com/VeBeshka/tf2-scraptf-profit-helper',
   ]),

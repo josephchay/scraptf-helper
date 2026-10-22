@@ -3,7 +3,8 @@
 // Pure functions over local data; nothing here fetches anything (R1).
 
 import { bankForCategory } from './links';
-import type { BankStockRow, Category, MarketRow, Opportunity, ScraptfBank, ScraptfBankFlip, ScraptfBankLookFor, ScraptfBankSummary } from './types';
+import type { BankStockRow, Category, ImportBatch, MarketRow, Opportunity, ScraptfBank, ScraptfBankFlip, ScraptfBankLookFor, ScraptfBankSummary, UnixMs } from './types';
+import { batchSavedAt } from './market'; // 0.9 (#13); no cycle: market.ts does not import banks.ts
 
 /** ScraptfBankSummary.top holds at most this many flips. */
 export const BANK_TOP_FLIPS = 3;
@@ -109,4 +110,27 @@ export function bankLookFor(rows: readonly MarketRow[], categories: readonly Cat
     unchecked,
     lookFor: priced.slice(0, BANK_LOOK_FOR).map((r): ScraptfBankLookFor => ({ sku: r.sku, name: r.name, maxCostScrap: r.maxCostScrap ?? 0, revenueScrap: r.revenueScrap ?? 0 })),
   };
+}
+
+/**
+ * 0.9 (#13): batchSavedAt of the newest batch of `bank` whose page said the bank was not trading (bankNotice
+ * 'unavailable'); null when none. Other banks' batches and notice-less ones are ignored.
+ */
+export function bankNoticeNewestAt(batches: readonly Pick<ImportBatch, 'bank' | 'fileMtime' | 'importedAt' | 'bankNotice'>[], bank: ScraptfBank): UnixMs | null {
+  let at: UnixMs | null = null;
+  for (const b of batches) {
+    if (b.bank !== bank || b.bankNotice !== 'unavailable') continue;
+    const t = batchSavedAt(b);
+    if (Number.isFinite(t) && (at === null || t > at)) at = t;
+  }
+  return at;
+}
+
+/**
+ * 0.9 (#13): ScraptfBankSummary.unavailableAt: `noticeAt` when it is the bank's newest look (never saved, or saved at
+ * or before it), else null (a newer save of the bank supersedes the notice).
+ */
+export function bankUnavailableAt(noticeAt: UnixMs | null, lastSavedAt: UnixMs | null): UnixMs | null {
+  if (noticeAt === null || !Number.isFinite(noticeAt)) return null;
+  return lastSavedAt === null || !Number.isFinite(lastSavedAt) || noticeAt >= lastSavedAt ? noticeAt : null;
 }

@@ -23,6 +23,10 @@
 // profit settings, ScraptfTimingInputs, so a join reads neither per row). Health's asset-id stability is the walk's
 // pre-pass alone, kept per runs rebuild: its poll builds no lifecycle. Still in memory only: no query and no request is
 // added.
+//
+// 0.9 (history, H9): per copy, the lowest price on sale in the user's saves. The retained saves' lows (scraptfLowsOf,
+// built per runs rebuild and key price) merge with scraptf_lows, which recordLows writes at import from 0.9 (the table
+// keeps the low of every save for 365 days after its last sighting, past the saves' own thinning). Local only.
 
 import { BANK_STOCK_PLAIN_KEY, bankStockIsOwnCopy, bankStockKey, bankStockTargetOf, type BankStockThinSave } from '../../shared/bankStock';
 import type { CeilingSettings } from '../../shared/ceiling';
@@ -54,6 +58,7 @@ import {
   type ScraptfSaveRows,
 } from '../../shared/scraptfHistory';
 import { scraptfBankCyclesOf, scraptfBankTurnover, scraptfItemTimingOf, scraptfTimingForKey, type ScraptfBankCycles } from '../../shared/scraptfTiming';
+import { sameScraptfLow, scraptfCopyLowOf, scraptfLowFold, scraptfLowMerge, scraptfLowSightingsOf, scraptfLowsOf } from '../../shared/scraptfLows';
 import type {
   BankStockStored,
   KeyPriceState,
@@ -65,9 +70,12 @@ import type {
   ScraptfBuyTiming,
   ScraptfChangeEvent,
   ScraptfChangesQuery,
+  ScraptfCopyLow,
   ScraptfEventStored,
   ScraptfItemHistory,
   ScraptfKeyRun,
+  ScraptfLowCore,
+  ScraptfLowStored,
   ScraptfTurnover,
   UnixMs,
 } from '../../shared/types';
@@ -92,6 +100,8 @@ export interface ScraptfHistoryDeps {
   nameOf?(sku: string): string | null | undefined;
   /** 0.8 (T3/T4): settings.profit for the timing EV (core: () => settings.profit). Omitted (tests): no timing. */
   profit?(): CeilingSettings;
+  /** 0.9 (history): stored lows (scraptf_lows), read per bank and written by recordLows. Omitted (tests): lows come from the retained saves alone and recordLows writes nothing. */
+  lows?: Pick<Repo, 'transaction' | 'scraptfLows' | 'upsertScraptfLows'>;
 }
 
 export interface ScraptfHistory {
@@ -172,6 +182,20 @@ export interface ScraptfHistory {
    * lifecycle is built for it), in SCRAPTF_BANKS order. Never throws.
    */
   assetStability(): ScraptfAssetIdsHealth[];
+  /**
+   * 0.9 (history): per copy key (bankStockKey), the lowest price on sale in the bank's saves: the retained saves
+   * (scraptfLowsOf, built once per runs rebuild and key price) merged with the stored lows (scraptfLowMerge), valued at
+   * the key price now. Memoised until the runs, the stored lows or the key price change. Empty for a bank never saved.
+   * Never throws: a failure is logged once per streak and gives what could be read.
+   */
+  lowsFor(bank: ScraptfBank): ReadonlyMap<string, ScraptfCopyLow>;
+  /**
+   * 0.9 (history): importSavedPage calls it inside its transaction right after onImport, for a save that wrote bank
+   * stock: folds the save's copies on sale (scraptfLowSightingsOf, at the save's time) into scraptf_lows
+   * (scraptfLowFold at the key price now; only changed rows are written) in a nested transaction. Returns rows written;
+   * 0 without deps.lows. Never throws: a failure costs only this save's stored lows (logged once per streak).
+   */
+  recordLows(batchId: number): number;
 }
 
 /**
@@ -295,6 +319,8 @@ interface BankHistory {
    * Health reads it without building the lifecycle, and the lifecycle reuses it.
    */
   stability: ScraptfAssetStability | null;
+  /** 0.9 (history): scraptfLowsOf over `saves` at `keyScrap`, built on first use per runs rebuild and key price. */
+  lows: { keyScrap: Scrap; map: Map<string, ScraptfLowCore> } | null;
 }
 
 /**
@@ -337,6 +363,13 @@ export function createScraptfHistory(deps: ScraptfHistoryDeps): ScraptfHistory {
   let keyFailing = false;
   /** 0.8: the cycle reads' failure streaks (by message): each is logged once per streak, not once per row. */
   const streaks = new Set<string>();
+  /** 0.9 (history): per bank, its stored lows (deps.lows.scraptfLows) by copy key; recordLows and refresh drop them. */
+  const storedLows = new Map<ScraptfBank, Map<string, ScraptfLowCore>>();
+  /** 0.9 (history): grows whenever the stored lows may have changed (part of lowsFor's memo key). */
+  let storedGen = 0;
+  /** 0.9 (history): per bank, lowsFor's last answer and what it was built from. */
+  const merged = new Map<ScraptfBank, { ver: number; gen: number; keyScrap: Scrap; map: Map<string, ScraptfCopyLow> }>();
+  const noLows: ReadonlyMap<string, ScraptfLowCore> = new Map();
 
   function failed(msg: string, err: unknown): void {
     if (!streaks.has(msg)) log.warn(msg, { error: errorText(err) });
@@ -451,7 +484,7 @@ export function createScraptfHistory(deps: ScraptfHistoryDeps): ScraptfHistory {
       }
       // Only this bank's runs move: the others keep theirs.
       const runs = scraptfRunsOf(mine);
-      banks.set(bank, { saves: mine, runs, listed: listedOf(runs), cycles: null, stability: null });
+      banks.set(bank, { saves: mine, runs, listed: listedOf(runs), cycles: null, stability: null, lows: null });
     }
     anyBank = null;
     ver++;
@@ -695,6 +728,102 @@ export function createScraptfHistory(deps: ScraptfHistoryDeps): ScraptfHistory {
     return repo.insertScraptfEvents(events);
   }
 
+  /** 0.9 (history): a stored low's price and times (the six fields the fold reads). */
+  function coreOf(r: ScraptfLowCore): ScraptfLowCore {
+    return { keys: r.keys, scrap: r.scrap, firstAt: r.firstAt, lastAt: r.lastAt, since: r.since, seenAt: r.seenAt };
+  }
+
+  /** 0.9 (history): a bank's stored lows by copy key, read once per change (recordLows and refresh drop them). */
+  function storedOf(bank: ScraptfBank): ReadonlyMap<string, ScraptfLowCore> {
+    if (!deps.lows) return noLows;
+    const hit = storedLows.get(bank);
+    if (hit) return hit;
+    const m = new Map<string, ScraptfLowCore>();
+    for (const r of deps.lows.scraptfLows(bank)) m.set(bankStockKey(r.sku, r.specialKey), coreOf(r));
+    storedLows.set(bank, m);
+    return m;
+  }
+
+  /** ScraptfHistory.lowsFor: the retained saves' lows merged with the stored ones, memoised per runs, stored lows and key price. */
+  function lowsFor(bank: ScraptfBank): ReadonlyMap<string, ScraptfCopyLow> {
+    const msg = 'scrap.tf history could not read the lowest prices';
+    ensure();
+    const K = readKeyPrice().valueScrap;
+    const memo = merged.get(bank);
+    if (memo && memo.ver === ver && memo.gen === storedGen && memo.keyScrap === K) return memo.map;
+    // A part that could not be read leaves the answer unmemoised, so the next read tries again.
+    let complete = !failing;
+    let retained: ReadonlyMap<string, ScraptfLowCore> = noLows;
+    try {
+      const b = failing ? undefined : banks.get(bank);
+      if (b) {
+        if (b.lows === null || b.lows.keyScrap !== K) b.lows = { keyScrap: K, map: scraptfLowsOf(b.saves, bank, K) };
+        retained = b.lows.map;
+      }
+    } catch (err) {
+      complete = false;
+      failed(msg, err);
+    }
+    let stored: ReadonlyMap<string, ScraptfLowCore> = noLows;
+    try {
+      stored = storedOf(bank);
+    } catch (err) {
+      complete = false;
+      failed(msg, err);
+    }
+    const out = new Map<string, ScraptfCopyLow>();
+    for (const key of new Set([...retained.keys(), ...stored.keys()])) {
+      const low = scraptfCopyLowOf(scraptfLowMerge(retained.get(key), stored.get(key), K), K);
+      if (low) out.set(key, low);
+    }
+    if (complete) {
+      streaks.delete(msg);
+      merged.set(bank, { ver, gen: storedGen, keyScrap: K, map: out });
+    }
+    return out;
+  }
+
+  /** ScraptfHistory.recordLows: one save's copies on sale folded into scraptf_lows (changed rows only), in a nested transaction. */
+  function recordLows(batchId: number): number {
+    const lows = deps.lows;
+    if (!lows || !Number.isSafeInteger(batchId) || batchId <= 0) return 0;
+    const msg = "scrap.tf history could not keep a save's lowest prices";
+    try {
+      const self = repo.bankStockSaveIndex().find((s) => s.batchId === batchId);
+      if (!self || !scraptfBankInfo(self.bank)) return 0;
+      const sightings = scraptfLowSightingsOf(repo.bankStockRowsOf([batchId]).get(batchId) ?? [], self.bank, self.savedAt);
+      if (sightings.length === 0) return 0;
+      const K = readKeyPrice().valueScrap;
+      // A SAVEPOINT inside the import's transaction: a failure undoes only this save's lows, never the import.
+      const n = lows.transaction(() => {
+        const stored = new Map<string, ScraptfLowStored>();
+        for (const r of lows.scraptfLows(self.bank)) stored.set(bankStockKey(r.sku, r.specialKey), r);
+        const changed: ScraptfLowStored[] = [];
+        for (const s of sightings) {
+          const had = stored.get(s.key);
+          const next = scraptfLowFold(had ? coreOf(had) : null, s, K);
+          if (had && sameScraptfLow(next, had)) continue;
+          changed.push({ bank: self.bank, sku: s.sku, specialKey: s.specialKey, ...next });
+        }
+        return changed.length > 0 ? lows.upsertScraptfLows(changed) : 0;
+      });
+      storedLows.delete(self.bank);
+      storedGen++;
+      streaks.delete(msg);
+      return n;
+    } catch (err) {
+      failed(msg, err);
+      return 0;
+    }
+  }
+
+  /** 0.9 (history): an item history with its copy's low in its bank (lowsFor), when there is one. */
+  function withLow(x: ScraptfItemHistory): ScraptfItemHistory {
+    if (x.bank === null) return x;
+    const low = lowsFor(x.bank).get(bankStockKey(x.sku, x.specialKey));
+    return low ? { ...x, low } : x;
+  }
+
   return {
     onImport,
 
@@ -744,10 +873,11 @@ export function createScraptfHistory(deps: ScraptfHistoryDeps): ScraptfHistory {
         try {
           const out = { ...h, ...scraptfItemTimingOf(h, { cyclesOf, buy: entryOf(base), profit: deps.profit?.() ?? null, keyScrap: kp.valueScrap, now: at }) };
           streaks.delete(msg);
-          return out;
+          // 0.9 (history): the copy's lowest price on sale in its bank's saves (never throws).
+          return withLow(out);
         } catch (err) {
           failed(msg, err);
-          return h;
+          return withLow(h);
         }
       } catch (err) {
         log.warn('scrap.tf history could not read an item', { error: errorText(err) });
@@ -785,6 +915,9 @@ export function createScraptfHistory(deps: ScraptfHistoryDeps): ScraptfHistory {
     },
 
     refresh() {
+      // 0.9 (history): the stored lows are read again too (maintenance may have pruned them).
+      storedLows.clear();
+      storedGen++;
       stale = true;
       ensure(true);
     },
@@ -873,5 +1006,9 @@ export function createScraptfHistory(deps: ScraptfHistoryDeps): ScraptfHistory {
         return [];
       }
     },
+
+    lowsFor,
+
+    recordLows,
   };
 }

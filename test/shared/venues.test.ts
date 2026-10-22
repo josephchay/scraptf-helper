@@ -19,6 +19,7 @@ const ALIASES: Record<string, readonly string[]> = {
   'scrap.tf': ['scrap.tf', 'scraptf', 'scrap tf', 'scrap'],
   'backpack.tf': ['backpack.tf', 'backpacktf', 'backpack tf', 'backpack', 'bp.tf', 'bptf', 'bp', 'next.backpack.tf'],
   'marketplace.tf': ['marketplace.tf', 'marketplacetf', 'marketplace tf', 'marketplace', 'mp.tf', 'mptf'],
+  'mannco.store': ['mannco.store', 'manncostore', 'mannco store', 'mannco'],
   'Steam Community Market': ['steam community market', 'steam market', 'community market', 'scm', 'steam', 'steamcommunity.com'],
   'Direct trade': ['direct trade', 'direct', 'steam trade', 'trade offer', 'private trade'],
   other: ['other'],
@@ -28,7 +29,8 @@ const ALIASES: Record<string, readonly string[]> = {
 describe('the venue list', () => {
   it('starts with the two holding exits, then the other venues', () => {
     expect(JOURNAL_VENUES.slice(0, 2)).toEqual([HOLDING_EXIT_VENUES.scraptf, HOLDING_EXIT_VENUES.backpack]);
-    expect(JOURNAL_VENUES).toEqual(['scrap.tf', 'backpack.tf', 'marketplace.tf', 'Steam Community Market', 'Direct trade', 'other']);
+    // 0.9 (#2): mannco.store after marketplace.tf.
+    expect(JOURNAL_VENUES).toEqual(['scrap.tf', 'backpack.tf', 'marketplace.tf', 'mannco.store', 'Steam Community Market', 'Direct trade', 'other']);
     expect(WRITE_OFF_VENUE).toBe('Written off');
     expect(UNKNOWN_VENUE_LABEL).toBe('Unknown');
     // Every listed venue is its own canonical name.
@@ -55,6 +57,8 @@ describe('venueKey and venueLabel', () => {
     expect(venueLabel(' BP.TF ')).toBe('backpack.tf');
     expect(venueLabel('Steam')).toBe('Steam Community Market');
     expect(venueLabel('scrap.tf/')).toBe('scrap.tf');
+    // 0.9 (#2): a trailing dot is dropped before the fold.
+    expect(venueLabel('mannco.store.')).toBe('mannco.store');
   });
 
   it('keeps unknown text trimmed with its case, and names an empty venue Unknown', () => {
@@ -83,15 +87,23 @@ describe('venueFeeHint (brief §5.4, text only)', () => {
     }
   });
 
-  it("names marketplace.tf's and the Steam Market's cut on a sale only", () => {
+  it("names marketplace.tf's and the Steam Market's cut on a sale only (0.9, #2: from the cent rules and the setting)", () => {
     expect(venueFeeHint('marketplace.tf', 'sell')).toBe(
-      'marketplace.tf keeps about 10% of the sale price (you get about 90%). Enter that cut in keys or metal, at the value you log the sale at.',
+      'marketplace.tf keeps about 10% of the sale price (your setting under Settings > Profit thresholds; about 10% rests on a 2019 forum report). Enter that cut in keys or metal, at the value you log the sale at.',
     );
     expect(venueFeeHint('SCM', 'sell')).toBe(
-      'The Steam Market keeps about 13% (the buyer pays about 1.15× what you get: 5% Steam and 10% TF2, each at least $0.01), in Steam Wallet funds. Enter that cut in keys or metal, at the value you log the sale at.',
+      'The Steam Market keeps 5% (Steam) and 10% (TF2) of what you get, each rounded down to the cent and at least $0.01, in Steam Wallet funds, not cash: the buyer pays $1.15 for $1.00 to you, $2.21 for $1.93 and $0.03 for $0.01. Enter that cut in keys or metal, at the value you log the sale at.',
     );
     expect(venueFeeHint('marketplace.tf', 'buy')).toBeNull();
     expect(venueFeeHint('Steam Community Market', 'buy')).toBeNull();
+  });
+
+  it("names mannco.store's cut on a sale only (0.9, #2)", () => {
+    expect(venueFeeHint('mannco', 'sell')).toBe(
+      'mannco.store keeps 5% of the sale price, rounded in your favour and at least $0.01 (none on a $0.01 sale): a $1.00 sale pays you $0.95, a $0.10 sale $0.09. Enter that cut in keys or metal, at the value you log the sale at.',
+    );
+    expect(venueFeeHint('mannco.store', 'buy')).toBeNull();
+    expect(venueFeeHint('mannco.store', 'writeoff')).toBeNull();
   });
 
   it('gives nothing for a write-off or any other venue', () => {

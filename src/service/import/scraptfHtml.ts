@@ -8,21 +8,36 @@ import type { DefaultTreeAdapterMap, DefaultTreeAdapterTypes, TreeAdapter } from
 import { z } from 'zod';
 import { parsePrice } from '../../shared/currency';
 import {
+  BANK_UNAVAILABLE_WARNING,
   CRAFT_UNVERIFIED,
   DUPLICATE_ROW,
   IMPORT_REFUSAL_CODES,
   IMPORT_REPORT_MAX_ITEMS,
+  IMPORT_REPORT_NOTICES_MAX,
   LAYOUT_CHANGED,
   NO_PRICE_COLUMN,
   NO_STOCK_LIMIT,
+  PRICE_COUNTDOWN,
+  PRICE_MARKDOWN,
+  RECENT_SECTION,
   UNUSUALS_INDEX,
   importWarningCode,
 } from '../../shared/importCodes';
 import { scraptfListFamilyOf } from '../../shared/scraptfList';
 import { fromObject, normalizeSkuObject } from '../../shared/sku';
 import { SCRAPTF_BANK_IDS } from '../../shared/types';
-import type { ImportPageKind, ImportReport, ImportReportItem, ParsedScrapItem, ScraptfBank, SkuObject, SpecialAttrs } from '../../shared/types';
-import { CRAFT_NUMBER_DROPPED, SERIESLESS_CRATES } from '../connectors/schemaNames';
+import type {
+  ImportPageKind,
+  ImportReport,
+  ImportReportItem,
+  ParsedScrapItem,
+  ScraptfBank,
+  ScraptfBankNotice,
+  ScraptfMarkdown,
+  SkuObject,
+  SpecialAttrs,
+} from '../../shared/types';
+import { CRAFT_NUMBER_DROPPED, SERIESLESS_CRATES, effectTypeForItem } from '../connectors/schemaNames';
 import type { PaintkitRow, SchemaItemRow, SchemaService } from '../contracts';
 
 type Node = DefaultTreeAdapterTypes.Node;
@@ -58,6 +73,100 @@ const MAX_NAME_CHARS = 256;
 const MAX_URL_CHARS = 4096;
 const MAX_ARCHIVE_DEPTH = 3;
 
+/** 0.9 (#13): visible page text outside cards and rows kept for the notice probes, and inside "recent" elements. */
+const MAX_PROBE_CHARS = 64 * 1024;
+const MAX_RECENT_PROBE_CHARS = 8 * 1024;
+/** 0.9 (#13): a card's own text is read from at most this many nodes and characters (headerText's budget shape). */
+const MAX_CARD_TEXT_NODES = 512;
+const MAX_CARD_TEXT_CHARS = 1024;
+/** 0.9 (#13): at most this many phrases of a kind are counted or kept. */
+const PROBE_COUNT_MAX = 50;
+/**
+ * "Hat Banking is temporarily disabled", "Unusual Hat banking is …", "Banking is currently offline", "This bank is
+ * closed"; group 1 the category word(s). Every category scrap.tf names is listed, so "Key Banking …" or "Card banking
+ * …" is never read as the word-less "Banking …" (S3); a bare "banking" right after any other word is checked by
+ * noticeWordBefore. Linear.
+ */
+const BANK_UNAVAILABLE_RE =
+  /\b(?:((?:unusual\s+)?(?:hat|weapon|strange|killstreak|skin|item|unusual|key|card|australium|taunt|paint|crate|tool|auction|raffle))s?\s+(?:bank(?:ing)?|trading)|banking|this\s+bank)\s+(?:is|has\s+been)\s+(?:(?:currently|temporarily)\s+){0,2}(?:disabled|unavailable|offline|paused|suspended|closed|down)\b/gi;
+/**
+ * 0.9 (#13): the banks a notice's category word names (a word-less notice names the page's own bank; a word not
+ * listed here names none).
+ */
+const NOTICE_WORD_BANKS: Readonly<Record<string, readonly ScraptfBank[]>> = {
+  hat: ['hats'],
+  weapon: ['weapons'],
+  strange: ['stranges'],
+  killstreak: ['killstreaks'],
+  skin: ['skins'],
+  item: ['items', 'list'],
+  unusual: ['unusuals'],
+  'unusual hat': ['unusuals'],
+  // The kinds the items bank sells (links.ts: tools, paints, taunts, crates, australiums): a notice about one of
+  // them is the items page's own, so its missing copies never read as sold.
+  australium: ['items'],
+  taunt: ['items'],
+  paint: ['items'],
+  crate: ['items'],
+  tool: ['items'],
+  // scrap.tf trades these elsewhere: no page Flip Desk reads.
+  key: [],
+  card: [],
+  auction: [],
+  raffle: [],
+};
+/**
+ * 0.9: words before a bare "banking" that name no category ("All banking is …", "Scrap.TF banking is …"). Recheck: and
+ * the ordinary lead-ins a banner puts there without punctuation ("Unfortunately banking is …", a bold "Notice" label,
+ * "Please note banking is …", "Due to Steam maintenance banking is …", "… and banking is …"), so a page-wide notice
+ * in those forms stays the page's own: a missed notice reads the copies the page leaves out as sold, while a false
+ * one only skips one bank stock save. Lowercase; noticeWordBefore drops a possessive "'s" first ("Scrap.TF's banking").
+ */
+const NOTICE_LEAD_WORDS: ReadonlySet<string> = new Set([
+  // The site and determiners.
+  'all', 'the', 'our', 'your', 'its', 'scrap.tf', 'scraptf', 'tf', 'tf2',
+  // Banner labels and polite lead-ins.
+  'notice', 'note', 'warning', 'attention', 'important', 'update', 'updated', 'alert', 'info', 'announcement', 'news',
+  'reminder', 'fyi', 'ps', 'sorry', 'please',
+  // Adverbs and connectives.
+  'unfortunately', 'sadly', 'regrettably', 'currently', 'presently', 'temporarily', 'now', 'today', 'still', 'also',
+  'again', 'however', 'meanwhile', 'therefore', 'thus', 'hence', 'and', 'or', 'but', 'so', 'then', 'while', 'as',
+  'because', 'since',
+  // A reason right before it ("Due to maintenance banking is …").
+  'maintenance', 'issues', 'problems', 'outage', 'downtime',
+]);
+/**
+ * 0.9: the last word right before a notice (letters or digits, inner dots, apostrophes, typographic apostrophes and
+ * hyphens), never across punctuation.
+ */
+const WORD_BEFORE_RE = /([\p{L}\p{N}](?:[\p{L}\p{N}.'’-]*[\p{L}\p{N}])?)\s*$/u;
+/**
+ * 0.9: the probe text's mark between block elements (and around a skipped card or row), so a notice's category word
+ * is never read from the element before it (a nav link "Keys", a heading "Hats"). Never whitespace, never a word.
+ */
+const PROBE_BREAK = '|';
+/** 0.9: the elements whose start and end break the probe text (inline ones such as strong, span and a do not). */
+const PROBE_BLOCK_TAGS: ReadonlySet<string> = new Set([
+  'address', 'article', 'aside', 'blockquote', 'body', 'br', 'button', 'caption', 'center', 'dd', 'details', 'dialog',
+  'div', 'dl', 'dt', 'fieldset', 'figcaption', 'figure', 'footer', 'form', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
+  'header', 'hr', 'li', 'main', 'nav', 'ol', 'option', 'p', 'pre', 'section', 'select', 'summary', 'table', 'tbody',
+  'td', 'textarea', 'tfoot', 'th', 'thead', 'tr', 'ul',
+]);
+const RECENTLY_TRADED_RE = /\brecently\s+traded\b/gi;
+/** "2:13:45", "10:30", "2h 13m", "1 d 4 h", "in 45 minutes". Probed on a card's own text and inside "recent" elements only. */
+const COUNTDOWN_RE = /\b\d{1,2}:\d{2}(?::\d{2})?\b|\b\d{1,3}\s?[dhm]\s+\d{1,3}\s?[hms]\b|\bin\s+\d{1,3}\s*(?:days?|hours?|minutes?|mins?|[dhm])\b/gi;
+/** A one-shot (non-global) copy of COUNTDOWN_RE for exec on one card's text. */
+const COUNTDOWN_ONE_RE = new RegExp(COUNTDOWN_RE.source, 'i');
+/** 0.9 (#13): scrap.tf's own price-drop wording (2018 /buy/hats markup; no real save has confirmed it). */
+const MARKDOWN_SOON_RE = /\bwill\s+decrease\s+in\s+price\s+shortly\b/i;
+const MARKDOWN_OFF_RE = /\boff\s+(?:the\s+)?original\s+price\b|\boriginal\s+price\s+of\b/i;
+const ORIGINAL_PRICE_RE = /\boriginal\s+price\s+of\s+([^;()]{1,40})/i;
+const RECENT_ATTR_RE = /recent/i;
+const HIDDEN_CLASS_RE = /(?:^|\s)(?:hidden|d-none|hide|invisible)(?:\s|$)/i;
+const HIDDEN_STYLE_RE = /display\s*:\s*none|visibility\s*:\s*hidden/i;
+/** 0.9 (#13): card classes a report also keeps (page-authored names that may mark a markdown or a "recent" card), each <= 40 chars. */
+const REPORT_EVIDENCE_CLASS_RE = /recent|countdown|drop|discount|markdown|timer/i;
+
 export class ImportTooLargeError extends Error {
   override readonly name = 'ImportTooLargeError';
   constructor(readonly bytes: number, readonly limit: number = MAX_IMPORT_BYTES) {
@@ -92,6 +201,12 @@ export interface ScrapTfParseResult {
    * ParseOptions.diagnostics. Whitelisted card and row fields only, never the nav, scripts or avatar.
    */
   diagnostics?: ParseDiagnostics;
+  /**
+   * 0.9 (#13): the page's own notice about its bank: 'unavailable' when its visible text says the bank is not trading
+   * (only for a recognised bank whose notice names it, or names no bank); absent otherwise. importSavedPage stores no
+   * bank stock save for such a look.
+   */
+  bankNotice?: ScraptfBankNotice;
 }
 
 /** 0.7.1 (P4) ScrapTfParseResult.diagnostics: the report's counts, header and item records (reports.ts sanitizes the text). */
@@ -100,6 +215,8 @@ export interface ParseDiagnostics {
   headerColumns: string[];
   /** At most IMPORT_REPORT_MAX_ITEMS: refused items and items with a guess or mismatch code. */
   items: ImportReportItem[];
+  /** 0.9 (#13): the matched page phrases (bank notices, "recently traded", countdowns in a "recent" section), at most IMPORT_REPORT_NOTICES_MAX. */
+  notices: string[];
 }
 
 /**
@@ -116,12 +233,16 @@ export interface ParseDiagnostics {
  * 0.7.4: quality-inferred (an Unusual-only item keyed 5 whatever quality the page gave it), quality-conflict
  * (refused: the Strange quality alone beside another quality word or an effect) and strange-conflict
  * (refused: strange parts on a copy nothing marks Strange).
+ * 0.9 (#13), report only (never a refusal): price-markdown (the card shows scrap.tf's own price-drop wording),
+ * price-countdown (the card's own text shows a countdown-like time) and recent-section (the card sits inside an
+ * element whose id or class names "recent").
  * Page codes: not-scraptf, page-not-importable, page-kind-guessed,
  * page-kind-unknown, unknown-bank, schema-not-loaded, duplicate-cards, duplicate-rows (0.7.4), no-items,
  * no-cards-saved (F18: a bank page saved without its cards), no-sku, no-pays-column,
  * layout-changed (0.7.1: item-like elements in no shape the parser knows), no-price-column (0.7.1:
  * an /items table with headers but no "Price to buy"), unusuals-index (0.7.3: scrap.tf's bare /unusuals
- * index with no card, which lists the unusual pages rather than items),
+ * index with no card, which lists the unusual pages rather than items), bank-unavailable (0.9, #13: a recognised
+ * bank page whose own visible text says its bank is not trading; it replaces no-cards-saved and no-items),
  * and from an .mhtml file (savedPage.ts): mhtml-invalid, mhtml-too-many-parts,
  * mhtml-no-html, mhtml-truncated (the file ends inside its page: nothing imported),
  * mhtml-charset; and too-large for a file the folder watch would not read
@@ -395,22 +516,32 @@ function textContent(root: Node): string {
  * whole cell quadratic.
  */
 function headerText(cell: Element): string {
+  return boundedText(cell, MAX_HEADER_NODES, MAX_HEADER_CHARS);
+}
+
+/** 0.9 (#13): textContent of `root` from at most `maxNodes` nodes and `maxChars` characters (headerText's walk). */
+function boundedText(root: Element, maxNodes: number, maxChars: number): string {
   let out = '';
-  let budget = MAX_HEADER_NODES;
-  const stack: Node[] = [cell];
-  while (stack.length && budget > 0 && out.length < MAX_HEADER_CHARS) {
+  let budget = maxNodes;
+  const stack: Node[] = [root];
+  while (stack.length && budget > 0 && out.length < maxChars) {
     const n = stack.pop()!;
     budget--;
     if (n.nodeName === '#text') {
-      out += (n as TextNode).value.slice(0, MAX_HEADER_CHARS - out.length);
+      out += (n as TextNode).value.slice(0, maxChars - out.length);
       continue;
     }
-    if (isElement(n) && n !== cell && SKIP_TEXT_TAGS.has(n.tagName)) continue;
+    if (isElement(n) && n !== root && SKIP_TEXT_TAGS.has(n.tagName)) continue;
     // Never more children than could still be read: a cell of a million children costs no more.
     const kids = childNodesOf(n);
     for (let i = Math.min(kids.length, budget) - 1; i >= 0; i--) stack.push(kids[i]!);
   }
   return out.replace(/\s+/g, ' ').trim();
+}
+
+/** 0.9 (#13): a card's own visible text (its children, not its tooltip attributes), bounded like a header cell. */
+function cardOwnText(el: Element): string {
+  return boundedText(el, MAX_CARD_TEXT_NODES, MAX_CARD_TEXT_CHARS);
 }
 
 function descendants(root: Element): Element[] {
@@ -667,6 +798,18 @@ interface DocScan {
    */
   lookalikes: number;
   lookalikeEls: Element[];
+  /** 0.9 (#13): notice probes over visible page text outside cards and rows (report evidence; the notice also gates the stock save). */
+  probes: {
+    /** Every bank-unavailable phrase (at most IMPORT_REPORT_NOTICES_MAX), with its category word lower-cased (null: none). */
+    bankNotices: { phrase: string; word: string | null }[];
+    /** "recently traded" phrases (at most PROBE_COUNT_MAX counted), and the first of them, clipped to 40. */
+    recentlyTraded: number;
+    recentlyTradedText: string | null;
+    /** Countdown-like texts inside "recent" elements outside cards, at most 3, clipped to 30. */
+    recentCountdowns: string[];
+  };
+  /** 0.9 (#13): cards inside an element whose id or class names "recent". */
+  recentCards: Set<Element>;
 }
 
 function isCard(classes: string[]): boolean {
@@ -675,6 +818,26 @@ function isCard(classes: string[]): boolean {
 
 function cellsOf(row: Element): Element[] {
   return row.childNodes.filter((c): c is Element => isElement(c) && (c.tagName === 'th' || c.tagName === 'td'));
+}
+
+/**
+ * 0.9 (S3): the category a bare "Banking is …" notice names by the word right before it in the same block ("Promo
+ * Banking is …"), lowercased and without a possessive "'s"; null when it names none (the start of its block, sentence
+ * punctuation, or a NOTICE_LEAD_WORDS word such as "Unfortunately" or "Notice"). "This bank is …" is always
+ * word-less. At most 40 characters are looked at.
+ */
+function noticeWordBefore(text: string, index: number, phrase: string): string | null {
+  if (!/^banking\b/i.test(phrase)) return null;
+  const w = WORD_BEFORE_RE.exec(text.slice(Math.max(0, index - 40), index));
+  if (!w) return null;
+  const word = w[1]!.toLowerCase().replace(/['’]s$/, '');
+  return NOTICE_LEAD_WORDS.has(word) ? null : word;
+}
+
+/** 0.9 (S3): true when a notice is the page's own: word-less, or its word names the page's bank (never an unlisted word). */
+function noticeNamesBank(word: string | null, bank: ScraptfBank | null): boolean {
+  if (word === null) return true;
+  return bank !== null && Object.hasOwn(NOTICE_WORD_BANKS, word) && NOTICE_WORD_BANKS[word]!.includes(bank);
 }
 
 function scanDocument(root: Node): DocScan {
@@ -694,6 +857,8 @@ function scanDocument(root: Node): DocScan {
     dataDefindex: 0,
     lookalikes: 0,
     lookalikeEls: [],
+    probes: { bankNotices: [], recentlyTraded: 0, recentlyTradedText: null, recentCountdowns: [] },
+    recentCards: new Set(),
   };
   // Each table's first header row, and the table the first price row is in (P7: a header there that
   // lacks "Price to buy" means scrap.tf renamed or moved it, so no price is guessed by position).
@@ -704,16 +869,71 @@ function scanDocument(root: Node): DocScan {
     scan.lookalikes++;
     if (scan.lookalikeEls.length < IMPORT_REPORT_MAX_ITEMS) scan.lookalikeEls.push(n);
   };
-  const stack: { n: Node; selected: boolean; table: Element | null }[] = [{ n: root, selected: false, table: null }];
+  // 0.9 (#13): visible text outside cards and rows, capped, for the notice probes (and inside "recent" elements for
+  // the countdown probe). Whitespace-only nodes cost nothing from the budget.
+  const probeParts: string[] = [];
+  const recentParts: string[] = [];
+  let probeLen = 0;
+  let recentLen = 0;
+  const probe = (s: string, inRecent: boolean): void => {
+    if (probeLen < MAX_PROBE_CHARS) {
+      const part = s.slice(0, MAX_PROBE_CHARS - probeLen);
+      if (/\S/.test(part)) {
+        probeParts.push(part);
+        probeLen += part.length;
+      }
+    }
+    if (inRecent && recentLen < MAX_RECENT_PROBE_CHARS) {
+      const part = s.slice(0, MAX_RECENT_PROBE_CHARS - recentLen);
+      if (/\S/.test(part)) {
+        recentParts.push(part);
+        recentLen += part.length;
+      }
+    }
+  };
+  // 0.9: one PROBE_BREAK between blocks (never two in a row, never first), counted in the budget.
+  const probeBreak = (): void => {
+    if (probeLen < MAX_PROBE_CHARS && probeParts.length > 0 && probeParts[probeParts.length - 1] !== PROBE_BREAK) {
+      probeParts.push(PROBE_BREAK);
+      probeLen += PROBE_BREAK.length;
+    }
+  };
+  const stack: { n: Node; selected: boolean; table: Element | null; hidden: boolean; recent: boolean; brk?: true }[] = [
+    { n: root, selected: false, table: null, hidden: false, recent: false },
+  ];
   while (stack.length) {
-    const { n, selected, table } = stack.pop()!;
+    const { n, selected, table, hidden, recent, brk } = stack.pop()!;
+    if (brk) {
+      // A block element's end.
+      probeBreak();
+      continue;
+    }
     if (!isElement(n)) {
+      // 0.9 (#13): text only (never a comment), and only where nothing hides it.
+      if (n.nodeName === '#text') {
+        if (!hidden) probe((n as TextNode).value, recent);
+        continue;
+      }
       const kids = childNodesOf(n);
-      for (let i = kids.length - 1; i >= 0; i--) stack.push({ n: kids[i]!, selected, table });
+      for (let i = kids.length - 1; i >= 0; i--) stack.push({ n: kids[i]!, selected, table, hidden, recent });
       continue;
     }
     const tag = n.tagName;
     if (tag === 'script' || tag === 'style' || tag === 'template') continue;
+    const classes = classesOf(n);
+    // 0.9: a block element, a card or a row starts a new stretch of probe text (a notice's word stays in its block).
+    const block = PROBE_BLOCK_TAGS.has(tag);
+    if (block || isCard(classes)) probeBreak();
+    // 0.9 (#13): S3's "visible": not under hidden, aria-hidden, a hiding class or style, or noscript (the probes only).
+    const hiddenHere =
+      hidden ||
+      tag === 'noscript' ||
+      tag === 'title' ||
+      getAttr(n, 'hidden') !== null ||
+      (getAttr(n, 'aria-hidden') ?? '').toLowerCase() === 'true' ||
+      HIDDEN_CLASS_RE.test(classes.join(' ')) ||
+      HIDDEN_STYLE_RE.test((getAttr(n, 'style') ?? '').slice(0, MAX_STYLE_CHARS));
+    const recentHere = recent || RECENT_ATTR_RE.test(`${getAttr(n, 'id') ?? ''} ${classes.join(' ')}`.slice(0, 200));
     if (tag === 'title' && scan.title === null) {
       scan.title = textContent(n).slice(0, MAX_TITLE_CHARS);
       continue;
@@ -731,10 +951,12 @@ function scanDocument(root: Node): DocScan {
 
     const hasDefindex = getAttr(n, 'data-defindex') !== null;
     if (hasDefindex) scan.dataDefindex++;
-    const classes = classesOf(n);
     if (isCard(classes)) {
       if (selected) scan.skippedCards++;
-      else scan.cards.push(n);
+      else {
+        scan.cards.push(n);
+        if (recentHere) scan.recentCards.add(n);
+      }
       continue;
     }
     if (hasDefindex && tag !== 'tr' && getAttr(n, 'data-title') !== null) lookalike(n);
@@ -763,9 +985,25 @@ function scanDocument(root: Node): DocScan {
     const sel = selected || getAttr(n, 'id') === 'buy-selected-container' || classes.includes('buy-selected-items');
     const inTable = tag === 'table' ? n : table;
     const kids = n.childNodes;
-    for (let i = kids.length - 1; i >= 0; i--) stack.push({ n: kids[i]!, selected: sel, table: inTable });
+    if (block) stack.push({ n, selected: sel, table: inTable, hidden: hiddenHere, recent: recentHere, brk: true });
+    for (let i = kids.length - 1; i >= 0; i--) stack.push({ n: kids[i]!, selected: sel, table: inTable, hidden: hiddenHere, recent: recentHere });
   }
   scan.headerCells = priceHeader ?? (rowsTable !== undefined ? (headerOf.get(rowsTable) ?? null) : null);
+  // 0.9 (#13): the probes, report-first (no real save has confirmed the wording). Every regex here is linear and its
+  // input capped (MAX_PROBE_CHARS, MAX_RECENT_PROBE_CHARS); matchAll works on its own copy of each global regex.
+  const text = collapse(probeParts.join(' '));
+  for (const m of text.matchAll(BANK_UNAVAILABLE_RE)) {
+    scan.probes.bankNotices.push({ phrase: clip(m[0], 80), word: m[1] ? collapse(m[1]).toLowerCase() : noticeWordBefore(text, m.index ?? 0, m[0]) });
+    if (scan.probes.bankNotices.length >= IMPORT_REPORT_NOTICES_MAX) break;
+  }
+  for (const m of text.matchAll(RECENTLY_TRADED_RE)) {
+    scan.probes.recentlyTradedText ??= clip(m[0], 40);
+    if (++scan.probes.recentlyTraded >= PROBE_COUNT_MAX) break;
+  }
+  for (const m of collapse(recentParts.join(' ')).matchAll(COUNTDOWN_RE)) {
+    scan.probes.recentCountdowns.push(clip(m[0], 30));
+    if (scan.probes.recentCountdowns.length >= 3) break;
+  }
   return scan;
 }
 
@@ -1110,7 +1348,7 @@ function parseName(title: string, nctx: NameCtx, ctx: Ctx): NameParse {
       // /items row names it with no image to read it from; only a weapon effect, and only where no paintkit fits.
       if (res.effect === null && nctx.effectHint === null) {
         const word = WEAPON_EFFECT_WORDS.find((w) => rest.toLowerCase().startsWith(`${w.toLowerCase()} `));
-        const eff = word !== undefined ? safe(() => ctx.schema.effectIdByName(word), null) : null;
+        const eff = word !== undefined ? safe(() => ctx.schema.effectIdByName(word, 'weapon'), null) : null;
         if (word !== undefined && eff !== null && eff >= 701 && eff <= 704) {
           res.effect = eff;
           rest = rest.slice(word.length).trim();
@@ -1123,7 +1361,8 @@ function parseName(title: string, nctx: NameCtx, ctx: Ctx): NameParse {
 
   if (res.located) {
     if (rest) {
-      const eff = safe(() => ctx.schema.effectIdByName(rest), null);
+      // 0.9 (#22): the effect of this kind of item when a name is used by several (a renamed hat effect's old name).
+      const eff = safe(() => ctx.schema.effectIdByName(rest, effectTypeForItem(nctx.item, false)), null);
       if (eff !== null && res.effect === null && !allowPaintkit) res.effect = eff;
       else res.leftover.unshift(rest);
     }
@@ -1163,6 +1402,10 @@ interface ContentInfo {
   parts: string[];
   customDesc: boolean;
   unparsed: string[];
+  /** 0.9 (#13): "This item will decrease in price shortly." (scrap.tf's own wording; evidence only). */
+  markdownSoon: boolean;
+  /** 0.9 (#13): the first "… off original price" / "(original price of …)" line, as shown; null without. */
+  markdownOff: string | null;
 }
 
 /** A custom description line (the owner's own words): never reported. */
@@ -1234,6 +1477,8 @@ function parseContent(lines: string[], opts: { cosmetic?: boolean } = {}): Conte
     parts: [],
     customDesc: false,
     unparsed: [],
+    markdownSoon: false,
+    markdownOff: null,
   };
   // data-content2 often repeats data-content.
   for (const raw of new Set(lines)) {
@@ -1281,6 +1526,22 @@ function parseContent(lines: string[], opts: { cosmetic?: boolean } = {}): Conte
       info.reserved = true;
       continue;
     }
+    // A quoted custom description is the owner's own words, even when it reads like scrap.tf's price-drop wording
+    // below (scrap.tf never quotes its own lines): checked first, so it is never markdown evidence or a quoted warning.
+    if (CUSTOM_DESC_RE.test(line) && line.length > 2) {
+      info.customDesc = true;
+      continue;
+    }
+    // 0.9 (#13): scrap.tf's own price-drop wording (2018 /buy/hats markup): evidence, never an unparsed modifier.
+    if (MARKDOWN_SOON_RE.test(line)) {
+      info.markdownSoon = true;
+      continue;
+    }
+    if (MARKDOWN_OFF_RE.test(line)) {
+      // The line that names the original price wins ("0.22 ref off original price" often comes first).
+      if (info.markdownOff === null || (!ORIGINAL_PRICE_RE.test(info.markdownOff) && ORIGINAL_PRICE_RE.test(line))) info.markdownOff = line;
+      continue;
+    }
     if ((m = /^(?:Crate )?Series\s*#(\d{1,6})$/i.exec(line))) {
       info.crateSeries = Number(m[1]);
       continue;
@@ -1308,10 +1569,6 @@ function parseContent(lines: string[], opts: { cosmetic?: boolean } = {}): Conte
       const name = m[1]!.trim();
       if (baseSeen && !builtIn.has(name.toLowerCase())) info.parts.push(name);
       baseSeen = true;
-      continue;
-    }
-    if (CUSTOM_DESC_RE.test(line) && line.length > 2) {
-      info.customDesc = true;
       continue;
     }
     if (/\bGrade\b/.test(line)) {
@@ -1668,7 +1925,8 @@ function parseCard(el: Element, ctx: Ctx): ParsedEntry & { assetId: string | nul
 
   const q = qualityFromClasses(parts.classes);
   const effectImg = cardEffectId(parts, warnings);
-  const nameEffect = content.effectName ? safe(() => ctx.schema.effectIdByName(content.effectName!), null) : null;
+  // 0.9 (#22): the tooltip's effect name for this kind of item ("Northern Nights" on a hat is 408, Polar Prism).
+  const nameEffect = content.effectName ? safe(() => ctx.schema.effectIdByName(content.effectName!, effectTypeForItem(item, false)), null) : null;
   // A crate the schema does not know still shows its series in the tooltip ("Crate Series #N").
   const isCrate = item?.itemClass === 'supply_crate' || (item === null && content.crateSeries !== null);
   // The tooltip's effect also names it in a title such as "Isotope Frozen Aurora Flame Thrower" when no image does.
@@ -1789,6 +2047,19 @@ function parseCard(el: Element, ctx: Ctx): ParsedEntry & { assetId: string | nul
 
   if (content.reserved) warnings.push('reserved: scrap.tf marked this item as reserved by another user');
   if (content.notTradable) warnings.push('not-tradable: tooltip says the item is not tradable');
+  // 0.9 (#13): scrap.tf's price-drop wording on the card, in its tooltip or its own text, and a countdown in its own
+  // text. Report-first: noted for the parser report and the bank stock row's tag, never read as a price or a timing.
+  const ownText = cardOwnText(el);
+  const soon = content.markdownSoon || MARKDOWN_SOON_RE.test(ownText);
+  const offLine = content.markdownOff ?? (MARKDOWN_OFF_RE.test(ownText) ? ownText : null);
+  if (soon) warnings.push(`${PRICE_MARKDOWN}: scrap.tf says this item will decrease in price shortly`);
+  if (offLine !== null) {
+    const was = (ORIGINAL_PRICE_RE.exec(offLine)?.[1] ?? '').replace(/\.\s.*$/, '').trim();
+    warnings.push(was ? `${PRICE_MARKDOWN}: scrap.tf shows it marked down from an original price of "${clip(was, 40)}"` : `${PRICE_MARKDOWN}: scrap.tf shows it marked down from its original price`);
+  }
+  const countdown = COUNTDOWN_ONE_RE.exec(ownText)?.[0] ?? null;
+  if (countdown !== null) warnings.push(`${PRICE_COUNTDOWN}: the card shows "${clip(countdown, 30)}"`);
+  const markdown: ScraptfMarkdown[] = [...(offLine !== null ? (['off'] as const) : []), ...(soon ? (['soon'] as const) : [])];
   for (const u of content.unparsed.slice(0, 8)) warnings.push(`unparsed-modifier: "${clip(u, 100)}"`);
   if (content.unparsed.length > 8) warnings.push(`unparsed-modifier: ${content.unparsed.length - 8} more lines`);
   // 0.7.2: the rest of a kit's or strangifier's title is its target, which buildSku reads (or refuses).
@@ -1851,11 +2122,12 @@ function parseCard(el: Element, ctx: Ctx): ParsedEntry & { assetId: string | nul
       assetId,
       stock,
       warnings,
+      ...(markdown.length > 0 ? { markdown } : {}),
     },
     // P4: the card's own fields as read; the title only when it holds no custom name.
     report: ctx.diagnostics
       ? () => ({
-          ...cardReportBase(el, parts.classes),
+          ...cardReportBase(el, parts.classes, REPORT_EVIDENCE_CLASS_RE),
           title: name.customName === null ? titleText : null,
           contentLines: reportContentLines(contentLines),
           indicator: parts.indicator,
@@ -2564,6 +2836,14 @@ function reportLifecycle(item: ParsedScrapItem): boolean {
   return item.warnings.some((w) => REPORT_LIFECYCLE_CODES.has(importWarningCode(w)));
 }
 
+/** 0.9 (#13): codes a card is reported for as evidence of scrap.tf markup the parser only records. */
+const REPORT_EVIDENCE_CODES: ReadonlySet<string> = new Set([PRICE_MARKDOWN, PRICE_COUNTDOWN, RECENT_SECTION]);
+
+/** 0.9 (#13): an item the report keeps (after the refused ones, as lifecycle markers) for its evidence codes. */
+function reportEvidence(item: ParsedScrapItem): boolean {
+  return item.warnings.some((w) => REPORT_EVIDENCE_CODES.has(importWarningCode(w)));
+}
+
 /** P4: the report's header texts (the price list's header row), at most 20, each short. */
 function headerTexts(cells: readonly Element[] | null): string[] {
   return (cells ?? []).slice(0, 20).map((c) => clip(textContent(c), 40));
@@ -2603,10 +2883,23 @@ export function parseScrapTfHtml(html: string, schema: SchemaService, opts: Pars
     // 0.8 (LC-6): the items with a 'reserved' / 'not-tradable' warning code, counted before the last return.
     reserved: 0,
     notTradable: 0,
+    // 0.9 (#13): the parser evidence counts, report only: the page probes here, the card counts before the last return.
+    markdownSoon: 0,
+    markdownOff: 0,
+    countdownCards: 0,
+    recentlyTraded: scan.probes.recentlyTraded,
+    recentCards: 0,
+    bankNotices: scan.probes.bankNotices.length,
   };
+  // 0.9 (#13): the matched page phrases the report shows (ImportReport.notices; reports.ts scrubs them).
+  const notices: string[] = [
+    ...scan.probes.bankNotices.map((x) => `bank notice: "${x.phrase}"`),
+    ...(scan.probes.recentlyTradedText !== null ? [`recently traded: "${scan.probes.recentlyTradedText}"`] : []),
+    ...scan.probes.recentCountdowns.map((c) => `countdown in a "recent" section: "${c}"`),
+  ].slice(0, IMPORT_REPORT_NOTICES_MAX);
   const reports: ImportReportItem[] = [];
   const withDiagnostics = (r: ScrapTfParseResult): ScrapTfParseResult =>
-    ctx.diagnostics ? { ...r, diagnostics: { counts, headerColumns: headerTexts(scan.headerCells), items: reports } } : r;
+    ctx.diagnostics ? { ...r, diagnostics: { counts, headerColumns: headerTexts(scan.headerCells), items: reports, notices } } : r;
 
   // Page kind: the file's own address (an .mhtml part's Content-Location), saved-from comment,
   // canonical link, og:url, then title/structure.
@@ -2656,7 +2949,7 @@ export function parseScrapTfHtml(html: string, schema: SchemaService, opts: Pars
     if (entry.report === null) return;
     if (reportWorthy(entry.item)) {
       if (reports.length < IMPORT_REPORT_MAX_ITEMS) reports.push(entry.report());
-    } else if (reportLifecycle(entry.item)) lifecycleReports.push(entry.report);
+    } else if (reportLifecycle(entry.item) || reportEvidence(entry.item)) lifecycleReports.push(entry.report);
   };
   /** P4: a card or row that threw: its attributes only (its title could hold a custom name). */
   const failedReport = (el: Element, item: ParsedScrapItem): ParsedEntry['report'] =>
@@ -2693,6 +2986,8 @@ export function parseScrapTfHtml(html: string, schema: SchemaService, opts: Pars
       }
       seenUnidentified.add(key);
     }
+    // 0.9 (#13): after the dedupe, so a card shown in two containers dedupes as before. Report only.
+    if (scan.recentCards.has(el)) parsed.item.warnings.push(`${RECENT_SECTION}: the card sits in a part of the page whose id or class names "recent"`);
     keep(parsed);
   }
   counts.duplicates = dupes + unidentifiedDupes;
@@ -2739,7 +3034,7 @@ export function parseScrapTfHtml(html: string, schema: SchemaService, opts: Pars
     if (entry.report === null) continue;
     if (reportWorthy(entry.item)) {
       if (reports.length < IMPORT_REPORT_MAX_ITEMS) reports.push(entry.report());
-    } else if (reportLifecycle(entry.item)) lifecycleReports.push(entry.report);
+    } else if (reportLifecycle(entry.item) || reportEvidence(entry.item)) lifecycleReports.push(entry.report);
     else if (familyRow(entry.item)) familyReports.push(entry.report);
   }
   for (const report of [...lifecycleReports, ...familyReports]) {
@@ -2750,6 +3045,11 @@ export function parseScrapTfHtml(html: string, schema: SchemaService, opts: Pars
   // 0.7.3: the bare /unusuals index (an address, not a body id) lists the unusual pages and never shows a
   // card, so its tiles are no new layout and no save of it was cut short.
   const unusualsIndex = items.length === 0 && hint !== null && hint.scrapTf && page === '/unusuals';
+  // 0.9 (#13): a bank page whose own text says its bank is not trading (a word-less notice, or one naming this bank).
+  // Report-first wording (no real save has confirmed it); importSavedPage then stores no bank stock save for the look.
+  const noticePage = hint !== null ? hint.scrapTf && pageKind !== 'unknown' : bank !== null || bodyIdNamesCardBank(scan.bodyId);
+  const ownNotice = noticePage && scan.probes.bankNotices.some((x) => noticeNamesBank(x.word, bank));
+  if (ownNotice) warnings.push(BANK_UNAVAILABLE_WARNING);
   if (items.length === 0 && scan.lookalikes > 0) {
     // P7: item-like elements, none of them in a shape the parser knows: scrap.tf changed its page, so
     // neither "saved without its items" nor "no items" is true. Digits only: no page text.
@@ -2764,8 +3064,10 @@ export function parseScrapTfHtml(html: string, schema: SchemaService, opts: Pars
     // has loaded, and "HTML only" writes the page as it first loaded. Coverage, the banks cards and bank
     // stock ignore such a save of a bank page (it stores nothing); a list page keeps 'no-items'. The bare
     // /unusuals index is no bank page saved without its cards: it says so instead.
+    // 0.9 (#13): a page saying its bank is not trading was not saved without its items: its notice says so instead.
     const bankPage = hint !== null ? hint.scrapTf && (pageKind === 'buy' || pageKind === 'unusuals') : isCardBank(bank) || bodyIdNamesCardBank(scan.bodyId);
-    warnings.push(unusualsIndex ? UNUSUALS_INDEX_WARNING : bankPage ? NO_CARDS_SAVED_WARNING : 'no-items: no item cards or price rows found (save the page after the items have loaded)');
+    if (unusualsIndex) warnings.push(UNUSUALS_INDEX_WARNING);
+    else if (!ownNotice) warnings.push(bankPage ? NO_CARDS_SAVED_WARNING : 'no-items: no item cards or price rows found (save the page after the items have loaded)');
   } else {
     const noSku = items.filter((i) => i.sku === null).length;
     if (noSku > 0) warnings.push(`no-sku: ${noSku} of ${items.length} items could not be identified`);
@@ -2774,7 +3076,13 @@ export function parseScrapTfHtml(html: string, schema: SchemaService, opts: Pars
   const marked = (code: string) => items.filter((i) => i.warnings.some((w) => importWarningCode(w) === code)).length;
   counts.reserved = marked('reserved');
   counts.notTradable = marked('not-tradable');
-  return withDiagnostics({ pageKind, bank, page, items, warnings });
+  // 0.9 (#13): the card evidence, counted for the report only (buy timing, profit and alerts never read it).
+  counts.markdownSoon = items.filter((i) => i.markdown?.includes('soon')).length;
+  counts.markdownOff = items.filter((i) => i.markdown?.includes('off')).length;
+  counts.countdownCards = marked(PRICE_COUNTDOWN);
+  counts.recentCards = marked(RECENT_SECTION);
+  const bankNotice: ScraptfBankNotice | null = ownNotice && bank !== null ? 'unavailable' : null;
+  return withDiagnostics({ pageKind, bank, page, items, warnings, ...(bankNotice !== null ? { bankNotice } : {}) });
 }
 
 function failedItem(titleHtml: string, reason: string): ParsedScrapItem {

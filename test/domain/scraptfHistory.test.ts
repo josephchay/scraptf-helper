@@ -17,6 +17,7 @@ import { SCRAPTF_HISTORY_RETRY_MS, createScraptfHistory, type ScraptfHistory } f
 import { bankStockKey, bankStockSpecialKey } from '../../src/shared/bankStock';
 import { DEFAULT_SETTINGS } from '../../src/shared/defaults';
 import { scraptfBankCyclesOf, scraptfBankTurnover, scraptfItemTimingOf, scraptfTimingForKey } from '../../src/shared/scraptfTiming';
+import { scraptfCopyLowOf, scraptfLowsOf } from '../../src/shared/scraptfLows';
 
 const built = vi.hoisted(() => ({ cycles: [] as string[] }));
 
@@ -509,7 +510,10 @@ describe('itemHistory (S3)', () => {
       });
       // 0.8 (T3-T5): with the copy's cycles in its bank (no deps.profit here, so timing null).
       const cyclesOf = (bank: ScraptfBank) => scraptfBankCyclesOf(bank, savesOf(h.repo, bank), K);
-      expect(h.history.itemHistory('1;6', null, NOW)).toEqual({ ...expected, ...scraptfItemTimingOf(expected, { cyclesOf, buy: null, profit: null, keyScrap: K, now: NOW }) });
+      // 0.9 (history, H9): with the copy's lowest price in that bank's saves (no stored lows wired here).
+      const low = scraptfCopyLowOf(scraptfLowsOf(savesOf(h.repo, expected.bank!), expected.bank!, K).get(bankStockKey(expected.sku, expected.specialKey)), K);
+      expect(low).not.toBeNull();
+      expect(h.history.itemHistory('1;6', null, NOW)).toEqual({ ...expected, ...scraptfItemTimingOf(expected, { cyclesOf, buy: null, profit: null, keyScrap: K, now: NOW }), low });
     }
     // A key price move alone moves the values, never an unchanged raw price's change.
     const item = h.history.itemHistory('1;6', null, NOW);

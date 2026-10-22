@@ -26,7 +26,7 @@ export function askCopyMatches(l: Listing, paint: number | null): boolean {
 /**
  * The copy-matched sell listings of a book as ask candidates (askSideOf in src/shared/holdings.ts counts them):
  * intent 'sell' only, valued at `keyScrap` (non-finite keys or metal count as 0), excluded when marketplace.tf,
- * banned or blocklisted (match.blocklist).
+ * banned, flagged as an impersonator (0.9, #11) or blocklisted (match.blocklist).
  */
 export function askCandidatesOf(sells: readonly Listing[], paint: number | null, match: MatchContext, keyScrap: Scrap): AskCandidate[] {
   const out: AskCandidate[] = [];
@@ -42,7 +42,7 @@ export function askCandidatesOf(sells: readonly Listing[], paint: number | null,
       valueScrap: valueScrap(keys, metalScrap, keyScrap),
       isBot: l.isBot === true,
       lastEventAt: l.lastEventAt,
-      excluded: l.isMarketplace === true || l.userBanned === true || match.blocklist.has(l.steamid),
+      excluded: l.isMarketplace === true || l.userBanned === true || l.userImpersonated === true || match.blocklist.has(l.steamid),
     });
   }
   return out;

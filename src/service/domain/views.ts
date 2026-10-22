@@ -212,6 +212,8 @@ function sellSummaries(sells: readonly Listing[], match: MatchContext, keyScrap:
     const flags: string[] = [];
     if (listing.isMarketplace) flags.push('marketplace');
     if (listing.userBanned) flags.push('banned');
+    // 0.9 (#11): an impersonator's listing is excluded like a banned seller's.
+    if (listing.userImpersonated === true) flags.push('impersonator');
     if (match.blocklist.has(listing.steamid)) flags.push('blocklisted');
     if (!Number.isFinite(listing.lastEventAt) || match.now - listing.lastEventAt > UNVERIFIED_AFTER_MS) flags.push('unverified');
     return { listing, flags, eligible: !flags.some((f) => EXCLUDING_FLAGS.has(f)) };

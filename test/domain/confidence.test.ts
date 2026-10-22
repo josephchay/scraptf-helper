@@ -56,16 +56,18 @@ describe('scoreConfidence (brief §5.7 table)', () => {
     expect(delta({ order: order(130, { isBot: false, uaLastPulse: pulse(MIN) }) })).toBe(0);
   });
 
-  it('+5 when the buyer is online, as of an event in the last 2 h (0.7.4)', () => {
-    // Within 2 h the order also gets the +10 for a recent confirmation.
-    expect(delta({ order: order(130, { userOnline: true, lastEventAt: T0 - 2 * HOUR }) })).toBe(15);
+  it('no bonus for the online flag (0.9, #11)', () => {
+    // The live feed sent online: true on every captured event (RESEARCH §4.2), so the flag adds nothing; within 2 h the
+    // order still gets the +10 for a recent confirmation, whatever the flag says.
+    expect(delta({ order: order(130, { userOnline: true, lastEventAt: T0 - 2 * HOUR }) })).toBe(10);
     expect(delta({ order: order(130, { userOnline: false, lastEventAt: T0 - 2 * HOUR }) })).toBe(10);
     expect(delta({ order: order(130, { userOnline: null, lastEventAt: T0 - 2 * HOUR }) })).toBe(10);
-    // The flag is as old as the order's last event: 3 h (the helper's default) or 5 days says nothing about now.
     expect(delta({ order: order(130, { userOnline: true }) })).toBe(0);
     const old = scoreConfidence(base({ order: order(130, { userOnline: true, lastEventAt: T0 - 5 * 24 * HOUR }) }));
     expect(old.score).toBe(35);
-    expect(old.reasons).not.toContain('+5 Buyer is online');
+    const fresh = scoreConfidence(base({ order: order(130, { userOnline: true, lastEventAt: T0 }) }));
+    for (const r of [old, fresh]) expect(r.reasons).not.toContain('+5 Buyer is online');
+    expect(fresh.reasons.some((s) => /online/i.test(s))).toBe(false);
   });
 
   it('+10 when the order was confirmed within 2 h', () => {
@@ -150,7 +152,7 @@ describe('scoreConfidence (brief §5.7 table)', () => {
 
     const bot = order(130, { isBot: true, uaLastPulse: Math.floor(T0 / 1000), userOnline: true, lastEventAt: T0 });
     const peer = order(128, { steamid: 'peer' });
-    // 50 + 20 + 5 + 10 + 10 + 10 (agrees) - 25 = 80 -> 69
+    // 50 + 20 + 10 + 10 + 10 (agrees) - 25 = 75 -> 69 (0.9: no +5 online)
     const capped = scoreConfidence(
       base({ inputKind: 'rule', order: bot, eligible: [bot, peer], references: { pricedb: { buyScrap: 130, sellScrap: null, time: null, ageMs: null }, community: null } }),
     );
@@ -184,7 +186,7 @@ describe('scoreConfidence (brief §5.7 table)', () => {
     const top = scoreConfidence(
       base({ order: best, eligible: [best, peer], references: { pricedb: { buyScrap: 130, sellScrap: null, time: null, ageMs: null }, community: null } }),
     );
-    expect(top.score).toBe(100); // 105 before clamping
+    expect(top.score).toBe(100); // 50 + 20 + 10 + 10 + 10 (0.9: no +5 online)
 
     const worst = order(10 * K + 100, { lastEventAt: T0 - 48 * HOUR }, ['notes-flag']);
     const bottom = scoreConfidence(
@@ -204,16 +206,16 @@ describe('scoreConfidence (brief §5.7 table)', () => {
   it('explains every adjustment as "<signed delta> <text>"', () => {
     const o = order(130, { isBot: true, uaLastPulse: Math.floor(T0 / 1000), userOnline: true, lastEventAt: T0 }, ['notes-flag']);
     const r = scoreConfidence(base({ order: o, eligible: [o], references: { pricedb: null, community: null }, inputObservedAt: T0 - HOUR }));
+    // 0.9 (#11): no "+5 Buyer is online" for the online flag.
     expect(r.reasons).toEqual([
       '+20 Buyer is a bot that was active in the last 30 min',
-      '+5 Buyer is online',
       '+10 Order confirmed by the live feed or a snapshot in the last 2 h',
       '-10 No PriceDB or community price to compare with',
       "-10 Buyer's note mentions paint, spells, parts, dupes or 'only'",
       '-10 scrap.tf price is between 15 min and 2 h old',
     ]);
     for (const reason of r.reasons) expect(reason).toMatch(/^[+-]?\d+ \S/);
-    expect(r.score).toBe(55);
+    expect(r.score).toBe(50);
   });
 
   it('still scores the input when there is no order', () => {

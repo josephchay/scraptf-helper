@@ -171,6 +171,11 @@ export const SCRAPTF_READ_REASONS = Object.freeze({
   notImportable: 'Nothing to import on this page.',
   /** 0.7.1 (F21-1): the import refused the read while the item data loads; nothing was stored. */
   schemaLoading: 'Item data is still loading; press Read page now in a moment.',
+  /**
+   * 0.9 (#14): a read whose page carries a check page's own words (scraptfChallengeIn): nothing is imported. Only
+   * ScraptfReadOutcome.reason: the pushed read's warning is SCRAPTF_WINDOW_NOTICES.challenge, which the toolbar words.
+   */
+  challenge: 'A Cloudflare or scrap.tf check is on screen: solve it in the page; nothing was imported.',
 } as const);
 
 /**
@@ -220,6 +225,28 @@ export function responseNotice(httpStatus: unknown): string | null {
   if (httpStatus === 429) return SCRAPTF_WINDOW_NOTICES.rateLimited;
   if (httpStatus === 403 || httpStatus === 503) return SCRAPTF_WINDOW_NOTICES.challenge;
   return null;
+}
+
+/**
+ * 0.9 (#14): words only a check page carries: the sentences of scrap.tf's Cloudflare templates (RESEARCH §4.1), the
+ * interstitial's title as a <title> and its challenge options object. A page served with an unexpected status (a 200)
+ * that carries one is a check, not a scrap.tf page: never imported. Cloudflare's bot-detection script path is left out
+ * on purpose (it may sit on ordinary pages); so is a bare "Just a moment..." outside a <title>.
+ */
+export const SCRAPTF_CHALLENGE_PHRASES: readonly RegExp[] = Object.freeze([
+  /Please complete the following captcha to enter Scrap\.TF/i,
+  /checking your browser before continuing to Scrap\.TF/i,
+  /<title>\s*Just a moment\.\.\.\s*<\/title>/i,
+  /\b_cf_chl_opt\b/,
+]);
+/** 0.9 (#14): only the start of a read is searched: a check page is small, a bank page that large is no check. */
+export const SCRAPTF_CHALLENGE_SCAN_CHARS = 262_144;
+
+/** 0.9 (#14): `html` (a READ_SCRIPT result) is a check page by SCRAPTF_CHALLENGE_PHRASES. */
+export function scraptfChallengeIn(html: unknown): boolean {
+  if (typeof html !== 'string' || html.length === 0) return false;
+  const head = html.slice(0, SCRAPTF_CHALLENGE_SCAN_CHARS);
+  return SCRAPTF_CHALLENGE_PHRASES.some((re) => re.test(head));
 }
 
 /**

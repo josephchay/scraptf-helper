@@ -81,8 +81,9 @@ function refs(over: Partial<HoldingRefs> = {}): HoldingRefs {
 
 describe('the Advice column', () => {
   it('labels and tones every kind; the status pills keep their own words (D11)', () => {
-    expect(HOLDING_ADVICE_KINDS.map((k) => ADVICE_LABELS[k])).toEqual(['Sell now', 'List and wait', 'Hold', 'No clear signal']);
-    expect(HOLDING_ADVICE_KINDS.map((k) => ADVICE_TONES[k])).toEqual(['good', 'info', 'warn', 'muted']);
+    // 0.9 (#1): 'locked' (a 7-day Trade lock) joins last.
+    expect(HOLDING_ADVICE_KINDS.map((k) => ADVICE_LABELS[k])).toEqual(['Sell now', 'List and wait', 'Hold', 'No clear signal', 'Locked']);
+    expect(HOLDING_ADVICE_KINDS.map((k) => ADVICE_TONES[k])).toEqual(['good', 'info', 'warn', 'muted', 'warn']);
     for (const k of HOLDING_ADVICE_KINDS) expect(ADVICE_HELP[k].length).toBeGreaterThan(30);
   });
 
@@ -378,7 +379,8 @@ describe('adviceTitle', () => {
     expect(history.trend).toMatchObject({ direction: 'falling', recentHighScrap: 150 });
     const advice = holdingAdvice(r, history, P, KEY, T0);
     expect(advice.kind).toBe('sell-now');
-    expect(advice.reasons.map((x) => x.code)).toEqual(['below-target', 'falling']);
+    // 0.9 (#17): five points over 64 h give the trend its size, a context reason after falling (the kind is unchanged).
+    expect(advice.reasons.map((x) => x.code)).toEqual(['below-target', 'falling', 'trend-size']);
     const t = adviceTitle(advice, KEY, T0);
     expect(t.split('\n')[0]).toBe(`Sell now: ${ADVICE_BELOW_TARGET_FALLING_HELP}`);
     expect(t).not.toContain('nothing Flip Desk recorded was higher');

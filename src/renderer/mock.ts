@@ -7,8 +7,8 @@ import { sameAccelerator } from '../shared/accelerator';
 import { blankCheckResult, CHECK_ARM_MS, CHECK_ARM_NAME_MAX, CHECK_HOTKEY_CONFLICT, CHECK_MAX_CHARS, CHECK_PRICE_TEXT_MAX, CHECK_RECENT_MAX } from '../shared/check';
 import { formatScrap } from '../shared/currency';
 import { DEFAULT_SETTINGS, mergeSettings } from '../shared/defaults';
-import { HOLDINGS_CSV_COLUMNS, holdingRow, holdingsCsvCells, holdingsMatching, holdingsResult } from '../shared/holdings';
-import { NO_BANK_FLIPS, bankFlips, bankLookFor, bankStockFlips } from '../shared/banks';
+import { HOLDINGS_CSV_COLUMNS, holdingRow, holdingsCsvCells, holdingsMatching, holdingsResult, holdingsValuationOf, journalValuerOf } from '../shared/holdings';
+import { NO_BANK_FLIPS, bankFlips, bankLookFor, bankNoticeNewestAt, bankStockFlips, bankUnavailableAt } from '../shared/banks';
 import {
   BANK_STOCK_CSV_COLUMNS,
   BANK_STOCK_MAX_LIMIT,
@@ -78,6 +78,8 @@ import type {
   BankStockRow,
   CheckResult,
   CheckSource,
+  CommunityPoint,
+  HistoryPoint,
   HoldingDetail,
   HoldingMark,
   HoldingRow,
@@ -100,6 +102,7 @@ import type {
   Opportunity,
   OpportunityEvent,
   OpportunityEventKind,
+  OrderSpell,
   PriceRule,
   RequestLogRow,
   ResolvedItem,
@@ -112,6 +115,7 @@ import type {
   ScraptfChangeEvent,
   ScraptfChangeKind,
   ScraptfChangesQuery,
+  ScraptfCopyLow,
   ScraptfEventStored,
   ScraptfItemHistory,
   ScraptfKeyRun,
@@ -154,6 +158,9 @@ import {
   attachHoldingAdvice,
   holdingExitHistory,
   holdingMarkSettingsKey,
+  keyMoveBandOf,
+  tradeLockModeOf,
+  withTradeLock,
 } from '../shared/holdingAdvice';
 import {
   WATCHES_FULL,
@@ -196,11 +203,13 @@ import {
   mockHoldingAsk,
   mockHoldingBuySide,
   mockHoldingRefs,
+  mockKeyHistory,
   mockMarketQuery,
   mockImportReport,
   mockBankOf,
   mockMarketRow,
   mockOrderFlags,
+  mockOrderListedAt,
   mockParseBulk,
   mockPrices,
   mockRevenue,
@@ -213,7 +222,9 @@ import {
   seedJournal,
   seedBankStock,
   seedBankStockHistory,
+  seedCommunityHistory,
   seedHoldingMarks,
+  seedOrderSpells,
   seedPrices,
   seedScraptfList,
   type CatalogItem,
@@ -227,7 +238,7 @@ import { gateScraptfWindow, IMPORT_HTML_ORIGIN_REFUSAL, SCRAPTF_BAR_HASH } from 
 import { IMPORT_REPORT_RING, SKIP_CRAFT_UNPROVEN, SKIP_OUT_OF_STOCK } from '../shared/importCodes';
 import { createMockScraptfWindow } from './mockScraptfWindow';
 import { filterOpportunities, orderByGroup, revenueOrderOf, sortOpportunities, summarizeGroups } from './oppModel';
-import { craftabilityTwin } from '../shared/ceiling';
+import { breakEvenFor, craftabilityTwin } from '../shared/ceiling';
 import {
   scraptfBankCyclesOf,
   scraptfBankTurnover,
@@ -237,6 +248,12 @@ import {
   scraptfTimingForKey,
   type ScraptfBankCycles,
 } from '../shared/scraptfTiming';
+// 0.9 (history, #6, #7): 'item.bookHistory' and the copies' lows, by the service's shared rules.
+import { BOOK_HISTORY_ORDERS_MAX, itemBookHistoryOf } from '../shared/orderPersistence';
+import { scraptfCopyLowOf, scraptfLowsOf } from '../shared/scraptfLows';
+// 0.9 (ranking, #3, #12): the Opportunities CSV's book-depth tag and the suggested reserve, by the service's rules.
+import { liquidityTagOf } from '../shared/exitRisk';
+import { reserveSuggestionOf } from '../shared/reserveSuggest';
 import pkg from '../../package.json';
 
 export interface MockOptions {
@@ -386,6 +403,9 @@ export function createMockBridge(opts: MockOptions = {}): MockBridge {
     MOCK_KEY_SCRAP,
     t0,
   );
+  // 0.9 (#12): as the service's historyCache, the PriceDB history 'item.detail' served this session, per base (cleared
+  // past 200 bases). 'profit.reserveSuggestion' only reads it.
+  const historyOpened = new Map<string, HistoryPoint[]>();
   // 0.8 (G1): the user's scrap.tf watches, seeded from the hats page's rows on the first read (watchList); no RNG.
   let watches: ScraptfWatch[] | null = null;
   let watchSeq = 3;
@@ -603,6 +623,9 @@ export function createMockBridge(opts: MockOptions = {}): MockBridge {
       const items = fromList ? list.items : (newest?.items ?? 0);
       const pages = new Set(behind.get(info.bank));
       if (newest) pages.add(newest.id);
+      // 0.9 (#13), as the service: the bank's newest look said it was not trading (no save since). The seeds carry
+      // no notice, so it is absent.
+      const unavailableAt = bankUnavailableAt(bankNoticeNewestAt(batches, info.bank), fromList ? list.newestAt : (newest?.at ?? null));
       return {
         bank: info.bank,
         label: info.label,
@@ -618,6 +641,7 @@ export function createMockBridge(opts: MockOptions = {}): MockBridge {
         ...bankLookFor(rows, info.categories, info.bank),
         // F17: as the service, the change counts between the bank's two newest stock saves.
         whatsNew: whatsNewOf(info.bank, market),
+        ...(unavailableAt !== null ? { unavailableAt } : {}),
       };
     });
     const status = listStatus();
@@ -709,7 +733,16 @@ export function createMockBridge(opts: MockOptions = {}): MockBridge {
             const w = watchJoinOf(index, r, kp, Number.isFinite(minConfidence) ? minConfidence : 0);
             return w ? { ...r, watch: w } : r;
           });
-    return { rows: joined, items: newest.rows.length, savedAt: newest.savedAt, previousSavedAt: baseline?.savedAt ?? null, saves: p.saves };
+    // 0.9 (history): each row's lowest price in the bank's saves, after the watch join (the service's order).
+    const lows = mockLowsFor(bank);
+    const withLows =
+      lows.size === 0
+        ? joined
+        : joined.map((r) => {
+            const low = lows.get(r.key);
+            return low ? { ...r, low } : r;
+          });
+    return { rows: withLows, items: newest.rows.length, savedAt: newest.savedAt, previousSavedAt: baseline?.savedAt ?? null, saves: p.saves };
   }
 
   /**
@@ -901,6 +934,40 @@ export function createMockBridge(opts: MockOptions = {}): MockBridge {
     return c;
   }
 
+  // 0.9 (history): the copies' lowest prices on sale in a bank's kept saves, as the service's ScraptfHistory.lowsFor
+  // (the mock keeps no scraptf_lows table: its saves are all it has), valued at the key price; rebuilt when the saves
+  // or the key price change, as cyclesMemo is.
+  let lowsMemo: { saves: MockStockSave[]; keyScrap: Scrap; byBank: Map<ScraptfBank, Map<string, ScraptfCopyLow>> } | null = null;
+  /** 0.9 (history): per copy key (bankStockKey), the shared scraptfLowsOf over the bank's saves, valued by scraptfCopyLowOf. */
+  function mockLowsFor(bank: ScraptfBank): ReadonlyMap<string, ScraptfCopyLow> {
+    const kp = keyPrice().valueScrap;
+    if (lowsMemo === null || lowsMemo.saves !== stockSaves || lowsMemo.keyScrap !== kp) lowsMemo = { saves: stockSaves, keyScrap: kp, byBank: new Map() };
+    const hit = lowsMemo.byBank.get(bank);
+    if (hit) return hit;
+    const out = new Map<string, ScraptfCopyLow>();
+    for (const [key, core] of scraptfLowsOf(stockSavesOf(bank).map(saveRows), bank, kp)) {
+      const low = scraptfCopyLowOf(core, kp);
+      if (low) out.set(key, low);
+    }
+    lowsMemo.byBank.set(bank, out);
+    return out;
+  }
+
+  // 0.9 (history): each book's seeded order spells and recorded community prices, built once per base on its first
+  // read (memoised, so the answers stay put); a read never creates a book.
+  const spellsMemo = new Map<string, OrderSpell[]>();
+  const communityMemo = new Map<string, CommunityPoint[]>();
+  function spellsOf(base: string, book: MockBook): OrderSpell[] {
+    let s = spellsMemo.get(base);
+    if (!s) spellsMemo.set(base, (s = seedOrderSpells(book, now())));
+    return s;
+  }
+  function communityOf(base: string, book: MockBook): CommunityPoint[] {
+    let c = communityMemo.get(base);
+    if (!c) communityMemo.set(base, (c = seedCommunityHistory(book, now())));
+    return c;
+  }
+
   /** 0.8 (T3/T4): one copy's verdict, as the service's ScraptfHistory.timingFor (the shared scraptfTimingForKey). */
   function mockTimingOf(bank: ScraptfBank, key: string, buy: ScraptfEventBuySide | null): ScraptfBuyTiming | null {
     const cycles = cyclesOf(bank);
@@ -1019,7 +1086,10 @@ export function createMockBridge(opts: MockOptions = {}): MockBridge {
     const h = scraptfItemHistoryOf({ sku, specialKey: p.special ?? null, name: findCatalogItem(sku)?.name, banks, events, keyPrice: keyPrice(), now: now() });
     // 0.8 (T3-T5): its runs and verdict in its bank, as the service; the buy side is the base's market row with buyers.
     const row = marketRows().find((r) => r.sku === h.sku);
-    return { ...h, ...scraptfItemTimingOf(h, { cyclesOf, buy: row && row.buyerCount > 0 ? row : null, profit: settings.profit, keyScrap: keyPrice().valueScrap, now: now() }) };
+    const timed = { ...h, ...scraptfItemTimingOf(h, { cyclesOf, buy: row && row.buyerCount > 0 ? row : null, profit: settings.profit, keyScrap: keyPrice().valueScrap, now: now() }) };
+    // 0.9 (history): the copy's low in its bank, as the service's withLow.
+    const low = timed.bank === null ? undefined : mockLowsFor(timed.bank).get(bankStockKey(timed.sku, timed.specialKey));
+    return low ? { ...timed, low } : timed;
   }
 
   function bookFor(sku: string, name?: string): MockBook {
@@ -1537,6 +1607,10 @@ export function createMockBridge(opts: MockOptions = {}): MockBridge {
     // 0.8 (H5): as the service, each row carries the user's typical hold over every open position.
     const s = mockJournalSummary(journal);
     const hold = typicalHoldOf(s.closed, s.open);
+    // 0.9 (#1, #17), as the service's rowsOf: the user's trade lock (only '7d' marks rows) and the key band from the
+    // preview's key history (as if the drawer had loaded it).
+    const lockMode = tradeLockModeOf(settings);
+    const keyBand = keyMoveBandOf(mockKeyHistory(t0, MOCK_KEY_SCRAP), t0);
     return s.open.map((pos) => {
       let base = pos.sku;
       try {
@@ -1552,12 +1626,17 @@ export function createMockBridge(opts: MockOptions = {}): MockBridge {
       const extras = { ask: mockHoldingAsk(book, pos.sku, settings, kp, t), refs: mockHoldingRefs(book, settings, t), snapshotAt: book?.snapshotAt ?? null };
       // F14: the saved list row is the held item's scrap.tf exit (bestExitOf).
       const list = runsBase === null ? null : listRowFor(base, kp);
-      const row = withTypicalHold(holdingRow(pos, category, book ? mockHoldingBuySide(book, settings, kp, t) : null, settings.profit, kp, { list, now: t }, extras), hold);
+      const row = withTradeLock(
+        withTypicalHold(holdingRow(pos, category, book ? mockHoldingBuySide(book, settings, kp, t) : null, settings.profit, kp, { list, now: t }, extras), hold),
+        pos.lots,
+        lockMode,
+        t,
+      );
       // 0.8 (H6): the advice over the base's recorded runs, read as the service's historyFor reads them, since the buyer
-      // settings last changed; a currency has no book to refresh and no runs.
+      // settings last changed; a currency has no book to refresh and no runs. 0.9: after withTradeLock, so it reads the lock.
       if (runsBase === null) return attachHoldingAdvice(row, null, settings.profit, kp, t, { book: false });
       const history = holdingExitHistory(marksOf(runsBase, row.heldSince, HOLDING_HISTORY_MAX_RUNS), row.heldSince, kp, t, markSettings.at);
-      return attachHoldingAdvice(row, history, settings.profit, kp, t);
+      return attachHoldingAdvice(row, history, settings.profit, kp, t, { keyBand });
     });
   }
 
@@ -2208,10 +2287,31 @@ export function createMockBridge(opts: MockOptions = {}): MockBridge {
         for (const e of list) rows.push([e.id, new Date(e.ts).toISOString(), e.kind, e.sku, e.name, e.category, e.profitScrap === null ? '' : (e.profitScrap / 9).toFixed(2), e.confidence, e.summary]);
         return { csv: csv(rows), suggestedName: `flipdesk-events-${stamp(t)}.csv` };
       }
-      const rows: unknown[][] = [['sku', 'name', 'category', 'input', 'cost', 'revenue', 'profit', 'margin', 'confidence', 'buyers', 'status']];
+      // 0.9 (#2): break_even appended (the service's break_even_ref), from the same shared rule.
+      // 0.9 (#3): then the risk keys, the book depth and its tag (D10), blank where the row carries none.
+      const rows: unknown[][] = [
+        ['sku', 'name', 'category', 'input', 'cost', 'revenue', 'profit', 'margin', 'confidence', 'buyers', 'status', 'break_even', 'backup_profit', 'profitable_depth', 'book_depth', 'book_depth_tag'],
+      ];
       const q = query ?? {};
       for (const o of sortOpportunities(filterOpportunities([...opps.values()], q), q.sort ?? 'profit', q.dir ?? 'desc')) {
-        rows.push([o.sku, o.name, o.category, o.inputKind, formatScrap(o.costScrap, kp), formatScrap(o.revenueScrap, kp), formatScrap(o.profitScrap, kp), o.margin === null ? '' : o.margin.toFixed(4), o.confidence, o.buyerCount, o.status]);
+        rows.push([
+          o.sku,
+          o.name,
+          o.category,
+          o.inputKind,
+          formatScrap(o.costScrap, kp),
+          formatScrap(o.revenueScrap, kp),
+          formatScrap(o.profitScrap, kp),
+          o.margin === null ? '' : o.margin.toFixed(4),
+          o.confidence,
+          o.buyerCount,
+          o.status,
+          formatScrap(breakEvenFor(o.costScrap, settings.profit, 'buy'), kp),
+          o.backupProfitScrap === undefined ? '' : formatScrap(o.backupProfitScrap, kp),
+          o.profitableDepth ?? '',
+          o.bookDepth ?? '',
+          liquidityTagOf(o.bookDepth) ?? '',
+        ]);
       }
       return { csv: csv(rows), suggestedName: `flipdesk-opportunities-${stamp(t)}.csv` };
     },
@@ -2224,8 +2324,36 @@ export function createMockBridge(opts: MockOptions = {}): MockBridge {
       // Local only, as the service: the journal, the recorded exit runs and the same book (H7).
       return holdingDetail(canonical(p.sku.trim().toLowerCase()));
     },
+    // 0.9 (#12): as the service, local reads only: the recorded exit runs, the journal's typical hold and the history
+    // 'item.detail' served this session (historyOpened). Nothing is fetched or applied.
+    'profit.reserveSuggestion': () => {
+      const s = mockJournalSummary(journal);
+      return reserveSuggestionOf({
+        marks: holdingMarks,
+        histories: historyOpened,
+        // typicalHoldOf's lookup for a SKU with no own sales is the median over every sale; no SKU is ''.
+        hold: typicalHoldOf(s.closed, s.open)(''),
+        keyScrap: keyPrice().valueScrap,
+        settingsAt: markSettings.at,
+        now: now(),
+        // Review: as the service's pricedb.loadedKeyHistory(), the preview's key history (the one Holdings' key band reads,
+        // as if the drawer had loaded it at t0) values each recorded end with keys at that instant's key price.
+        keyHistory: { loadedAt: t0, points: mockKeyHistory(t0, MOCK_KEY_SCRAP) },
+      });
+    },
     'item.detail': ({ sku, history }) => {
       const d = detail(sku);
+      // 0.9 (#12): as the service's historyCache (keyed by the base SKU), the history this drawer read.
+      if (d && history !== false && d.history.length > 0) {
+        if (historyOpened.size > 200) historyOpened.clear();
+        let base = sku;
+        try {
+          base = baseSku(sku);
+        } catch {
+          base = sku;
+        }
+        historyOpened.set(base, d.history);
+      }
       // history: false is quick entry's local-only preview.
       return d && history === false ? { ...d, history: [] } : d;
     },
@@ -2256,8 +2384,35 @@ export function createMockBridge(opts: MockOptions = {}): MockBridge {
       if (!settings.connectors.scm) return null;
       const name = itemName(sku);
       const cents = 50 + (Math.abs([...sku].reduce((h, c) => (h * 31 + c.charCodeAt(0)) | 0, 7)) % 2000);
-      const usd = (c: number) => `${(c / 100).toFixed(2)}`;
+      // 0.9 (#2): "$2.21", as Steam's text, so the drawer's net line shows in the browser preview.
+      const usd = (c: number) => `$${(c / 100).toFixed(2)}`;
       return { lowest: usd(cents), median: usd(Math.round(cents * 1.04)), volume: String(10 + (cents % 400)), marketHashName: name };
+    },
+    // 0.9 (history): the service's shared rule (itemBookHistoryOf) over the book's seeded spells and community prices
+    // (seedOrderSpells / seedCommunityHistory, memoised per base) and the asked orders of its book, each with a listing
+    // time from its id (mockOrderListedAt). The checks are the service's zod. Nothing is fetched; a read creates no book.
+    'item.bookHistory': (p) => {
+      const bad = (why: string): never => {
+        throw new Error(`Invalid parameters for item.bookHistory: ${why}`);
+      };
+      if (!p || typeof p.sku !== 'string' || !isValidSku(p.sku.trim().toLowerCase())) bad('sku: not a SKU (pick an item first)');
+      if (p.orders !== undefined && (!Array.isArray(p.orders) || p.orders.length > BOOK_HISTORY_ORDERS_MAX || p.orders.some((o) => typeof o !== 'string' || o.length < 1 || o.length > 200))) bad(`orders: at most ${BOOK_HISTORY_ORDERS_MAX} listing ids`);
+      const base = baseSku(canonical(p.sku.trim().toLowerCase()));
+      const book = books.get(base) ?? extraBooks.get(base) ?? null;
+      const t = now();
+      return itemBookHistoryOf({
+        sku: base,
+        bases: [base],
+        spells: book ? spellsOf(base, book) : [],
+        points: book ? communityOf(base, book) : [],
+        current: null,
+        orders: [...new Set(p.orders ?? [])].slice(0, BOOK_HISTORY_ORDERS_MAX).map((id) => {
+          const o = book?.buy.find((x) => x.listingId === id);
+          return { listingId: id, listing: o ? { intent: 'buy' as const, keys: o.keys, metalScrap: o.metalScrap, isBot: o.isBot, listedAt: mockOrderListedAt(id, t) } : null };
+        }),
+        keyScrap: keyPrice().valueScrap,
+        now: t,
+      });
     },
     'prices.list': (p) => {
       const tokens = (p?.q ?? '').toLowerCase().split(/\s+/).filter(Boolean);
@@ -2483,9 +2638,11 @@ export function createMockBridge(opts: MockOptions = {}): MockBridge {
       return row;
     },
     'journal.summary': () => mockJournalSummary(journal),
-    // 0.8 (J5): the service's ledger cells in FIFO order (the value_ref column included).
+    // 0.8 (J5): the service's ledger cells in FIFO order (the value_ref column included). 0.9: the open lots valued as
+    // the service values them, over an unfiltered holdings read (worth_now_ref, unrealised_ref, valued_at).
     'journal.exportCsv': () => {
-      const rows: unknown[][] = [[...JOURNAL_CSV_COLUMNS], ...journalLedger(journal).map(journalCsvCells)];
+      const valuer = journalValuerOf(holdingsValuationOf(holdingsResult(holdingRows(), {}, keyPrice(), now())), settings.profit);
+      const rows: unknown[][] = [[...JOURNAL_CSV_COLUMNS], ...journalLedger(journal, valuer).map(journalCsvCells)];
       return { csv: csv(rows), suggestedName: `flipdesk-journal-${stamp(now())}.csv` };
     },
     'import.html': (p) => {

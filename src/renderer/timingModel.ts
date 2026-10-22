@@ -4,6 +4,8 @@
 // shared/scraptfTiming.ts over the user's own saves (R10), so every text says it is an estimate from those saves,
 // quotes each percentage with its own denominator and the save it rests on, and never forecasts a price, a time or
 // a fill. Nothing here loads scrap.tf (R1) or builds a URL.
+// 0.9 (#10): the odds carry their 90 % ranges with the items behind them, a verdict that turns with save timing says
+// so (and its tag ends in '?'), and 'unsure-gain' says waiting looked worth more but may add nothing.
 
 import { BANK_STOCK_SESSION_GAP_MS, bankStockPagePath } from '../shared/bankStock';
 import { copyExtrasWords } from '../shared/copyExtras';
@@ -15,13 +17,30 @@ import {
   SCRAPTF_TIMING_MIN_COPIES,
   SCRAPTF_TIMING_MIN_DROPS,
   SCRAPTF_TIMING_MIN_ENDED,
+  SCRAPTF_TIMING_RANGE_PCT,
 } from '../shared/scraptfTiming';
-import type { Scrap, ScraptfAssetIdsHealth, ScraptfBank, ScraptfBuyTiming, ScraptfTimingBrief, ScraptfTimingWhy, UnixMs } from '../shared/types';
+import type {
+  Scrap,
+  ScraptfAssetIdsHealth,
+  ScraptfBank,
+  ScraptfBuyTiming,
+  ScraptfSaveTimingAlt,
+  ScraptfShareRange,
+  ScraptfTimingBrief,
+  ScraptfTimingUncertainty,
+  ScraptfTimingWhy,
+  UnixMs,
+} from '../shared/types';
 import { DASH, PAINT_NAMES, fmtAge, fmtAgo, fmtInt, fmtMoney, paintHex, type Tone } from './format';
+import { CHECKOUT_GUARD_TAG } from '../shared/checkoutGuard';
 
-/** Under every timing figure: what the estimate rests on and what it cannot see (E.1-3, E.1-4). */
+/**
+ * Under every timing figure: what the estimate rests on and what it cannot see (E.1-3, E.1-4). 0.9 (#10): what the
+ * ranges allow for and what not, and that the Wait check's low end is for the picked wait taken alone, with the drop
+ * size at its own low end (T9-3b).
+ */
 export const TIMING_ESTIMATE_NOTE =
-  "An estimate from your saves, not a forecast: each step is dated at the save that showed it, several drops between two saves read as one, and 'gone' can be a sale, a reservation or a move. scrap.tf's own repricing rule is unknown.";
+  "An estimate from your saves, not a forecast: each step is dated at the save that showed it, several drops between two saves read as one, and 'gone' can be a sale, a reservation or a move. scrap.tf's own repricing rule is unknown. Ranges allow for chance between the items in your saves, not for when you happened to save or for scrap.tf changing its prices. The Wait check's low end is for the wait your saves picked, taken alone (that wait is the best of up to four, so it is less sure than it reads), and it takes the size of a drop at its low end too, from the drops seen between saves close together when there are enough.";
 
 function finite(v: unknown): v is number {
   return typeof v === 'number' && Number.isFinite(v);
@@ -70,6 +89,41 @@ function oddsText(t: ScraptfTimingBrief, path: string): string | null {
   return `Of the ${plural(t.n.atRisk, 'price')}${similarText(t.scope)} on ${path} still at their price at this age (from ${plural(t.n.states, 'price')} of ${plural(t.n.copies, 'item')} in your saves), ${pctText(t.pDrop)} dropped within ${timingDurText(t.horizonMs)} and ${pctText(goneOrRose)} went or rose first.`;
 }
 
+/** 0.9 (#10): a range as whole percents, rounded outward (never narrower than computed): "48-86 %", or "50 %". */
+export function timingRangeText(r: ScraptfShareRange): string {
+  const lo = Math.floor(Math.max(0, Math.min(1, r.low)) * 100 + 1e-9);
+  const hi = Math.ceil(Math.max(0, Math.min(1, r.high)) * 100 - 1e-9);
+  return lo >= hi ? `${lo} %` : `${lo}-${hi} %`;
+}
+
+/**
+ * 0.9 (#10): the ranges sentence, with the items behind them (the jackknife counts items, not prices); null without
+ * uncertainty. "Allowing for chance across the 13 items behind these (a 90 % range): 48-86 % dropped, 3-28 % went or rose first."
+ */
+export function timingRangesText(t: { uncertainty?: ScraptfTimingUncertainty | null }): string | null {
+  const u = t.uncertainty;
+  if (!u || !(u.copies > 0)) return null;
+  return `Allowing for chance across the ${plural(u.copies, 'item')} behind these (a ${SCRAPTF_TIMING_RANGE_PCT} % range): ${timingRangeText(u.pDrop)} dropped, ${timingRangeText(u.pGoneOrRose)} went or rose first.`;
+}
+
+/** 0.9 (#10): what the other placement's decision would suggest, in the save-timing sentence's words. */
+const SAVE_TIMING_ALT: Readonly<Record<ScraptfSaveTimingAlt['verdict'], (H: string | null) => string>> = {
+  wait: (H) => `waiting${H ? ` about ${H}` : ''}`,
+  'buy-now': () => 'buying now',
+  over: () => 'not buying (over Pay up to)',
+};
+
+/**
+ * 0.9 (#10): the save-timing sentence, or null when the verdict does not depend on it (no `saveTiming`). It names the
+ * decision the same rules give with every price change dated just after the save before it; it never changes the verdict.
+ */
+export function timingSaveTimingText(t: { saveTiming?: ScraptfSaveTimingAlt | null }): string | null {
+  const s = t.saveTiming;
+  if (!s || !Object.prototype.hasOwnProperty.call(SAVE_TIMING_ALT, s.verdict)) return null;
+  const H = finite(s.horizonMs) ? timingDurText(s.horizonMs) : null;
+  return `Depends on save timing: had each price change come just after your last save before it, not just before the save that showed it, your saves would suggest ${SAVE_TIMING_ALT[s.verdict](H)}.`;
+}
+
 /** "From your save 5 h ago; an estimate, not a forecast." (E.1-3: the save the estimate rests on.) */
 function fromSaveText(t: Pick<ScraptfTimingBrief, 'lastSeenAt'>, now: UnixMs): string {
   return `From your save ${fmtAgo(Math.min(t.lastSeenAt, now), now)}; an estimate, not a forecast.`;
@@ -84,11 +138,15 @@ function leadText(t: ScraptfTimingBrief, path: string): string {
         ? `Your saves suggest waiting${H ? ` about ${H}` : ''}: over Pay up to now, a typical drop would bring it under.`
         : `Your saves suggest waiting${H ? ` about ${H}` : ''}.`;
     case 'buy-now':
+      // 0.9 (#10): waiting cleared the bar on the estimate but not at the gain's low end.
+      if (t.why === 'unsure-gain') return `Your saves suggest buying now: waiting${H ? ` ${H}` : ''} looked worth more, but allowing for chance it may add nothing.`;
       return t.why === 'gone-risk'
         ? `Your saves suggest buying now: prices like it on ${path} went or rose first at least as often as they dropped.`
         : `Your saves suggest buying now: waiting${H ? ` ${H}` : ''} is not expected to add enough to the profit.`;
     case 'over':
-      return 'Over Pay up to: your saves show no drop likely enough to bring it under.';
+      return t.why === 'unsure-gain'
+        ? 'Over Pay up to: a typical drop would bring it under, but allowing for chance waiting may add nothing.'
+        : 'Over Pay up to: your saves show no drop likely enough to bring it under.';
     case 'no-buyers':
       return 'No backpack.tf buyer to judge the timing against.';
     case 'not-enough-data':
@@ -112,6 +170,8 @@ function judgedText(t: ScraptfTimingBrief, path: string, keyScrap: Scrap | null 
  * 'Buy now' (good), with a title quoting each percentage over its own denominator, the prices and items behind it,
  * the copy read and "from your save X ago". With `keyScrap` the title also names the scrap.tf price judged and the
  * Pay up to it was held against. Every other verdict gives null (the Verdict title says it).
+ * 0.9 (#10): the ranges sentence after the odds, the save-timing sentence after it, and a '?' (muted) on a flagged
+ * verdict ('Wait ~1 d?', 'Buy now?'); (#9) the checkout guard last on a Buy now.
  */
 export function timingBadge(
   t: ScraptfTimingBrief | null | undefined,
@@ -120,18 +180,33 @@ export function timingBadge(
 ): { text: string; tone: Tone; title: string } | null {
   if (!t || (t.verdict !== 'wait' && t.verdict !== 'buy-now')) return null;
   const path = pathOf(t.bank);
-  const text = t.verdict === 'wait' ? (finite(t.horizonMs) ? `Wait ~${timingDurText(t.horizonMs)}` : 'Wait') : 'Buy now';
+  const flagged = timingSaveTimingText(t) !== null;
+  const base = t.verdict === 'wait' ? (finite(t.horizonMs) ? `Wait ~${timingDurText(t.horizonMs)}` : 'Wait') : 'Buy now';
   const odds = oddsText(t, path);
   return {
-    text,
-    tone: t.verdict === 'wait' ? 'warn' : 'good',
-    title: [leadText(t, path), judgedText(t, path, keyScrap), odds, copyReadText(t.key), fromSaveText(t, now)].filter(Boolean).join(' '),
+    // 0.9 (#10): a verdict that turns with save timing ends in '?' and is muted.
+    text: flagged ? `${base}?` : base,
+    tone: flagged ? 'muted' : t.verdict === 'wait' ? 'warn' : 'good',
+    // 0.9 (#9): a Buy now tag suggests buying, so its title ends with the checkout guard (last; timing's ranges go before it).
+    title: [
+      leadText(t, path),
+      judgedText(t, path, keyScrap),
+      odds,
+      timingRangesText(t),
+      timingSaveTimingText(t),
+      copyReadText(t.key),
+      fromSaveText(t, now),
+      t.verdict === 'buy-now' ? CHECKOUT_GUARD_TAG : null,
+    ]
+      .filter(Boolean)
+      .join(' '),
   };
 }
 
 /**
  * 0.8 (T6, D23): the sentence appended to a bank stock row's Verdict title, for every verdict and every
- * not-enough-data reason, with the same denominators and "from your save X ago"; '' without a timing.
+ * not-enough-data reason, with the same denominators and "from your save X ago"; '' without a timing. 0.9 (#10): the
+ * ranges and the save-timing sentences after the odds, when the timing has them.
  */
 export function timingVerdictTitle(t: ScraptfTimingBrief | null | undefined, now: UnixMs): string {
   if (!t) return '';
@@ -142,7 +217,7 @@ export function timingVerdictTitle(t: ScraptfTimingBrief | null | undefined, now
   }
   if (t.verdict === 'no-buyers') return `Buy timing: ${leadText(t, path)}`;
   const odds = oddsText(t, path);
-  return ['Buy timing:', leadText(t, path), odds, fromSaveText(t, now)].filter(Boolean).join(' ');
+  return ['Buy timing:', leadText(t, path), odds, timingRangesText(t), timingSaveTimingText(t), fromSaveText(t, now)].filter(Boolean).join(' ');
 }
 
 /**
@@ -206,6 +281,9 @@ export function timingWhyText(why: ScraptfTimingWhy, ctx: TimingWhyContext): str
       return 'Prices like it went or rose first at least as often as they dropped';
     case 'over':
       return 'Over Pay up to, and no drop likely enough to bring it under';
+    // 0.9 (#10): the gain cleared the bar on the estimate but not at its low end (timing, Wave 2, produces it).
+    case 'unsure-gain':
+      return 'Waiting looked worth more on the estimate, but allowing for chance across the items in your saves it may add nothing; keep saving the page to settle it';
     case 'no-buyers':
       return 'No backpack.tf buyer to judge it against';
   }

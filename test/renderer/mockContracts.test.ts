@@ -58,7 +58,11 @@ describe('mock contracts', () => {
     const rows = (csv: string) => csv.trim().split('\r\n').slice(1);
     expect(rows(profitable.csv)).toHaveLength(listed.total);
     expect(rows(profitable.csv).length).toBeLessThan(rows(all.csv).length);
-    expect(rows(profitable.csv).every((line) => line.endsWith(',profitable') && line.includes(',hats,'))).toBe(true);
+    // 0.9 (#2): the status cell by its header index from the end (break_even and later columns follow it; their
+    // cells are money, counts and tag words, never a comma, and a quoted name with a comma sits before it).
+    const head = all.csv.trim().split('\r\n')[0]!.split(',');
+    const after = head.length - 1 - head.indexOf('status');
+    expect(rows(profitable.csv).every((line) => line.split(',').slice(-(after + 1))[0] === 'profitable' && line.includes(',hats,'))).toBe(true);
   });
 
   it('caps the automatic key price at the scrap.tf sell price like the service, but never a manual one', async () => {

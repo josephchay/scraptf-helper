@@ -55,42 +55,49 @@ lines to an attached console when its only log destination is a file, so a termi
 |---|---|
 | `src/shared/types.ts`, `rpc.ts`, `sku.ts`, `currency.ts`, `defaults.ts` | foundation; change only through integration |
 | `src/shared/links.ts`, `categories.ts` | link generator (rebuild of scrap.tf-item-information), category classifier; `SCRAPTF_BANKS`, the one list of scrap.tf bank ids, labels and URLs (F15); `scraptfLinkFor`, the page a Live market row links to (F19); `scraptfBankForItem`, the bank an item of its kind is sold on (0.7.4, F36) |
-| `src/shared/ceiling.ts` | profit status and the "pay up to" ceiling, shared by the engine, the dashboard and the mock so all three classify alike; from 0.7.4 (F22, F70) the cost checks: `costSanity`, `costSanityReason`, `COST_SANITY_FLAGS` / `costSuspectFlagged` (`variant-suspect`, `cost-below-market`; PriceDB only, age-gated by the caller), `craftabilityTwin`, `pricedbBand` and their thresholds, shared by confidence (the engine), shopping, the bank stock cost gate (review R14/R40), the Live check's `checkCostNote` and the mock; from 0.8 (PC-1, PC-2, H2) the one buy-side profit path `flipProfit`, `exitCostsOf`, `reservePctOf`, `reserveOf`, `flipProfitBound`, `profitBreakdown`, and the backup-buyer check `buyerDepthOf`, `exitOrdersOfSummaries`, `singleExitOf`, `singleExitText` / `singleExitReason` |
+| `src/shared/ceiling.ts` | profit status and the "pay up to" ceiling, shared by the engine, the dashboard and the mock so all three classify alike; from 0.7.4 (F22, F70) the cost checks: `costSanity`, `costSanityReason`, `COST_SANITY_FLAGS` / `costSuspectFlagged` (`variant-suspect`, `cost-below-market`; PriceDB only, age-gated by the caller), `craftabilityTwin`, `pricedbBand` and their thresholds, shared by confidence (the engine), shopping, the bank stock cost gate (review R14/R40), the Live check's `checkCostNote` and the mock; from 0.8 (PC-1, PC-2, H2) the one buy-side profit path `flipProfit`, `exitCostsOf`, `reservePctOf`, `reserveOf`, `flipProfitBound`, `profitBreakdown`, and the backup-buyer check `buyerDepthOf`, `exitOrdersOfSummaries`, `singleExitOf`, `singleExitText` / `singleExitReason`; from 0.9 (#2) the break-even price per exit (`breakEvenFor`, `breakEvensOf`, `grossBeforeFee`, `scmGrossValue`) |
 | `src/shared/referenceAge.ts` | the reference age gate's community floor (`communityMaxAgeMs`), shared the same way so the drawer marks a reference "ignored" exactly when the engine drops it |
-| `src/shared/buyerSeen.ts` | 0.7.4 (F23, F63) a buy order's liveness: `ORDER_CONFIRMED_MS` (2 h), `orderSeenRecently`, `buyerOnlineNow` (an old online flag is not presence), `seenAgeText`, `buyerPresenceText`; shared by confidence, the engine, core's snapshot job, bptfApi's online carry (review R36) and the Live log's buyer tag in the service, by every renderer buyer line (Opportunities, drawer, Live market, Holdings, Shopping, Bank stock, Live check) and by the mock; from 0.8 `ORDER_UNVERIFIED_AFTER_MS` (24 h) and `unverifiedRevenue`, moved from the holdings service so Holdings, the advice (`holdingAdvice.ts`) and the mock share them (matcher's `UNVERIFIED_AFTER_MS` and the mock's `MOCK_UNVERIFIED_AFTER_MS` are the same constant) |
+| `src/shared/buyerSeen.ts` | 0.7.4 (F23, F63) a buy order's liveness: `ORDER_CONFIRMED_MS` (2 h), `orderSeenRecently`, `buyerOnlineNow` (an old online flag is not presence), `seenAgeText`, `buyerPresenceText`; shared by confidence, the engine, core's snapshot job, bptfApi's online carry (review R36) and the Live log's buyer tag in the service, by every renderer buyer line (Opportunities, drawer, Live market, Holdings, Shopping, Bank stock, Live check) and by the mock; from 0.8 `ORDER_UNVERIFIED_AFTER_MS` (24 h) and `unverifiedRevenue`, moved from the holdings service so Holdings, the advice (`holdingAdvice.ts`) and the mock share them (matcher's `UNVERIFIED_AFTER_MS` and the mock's `MOCK_UNVERIFIED_AFTER_MS` are the same constant); from 0.9 the bot service a client names (`botServiceOf`) |
 | `src/shared/copyExtras.ts` | 0.7.4 (F66, F27, F33) which copy an opportunity prices and one profit per buy order: `opportunityCopyKey`, `copyExtrasOf`, `copyExtrasWords`, the sheen and killstreaker names, `markSharedBuyers` (the 'shared-buyer' flag) and, from review R27, `onceByOrderProfit` (group totals at the best copy shown); shared by the engine, the repo, views, priceSheetIo, the dashboard and the mock |
 | `src/shared/priceCopy.ts` | 0.7.4 (F80) which stored price is a given copy's: `priceIsForSku`, `newestTypedPriceFor` (`prices.upsert` `replaceTyped`); shared by rpcHandlers, the item menu model (Record buy's price, the drawer's price form), Quick entry and the mock |
 | `src/shared/ruleEvidence.ts` | 0.7.4 (F78) a rule never undercuts a price scrap.tf showed: `scraptfSeenPriceOf`, `boundRuleCost` (the `rule-under-scraptf` flag), `ruleUnderScraptfReason`; local saved data only (R1); shared by the engine's rule rows, the Live market's rule verdict, core and the mock |
 | `src/shared/accelerator.ts`, `contact.ts`, `htmlDecode.ts` | the hotkey accelerator rule (settings schema, Settings page, mock), the User-Agent contact rule (R6: settings schema and Settings page), the decoding of a saved page's bytes (main's Import file and the service's folder watch) |
 | `src/shared/market.ts` | Live market rules (verdict, profit, filters, search words, comparator, paging, CSV cells), shared by the market index, the dashboard and the mock so counts, order and pages match |
-| `src/shared/holdings.ts` | Holdings rules (status, profit figures, row, comparator, search, totals, CSV cells), shared by the holdings service, the dashboard and the mock the same way; from 0.8 the ask side (`askSideOf`, `AskCandidate`), references (`holdingRefsOf`), the row's extras (`HoldingRowExtras`) and `scraptfAlternative` (moved from the service) |
+| `src/shared/holdings.ts` | Holdings rules (status, profit figures, row, comparator, search, totals, CSV cells), shared by the holdings service, the dashboard and the mock the same way; from 0.8 the ask side (`askSideOf`, `AskCandidate`), references (`holdingRefsOf`), the row's extras (`HoldingRowExtras`) and `scraptfAlternative` (moved from the service); from 0.9 `holdingLockedNow`, the locked count in the totals, and the valuation `holdingsValuationOf`, `lotValueOf`, `journalValuerOf` (Journal card and ledger CSV) |
 | `src/shared/scraptfList.ts` | scrap.tf price list rules (F14): valuing a saved list row, full, fresh, the key row, a held item's better exit, the market and holdings list fields, and from 0.7.4 the family rows (`scraptfListFamilyOf`, `scraptfListLookup`, `scraptfListCraftProven`, `scraptfListIsFamily`), shared the same way |
-| `src/shared/banks.ts` | scrap.tf banks rules (F15): flips per bank and what to look for there (`bankFlips`, `bankLookFor`), shared by the banks summary, the dashboard and the mock the same way |
-| `src/shared/bankStock.ts` | scrap.tf bank stock rules (F17): the extras key, on sale, the diff of two saves, rows, verdict, filters, counts, order, paging, "What's new", the market's New join, the drawer's line, the notification texts and CSV cells, and from 0.7.4 the list's family rows (`bankStockListFamily`, review R01/R06) and a copy's saved prices (`bankStockPricesOf`, the Live check's craftability), shared by the bank stock cache, the dashboard and the mock the same way |
+| `src/shared/banks.ts` | scrap.tf banks rules (F15): flips per bank and what to look for there (`bankFlips`, `bankLookFor`), shared by the banks summary, the dashboard and the mock the same way; from 0.9 (#13) the bank's newest "not trading" look (`bankNoticeNewestAt`, `bankUnavailableAt`: `ScraptfBankSummary.unavailableAt`) |
+| `src/shared/bankStock.ts` | scrap.tf bank stock rules (F17): the extras key, on sale, the diff of two saves, rows, verdict, filters, counts, order, paging, "What's new", the market's New join, the drawer's line, the notification texts and CSV cells, and from 0.7.4 the list's family rows (`bankStockListFamily`, review R01/R06) and a copy's saved prices (`bankStockPricesOf`, the Live check's craftability), shared by the bank stock cache, the dashboard and the mock the same way; from 0.9 (#13) a card's price-drop wording as `bank_stock.markdown` stores it (`bankStockMarkdownText`, `bankStockMarkdownOf`) and on an on-sale row (`BankStockRow.markdown`, never a gone or family row) |
 | `src/shared/scraptfHistory.ts` | scrap.tf history rules (F20): a save's change events, valuing an event now with the live buy side, the runs index ("listed since"), one item's history, the feed's limits and CSV cells (from 0.7.4 an /items family row's event meets no buyer: `scraptfEventListFamily`), and the re-save reminder's banks, timing and texts, and from 0.8 (T1, LC-3, LC-5) the per-bank lifecycle builder (`scraptfLifecycleOf`: price states, listing runs, asset-id stability with its pre-pass `scraptfAssetStabilityOf`; `scraptfKeyStatesOf` now wraps it; `scraptfCopyBankOf`) and the one restock rule (`scraptfSeenBefore`, `scraptfIsRestock`), shared by the service, the dashboard and the mock the same way |
-| `src/shared/scraptfTiming.ts` | 0.8 (T2-T4, LC-4) buy-timing estimators (pooled drop / gone / rose table, still-listed turnover), the Wait / Buy now verdict and the row briefs (`scraptfTimingTableOf`, `scraptfLookGapMs`, `scraptfBankCyclesOf`, `scraptfTimingEv` through `flipProfit`, `scraptfBuyTimingOf`, `scraptfTimingForKey`, `scraptfTimingBrief`, `scraptfTurnoverOf`, `scraptfItemTimingOf`, `scraptfOpportunityTiming`), shared by the service and the mock; estimates from the user's own saves, never forecasts |
+| `src/shared/scraptfTiming.ts` | 0.8 (T2-T4, LC-4) buy-timing estimators (pooled drop / gone / rose table, still-listed turnover), the Wait / Buy now verdict and the row briefs (`scraptfTimingTableOf`, `scraptfLookGapMs`, `scraptfBankCyclesOf`, `scraptfTimingEv` through `flipProfit`, `scraptfBuyTimingOf`, `scraptfTimingForKey`, `scraptfTimingBrief`, `scraptfTurnoverOf`, `scraptfItemTimingOf`, `scraptfOpportunityTiming`), shared by the service and the mock; estimates from the user's own saves, never forecasts; from 0.9 (#10) the copy-clustered infinitesimal jackknife (`scraptfTimingInfluenceOf`, `scraptfTimingSpreadOf`, memoised per table), the share ranges (`scraptfWilson`, `scraptfShareRange`), the Wait gate on the gain's low end with the drop size at its own low end (`scraptfMedianLowRank`, `scraptfDropLowOf`, `scraptfTableDropLowOf`) and the save-timing check ('left' placement) |
 | `src/shared/check.ts` | Live check (F16) limits, fixed user-facing texts (refusals, reasons, item notes, the privacy sentence, `CHECK_HOTKEY_CONFLICT`), `checkTextRefusal`, `checkPriceIsOtherCopy`, `blankCheckResult`, F19's `checkHintPriceOf` (a price copied on its own) and 0.7.4's craftability rules (`checkTextStatesCraft`, `checkCraftTwinOf`, `checkListCopyPrices`, `checkCraftCopy`, `checkWorseCopy`, `checkCraftUndecided`, `checkPriceReadAsRef`; review fixes `checkListFamilyOnSale`, `checkDecideCopy`, `checkHasRevenue`, `checkRevenueUnverified`, `checkCostNote`, `checkCostSuspect`); zod-free, shared by main, the service, the dashboard and the mock so all of them refuse and word things alike |
 | `src/shared/itemUrl.ts` | the item links the app reads (marketplace.tf and PriceDB item pages, backpack.tf stats pages): hosts, path shapes and next.backpack.tf's query keys, shared by the schema resolver (`parseItemUrl`) and main's clipboard filter, which lets exactly these links through |
 | `src/shared/settingsSchema.ts` | zod schema for `Settings` (owned by main) |
-| `src/shared/importCodes.ts`, `scraptfPaths.ts`, `boundaryText.ts` | 0.7.1: the import's warning and refusal codes, fixed messages, skip reasons, partial-read thresholds and report limits (`importWarningCode`); `scraptfImportablePath`, the scrap.tf pages the import reads (parity with `pageKindFromUrl`, tested); the one boundary sentence (`SCRAPTF_BOUNDARY_SHORT`, `scraptfDataSourcesText`) every dashboard text uses |
-| `src/shared/scraptfWindowPolicy.ts` | F21's rules for the opt-in scrap.tf window, pure and zod-free: which URLs it starts on, keeps, sends to the browser or blocks (top level and frames), which pages it reads, the pinned `READ_SCRIPT` and its forbidden tokens, the read timings, the fixed texts and the settings gate; shared by main, the settings schema, the service, the mock and the tests |
+| `src/shared/importCodes.ts`, `scraptfPaths.ts`, `boundaryText.ts` | 0.7.1: the import's warning and refusal codes, fixed messages, skip reasons, partial-read thresholds and report limits (`importWarningCode`); `scraptfImportablePath`, the scrap.tf pages the import reads (parity with `pageKindFromUrl`, tested); the one boundary sentence (`SCRAPTF_BOUNDARY_SHORT`, `scraptfDataSourcesText`) every dashboard text uses; from 0.9 (#13) the bank-not-trading code (`BANK_UNAVAILABLE`, `BANK_UNAVAILABLE_WARNING`), the evidence codes `PRICE_MARKDOWN`, `PRICE_COUNTDOWN`, `RECENT_SECTION` and `IMPORT_REPORT_NOTICES_MAX` |
+| `src/shared/scraptfWindowPolicy.ts` | F21's rules for the opt-in scrap.tf window, pure and zod-free: which URLs it starts on, keeps, sends to the browser or blocks (top level and frames), which pages it reads, the pinned `READ_SCRIPT` and its forbidden tokens, the read timings, the fixed texts and the settings gate; shared by main, the settings schema, the service, the mock and the tests; the challenge phrases (`scraptfChallengeIn`) |
 | `src/shared/opportunityEvents.ts` | 0.7.3: the Live log's opportunity-event filters (`OPPORTUNITY_EVENT_KINDS`, `EVENTS_EXPORT_MAX` = 5000, `eventMatches`: the category plus `marketSearchTokens` words across name, SKU and summary), shared by the events view, the service's events export and the mock, so the file matches the page |
-| `src/shared/journal.ts` | 0.8 (J1, J2, J5, H5) the journal's rules: FIFO (`journalSummary`, `journalOrder`, `journalValue`, moved from service/domain/journal.ts), the closed-trade ledger (`JournalSummary.closed`), fees (`feeOf`, `feePatchOf`, `applyJournalPatch`), write-offs, the user's typical hold (`typicalHoldOf`, `withTypicalHold`, `closedTradesOf`) and the ledger CSV (`journalLedger`, `JOURNAL_CSV_COLUMNS`, `journalCsvCells`); shared by the service (journal RPCs, holdings, CSV), the dashboard and the mock, which keeps no copy of its own |
-| `src/shared/venues.ts` | 0.8 (J2, J4) the one journal venue list (`JOURNAL_VENUES`, `WRITE_OFF_VENUE`), the read-time normaliser (`venueKey`, `venueLabel`, `isScraptfVenue`) and brief §5.4's fee hints (`venueFeeHint`, text only); shared by core (ACT-3), the dashboard and the mock |
+| `src/shared/journal.ts` | 0.8 (J1, J2, J5, H5) the journal's rules: FIFO (`journalSummary`, `journalOrder`, `journalValue`, moved from service/domain/journal.ts), the closed-trade ledger (`JournalSummary.closed`), fees (`feeOf`, `feePatchOf`, `applyJournalPatch`), write-offs, the user's typical hold (`typicalHoldOf`, `withTypicalHold`, `closedTradesOf`) and the ledger CSV (`journalLedger`, `JOURNAL_CSV_COLUMNS`, `journalCsvCells`); shared by the service (journal RPCs, holdings, CSV), the dashboard and the mock, which keeps no copy of its own; from 0.9 the ledger CSV's valuation columns (`journalLedger`'s valuer, `JournalLotValuer`) |
+| `src/shared/venues.ts` | 0.8 (J2, J4) the one journal venue list (`JOURNAL_VENUES`, `WRITE_OFF_VENUE`), the read-time normaliser (`venueKey`, `venueLabel`, `isScraptfVenue`) and brief §5.4's fee hints (`venueFeeHint`, text only); shared by core (ACT-3), the dashboard and the mock; from 0.9 the documented fee rules in cents (`scmBuyerPaysCents`, `scmSellerNetCents`, `manncoNetCents`) and mannco.store |
 | `src/shared/watches.ts` | 0.8 (G1, G3): the user's scrap.tf watches: covering a copy (bankStockIsOwnCopy), targets at the key price, what a row meets now and on a read (the edge), the rows' join, a watch's copy on sale now, the engine's profit bar, input rules; shared by the service, the dashboard and the mock |
-| `src/shared/bankStockNotify.ts` | 0.8: the S3 notifier's rules: one ordered candidate list per told look (watch, new, cheaper, back, timing: `bankStockNotifyCandidates`, `bankStockNotifyOrder`, the dedupe keys `bankStockNotifyKey` and `bankStockWatchNotifyKey`), G4's memory of Wait (`bankStockTimingParse`, `bankStockTimingNext`), every toast and summary text (`bankStockNoticeOf`, `bankStockSummaryNotice`, `bankStockOldSaveSummary`), the summary's chip (G5, `bankStockSummaryChip`); pure, read by the service's notifier |
-| `src/shared/holdingAdvice.ts` | 0.8 (H1, H6, H7) valuing recorded exit runs (`markExitScrap`, `holdingMarkValuesOf`, `sameHoldingMarkValues`), a holding's history and trend (`holdingExitHistory`) and the advice (`holdingAdvice`, `attachHoldingAdvice`) with their thresholds; shared by the holdings service, the dashboard and the mock |
+| `src/shared/bankStockNotify.ts` | 0.8: the S3 notifier's rules: one ordered candidate list per told look (watch, new, cheaper, back, timing: `bankStockNotifyCandidates`, `bankStockNotifyOrder`, the dedupe keys `bankStockNotifyKey` and `bankStockWatchNotifyKey`), G4's memory of Wait (`bankStockTimingParse`, `bankStockTimingNext`), every toast and summary text (`bankStockNoticeOf`, `bankStockSummaryNotice`, `bankStockOldSaveSummary`), the summary's chip (G5, `bankStockSummaryChip`); pure, read by the service's notifier; from 0.9 (#9) `bankStockNoticeWithGuard`, the checkout guard's sentence on a watch hit or G4 toast that tells a flip |
+| `src/shared/checkoutGuard.ts` | 0.9 (#9) the checkout guard's sourced lines, titles and the toast suffix rule (`withCheckoutGuard`); shared by the dashboard, the S3 notifier and the engine's "Watch:" toast |
+| `src/shared/holdingAdvice.ts` | 0.8 (H1, H6, H7) valuing recorded exit runs (`markExitScrap`, `holdingMarkValuesOf`, `sameHoldingMarkValues`), a holding's history and trend (`holdingExitHistory`) and the advice (`holdingAdvice`, `attachHoldingAdvice`) with their thresholds; shared by the holdings service, the dashboard and the mock; from 0.9 the trade lock (`TRADE_LOCK_MS`, `tradeLockModeOf`, `tradableAtOf`, `holdingTradeLockOf`, `withTradeLock`), the trend size (`HoldingTrend.size`, `HOLDING_TREND_SIZE_*`) and the key move band (`keyMoveBandOf`, `KEY_BAND_*`) |
+| `src/shared/robustStats.ts` | 0.9: `median`, `quantile`, `theilSen`, `medianAbsDeviation` (robust statistics for small samples), shared by holdingAdvice and any later rule; pure |
+| `src/shared/exitRisk.ts` | 0.9 (#3) the risk-aware ranking keys over a book already read: `exitDepthOf`, `profitableDepthAt`, `backupProfitOf`, `exitRiskAt`, `opportunityRiskFields`, `marketRiskFields`, the book-depth tag `liquidityTagOf`, and the notification gate (`minProfitableDepthOf`, `depthGateOk`); shared by the engine, the Live market, the bank stock notifier, the dashboard and the mock. Buyer counts are demand, never a chance of a sale |
+| `src/shared/reserveSuggest.ts` | 0.9 (#12) the suggested price-move reserve: per value band (`reserveBandOf`), the 10th percentile (`lowerQuantile`, `suggestedPctOf`) of the exit's change over the user's typical hold (`reserveHoldOf`), from recorded exit runs (`recordedWindows`) and the PriceDB history the drawer loaded (`pricedbWindows`); `reserveSuggestionOf` is shared by 'profit.reserveSuggestion' and the mock. Text beside the setting, never applied |
+| `src/shared/orderPersistence.ts` | 0.9 (history, RESEARCH #6) buy-order persistence: the follow rule (`orderSpellFollows`, `ORDER_SPELL_FOLLOW_SHARE`), spell ends (`orderSpellEndOf`), Kaplan-Meier with delayed entry (`spellObservationOf`, `persistenceWindowOf`, `orderPersistenceOf`), the summary and `itemBookHistoryOf`, with retention and gate constants; shared by the tracker, `'item.bookHistory'`, the dashboard and the mock; order persistence, never a fill rate |
+| `src/shared/communityHistory.ts` | 0.9 (history, RESEARCH #7) recorded community prices: which IGetPrices rows are kept (`communityHistoryPointsOf`), the point key, `communityValueScrap` (pricing.ts's rule, parity-tested), the drawer's steps (`communityHistoryOf`), retention; shared by the scheduler, the feed recorder, the dashboard and the mock |
+| `src/shared/scraptfLows.ts` | 0.9 (history) a scrap.tf copy's lowest price on sale in the user's saves: `rawPriceCompare`, `scraptfLowFold`, `scraptfLowMerge`, `scraptfLowSightingsOf`, `scraptfLowsOf`, `scraptfCopyLowOf`, `SCRAPTF_LOWS_MAX_AGE_MS`; shared by the history index, the bank stock join, the dashboard and the mock |
 | `src/service/net/*` | `policy.ts`, `budgets.ts`, `http.ts`, `redact.ts`, `ratelimit.ts`, `errors.ts` |
 | `src/service/db/*` | `openRepo(path)` implementing `Repo` with `node:sqlite` |
-| `src/service/connectors/schema.ts`, `schemaNames.ts` | `createSchemaService` (sku.pricedb.io), names and resolver |
+| `src/service/connectors/schema.ts`, `schemaNames.ts` | `createSchemaService` (sku.pricedb.io), names and resolver; from 0.9 (#22) renamed effects resolved per kind of item (`EFFECT_NAME_ALIASES`, `effectTypeForItem`, `effectIdByName(name, type?)`) and twins scoped by effect kind |
 | `src/service/connectors/pricedb.ts`, `steamMarket.ts` | PriceDB REST and socket; optional SCM priceoverview |
 | `src/service/connectors/bptfSocket.ts`, `bptfApi.ts`, `bptfItem.ts` | backpack.tf websocket, snapshot/IGetPrices/IGetCurrencies, item → SKU mapping |
-| `src/service/domain/*` | matcher, pricing, confidence, key price, engine, views (list/group/detail), shopping list, Live market index (`market.ts`), journal, holdings (`holdings.ts`), the saved scrap.tf list cache (`scraptfList.ts`), the per-bank summary (`banks.ts`, F15), the live check parser and evaluation (`liveCheck.ts`), the bank stock cache and its notifications (`bankStock.ts`, F17), the scrap.tf history index and change feed (`scraptfHistory.ts`, F20) and the re-save reminders (`resaveReminders.ts`, F20), one item's buy book across its defindex twins (`bookTwins.ts`, 0.7.4), recorded exit runs (`holdingMarks.ts`, 0.8), the copy-matched ask side (`asks.ts`, 0.8), the user's scrap.tf watches in memory (`watches.ts`, the watch cache, 0.8 G1), CSV |
+| `src/service/domain/*` | matcher, pricing, confidence, key price, engine, views (list/group/detail), shopping list, Live market index (`market.ts`), journal, holdings (`holdings.ts`), the saved scrap.tf list cache (`scraptfList.ts`), the per-bank summary (`banks.ts`, F15), the live check parser and evaluation (`liveCheck.ts`), the bank stock cache and its notifications (`bankStock.ts`, F17), the scrap.tf history index and change feed (`scraptfHistory.ts`, F20) and the re-save reminders (`resaveReminders.ts`, F20), one item's buy book across its defindex twins (`bookTwins.ts`, 0.7.4), recorded exit runs (`holdingMarks.ts`, 0.8), the copy-matched ask side (`asks.ts`, 0.8), the user's scrap.tf watches in memory (`watches.ts`, the watch cache, 0.8 G1), buy-order spells (`orderSpells.ts`, 0.9), the feed's community prices (`communityFeed.ts`, 0.9), the drawer's order book history read (`bookHistory.ts`, 0.9), CSV |
 | `src/service/priceSheetIo.ts`, `buyerCheck.ts`, `rpcSchemas.ts` | bulk paste and backups (pure); `buyer.check` lookups; zod schemas shared by more than one handler |
 | `src/service/import/*` | saved scrap.tf page parser (`scraptfHtml.ts`, parse5, no script execution), the MHTML extractor (`mhtml.ts`, F18, pure), the one entry for both file types (`savedPage.ts`), folder watcher; from 0.7.1 the in-memory ring of sanitized parser reports behind `'import.report'` (`reports.ts`, P4, never persisted) |
 | `src/service/core.ts`, `scheduler.ts`, `rpcHandlers.ts`, `entry.ts`, `logger.ts` | wiring and periodic jobs (integration) |
 | `src/main/*` | Electron main, preload, windows, tray, settings store, secrets, service host; the live check's controller (`liveCheck.ts`, with F19's `check.arm`), clipboard filter and watcher (`clipboardWatch.ts`) and global hotkey registration (`hotkeys.ts`); the opt-in scrap.tf window (`scraptfWindow.ts`, F21), the only module that may show scrap.tf, and from 0.7.1 its remembered size and place (`windowBounds.ts`, F21-12); diagnostics only, the window's hermetic test (`smokeWindow.ts`, loaded by main's gated `--smoke-window` branch alone, and its pure local router `smokeWindowFixtures.ts`) |
-| `src/renderer/*` | dashboard UI; `api.ts` uses `window.flipdesk` or, in a plain browser, `mock.ts`. Page logic lives in pure, unit-tested `*Model.ts` files |
+| `src/renderer/*` | dashboard UI; `api.ts` uses `window.flipdesk` or, in a plain browser, `mock.ts`. Page logic lives in pure, unit-tested `*Model.ts` files; from 0.9 the pure models `breakEvenModel.ts`, `checkoutGuardModel.ts`, `aboutModel.ts`, `riskModel.ts` and `bookHistoryModel.ts`, and the components `CheckoutGuard.tsx`, `TradeLockCard.tsx` and `BookHistorySection.tsx` |
 | `test/<area>/*.test.ts`, `test/fixtures/<area>/*` | vitest tests and fixtures per area |
 
 ## Agreed module entry points
@@ -593,12 +600,18 @@ ScraptfListed.key?                                                   // scraptfL
 SCRAPTF_TIMING_MIN_DROPS = 5, SCRAPTF_TIMING_MIN_COPIES = 3, SCRAPTF_TIMING_MIN_ENDED = 15, SCRAPTF_TIMING_MIN_AT_RISK = 8, SCRAPTF_TIMING_MIN_AT_RISK_END = 3,
 SCRAPTF_TIMING_HORIZONS_MS (6 h, 1 d, 3 d, 7 d), SCRAPTF_OWN_MIN_DROPS = 3, SCRAPTF_OWN_CADENCE_MAX_CV = 0.35,
 SCRAPTF_OWN_CADENCE_MIN_BRACKETS = 4, SCRAPTF_OWN_CADENCE_MIN_LOOKS = 2, SCRAPTF_WAIT_MIN_GAIN_SCRAP = 3, SCRAPTF_WAIT_MIN_GAIN_SHARE = 0.1,
-SCRAPTF_WAIT_MIN_P_DROP = 0.3, SCRAPTF_TIMING_STEPS_MAX = 10, SCRAPTF_TIMING_BRIEF_STEPS = 5, SCRAPTF_TIMING_RUN_ENDS_MAX = 5,
+SCRAPTF_WAIT_MIN_GAIN_LOW_SCRAP = 1, SCRAPTF_TIMING_Z = 1.6448536269514722, SCRAPTF_TIMING_RANGE_PCT = 90, SCRAPTF_TIMING_SPREAD_CACHE_MAX = 4096,
+SCRAPTF_DROP_LOW_ALPHA = 0.05, SCRAPTF_DROP_SHORT_BRACKET_MIN = 5,   // 0.9 (#10)
+SCRAPTF_TIMING_STEPS_MAX = 10, SCRAPTF_TIMING_BRIEF_STEPS = 5, SCRAPTF_TIMING_RUN_ENDS_MAX = 5,
 SCRAPTF_TIMING_TABLES_MAX = 64, SCRAPTF_TURNOVER_CURVE_MAX = 50 (SCRAPTF_TIMING_MAX_BRACKET_MS and the gap-limit names re-exported)
-ScraptfTimingTable; scraptfTimingTableOf(states, keyScrap, scope); scraptfTimingAt(t, ageMs); scraptfAtRiskAt(t, ageMs); scraptfLookGapMs(times)
-ScraptfBankCycles; scraptfBankCyclesOf(bank, saves, keyScrap, { assetStability? }); scraptfTimingTableFor(c, valueScrap, keyScrap)   // band, else the bank
+ScraptfTimingTable (+ events, copyIx, placement, dropSizes, dropBrackets); ScraptfTimingPlacement = 'right' | 'left'; scraptfTimingTableOf(states, keyScrap, scope, placement = 'right')
+scraptfTimingAt(t, ageMs); scraptfAtRiskAt(t, ageMs); scraptfLookGapMs(times)
+ScraptfBankCycles; scraptfBankCyclesOf(bank, saves, keyScrap, { assetStability? }); scraptfTimingTableFor(c, valueScrap, keyScrap, placement = 'right')   // band, else the bank; 'left' cached beside as …|left
+scraptfTimingInfluenceOf(t, fromMs, toMs): ScraptfTimingInfluence; scraptfTimingSpreadOf(t, fromMs, toMs, lookGapMs): ScraptfTimingSpread   // memoised per table
+scraptfWilson(p, n, z?); scraptfShareRange(p, variance, states, copies): ScraptfShareRange
+scraptfMedianLowRank(n, alpha?); scraptfDropLowOf(sizes, brackets, lookGapMs): ScraptfDropLow | null; scraptfTableDropLowOf(t, lookGapMs)   // T9-3b, memoised per table
 scraptfTimingEv({ revenueScrap, costScrap, nextScrap, pDrop, pNone, q, profit }): { evBuyScrap; evWaitScrap }   // through flipProfit
-scraptfBuyTimingOf({ bank, copy, table, buy, profit, keyScrap, lookGapMs, now }): ScraptfBuyTiming
+scraptfBuyTimingOf({ bank, copy, table, buy, profit, keyScrap, lookGapMs, now, tableLeft? }): ScraptfBuyTiming   // + uncertainty?, saveTiming?
 scraptfTimingForKey({ cycles, key, buy, profit, keyScrap, now }): ScraptfBuyTiming | null; scraptfTimingBrief(t): ScraptfTimingBrief
 scraptfCyclesLookGapMs(c, page)   // the home page's look gap the lifecycle kept (life.lookGaps): never re-sorted per row
 scraptfTurnoverOf(life, bank); scraptfBankTurnover(c) (memoised); scraptfItemCyclesOf(c, key)
@@ -621,7 +634,7 @@ HandlerContext.scraptfHistory: Pick<ScraptfHistory, 'onImport' | 'itemHistory' |
 listOpportunities(repo, q, keyPrice, now, useOrder?, joins?: { timingForCopy? })   // views.ts: Opportunity.timing on 'import' rows
 HealthReport.scraptfAssetIds (computeHealth); ImportReport.counts.reserved / notTradable, ImportReportItem.dataBot   // LC-5, LC-6
 // renderer
-timingBadge(t, now), timingVerdictTitle(t, now), timingWhyText(why, ctx), timingDurText(ms), assetIdsLines(list), TIMING_ESTIMATE_NOTE   // timingModel.ts
+timingBadge(t, now), timingVerdictTitle(t, now), timingWhyText(why, ctx), timingDurText(ms), timingRangeText(r), timingRangesText(t), timingSaveTimingText(t), assetIdsLines(list), TIMING_ESTIMATE_NOTE   // timingModel.ts
 historyTimingView(t, h, keyScrap, now), historyRunLines(c, h, keyScrap, now), HISTORY_RUNS_SHOWN   // historyModel.ts
 stepChartGeom(points, box?, marks?: { downAts? }) -> StepGeom.downs? (only with marks); StepSparkline draws a tick under each
 bankStockSinceListedCell(r & { timing? }, keyScrap), bankStockTurnoverText(t, path)   // bankStockModel.ts
@@ -702,7 +715,7 @@ bankStockComparator(sort, dir, now?); bankStockLongListed(r, now, minListedMs?) 
 BANK_STOCK_NOTIFY_AGE_NOTE_MS (15 min), bankStockSaveAgeText(ms), bankStockOldSaveNotice(...), bankStockNewFlipNotice(label, row, key, savedAgoMs?)
 // shared/banks.ts, market.ts, scraptfHistory.ts, scraptfList.ts
 bankStockFlips(rows, count); mergeBankNewestSaves(newest, extra); WholeLookSave, wholeLookNewestSaves(newest, wholeLookOf, itemCountOf), batchItemCounts(batches, extra?) (DC-2)
-scraptfCoverage(batches, categoriesOf, extra?, wholeLookOf?); MARKET_SORTS; marketProfitTie
+scraptfCoverage(batches, categoriesOf, extra?, wholeLookOf?); MARKET_SORTS; marketProfitTie; marketProfitTiesFirst(key) ('seen', 0.9 'backup' / 'depth')
 SCRAPTF_ITEM_STOCK_EVENTS (10), SCRAPTF_PRICE_KINDS; ScraptfKeyState, scraptfKeyStatesOf, scraptfEventIsCurrent, scraptfMarkSuperseded (ACT-10)
 ScraptfListed, scraptfListedOf, scraptfListedPick; marketListedSideMatches({ scraptfListedSince, scraptfLastSeenAt? }, q, now)
 scraptfResaveNotice(bank, lastSavedAt, now, window?); SCRAPTF_RESAVE_HOW_FILE, SCRAPTF_RESAVE_HOW_WINDOW; WATCH_WAITING_FOR_SCHEMA (scraptfList.ts)
@@ -754,6 +767,170 @@ ServiceHostStatus.failure                                         // the ready m
 // renderer
 OPP_MAX_SEARCH_CHARS (oppModel.ts); KEY_SANE_SCRAP (settingsFields.ts); SCRAPTF_CHALLENGE_NOTICE_READ_OFF (scraptfWindowModel.ts)
 ```
+
+v0.9 exits (#2 exact exit fees and break-even, #11 buyer signals, #14 hardening; "0.9 round", below):
+
+```ts
+// shared/venues.ts (integer cents; no URL, no request)
+ScmFeeRule, SCM_FEE_RULE (5% Steam, 10% TF2, min 1 cent), FEE_MAX_CENTS (1,000,000)
+scmBuyerPaysCents(receivedCents, rule?) (100 -> 115, 193 -> 221, 1 -> 3), scmSellerNetCents(buyerPaysCents, rule?) (the inverse; null under 3)
+MANNCO_FEE_BPS (500), MANNCO_MIN_FEE_CENTS (1), manncoNetCents(priceCents); MARKETPLACE_FEE_DEFAULT (0.1), MARKETPLACE_FEE_MAX (0.5), marketplaceFeeOf(v)
+parseUsdCents(text), usdText(cents); venueFeeHint(venue, side, marketplaceFeePct?); JOURNAL_VENUES + 'mannco.store'
+// shared/ceiling.ts
+BreakEvenSettings, marketplaceFeePctOf(p), breakEvenFor(cost, p, mode = 'buy'), grossBeforeFee(net, fee), scmGrossValue(net), breakEvensOf(cost, p, mode?)
+// shared/buyerSeen.ts, scraptfWindowPolicy.ts
+BOT_SERVICES, botServiceOf(uaClient), botServiceTitle(o)   // a label only
+SCRAPTF_READ_REASONS.challenge; SCRAPTF_CHALLENGE_PHRASES, SCRAPTF_CHALLENGE_SCAN_CHARS (262,144), scraptfChallengeIn(html)
+// service
+bptfListingActive(raw, stats?), truthyBan(v), isBannedFromBans(bans) (moved from bptfApi.ts, which re-exports it)   // connectors/bptfItem.ts
+BptfMapStats.inactive; WsMapResult ok arm + active   // the socket drops an inactive listing like a delete (FeedBatch.inactive)
+CHALLENGE_BODY_MARKERS, hasChallengeMarkers(text); STEAM_RATE_LIMIT_ERESULTS ('25', '84'), steamRateLimitEresult(host, headers)   // net/http.ts
+opportunitiesCsv(rows, keyScrap, profit?: BreakEvenSettings | null) + break_even_ref   // domain/csv.ts
+// renderer
+BREAK_EVEN_NOT_A_FORECAST, breakEvenText, venueBreakEvensText, breakEvenTitle(b, keyScrap, { estimate? }), oppCostTitle, holdingBreakEvenTitle   // breakEvenModel.ts
+BreakEvenView, quickBreakEvenView, inputBreakEvenView, CheckBreakEvenView, checkBreakEvenView; ScmNetView, SCM_NET_TITLE, scmNetView(r)   // breakEvenModel.ts
+MARKETPLACE_FEE_PCT, MARKETPLACE_FEE_HINT (settingsFields.ts); feeHint(venue, side, marketplaceFeePct?) (recordTradeModel.ts); FLAGS.impersonator (format.ts)
+```
+
+v0.9 scrap.tf (#9, #13, #25, #22; "0.9 round", below):
+
+```ts
+// shared/checkoutGuard.ts (pure, zod-free, no address: an F20 file)
+CheckoutGuardSource ('help' | 'community' | 'inferred' | 'rule'), CheckoutGuardId, CheckoutGuardLine, CHECKOUT_GUARD_LINES, CHECKOUT_GUARD_SOURCE_LABELS
+CHECKOUT_GUARD_CHECKED ('2026-10-22'), CHECKOUT_GUARD_HEAD, CHECKOUT_GUARD_NEVER, CHECKOUT_GUARD_SHORT, CHECKOUT_GUARD_TAG, CHECKOUT_GUARD_POPUP
+CHECKOUT_GUARD_TOAST, CHECKOUT_GUARD_TOAST_BODY_MAX (200); checkoutGuardItems(), checkoutGuardTitle(), withCheckoutGuard(body, max?)
+// shared/importCodes.ts, banks.ts, bankStock.ts, bankStockNotify.ts
+BANK_UNAVAILABLE ('bank-unavailable'), BANK_UNAVAILABLE_WARNING; PRICE_MARKDOWN, PRICE_COUNTDOWN, RECENT_SECTION (report only); IMPORT_REPORT_NOTICES_MAX (5)
+bankNoticeNewestAt(batches, bank), bankUnavailableAt(noticeAt, lastSavedAt)   // ScraptfBankSummary.unavailableAt
+bankStockMarkdownText(marks), bankStockMarkdownOf(v) (Foundation); bankStockRow(...).markdown (an on-sale row only)
+bankStockNoticeWithGuard(c, label, K, savedAgoMs, timing?)   // the S3 notifier's send
+// service
+SchemaService.effectIdByName(name, type?); EFFECT_NAME_ALIASES ([{ id: 408, names: ['Polar Prism', 'Northern Nights'] }]), effectTypeForItem(item, skin)   // connectors/schemaNames.ts
+ScrapTfParseResult.bankNotice?: 'unavailable'; ParseDiagnostics.notices; DocScan.probes, DocScan.recentCards   // import/scraptfHtml.ts
+ImportReport.counts + markdownSoon, markdownOff, countdownCards, recentlyTraded, recentCards, bankNotices; ImportReport.notices?   // import/reports.ts
+importSavedPage: a bankNotice look is stockSave 'partial'; a window read of one with 0 items records its batch; ImportBatch.bankNotice
+// main
+WARNING_ORDER: BANK_UNAVAILABLE first   // scraptfWindow.ts
+// renderer
+checkGuardLine(r), timingGuardShown(t), shoppingGuardLine()   // checkoutGuardModel.ts
+CheckoutGuard({ variant: 'list' | 'line' })   // components/CheckoutGuard.tsx; timingBadge's title ends with CHECKOUT_GUARD_TAG on Buy now
+bankStockMarkdownTag(r) ('Drops soon' | 'Marked down')   // bankStockModel.ts
+BankCardView.unavailable, bankUnavailableText(s, now, path); importBankText(..., unusualsIndex?, bankUnavailable = false)   // banksModel.ts
+importBankUnavailable(r), ImportReportMarkers, importReportMarkers(reports), importReportToast(copied, count, markers?: ImportReportMarkers)   // importModel.ts
+WINDOW_WARNINGS[BANK_UNAVAILABLE]   // scraptfWindowModel.ts
+BoundaryGrade, BoundarySource, UnsupportedRow, UNSUPPORTED_CHECKED, BOUNDARY_GRADE_LABELS, UNSUPPORTED_INTRO, SCRAPTF_UNSUPPORTED (9 rows)   // aboutModel.ts
+PERMISSION_QUESTIONS, PERMISSION_TEMPLATE (moved from ImportPage.tsx, which re-exports it), boundarySourceTitle(s)   // aboutModel.ts
+UnsupportedPanel()   // pages/AboutPage.tsx: copies, never opens
+```
+
+v0.9 holdings and ledger (#1 trade lock, #17 trend size and key band, the ledger's valuation; every new field optional):
+
+```ts
+// shared/robustStats.ts (pure; other packages may import it, never edit it)
+median(values), quantile(values, q) (R type 7), theilSen(points) -> { slope; intercept; pairs } | null, medianAbsDeviation(values, center?)
+// shared/holdingAdvice.ts
+TRADE_LOCK_MS (7 d); tradeLockModeOf(settings) ('unknown' unless 'none' / '7d'); tradableAtOf(boughtAt, mode) (+7 d with '7d', else null)
+holdingTradeLockOf(lots, mode, now) -> HoldingTradeLock | null; withTradeLock(row, lots, mode, now) (no key without a lock)
+HOLDING_TREND_SIZE_MIN_POINTS (5), HOLDING_TREND_SIZE_MAX_POINTS (60); HoldingTrend.size (Theil-Sen over the newest stretch's sources)
+KEY_BAND_SPAN_MS (7 d), KEY_BAND_STEP_MS (1 d), KEY_BAND_MAX_POINT_AGE_MS (2 d), KEY_BAND_MIN_SPANS (28), KEY_BAND_MAX_SPANS (180), KEY_BAND_LOW_Q / HIGH_Q (0.1 / 0.9)
+keyMoveBandOf(points, loadedAt) -> KeyMoveBand | null; HoldingAdviceOptions.keyBand
+holdingAdvice: kind 'locked' (first reason 'trade-locked' with todayKind), context reasons 'trend-size', 'units-locked', key-exposure.band
+// shared/holdings.ts
+holdingLockedNow(row); HoldingsResult.totals.locked (absent at 0; locked rows leave sellable)
+holdingsValuationOf(res) -> HoldingsValuation; lotValueOf(lot, sku, v, profit) -> JournalLotValue; journalValuerOf(v, profit) -> JournalLotValuer
+// shared/journal.ts
+JournalLotValuer { at; valueOf(lot, sku) }; journalLedger(entries, valuer = null); JournalLedgerRow.value
+JOURNAL_CSV_COLUMNS + worth_now_ref, unrealised_ref, valued_at (23 columns; blank without a valuer and on every row but an open buy)
+// shared/links.ts
+STEAM_TRADE_PROTECTION_FAQ_URL (in STATIC_EXTERNAL_URLS; opened only in the user's browser, never fetched)
+// service
+PriceDb.loadedKeyHistory() -> LoadedKeyHistory | null   // the key curve cache ('|' first); history('5021;6') now fills it; sends nothing
+HoldingsDeps.keyHistory?() -> LoadedKeyHistory | null    // core: pricedb.loadedKeyHistory(); a throw gives no band, never a failed list
+journalCsv(entries, valuer = null)                       // domain/csv.ts; 'journal.exportCsv' values over ctx.holdings.list({}, now)
+// renderer
+keyBandText(band, netKeys); TRADE_LOCK_QUESTION, TRADE_LOCK_BODY, TRADE_LOCK_LABELS, TRADE_LOCK_TITLES, TRADE_LOCK_CARD_ORDER, TRADE_LOCK_HELP
+TRADE_LOCK_CARD_FOOTER, TRADE_LOCK_CAUTION, TRADE_LOCK_FAQ_LABEL; tradeLockAnsweredText(at), tradeLockSetToast(mode), tradeLockCautionOn(settings)
+tradeLockDrawerCaution(heldSince, now); SELLABLE_TITLE, sellableTitle(totals); tradeLockLapseAt(rows), holdingsLapseAt(rows)   // holdingsModel.ts
+holdingLotLines(lots, keyScrap, now, mode = 'unknown') (" · tradable <date>")                     // holdingDetailModel.ts
+INVENTORY_TITLE, inventoryStat(valuation, keyScrap, error?)                                    // journalModel.ts
+TradeLockCard(), TradeLockCaution({ held })                                                   // components/TradeLockCard.tsx
+TradeLockSection({ s })                                                                       // pages/SettingsPage.tsx ('set-trade')
+mockKeyHistory(t0, keyScrap)                                                                  // mockData.ts: 45 daily points, no RNG
+```
+
+v0.9 ranking (#3 risk-aware keys and the risk control, #12 the suggested reserve; "0.9 round", below):
+
+```ts
+// shared/exitRisk.ts (pure; imports ./ceiling and ./types only)
+EXIT_DEPTH_CAP (20), BOOK_DEPTH_MANY_MIN (5), MIN_PROFITABLE_DEPTH_MAX (10); ExitDepth { values; buyers }, ExitRisk { backupProfitScrap; profitableDepth; bookDepth }
+exitDepthOf(orders, useOrder?), profitableDepthAt(d, cost, p) (= values >= breakEvenFor(cost, p, 'buy')), backupProfitOf(next, cost, p)
+exitRiskAt(e: { exitDepth?; nextBuyer? }, cost, p) -> ExitRisk | null; opportunityRiskFields(r) (nulls absent), marketRiskFields(r) (profitableDepth null kept)
+liquidityTagOf(bookDepth) ('none' | 'one' | 'few' | 'many'); minProfitableDepthOf(v), depthGateOk(depth, minDepth)   // notifications.minProfitableDepth
+// shared/reserveSuggest.ts (pure)
+RESERVE_LOOKBACK_MS (90 d), RESERVE_MAX_MARKS (50,000), RESERVE_BANDS, RESERVE_BAND_REF10_SCRAP (90), RESERVE_DEFAULT_HOLD_MS (1 d), RESERVE_MIN_HOLD_MS (1 h), RESERVE_MAX_HOLD_MS (14 d)
+RESERVE_MIN_WINDOWS (20), RESERVE_MIN_ITEMS (3), RESERVE_MAX_WINDOWS_PER_ITEM (30), RESERVE_QUANTILE (0.1), RESERVE_POINT_TOLERANCE_MIN_MS (1 h), RESERVE_KEY_POINT_MAX_AGE_MS (2 d)
+reserveBandOf(value, keyScrap), lowerQuantile(sorted, q), suggestedPctOf(p10), ReserveHold, reserveHoldOf(hold), ReserveWindow, keyPriceAtOf(keyHistory) -> (t) => Scrap | null, markRevenueScrap(m, keyScrap)
+recordedWindows(marks, holdMs, settingsAt, now, keyAt?), pricedbWindows(histories, holdMs, now), reserveSuggestionOf({ marks, histories, hold, keyScrap, settingsAt, now, keyHistory? }) -> ReserveSuggestion
+// shared/market.ts, bankStockNotify.ts
+marketRiskCost(r) (your price, else a rule flip's estimate, else null); MARKET_CSV_COLUMNS + backup_profit, profitable_depth, book_depth, book_depth_tag
+BankStockNotifyArgs.minDepth?, depthOf?(row)   // candidateOf's flip gates
+// service
+'profit.reserveSuggestion' -> ReserveSuggestion   // rpcHandlers.ts: holdingMarksSince, the journal, historyCache, pricedb.loadedKeyHistory() only
+MarketEval.exitDepth?; sortValueOf(key, e, profit, knownObservedAt, risk); toRow(c, now, K, kn, p, withTiming?)   // domain/market.ts
+BankStock.depthOf?(r); Holdings.buyerSettingsAt?(now); opportunitiesCsv + backup_profit_ref, profitable_depth, book_depth, book_depth_tag
+// renderer
+OPP_SORT_LABELS, OPP_SORT_HELP; compareOpps ties 'backup' / 'depth' by profit   // oppModel.ts
+MIN_PROFITABLE_DEPTH, MIN_PROFITABLE_DEPTH_LABEL, minProfitableDepthHint(n)   // settingsFields.ts
+DEMAND_NOT_SALES, BOOK_DEPTH_LABELS, BOOK_DEPTH_BOT_LABELS, depthPopulationNote(useOrder?), depthCountText(n), riskSentences(r, keyScrap, at, hasRevenue, useOrder?), oppBuyersTitle(o, keyScrap, useOrder?)   // riskModel.ts
+marketRiskTitle(r, keyScrap), marketSellsTitle(r, keyScrap, now?), DRAWER_RISK_HELP, DrawerRiskLine, drawerRiskLine(o, buyOrders, p, keyScrap)   // riskModel.ts
+RESERVE_BAND_LABELS, RESERVE_SUGGEST_HELP, reserveBandText(b), ReserveSuggestionView, reserveSuggestionView(s)   // riskModel.ts
+OppSortPicker (OpportunitiesPage.tsx); ReserveSuggestionNote (SettingsPage.tsx, under Profit thresholds' fields)
+```
+
+v0.9 history (#6 order persistence, #7 recorded community prices, scrap.tf lows; "0.9 round", below):
+
+```ts
+// shared/orderPersistence.ts (pure, zod-free; order persistence, never a fill rate)
+ORDER_SPELLS_MAX_AGE_MS (60 d), ORDER_SPELLS_PER_BASE_MAX (300), ORDER_SPELLS_MAX_ROWS (400,000), ORDER_SPELLS_DETAIL_MAX (2,000), BOOK_HISTORY_ORDERS_MAX (5)
+ORDER_SPELL_FOLLOW_SHARE (0.7), ORDER_SPELL_TOUCH_MS (10 min), ORDER_SPELL_OPEN_MAX (20,000), ORDER_SPELL_RELIST_GRACE_MS (60 s)
+ORDER_PERSISTENCE_HORIZONS_MS (1 h, 1 d, 7 d), ORDER_PERSISTENCE_MIN_AT_RISK (8), ORDER_PERSISTENCE_MIN_AT_RISK_END (3), ORDER_PERSISTENCE_VALUE_BAND (0.15), ORDER_PERSISTENCE_NOTE
+SpellObservation; orderSpellFollows(l, topScrap, keyScrap), orderSpellEndOf(prev, next, keyScrap) ('same' | 'lowered' | 'raised'), spellObservationOf(s, keyScrap)
+persistenceWindowOf(obs, ageMs, horizonMs), orderPersistenceOf(spells, order, keyScrap, now), orderSpellSummaryOf(spells), spellsEntryCutOf(spells), itemBookHistoryOf(a)
+// shared/communityHistory.ts (accepted price suggestions, never sales)
+COMMUNITY_HISTORY_MAX_AGE_MS (365 d), COMMUNITY_HISTORY_PER_SKU_MAX (200), COMMUNITY_HISTORY_MAX_ROWS (300,000), COMMUNITY_HISTORY_DETAIL_MAX (200), COMMUNITY_CURRENCY_MAX (16)
+COMMUNITY_FEED_MEMO_MAX (20,000), COMMUNITY_NOTE; communityHighOf(p) (a high equal to the low is null), sameCommunityPrice(a, b), communityPointKey(p)
+communityValueScrap(currency, value, keyScrap) (pricing.ts's communityScrap, parity-tested), communityHistoryPointsOf(before, incoming, { delta, recordedAt }), communityHistoryOf(points, current)
+// shared/scraptfLows.ts
+SCRAPTF_LOWS_MAX_AGE_MS (365 d), ScraptfLowSighting; rawPriceCompare(a, b, keyScrap), scraptfLowFold(low, s, keyScrap), scraptfLowMerge(a, b, keyScrap), sameScraptfLow(a, b)
+scraptfLowSightingsOf(rows, bank, at), scraptfLowsOf(saves, bank, keyScrap), scraptfCopyLowOf(core, keyScrap)
+// shared/types.ts (Foundation)
+OrderSpell, OrderSpellEnd (deleted | inactive | lowered | raised | relisted | unwatched), ORDER_SPELL_ENDS, PersistenceScope, PersistenceShort, PersistenceWindow, OrderPersistence
+OrderSpellSummary, BookOrderPersistence, CommunityPoint(Source), CommunityHistory(Step), ItemBookHistory, ScraptfLowCore, ScraptfLowStored, ScraptfCopyLow; BankStockRow.low?, ScraptfItemHistory.low?
+// service
+wsCommunityPriceOf(payload, stats?) -> WsCommunityPrice | null   // connectors/bptfItem.ts: item.price.community; never user, steam or deal
+FeedBatch.community? (FeedCommunityPrice, newest per base), FeedBatch.epoch? (grows per connection and buffer-limit-exceeded)   // contracts.ts, connectors/bptfSocket.ts
+createOrderSpellTracker(deps): OrderSpellTracker { start(), onBatch(b, tracked, now), tick(live, now), stop(), following() }   // domain/orderSpells.ts
+createCommunityFeedRecorder(deps): CommunityFeedRecorder { record(prices, tracked) }   // domain/communityFeed.ts
+readItemBookHistory(a) -> ItemBookHistory   // domain/bookHistory.ts ('item.bookHistory': local reads only)
+ScraptfHistory.lowsFor(bank), ScraptfHistory.recordLows(batchId); ScraptfHistoryDeps.lows?   // domain/scraptfHistory.ts
+BankStockDeps.history.lowsFor?   // domain/bankStock.ts: BankStockRow.low, after the watch join
+Repo.insertOrderSpell, endOrderSpell, touchOpenOrderSpells(at, exceptIds?), endOpenOrderSpells, orderSpells, pruneOrderSpells   // db/repo.ts (Foundation)
+Repo.communityFor, insertCommunityHistory, communityHistory, pruneCommunityHistory; Repo.scraptfLows, upsertScraptfLows, pruneScraptfLows
+RETENTION.orderSpellsMs / communityHistoryMs / scraptfLowsMs; runMaintenance(...) + orderSpells, communityHistory, scraptfLows   // domain/engine.ts
+'item.bookHistory' { sku, orders? } -> ItemBookHistory   // no push
+// renderer
+BOOK_HISTORY_REFRESH_MS (30 s), BOOK_HISTORY_ORDERS_SHOWN (3), PERSISTENCE_SCOPE_SHORT, PERSISTENCE_SCOPE_WORDS, PERSISTENCE_SHORT_WORDS, SCRAPTF_LOW_NOTE, BOOK_HISTORY_NOTHING_FOLLOWED
+bookHistoryOrderIds(orders), bookOrderWho(o, orders), fmtPersistencePct(p), bookHistorySummaryText(s), bookHistorySummaryTitle(s), orderPersistenceLine(o, who, keyScrap)
+communityChartPoints(h, keyScrap, now), communityReadout(step, keyScrap), communitySinceText(h), scraptfLowLine(h, keyScrap), scraptfLowSentence(low, costScrap, keyScrap)   // bookHistoryModel.ts
+BookHistorySection({ sku, orders, keyScrap, now })   // components/BookHistorySection.tsx: ItemDrawer, after the Sell listings
+bankStockPriceTitle(r & { low? }, keyScrap)   // bankStockModel.ts: + scraptfLowSentence
+mockOrderListedAt(listingId, now), seedOrderSpells(book, now), seedCommunityHistory(book, now)   // mockData.ts
+```
+
+v0.9 timing (#10 honest uncertainty in buy timing; "0.9 round", below): its entries extend the 0.8
+`// shared/scraptfTiming.ts` block and the `timingModel.ts` renderer line above in place (the jackknife, the share
+ranges, the drop size's low end, 'left' placement, `tableLeft?`, `timingRangeText`, `timingRangesText`,
+`timingSaveTimingText`); 0.8's fixed drop-chance constant is gone from it.
 
 ## Integration (src/service/core.ts and friends)
 
@@ -1057,7 +1234,8 @@ importSavedPage(ctx, { html, fileName, mtimeMs })         // shared by 'import.h
   `mockPrices` alike). Instant never picks an unverified bot order, so
   "no realistic bot order" includes "none seen in the last day". A zero-valued order ("0.05 ref" weapon-priced orders
   round to 0 scrap, F19) is left out of the median and never called an outlier. Confidence gives "+5 Buyer is online"
-  only while the order's last event is within `CONFIRMED_MS` (2 h; the flag is as old as that event), and counts
+  only while the order's last event is within `CONFIRMED_MS` (2 h; the flag is as old as that event) (0.9, #11: no
+  longer added; the flag was true on every captured event, RESEARCH §4.2), and counts
   only verified orders (and the order itself) as buyers within 10%, never around a zero price. The renderer's
   online dots and "Sells for" lines say "last seen N ago" past 2 h (`buyerPresenceText`, `src/shared/buyerSeen.ts`),
   and Opportunities and the drawer headline mark an unverified revenue order with a warn clock and its age.
@@ -1884,6 +2062,14 @@ Decisions and deviations from the F15 spec:
    followed the card's quality class until 0.7.1, which keys every skin the backpack.tf way, P2; re-tagging moves a
    price's bank).
 
+**0.9 (#13) A bank that is not trading.** When the bank's newest look said it was not trading (a batch with
+`bankNotice` 'unavailable' at or after its newest save: `bankNoticeNewestAt`, `bankUnavailableAt`), the summary sets
+`ScraptfBankSummary.unavailableAt` and the card adds a warning line under its saved line (`bankUnavailableText`:
+"scrap.tf said it was not trading at your look 5 min ago"; `.bank-unavailable`). Its title says that look stored no
+bank stock save, so the stock, changes and flips shown are from the save before it, and that the notice is read from
+the page's text, a form no real save has confirmed. A later normal save clears it; the field is absent otherwise, so
+older summaries and the mock's seeds read as before.
+
 ## Live check (F16)
 
 The spec calls this "F15 Live check"; F15 in this codebase is the scrap.tf banks page, so code comments say **F16** and
@@ -2442,6 +2628,14 @@ Decisions and deviations from the F17 spec:
     changes are compared per page, so a page's first save shows none and an item that moved between pages of the list
     can read as new; pages saved before 0.6).
 
+**0.9 (#13) The price-drop tag.** A bank page card that showed scrap.tf's own price-drop wording carries it in
+`bank_stock.markdown` (V16; never on /items rows), and the shared `bankStockRow` puts it on an on-sale row of the newest
+save only (`BankStockRow.markdown`; never a gone or family row). The Item cell shows it after the timing badge as a
+pill (`bankStockMarkdownTag`, `.bs-markdown`): *Drops soon* for "This item will decrease in price shortly." (also with
+both), *Marked down* for "… off original price" only. Its title says it is evidence only: no real save has confirmed
+the wording, Flip Desk does not know when or by how much the price changes, and buy timing, profit and alerts do not
+use it.
+
 ## Save modes, MHTML and the reference helper (F18)
 
 scrap.tf adds bank cards after its page has loaded: new stock appears live. The reference userscript (VeBeshka's
@@ -2606,6 +2800,12 @@ save type out.
     import skips its own toast for a no-cards result, so the notice shows once.
     `AppContextValue.lastImport` keeps the newest result, so the Import page that How to save opens starts on it.
   - A test ties the renderer's code and reason to the parser's `NO_CARDS_SAVED_WARNING`.
+- **0.9 (#13) A bank that is not trading.** A recognised bank page whose own visible text says its bank is not trading
+  (a notice naming no bank or the page's own, such as "Hat Banking is temporarily disabled") warns `bank-unavailable`
+  (`BANK_UNAVAILABLE_WARNING`) in place of `no-cards-saved`, which gave the wrong advice: the page was saved fine. The
+  look stores the prices it shows but no bank stock save, whatever its cards (`stockSave: 'partial'`), and its batch
+  keeps `bankNotice`. Last import and Recent batches read "Hats · scrap.tf/buy/hats · bank not trading"
+  (`importBankText(…, bankUnavailable)`, from `importBankUnavailable(r)` or the batch's `bankNotice`).
 
 **S4 Parity with the reference helper.** Each rule the reference uses to read a card is proven by a describe in
 `test/import/referenceParity.test.ts`; two gaps were fixed.
@@ -3388,6 +3588,10 @@ only in development. Its bounds follow resize, maximise, unmaximise, restore and
   new". From 0.7.1 a window read that wrote a save also carries `pageFlips` and `topFlips` (UX-3), and `settled:
   false` (main only) stores prices and the batch but no bank stock save (`stockSave: 'unsettled'`). From 0.8 (G2) it
   carries `droppedFlips` too (absent when that count failed; main's `readFlipsOf` passes it on).
+- 0.9 (#13): a read of a page whose own text says its bank is not trading records its batch even with no items (with
+  `bankNotice`, `itemCount` 0 and no stock save), so the Banks card can date the notice; any other read with no items
+  still records nothing. Main's `WARNING_ORDER` ranks `bank-unavailable` first, and the toolbar words it "scrap.tf
+  says this bank is not trading right now: no stock save, and nothing on it reads as sold" (`WINDOW_WARNINGS`).
 
 **Renderer.**
 
@@ -3426,7 +3630,11 @@ only in development. Its bounds follow resize, maximise, unmaximise, restore and
   own user agent, naming Flip Desk and Electron, without the contact address), and its R9 says key presses in the
   scrap.tf window, Steam's sign-in included, are only checked for the window's Back, Forward, Reload and Home keys
   (F21-11) and are never kept, logged or sent. It credits both ported MIT projects with their copyright and says
-  where an installed copy keeps the licence notices (0.7.3 round, Packaging).
+  where an installed copy keeps the licence notices (0.7.3 round, Packaging). 0.9 (#25): between "What it never
+  does" and "Platform rules", *Unsupported by scrap.tf* (`UnsupportedPanel`, `aboutModel.ts`) lists nine things
+  scrap.tf does not offer or allow, why, and what Flip Desk does instead, with dated, graded sources whose addresses
+  are copied, never opened, then the email (`PERMISSION_TEMPLATE`, moved from the Import page, which re-exports it)
+  behind "Show the email" and a Copy button.
 - **Mock.** `mockScraptfWindow.ts`: a fake history, main's validation, made-up reads with
   `MOCK_WINDOW_READ_WARNING` and `openFromLink` (from 0.7.4 a read's `pageFlips` and `newFlips` are the mock bank
   stock page's Flips and new-flip counts, `flipsOn`, so an /items family row is no flip there either); `mock.ts` gates `settings.set`, routes `links.open`, refuses a
@@ -3698,7 +3906,15 @@ gained the checks below. Schema V10 adds one index. Section names are the audit'
   keeps the newest `IMPORT_REPORT_RING` (20) in memory only (`scrubReportText` masks 9+ digit runs, links and control
   characters and clips every text); refused parses and empty window reads are kept as counts only.
   `'import.report' { limit? }` returns copies, newest first; the Import page's **Copy parser report** puts them on
-  the clipboard as JSON and sends nothing.
+  the clipboard as JSON and sends nothing. 0.9 (#13): `counts` gains `markdownSoon`, `markdownOff`, `countdownCards`,
+  `recentlyTraded`, `recentCards` and `bankNotices`, and `notices` (absent when none) keeps at most
+  `IMPORT_REPORT_NOTICES_MAX` (5) matched phrases ('bank notice: "…"', 'recently traded: "…"', 'countdown in a
+  "recent" section: "…"'), scrubbed again. Cards with an evidence code (`price-markdown`, `price-countdown`,
+  `recent-section`) are kept after the refused ones, with class tokens naming recent, countdown, drop, discount,
+  markdown or timer. The copy toast sums them (`importReportMarkers`) and adds "They also showed scrap.tf wording Flip
+  Desk only records (…); the report shows it." when any is above 0; the 0.8 texts are unchanged otherwise. It names
+  'a "recently traded" section' only when `recentlyTraded` is above 0; cards under an id or class that merely names
+  "recent" read 'N cards in a part of the page marked "recent"' (the two counts are kept apart).
 
 **Bank stock and history** (`shared/bankStock.ts`, `domain/bankStock.ts`, `shared/scraptfHistory.ts`,
 `domain/scraptfHistory.ts`, `banks.ts`, `market.ts`): DM-3/CQ-1 thinning (F20 S1), CQ-2 session baseline and
@@ -3864,7 +4080,8 @@ bullets below list them.
   not exclusive: when every verified order is an outlier, Conservative is the top non-outlier unverified order, so the
   book is no longer 'all-outliers' (review R12, the mock alike; `test/domain/audit-074-verified-fallback.test.ts`).
 - **Buyer liveness (F23, F63).** "+5 Buyer is online" and every online dot or line need the order's last event within
-  2 h, else "last seen N ago"; a snapshot no longer carries a stale online flag onto the row it stamps as seen now;
+  2 h (0.9, #11: the +5 is no longer added, RESEARCH §4.2; the dots and lines keep the 2 h rule), else "last seen N
+  ago"; a snapshot no longer carries a stale online flag onto the row it stamps as seen now;
   "buyers within 10%" counts verified orders only. Opportunities and the drawer headline mark an unverified revenue
   order. `test/domain/audit-074-cost-sanity.test.ts`, `test/renderer/audit-074-buyer-seen.test.ts`,
   `test/bptf/audit-074-snapshot-sides.test.ts`. The online flag carries only from a feed row ('ws'), so the next
@@ -4179,7 +4396,9 @@ No migration, no new RPC method or push, no new request kind and no new `src/` f
   product's float noise ignored (`RESERVE_FLOAT_TOLERANCE`, 1e-9: a typed 7% is 0.07, and 7% of 100 scrap is 7, not
   8); `flipProfitBound` adds the same tolerance when a reserve is set, so it stays an upper bound. It is
   the user's own allowance for a price drop between buying on scrap.tf and the buyer accepting; Flip Desk does not
-  measure price swings, and the field's hint (`exitReserveHint`) says so. It applies to buy decisions only.
+  measure price swings, and the field's hint (`exitReserveHint`) says so (0.9, #12: the hint now says
+  Flip Desk never sets it, and Settings shows what your data suggests per value band; see the 0.9 round). It applies
+  to buy decisions only.
 - **Sells are unchanged (R-PC1-sell).** A sale into a live buy order (`holdingFigures`, the service's
   `scraptfAlternative`, `recordTradeModel.sellComparison`) keeps `sale - lot cost - friction`: nothing is left to move.
   Holdings' advice (Wave 2) applies the reserve only to exits nobody pays today (a listing, a recorded high, a
@@ -4367,7 +4586,8 @@ parser report's `counts.reserved` / `notTradable` and `dataBot`). New files: `sr
   `q = S + F_drop` at the look gap (the dropped price is neither gone nor risen by the next look); EV through
   `flipProfit` (`scraptfTimingEv`: evBuy = flipProfit(R, c0); evWait = pDrop x q x max(0, flipProfit(R, c1)) +
   pNone x max(0, evBuy), gone and rose first worth nothing to waiting), the best horizon by evWait; *Wait* when the gain
-  is at least max(3 scrap, 10 % of the profit now), pDrop >= 0.3 and c0 or c1 is within Pay up to (`drop-makes-flip`
+  is at least max(3 scrap, 10 % of the profit now), pDrop >= 0.3 (0.9: replaced by the gain's low end, see the 0.9
+  round) and c0 or c1 is within Pay up to (`drop-makes-flip`
   when only c1 is); else *Over Pay up to* above it; else *Buy now* (`gone-risk` when pGone + pRise >= pDrop and the
   window saw a gone or a rise at all, else `flip-now`: a window with no event is no evidence of a risk). A drop rhythm is the copy's own (3 or more reprice-downs, CV <= 0.35, a median at least 4x its drops'
   end bracket and 2x the look gap, so daily saves never read as a daily rhythm), worded "by that rhythm the next drop
@@ -4666,6 +4886,877 @@ paragraph lists the kinds, titles, gates and dedupe; F20 the click order.
 - **Version.** 0.8.0 (`package.json`, `package-lock.json`'s root entries; README's installer path, which
   audit-074-docs-consistency pins). The mock's `MOCK_APP_VERSION` reads `package.json`.
 
+## 0.9 round: exit fees and break-even, risk ranking, order history, honest buy timing, scrap.tf evidence and the trade lock
+
+Six feature packages and a docs package on 0.8.0, built in two waves on one Foundation, from the ranked improvements
+of the 2026-10-22 research (`docs/RESEARCH.md` §8; the `#` numbers below are its ranks). Foundation landed every
+cross-package contract first (Schema V16, the shared types, two RPC methods, three settings keys, five seeded shared
+modules and the compile-only edits that widened unions force), so each package built on code that already compiled
+and left the tree green. Wave 1 was **exits** (#2, #11, #14: exact exit fees and a break-even price per exit, buyer
+signals without the daily impersonator list, compliance hardening), **scrap.tf** (#9, #13, #25, #22: the checkout
+guard, parser evidence and the bank-not-trading notice, the *Unsupported by scrap.tf* panel, effect names per kind of
+item) and **holdings-ledger** (#1, #17: the trade lock, the trend size and key move band, the Journal's inventory
+valuation); Wave 2 **ranking** (#3, #12: risk-aware sort keys, the depth gate, the suggested price-move reserve),
+**history** (#6, #7: buy-order persistence, recorded community prices, scrap.tf lows), **timing** (#10: ranges on buy
+timing and the Wait gate on the gain's low end) and **docs** (the DESIGN_BRIEF corrections and the FIELDS.md rows);
+then an integration pass (the version, the README, this introduction and "Tests and version", the duplicate imports,
+the build markers and the docs test). Every code package wrote its own subsection below, its ownership rows, its
+feature-section notes and its entry points (D16); every rule lives in `src/shared`, so the service, the dashboard and
+the browser mock share it, and each package has a mock parity test. Decisions D1-D30 are the build plan's settled
+conflicts between the package specs, named where they apply. New settings: `profit.marketplaceFeePct` (0.1, for
+marketplace.tf's break-even and fee hint only), `notifications.minProfitableDepth` (0, off) and the top-level
+`tradeLock` (`{ mode: 'unknown', answeredAt: null }`). Defaults keep 0.8's behaviour except these deliberate changes
+(D26), each explained in its subsection: rows whose revenue order had the online flag score 5 lower
+(`notifications.minConfidence` stays 45, D30), inactive and impersonator orders leave the book, object-form bans
+follow the `users/info` rule, the Steam Market's daily cap, `x-eresult` 25/84 as a rate limit, a challenge marker
+disabling its host at any status and the F21 window refusing a 200 check page (exits); *Wait* gated on the gain's low
+end, measured against max(evBuy, 0) (timing); the guard's toast suffix and the bank-notice import (scrap.tf); the
+one-time rewrite of stored opportunities (ranking); and the Journal's *Unrealised P/L* card and the Holdings question
+card (holdings-ledger). Every new figure shows its n, says "not enough data" with a reason rather than guess, and is
+never a forecast: break-even is a price to clear, buyer counts are demand, not sales, order persistence is never a
+fill rate, and the confidence score still multiplies nothing.
+
+**Boundary unchanged** (R1-R10): no request kind, host, endpoint, credential or cadence was added, and no budget was
+raised (the Steam Market's priceoverview gained a daily cap of 300); every new history is storage of data that already
+arrives (the backpack.tf feed, the existing IGetPrices answer, the user's saves); the one new outbound link is Valve's
+Trade Protection FAQ, opened only in the user's browser; no `openUrl` beyond an exact SCRAPTF_BANKS page; nothing is
+bought, queued, listed or traded (R4). `x-eresult` and the challenge markers only stop or pause requests, and
+`history('5021;6')` filling PriceDB's key curve cache can only save a later identical request. Flip Desk still sends
+no request to scrap.tf (R1), and scrap.tf data still comes only from the user's typing, saves and window reads (R10).
+The one migration (V16) holds only nullable `ALTER TABLE … ADD COLUMN` and `CREATE TABLE` / `CREATE [UNIQUE] INDEX`
+statements, with no row read or rewritten (a 0.8 build refuses a V16 database), and `test/compliance` passes with the
+new modules in its scans.
+
+### Schema V16 and contracts (Foundation)
+
+Foundation lands every cross-package contract first, so the packages build on types, methods and tables that already
+compile and are tested. It adds no request kind, host, credential, endpoint, budget or cadence, and at its hand-off
+nothing it added changed what the user sees, apart from these: `opps.list` accepted the sorts `backup` and `depth`
+(nothing in the dashboard asked for them yet); the Live market's Sort select listed *If this buyer leaves* and *Buyers
+at break-even*, which sorted by name until ranking filled them; settings files gained three keys with their defaults;
+the Holdings advice texts knew a `locked` kind that nothing produced yet (holdings-ledger's trade lock does).
+
+- **Schema V16 (`V16_ROUND_090`, migrations.ts), the release's one migration (D1).** Only nullable `ALTER TABLE …
+  ADD COLUMN` and `CREATE TABLE` / `CREATE [UNIQUE] INDEX` statements; no row is read or rewritten, so upgrading loses
+  nothing, and a 0.8 build refuses a V16 database (SchemaVersionError / DataTooNewScreen) as for every migration. V15
+  and every earlier migration are unchanged.
+  - `listings.user_impersonated INTEGER` (exits, #11): backpack.tf's `user.flagImpersonated`; NULL is "not flagged
+    or not known" (every row before V16, snapshot rows), 1 flagged. The repo reads only a flagged row with the
+    `userImpersonated` key, so every 0.8 row reads back as it did.
+  - `opportunities.backup_profit_scrap`, `profitable_depth`, `book_depth INTEGER` (ranking, #3): NULL on every row
+    stored before V16 until the engine's first full sweep rewrites it, as V2's `max_cost_scrap` was; NULL reads absent.
+  - `order_spells` (history, #6): one row per spell (one buy order at one price as the live feed showed it), with no
+    SteamID, listing id or name. Indexes `order_spells_base_first (base_sku, first_seen_at)` (the per-base read),
+    `order_spells_first_seen` (retention) and the partial `order_spells_open (id) WHERE end_kind IS NULL` (the two
+    updates of every followed spell). Every cut selects on `first_seen_at`, the spell's entry, never on its end: a cut
+    on the end keeps long spells and drops their short siblings, which biases Kaplan-Meier up.
+  - `bptf_community_history` (history, #7): recorded community prices, one row per distinct price per SKU and source
+    through the unique expression index `bptf_community_history_point` (NULLs folded with `IFNULL`, as V10 and V15
+    do), and `bptf_community_history_recorded` for retention. `bptf_community` is still overwritten as before.
+  - `scraptf_lows` (history): a copy's lowest on-sale price in the user's saves, per bank, raw keys + metal, keyed
+    `(bank, sku, special_key)`, with `scraptf_lows_seen` for retention.
+  - `import_batches.bank_notice TEXT` and `bank_stock.markdown TEXT` (scrap.tf, #13): a bank page's own "not trading"
+    notice and a card's price-drop wording ('off', 'soon' or 'off soon'); NULL reads absent.
+- **Pins (D1).** `test/db/audit-v15-journal-fees.test.ts`, `watches.test.ts` and `holdingMarks.test.ts` migrate with
+  `MIGRATIONS.slice(0, 15)` to pin V15 itself; `db.test.ts` lists the three new tables; `bankStock.test.ts` and
+  `importBank.test.ts` append the new columns; `SCHEMA_VERSION === MIGRATIONS.length` (16).
+- **Repo (`repo.ts`, implemented and tested, D2).** Listings and opportunities round-trip the V16 columns, and
+  `OPP_SORT` orders `backup` and `depth` with missing values last in both directions, ties by profit, name and key.
+  `holdingMarksSince` (ranking: every base's runs with `to_at` since a time, the newest 50,000 at most). The order
+  spells (`insertOrderSpell`, `endOrderSpell` (an ended spell is never ended again; its `last_seen_at` becomes its end),
+  `touchOpenOrderSpells` (but the tracker's held rows), `endOpenOrderSpells` ('unwatched', censored at `last_seen_at`),
+  `orderSpells` (after the whole-table cap's entry cut), `pruneOrderSpells`: ended spells only, 60 days, 300 per base,
+  400,000 in all). The community history (`communityFor`, `insertCommunityHistory` (INSERT OR IGNORE, the currency
+  lower case and cut to 16, a high equal to the low stored as NULL),
+  `communityHistory`, `pruneCommunityHistory`: 365 days, 200 per SKU, 300,000 in all). The scrap.tf lows
+  (`scraptfLows`, `upsertScraptfLows`, `pruneScraptfLows`: 365 days after `seen_at`). `createImportBatch` stores
+  `bankNotice`, and `insertBankStock` stores a card's wording on a bank page's rows (never on `/items` rows).
+- **Contracts (`contracts.ts`).** `FeedBatch.inactive` (required: ids among `deletes` that a listing-update reported
+  not live; the socket's flush sent `[]` until exits filled it), `FeedBatch.community?` (`FeedCommunityPrice`) and
+  `FeedBatch.epoch?` (history); `SchemaService.effectIdByName(name, type?)` (scrap.tf, #22; the test doubles stay
+  assignable); `PriceDb.loadedKeyHistory()` (holdings-ledger, #17; a `() => null` stub in the connector until Wave 1
+  filled it).
+- **RPC (`src/shared/rpc.ts`, no push, D14).** New methods `profit.reserveSuggestion` (ranking, #12) and
+  `item.bookHistory` (history, #6/#7), both local reads. Their service and mock bodies were stubs that threw "… is not
+  built yet." until Wave 2 replaced them (integration's grep of `src/` finds none left); `item.bookHistory`'s zod (a
+  SKU and at most `BOOK_HISTORY_ORDERS_MAX` (5) order ids) and the mock's matching checks are final. The preload and
+  main forward every `SERVICE_METHODS` entry, so neither changed.
+- **Settings (three keys, defaults keep 0.8's behaviour, D3).** `profit.marketplaceFeePct` 0.1 (0 to 0.5; used for
+  marketplace.tf's break-even and the journal hint only, never for profit), `notifications.minProfitableDepth` 0 (off;
+  whole buyers up to `MIN_PROFITABLE_DEPTH_MAX`, 10) and a top-level `tradeLock` `{ mode: 'unknown', answeredAt: null }`
+  (`'unknown' | 'none' | '7d'`). A settings file from 0.8 loads with those values through the lenient load, unreported;
+  the Settings controls come with their packages.
+- **Seeded modules (D13).** `src/shared/exitRisk.ts` and `reserveSuggest.ts` (ranking completes them),
+  `orderPersistence.ts`, `communityHistory.ts` and `scraptfLows.ts` (history completes them), each holding only the
+  constants a Foundation file reads (the settings maximum, the repo's read caps and retention defaults, the
+  `item.bookHistory` zod). They were listed in `F20_FILES` from the start, where their packages' other modules joined
+  them. scrap.tf's two pure markdown helpers (`bankStockMarkdownText`, `bankStockMarkdownOf`) sit in
+  `src/shared/bankStock.ts`.
+- **Compile-only edits (D12).** The widened unions and new required fields compile with final behaviour wherever a
+  case reads only typed fields: `oppModel` `sortValue` and the shared `market.ts` `sortValue` read the risk keys
+  (absent sorts last), `MARKET_SORTS` and `SORT_LABELS` gain `backup` and `depth` together, the service market
+  index's `sortValueOf` returned null for both until ranking, the Holdings advice texts know `locked`
+  (`ADVICE_LABELS`, `ADVICE_TONES`, `ADVICE_HELP`) and the reasons `trade-locked`, `units-locked` and `trend-size`,
+  `timingWhyText` knows `unsure-gain`, and the six new `ImportReport.counts` fields started at 0 until scrap.tf counted
+  them.
+- **The 0.8 docs test (D15).** `test/shared/audit-080-docs.test.ts` ends the 0.8 round's slice at this section, so the
+  0.8 checks never read 0.9 text.
+- **Tests.** `test/db/v16Round090.test.ts` (the schema, the indexes the reads use, and 0.8 rows read back unchanged),
+  `test/db/listingsImpersonated090.test.ts`, `test/db/opportunitiesRanking090.test.ts`,
+  `test/db/orderSpells.test.ts`, `test/db/communityHistory.test.ts`, `test/db/scraptfLows.test.ts`,
+  `test/db/audit-v16-scraptf-columns.test.ts` and `test/service/contracts090.test.ts` (both methods routed, zod-checked
+  and answered by the mock); new cases in `test/main/settingsSchema.test.ts` and `test/shared/defaults.test.ts`.
+
+### Exits: fees, break-even, buyer signals, hardening (#2, #11, #14)
+
+Local arithmetic, parsing of data that already arrives, and tighter guards. Nothing adds a host, credential, request
+kind, endpoint or cadence, and no budget rises. Every profit number, verdict, Pay up to and notification keeps 0.8's
+behaviour, with these deliberate changes (A.2): the online bonus is gone (below), inactive and impersonator orders
+leave the book, object-form bans use the stricter rule, and the hardening of #14.
+
+- **Break-even (`breakEvenFor`, `breakEvensOf`, `src/shared/ceiling.ts`).** The lowest whole-scrap backpack.tf sale
+  price that loses nothing at a cost. `'buy'` (every buy decision) is the smallest R ≥ 0 with
+  `flipProfit(R, cost, p) >= 0`, so friction and the price-move reserve are in it and it goes through the one profit
+  path (a short bisection over `flipProfit`); because `flipProfit` never falls as R grows, R ≥ break-even exactly when
+  `flipProfit(R) >= 0` for every whole R (the equivalence ranking counts on). `'sell'` (a held lot sold into a live
+  order, Holdings) is `ceil(cost + friction)`, never the reserve, as `holdingFigures` judges a sale. Thresholds (min
+  profit, margin) are Pay up to's job, not break-even's. Worked: cost 100, friction 0, 7% → 108; friction 1, 5% → 107
+  ('sell' 101). A price to clear, never a forecast that a buyer pays it.
+- **Other exits, in value (D21, E-D2).** marketplace.tf and mannco.store pay cash and the Steam Market Wallet funds;
+  Flip Desk has no rate between ref and either, so `breakEvensOf` gives the value a sale must bring in before the
+  venue's fee, at the user's key value: `grossBeforeFee(backpack, fee)` for marketplace.tf (`profit.marketplaceFeePct`,
+  default 0.1, 0 to 0.5; used for this and the journal hint only, never for profit) and mannco.store (5%), and
+  `scmGrossValue` (`ceil(net × 1.15)`) for the Steam Market. The 1-cent minimums need dollars, so the texts say "each
+  fee is at least $0.01, so items under about $0.20 need more".
+- **The cent rules (`src/shared/venues.ts`).** `scmBuyerPaysCents` (received + Steam's 5% + TF2's 10%, each floored
+  and at least 1 cent: 100 → 115, 193 → 221, 1 → 3) and its inverse `scmSellerNetCents` (the largest r with
+  f(r) ≤ p: 115 → 100, 221 → 193, 116 → 101, 114 → 99; null under 3), `manncoNetCents` (price − max(1, floor 5%), all
+  of a 1-cent sale: 100 → 95, 101 → 96, 20 → 19), `parseUsdCents` / `usdText`. mannco.store is a journal venue
+  (`JOURNAL_VENUES`, aliases `mannco`, `manncostore`), and the journal's fee hints are built from the rules, so the
+  examples never drift; marketplace.tf's names the user's setting (`venueFeeHint(venue, side, marketplaceFeePct?)`,
+  `feeHint` in the Record trade dialog and the Journal form).
+- **Where break-even shows (`src/renderer/breakEvenModel.ts`, pure).** Opportunities' Cost hover (`oppCostTitle`,
+  after "Entered as …" for a keyed price) and its CSV's `break_even_ref`, appended after `updated_at`
+  (`opportunitiesCsv(rows, keyScrap, profit)`; the mock's CSV appends `break_even`); the drawer input card's
+  *Break-even* line; Quick entry's *Break-even* line for the typed price; the Live check popup beside the scrap.tf
+  price (`CheckResult.breakEven`, set by `liveCheck.ts` and the mock's evaluator and demos whenever a check has a
+  price); Holdings' Cost hover (`holdingBreakEvenTitle`, 'sell'). Each hover names friction and the reserve when above
+  0, every venue's value and the not-a-forecast sentence; a rule row says its cost is an estimate. The model reads
+  `BreakEvens.frictionScrap` only by destructuring (D7), so the profit-path scan stays as it was.
+- **The drawer's Steam Market check.** `scmNetView` says what the seller receives at the lowest and the median price,
+  exact to the cent ("You get $1.93 of the $2.21 lowest (Steam and TF2 keep $0.28, 12.7%) …, in Steam Wallet funds,
+  not cash"), from the one priceoverview the click already returned; "about 15% fees" is gone. The mock's `item.scm`
+  answers in Steam's "$" text so the line shows in a plain browser.
+- **Settings.** Profit thresholds gains *marketplace.tf fee* (`MARKETPLACE_FEE_PCT` 0 to 50%, `MARKETPLACE_FEE_HINT`:
+  about 10% rests on one 2019 forum report, check your seller page; Flip Desk reads nothing from marketplace.tf).
+- **The online bonus is removed (#11, D30).** `scoreConfidence` and the mock no longer add "+5 Buyer is online": the
+  live feed sent `user.online: true` on all 299 captured events (RESEARCH §4.2), so it said nothing. A row whose
+  revenue order had the flag and an event within 2 h scores 5 lower; `notifications.minConfidence` stays 45. The online
+  dots and `buyerPresenceText` still display the flag.
+- **Inactive listings leave the book (E-D4).** `bptfListingActive`: a feed update or snapshot row with `archived:
+  true` or a `status` of `listingInactive`, `hiddenByUser`, `notEnoughCurrency` or `archived` (any case, spaces
+  ignored) is not live. The socket turns such a `listing-update` into a delete and reports it in `FeedBatch.inactive`
+  (a later active update brings it back; a delete in the same window is a plain delete), so core deletes and
+  tombstones it as any delete; a snapshot row is skipped. An unknown status, or a non-string one, is kept and counted
+  in `BptfMapStats.unknownShapes.status`, so a renamed status never empties the book; `BptfMapStats.inactive` counts
+  the dropped ones.
+- **Impersonators (E-D5).** `user.flagImpersonated === true` sets `Listing.userImpersonated` (V16
+  `listings.user_impersonated`), which raises the excluding flag `'impersonator'` ("Impersonator", tone bad) on buy
+  orders (`classifyOrder`) and sell listings (`sellSummaries`), and the ask side excludes such sellers. It is not
+  folded into `userBanned`, so the drawer says "Impersonator", not "banned". A snapshot row keeps the stored flag
+  (`withStoredUserData`), as a ban is kept. The daily impersonator list is not fetched (D22).
+- **Bans in object form (E-D6).** The feed's and the snapshots' `user.bans` are read with `isBannedFromBans`, the
+  `users/info` rule moved into `bptfItem.ts` (bptfApi.ts re-exports it): a non-empty array is a ban, as before; an
+  object counts only `all`, `steamrep_scammer`, `marketplace` and `valve.economy` (`{steamrep_caution: 1}` is no
+  longer a ban).
+- **Bot-service labels (E-D8).** `OrderSummary.botService` (`botServiceOf` over the first part of
+  `userAgent.client`: TF2Autobot (PriceDB), TF2Autobot, Gladiator.tf, cobra.tf, Dolphin, Merchant.TF,
+  Quicksell.store) is a label in the drawer's order book (the bot icon's hover, `botServiceTitle`, and a muted name).
+  It changes no score, flag, eligibility, Instant or `isBot`; the mock sets none.
+- **Hardening (#14).**
+  - The Steam Market's priceoverview budget gains `maxPerDay: 300` (a rolling 24 h, seeded at start), under the
+    community-measured 1,000.
+  - An api.steampowered.com answer with `x-eresult` 25 or 84 (`steamRateLimitEresult`) is a rate limit even with
+    status 200: the budget pauses, the host streak counts, and the caller sees the true status with `ok: false`.
+  - Any HTML answer carrying a Cloudflare challenge marker (`hasChallengeMarkers`: the interstitial's
+    `/cdn-cgi/challenge-platform/[h/<x>/]orchestrate/` script, `_cf_chl_opt`, `cf-chl` ids, the Turnstile host, a
+    "Just a moment..." title) takes R7's challenge path whatever its status: the host is disabled until the user
+    re-enables it on Data health ("challenge page (Cloudflare challenge script, HTTP 429)"). An HTML 429 without one
+    stays a 429. Only challenge-specific signatures count: Cloudflare's JavaScript-detections snippet
+    (`__CF$cv$params`, `/cdn-cgi/challenge-platform/scripts/jsd/main.js`) sits on ordinary pages, so an nginx 429 or a
+    5xx outage page carrying it keeps its status's own path (backoff pause, then retry), as in 0.8
+    (`test/fixtures/net/bptf-429-jsd.html`).
+  - `test/compliance/static.test.ts` holds a deny-list of scrap.tf automation signatures (the /ajax actions bots
+    call, the queue-confirmation hook, the session cookies by name, the CSRF hash object, the anti-detection drivers)
+    that must not appear in `src/`, and no browser-automation package may be a dependency.
+  - `policy.ts`'s STN comment now says the trade calls are POSTs (RESEARCH §4.5); the rule is unchanged.
+  - The F21 window's `readPage` refuses a page carrying a check page's own words (`scraptfChallengeIn`,
+    `SCRAPTF_CHALLENGE_PHRASES`: scrap.tf's captcha and browser-check sentences, the interstitial's `<title>`, its
+    options object) whatever its status: nothing is imported, held or remembered, the page notice
+    (`SCRAPTF_WINDOW_NOTICES.challenge`) stops automatic reads until the next document, the pushed read carries that
+    notice (worded "Could not read …" by the toolbar) and `readNow()` returns `SCRAPTF_READ_REASONS.challenge`.
+    Cloudflare's bot-detection script path is left out on purpose (it may sit on ordinary pages).
+- **Mock parity.** The mock's confidence drops the bonus, its Live check and popup demos carry `breakEvensOf`, its
+  Opportunities CSV appends `break_even`, and fees and settings flow through the shared rules and `mergeSettings`.
+- **Tests.** `test/shared/exitFees090.test.ts` (the cent rules, a brute-force inverse over 3..200,000, the hints),
+  `test/shared/breakEven090.test.ts` (the flipProfit property and the ranking equivalence), `test/renderer/breakEvenModel090.test.ts`,
+  `test/renderer/mockExits090.test.ts`, `test/renderer/settingsExits090.test.ts`, `test/bptf/buyerSignals090.test.ts`
+  (the 299 fixture events: all active, the one impersonator, the bot-service tally), `test/domain/impersonator090.test.ts`,
+  `test/net/steamEresult090.test.ts`, `test/net/challenge429090.test.ts` (synthetic HTML-429 fixtures
+  `test/fixtures/net/bptf-429-challenge.html` and `bptf-429-plain.html`) and `test/shared/scraptfChallenge090.test.ts`;
+  new cases in `confidence.test.ts`, `audit-074-cost-sanity.test.ts`, `market.test.ts`, `venues.test.ts`,
+  `recordTradeModel.test.ts`, `budgets.test.ts`, `csv.test.ts`, `liveCheckEval.test.ts`, `bptfSocket.test.ts`,
+  `scraptfWindow.test.ts`, `mock.test.ts`, `mockContracts.test.ts` and the static compliance scan (the deny-list and
+  `EXIT_FILES`).
+
+### scrap.tf: checkout guard, parser evidence, the boundary panel, names (#9, #13, #25, #22)
+
+Text, parsing of pages the user brought, and name rules. Nothing adds a host, credential, request kind, endpoint,
+cadence, setting, timer or push, and nothing reaches scrap.tf: the probes read only the parsed tree of the user's own
+save or window snapshot (R10), nothing in it is fetched, opened or followed (R1), and nothing is bought, queued, listed
+or traded (R4). Two deliberate default changes (A.2): a watch or G4 toast that tells a flip gains the guard's sentence,
+and a bank page saying its bank is not trading imports as a look with no stock save.
+
+- **The checkout guard (#9, `src/shared/checkoutGuard.ts`, pure, no address).** Five lines on what to know before
+  joining a scrap.tf bank's queue, each naming its source and how sure it is (sources read 2026-10-22, RESEARCH §4.1):
+  joining the queue is what reserves the items (help pages, read from search-engine copies); accept the bot's offer
+  promptly, since scrap.tf cancels offers after a time it does not publish (help); a lapsed offer can lock buying for
+  about 2 hours (community reports on scrap.tf's forum, 2024, not confirmed by scrap.tf); keep one request pending
+  (inferred); never leave and rejoin for a lower price (reportedly penalised; R4). It ends "Flip Desk never joins,
+  leaves or watches a queue for you." It is text only, shown only where the app suggests buying, with no setting:
+  - the Buy now tag's title (`timingBadge` appends `CHECKOUT_GUARD_TAG` last, so every Buy now surface has it: bank
+    stock, Live market, Opportunities, the drawer pill; a Wait tag never does);
+  - the drawer under a Buy now verdict (`CheckoutGuard variant="list"`, a sibling after `.stf-hist-timing`, never in it);
+  - the Live check popup on a flip (`checkGuardLine`: `CHECKOUT_GUARD_POPUP` takes the key legend's line, its title
+    the full guard; with a note neither shows, and the keys stay in the buttons' titles and `aria-keyshortcuts`);
+  - the Shopping list (`CheckoutGuard variant="line"`, after its info banner);
+  - toast bodies that suggest buying: `withCheckoutGuard` appends "Accept the bot's offer promptly." only when the
+    body stays at or under 200 characters (`CHECKOUT_GUARD_TOAST_BODY_MAX`; main clips at 400). The S3 notifier sends
+    `bankStockNoticeWithGuard` (a watch hit or a G4 "Buy now" with `tellsFlip` and no doubt), and the engine's own
+    "Watch: <name>" toast (G1) gets it too. "Profit:" and "Candidate:" bodies, summaries and old-save summaries are
+    unchanged, and so is the `notified` event text.
+- **A bank that is not trading (#13).** The parser reads visible page text outside cards and rows (not inside
+  `hidden`, `aria-hidden`, a `d-none`/`hidden`/`hide`/`invisible` class, a `display:none`/`visibility:hidden` style,
+  `noscript`, script, style, template or the title; at most 64 KB) for a notice such as "Hat Banking is temporarily
+  disabled" (`BANK_UNAVAILABLE_RE`, linear). A notice counts for a recognised bank page only when it names no bank or
+  names the page's own (`NOTICE_WORD_BANKS`: "Hat" for /buy/hats, "Item" for /buy/items and the list, "Unusual Hat"
+  for /unusuals, and the items bank's kinds "Australium", "Taunt", "Paint", "Crate" and "Tool" for /buy/items).
+  "Key", "Card", "Auction" and "Raffle" name no page Flip Desk reads, and any other word right before a bare "banking"
+  ("Promo Banking is …") names a category too (`noticeWordBefore`), so a banner about another category never turns
+  every bank look into a notice look. Recheck: the site, determiners and the ordinary lead-ins a banner puts there
+  without punctuation name none (`NOTICE_LEAD_WORDS`: "All", "The", "Our", "Scrap.TF" or "Scrap.TF's",
+  "Unfortunately", "Currently", a bold "Notice" or "Warning" label, "Please note", "… maintenance", "… and"), so a
+  page-wide notice in those forms stays the page's own: a missed notice would read the copies the page leaves out as
+  sold, while a false one only skips one bank stock save. Block elements, cards and rows
+  break the probe text (`PROBE_BREAK`), so a heading or nav link before a notice is never read as its word. Then:
+  - the page warns `bank-unavailable` (`BANK_UNAVAILABLE_WARNING`) in place of `no-cards-saved` / `no-items`, and the
+    result carries `bankNotice: 'unavailable'`;
+  - `importSavedPage` stores the prices the page shows but no bank stock save (`stockSave: 'partial'`, as a DM-2
+    partial look: it replaces only the copies it shows and reads none as gone), so a notice never reads as mass
+    sell-outs and a false match never silently stops imports;
+  - the batch stores `bankNotice` (V16 `import_batches.bank_notice`), and a window read of such a page with 0 items
+    records its batch (it used to record nothing), so the Banks card can date it; main's `WARNING_ORDER` ranks the
+    code first;
+  - the Banks summary sets `unavailableAt` when the bank's newest notice look is at or after its newest save
+    (`bankNoticeNewestAt` over the 500 batches it already reads, `bankUnavailableAt`); a later normal save clears it.
+- **Report-first evidence (#13).** scrap.tf's own price-drop wording ("This item will decrease in price shortly.";
+  "… off original price" / "(original price of …)"), in a card's tooltip or its own text, is no longer an
+  `unparsed-modifier` (a quoted custom description using those words is the owner's own and is read first, as before:
+  `customDesc`, no markdown, never quoted in a warning or the report): the card warns `price-markdown`, carries `markdown` ('soon', 'off'), and `bank_stock.markdown`
+  (V16) keeps it on bank page rows (never /items rows). A countdown-like text in a card's own text (`price-countdown`),
+  a card inside an element whose id or class names "recent" (`recent-section`) and "recently traded" phrases are noted
+  for the report only. The report's six counts (`markdownSoon`, `markdownOff`, `countdownCards`, `recentlyTraded`,
+  `recentCards`, `bankNotices`) and `notices` (at most 5 matched phrases, scrubbed) say what was seen; such cards are
+  kept in the report after the refused ones. Buy timing, profit and alerts never read any of it. The bank stock row
+  shows the newest save's wording as a tag (`bankStockMarkdownTag`: *Drops soon* / *Marked down*, tone info), whose
+  title says no real save has confirmed the wording. No synthetic fixture holds any of these phrases, and a test pins
+  zero false positives over all of them.
+- **Names (#22).** The 2026-07-14 TF2 update renamed the hat effect Northern Nights to Polar Prism; sku.pricedb.io
+  (2026-10-14) lists 408 "Polar Prism" (cosmetic) and 3221 "Northern Nights" (a taunt effect). `EFFECT_NAME_ALIASES`
+  resolves a name per kind of item, wherever the schema does not give that name to an effect of that kind itself
+  (`effectTypeForItem`: a skin is 'weapon', slot taunt 'taunt', a `tf_wearable` 'cosmetic'): "Northern Nights Team
+  Captain" is `378;5;u408` (it was `u3221`, an effect no hat order can match), and "Northern Nights Taunt: The Shred
+  Alert" stays `1015;5;u3221`. `effectIdByName(name)` without a kind answers as 0.8 did; the saved-page parser
+  (tooltip effect lines, titles) and the snapshot mapper pass the item's kind. `schema.ts` scopes twins
+  (`canonicalId`) by effect kind, so a name two kinds share never merges them (no change on today's data). An alias
+  whose id the schema lacks is ignored, and names learned from the feed still win.
+- **The visible boundary (#25).** About → *Unsupported by scrap.tf* (`UnsupportedPanel`, rows in
+  `src/renderer/aboutModel.ts`): nine things scrap.tf does not offer or allow (automatic monitoring, crawling item
+  pages, joining the queue automatically, leave-and-rejoin, queue state, automatic buying, its repricing schedule,
+  per-user limits, a developer API), why, and what Flip Desk does instead, each with dated sources graded "read at the
+  source", "a search-engine copy" or "a community report" (RESEARCH §6.1, checked 2026-10-22). A source button copies
+  its address for the user's browser; nothing opens it (most are not on the `links.open` allowlist, which is
+  unchanged). The Appendix C email moved to `aboutModel.ts` (the Import page re-exports and still shows it): it no
+  longer says the tool "never connects to scrap.tf", which stopped being true with F21, and asks three more questions
+  (the window, the queue and offer timings, a sanctioned feed). The app never sends it.
+- **V16 (Foundation, B.1).** `import_batches.bank_notice` and `bank_stock.markdown`, nullable, no default or index; no
+  row is rewritten and retention is unchanged.
+- **Mock parity.** The mock's banks summary uses `bankNoticeNewestAt` / `bankUnavailableAt` (no seed carries a notice,
+  so `unavailableAt` is absent, as in the service); its report counts hold the six fields at 0 and no `notices`; its
+  bank stock rows go through the shared `bankStockRows`, so a stored `markdown` passes through; the guard reaches it
+  through the shared `timingBadge`, CheckPopup, ShoppingPage and ScraptfHistory. The mock sends no toasts.
+- **Known limits.** The markdown, countdown, "recently traded" and notice markup is unconfirmed: the probes may miss a
+  real form (the report then shows unparsed lines), and a template hidden only by CSS could match (shown on the Import
+  page and the Banks card; the parser report says why). A notice look keeps the prices it shows, so a bank that is not
+  trading may still be priced as a flip elsewhere until a normal save, and the Bank stock page itself shows no notice
+  line. The alias needs effect 408 in the schema. The guard's timings are community-reported; scrap.tf publishes none.
+- **Compliance.** `F20_FILES` adds `shared/checkoutGuard.ts`, `renderer/checkoutGuardModel.ts` and
+  `renderer/components/CheckoutGuard.tsx` (no request, loader, opener, `href=`/`src=` or http text). The describe "0.9
+  scrap.tf boundary panel and guard (R1, R3)" pins that `aboutModel.ts` and `AboutPage.tsx` call no loader or opener
+  beyond About's existing `ExternalLink`s (TERMS and the credits), that no `ExternalLink` takes a row's or source's url,
+  that every panel address is `https://`, and that the guard holds no address, with a planted-offender case.
+  `test/renderer/externalLinks.test.ts` skips `aboutModel.ts`, whose addresses are copied, never opened (D8). Exits'
+  automation deny-list tokens appear in none of these strings.
+- **Tests.** `test/shared/checkoutGuard.test.ts`, `test/shared/bankStockNotifyGuard090.test.ts`,
+  `test/renderer/checkoutGuardModel.test.ts`, `test/renderer/aboutModel.test.ts`,
+  `test/import/parserEvidence090.test.ts`, `test/service/bankUnavailable090.test.ts`,
+  `test/shared/banksNotice090.test.ts`, `test/domain/banksUnavailable090.test.ts`,
+  `test/renderer/banksUnavailable090.test.ts`, `test/renderer/bankStockMarkdown090.test.ts`,
+  `test/renderer/importEvidence090.test.ts`, `test/pricedb/schema.names090.test.ts` (the alias, the type-scoped twins
+  and the name-parsing regression pins), `test/import/effectAlias090.test.ts` (a card's tooltip effect and the effect
+  in its title, per kind of item) and `test/renderer/mockScraptf090.test.ts`
+  (parity); new cases in `checkPopup.test.ts`, `bankStockWatchNotify.test.ts`, `bankStockTimingNotify.test.ts`,
+  `engineWatchFloor.test.ts`, `scraptfWindow.test.ts`, `externalLinks.test.ts` and the static compliance scan.
+
+### Holdings and ledger: trade lock, trend size, inventory valuation (#1, #17)
+
+- **Trade lock (#1, RESEARCH #1).** Steam's Trade Protection may keep a TF2 item the user receives untradable (and
+  reversible) for 7 days; Flip Desk cannot read the account, so the top-level setting `tradeLock` holds the user's
+  answer, `'unknown'` (Not sure, the default), `'none'` or `'7d'`, with `answeredAt` (deviation 13).
+  - Holdings asks once (`TradeLockCard`: the question, three answers and Valve's Trade Protection FAQ) until
+    `answeredAt` is set; Settings → Trade lock (`TradeLockSection`, after Your accounts) changes the answer, says when
+    it was given and, while unanswered, offers *Keep "Not sure" and stop asking*. Every answer is a settings write.
+  - An answered Not sure shows one caution line on Holdings and, in the drawer, a dated caution for a next unit bought
+    less than 7 days ago. Nothing else changes.
+  - With `'7d'` each open lot is locked until its journal time + `TRADE_LOCK_MS` (a lot exactly 7 days old is
+    tradable; a time ≤ 0 is never locked). `withTradeLock` sets `HoldingRow.tradeLock` (`holdingTradeLockOf`: locked
+    units, the next lot's unlock, the earliest unlock). A row whose next unit is locked reads `'locked'` advice whose
+    first reason, `trade-locked`, dates the unlock and names what today's book alone would say (`todayKind`), never
+    the price on that day; a row whose later units are locked adds the context reason `units-locked`. `holdingsTotals`
+    leaves locked rows out of Sellable now and counts them in `totals.locked` (absent at 0), the card shows "N
+    locked", the Held for hover and the drawer's lot lines say "tradable <date>", the "Sell:" toast waits
+    (`check` skips a locked row and `trackListExpiry` arms the re-check 1 ms after the unlock), and the page refetches
+    then (`holdingsLapseAt`). Prices, profits, Worth now and P/L are unchanged in every mode.
+  - core's `holdingsKey` includes `tradeLock.mode`, so a change of answer re-checks Holdings (switching 7-day → none
+    tells newly sellable rows, deduped per SKU as before); `answeredAt` alone re-checks nothing.
+- **Trend size (#17).** `holdingExitHistory`'s trend gains `size`: a Theil-Sen line (`robustStats.theilSen`) through
+  the newest ≤ 60 exit stretches that observed the same sources as the newest one, each at its midpoint, with the
+  fitted change over the span and the median absolute residual. It needs ≥ 5 points over ≥ 48 h, adds the context
+  reason `trend-size` after `falling`, and never changes a verdict (the advice kind is identical with and without
+  it). "Measured, not a forecast."
+- **Key move band (#17).** `keyMoveBandOf` takes the 10th and 90th percentile of the key's 7-day move over daily spans
+  from the newest point back (at most 180), each counted only when both ends have a PriceDB point at most 2 days
+  older. The first span failing that ends the walk, so only the newest unbroken run counts: the sparse months are
+  skipped (never read as a flat key) and never stretch the dates or the separate weeks; a span resolving to the same
+  two points as the previous counted one counts once. Nothing below 28 spans (neighbouring spans share 6 of 7 days,
+  so 28 cover about 4 separate weeks). It reads only the history already in memory:
+  `PriceDb.loadedKeyHistory()` returns the key curve cache (the window-less `'|'` curve first, ignoring the TTL,
+  because the band says when it was loaded), and `history('5021;6')`, a request the drawer already sends, now also
+  fills that cache, which can only save a later identical request. Holdings memoises the band per load
+  (`HoldingsDeps.keyHistory?`, a throw gives no band and never fails a list), and the `key-exposure` reason quotes it
+  as `band`: the overlapping spans, both dates, the separate weeks and the profit range such a move would give
+  (`keyBandText`). Until PriceDB's dense key history is about 34 days long (early November 2026) the band is absent,
+  which is the honest answer.
+- **Inventory valuation.** `holdingsValuationOf` turns one unfiltered `holdings.list` read into the Journal's
+  *Unrealised P/L* card (`inventoryStat`: Holdings' P/L, the worth now, the read's time and the items with no exit),
+  read on mount and refetched on the same pushes as Holdings. The ledger CSV appends `worth_now_ref`, `unrealised_ref`
+  and `valued_at`, filled only on open buys (`journalLedger`'s valuer, `journalValuerOf`): each lot at its SKU's
+  exit, its unrealised P/L through `holdingFigures` (friction only), so over a SKU's lots they sum to the row's
+  `profitAllScrap`; blank on every other row and when Holdings cannot answer (`journal.exportCsv` logs and exports
+  without them). The mock values alike.
+- **Boundary.** The trade lock is a setting and arithmetic on journal times, the trend size reads the
+  `holding_marks` rows already read for the advice, and the valuation the local `holdings.list`. The key band reads
+  only the key curve PriceDB already holds in memory. No host, credential, request kind, endpoint, budget, cadence,
+  RPC method, push or V16 statement is added. The FAQ link is one exact `STATIC_EXTERNAL_URLS` entry opened on the
+  user's click through `links.open` (the HTTP client's policy still denies `help.steampowered.com`). Nothing contacts
+  scrap.tf (R1, R10), and nothing is bought, listed or traded (R4).
+- **Defaults.** Not sure, not answered: nothing changes but the question card on Holdings. Every 0.8 number, verdict,
+  toast and CSV cell is unchanged, apart from the three appended ledger columns, the Journal card, and the
+  `trend-size` and band lines where the data exists.
+- **Tests.** `test/shared/robustStats.test.ts`, `test/shared/holdingTradeLock.test.ts`,
+  `test/shared/holdingTrendSize.test.ts`, `test/shared/keyMoveBand.test.ts`, `test/shared/holdingsValuation.test.ts`,
+  `test/domain/holdingsTradeLock.test.ts` (no "Sell:" until the unlock, then exactly one; the band from
+  `deps.keyHistory`), `test/service/journalValuationRpc.test.ts`, `test/pricedb/pricedb.keyHistory.test.ts` (no
+  second key request, and reading sends nothing), `test/renderer/holdingsLedgerText.test.ts`,
+  `test/renderer/tradeLock.test.ts`, `test/renderer/journalValuation.test.ts` and the mock parity test
+  `test/renderer/mockHoldings09.test.ts`; `mockHoldings08`, `mockJournal`, `journal`, `csv`, `journalRpc` and
+  `holdingsPage` follow the appended columns, the band and the settings effect.
+
+### Ranking: risk-aware keys, the risk control and the suggested reserve (#3, #12)
+
+Ranking and text over books and data Flip Desk already holds. With the defaults every number, verdict, Pay up to and
+toast is 0.8's; the package adds two sort keys, hover text, four CSV columns per table, a drawer line, a Settings note
+and an opt-in notification gate. The engine rewrites each stored opportunity once to fill the V16 columns (A.2).
+
+- **Keys (#3).** Over the book each row already reads (the engine's priced book, a Live market entry), `exitRiskAt`
+  (`src/shared/exitRisk.ts`) gives three figures at the row's cost:
+  - *If this buyer leaves* (`backupProfitScrap`): `flipProfit` at `buyerDepthOf`'s best other buyer seen in the last
+    24 h; none when only an unverified one is left (as `singleExitOf`). A negative value is kept and shown.
+  - *Buyers at break-even* (`profitableDepth`): the distinct buyers seen in the last 24 h whose best usable order
+    (eligible, so banned and impersonator orders are out; not an outlier; above 0; a bot under Instant: `exitDepthOf`,
+    `buyerDepthOf`'s candidate rule, the revenue buyer included) gives `flipProfit >= 0` at the row's cost, capped at
+    20 (`EXIT_DEPTH_CAP`, shown "20+"). It equals counting the orders at or above exits' `breakEvenFor(cost, p, 'buy')`
+    (`test/shared/exitRisk.test.ts` checks both over a seeded sample).
+  - The book depth (`bookDepth`, uncapped) and its tag (`liquidityTagOf`): none (0), one, a few (2-4), many (5+). The
+    count is always shown beside the tag ("N of M usable buyers seen in the last 24 h"; with no price to judge,
+    `riskSentences` puts it in the depth sentence instead: "a few usable buyers (3 seen in the last 24 h)").
+  - Review: both counts are of `exitDepthOf`'s population, never every buyer the Buyers cell counts, so the texts
+    name it: "usable buyers" (`BOOK_DEPTH_LABELS`), "bot buyers" under Instant (`BOOK_DEPTH_BOT_LABELS`), followed by
+    `depthPopulationNote(useOrder)` ("Outlier orders are not counted."; under Instant "Under Instant only bots count;
+    outlier orders never do."; without a `useOrder`, a caller without settings, both rules). The Opportunities hover
+    passes the table's `useOrder`, the drawer its settings' and the Live market's Sells for and Buyers hovers the
+    page's (`MarketTable`'s `useOrder`, the same setting the service's `exitDepthOf` counted with), so five human
+    buyers under Instant read "0 of 0 bot buyers" and "no bot buyer seen in the last 24 h" beside a Buyers cell of 5,
+    never "no buyer seen".
+
+  `OppQuery` and `MarketQuery` sort by the first two (`'backup'`, `'depth'`), descending by default, with missing
+  values last in both directions and ties by profit (missing last), then name, then key: the repo's `OPP_SORT`, the
+  renderer's `compareOpps` and the shared `marketComparator` agree. Opportunities store the figures in V16's three
+  nullable columns (`opportunityRiskFields`: null is absent, so the repo's read-back equals the engine's shape and an
+  unchanged row is never upserted again); the engine reads the book once per row (`exitOrdersOfBook`, every row now,
+  not only profitable ones) for the next buyer and the keys, and its first full sweep rewrites rows stored before V16.
+  A row is rewritten again when a buyer it counts ages past 24 h or reprices, as 0.8 does when an order's
+  'unverified' flag changes. The Live market keeps a compact `ExitDepth` on each entry (`MarketEval.exitDepth`, set by
+  `evaluateMarketBase`) and computes the figures per read at `marketRiskCost` (your price, else a rule flip's
+  estimate, else none: `profitableDepth` null), in `select()`'s sort and `toRow` alike; `moved()` is unchanged, since
+  every `replace` already invalidates the read.
+
+  No column was added (the 0.8 plan's D23 precedent). Opportunities gained a Sort select (`OppSortPicker`,
+  `OPP_SORT_LABELS`, `OPP_SORT_HELP`; the column headers sort as before), the Live market's Sort select lists both
+  keys, and the figures show in the Opportunities Buyers hover (`oppBuyersTitle`), the Live market's Sells for and
+  Buyers hovers (`marketSellsTitle`, `marketRiskTitle`) and the drawer input card's *Buyers at break-even* line (D11,
+  below exits' *Break-even* and the *Next buyer* line). The drawer's line (`drawerRiskLine`) reads the drawer's own
+  book (`ItemDetail.buyOrders`) with the same `buyerDepthOf` call as `nextBuyerLine`, never the stored row, so the two
+  adjacent lines cannot disagree; it is null when the revenue order is not in that book, and warns on a profitable row
+  with at most one buyer at break-even. Both CSVs carry `backup_profit[_ref]`, `profitable_depth`, `book_depth` and
+  `book_depth_tag` (D10): the Opportunities CSV after exits' `break_even_ref`, the market CSV at its end, the mock's
+  Opportunities CSV after `break_even`; blank on a row with no figure. Nothing scales profit by the confidence score,
+  and every risk text ends "Buy orders show demand, not sales." (`DEMAND_NOT_SALES`).
+- **Why no EMA (D20).** The book changes only on feed events and snapshots, and deletes or reprices made while the app
+  or the feed was off are never re-sent (deviation 11), so the app has no regular cycle to smooth over. An EMA
+  updated per evaluation would weight event frequency, not time; a time-based one would need per-SKU state for every
+  Live market base, kept across restarts, whose gaps would either freeze an old book or decay into an invented empty
+  one (the reason `holding_marks` never fills a gap). The 24 h verification window is the smoothing: distinct usable
+  buyers seen in the last 24 h needs no new state, table or request.
+- **Risk control (D19).** `notifications.minProfitableDepth` (0 = off, the default; whole buyers 1-10, Settings →
+  Notifications, `MIN_PROFITABLE_DEPTH_LABEL`, `minProfitableDepthHint`) holds back the toasts that tell a flip until
+  that many buyers at break-even are seen: the engine's Profit, Watch (path B) and Candidate toasts (after the
+  unverified gate, `depthGateOk(opp.profitableDepth, minDepth)`), and the S3 notifier's new, cheaper, back and Buy now
+  flips (`BankStockNotifyArgs.minDepth` and `depthOf`, `BankStock.depthOf`: `profitableDepthAt` over the market
+  entry's `ExitDepth` at the row's cost, read only when a minimum is set; unknown holds the row back). A held-back flip
+  is not recorded as told, so a later run tells it once enough buyers are there. The S3 notifier's watch price or
+  profit hits (a page read or saved: its `ws` loop runs before the gates), Sell toasts, the Live check and re-save
+  reminders are not held back; the engine's "Watch: <name>" toast (a typed or imported price at a watch's profit
+  target) is, as `minProfitableDepthHint` says. Lists, rows and verdicts are unchanged.
+- **Suggested reserve (#12).** `profit.reserveSuggestion` (local reads only) runs `reserveSuggestionOf`
+  (`src/shared/reserveSuggest.ts`):
+  - per value band (under 10 ref, 10 ref to 1 key, 1 key and up; `reserveBandOf` at today's key price), the 10th
+    percentile (`lowerQuantile`, Hyndman-Fan type 1) of the exit's relative change over the user's typical hold
+    (`typicalHoldOf`'s median over every sale, clamped to 1 h-14 d, else 1 d, and the text says which; a clamped hold
+    keeps the median in `ReserveSuggestion.holdClampedFromMs`, so the note reads "over a 1 h hold (the shortest it
+    measures; your typical hold is 20 min, from 12 sales)", never calling the bound the user's hold), rounded up to a
+    whole percent (`suggestedPctOf`; 0 when the 10th percentile is a rise, at most 50%);
+  - windows on a fixed grid in the last 90 days, each needing both ends observed: a recorded run (`holding_marks`,
+    `repo.holdingMarksSince`, the newest 50,000) at each end, or a PriceDB point at most max(1 h, hold / 4) older; no
+    gap is filled;
+  - recorded windows start at the last buyer-settings change (`Holdings.buyerSettingsAt`, the stamp the advice reads;
+    the grid starts at max(first run, now - 90 d, the stamp)), so none is read from before it: only the latest change
+    is kept, and a window before it could span an earlier change no stamp remembers (review; `holdingExitHistory` cuts
+    at the same stamp). Each item gives at most its newest 30;
+  - both sources value keys at PriceDB's key price of each end's own time, so a key move counts as a revenue move the
+    same way from either (E.1 rule 9's exception): a PriceDB point as `history()` valued it, a recorded end with keys
+    at `keyPriceAtOf(PriceDb.loadedKeyHistory())` at that instant (the newest key point at or before it, at most
+    `RESERVE_KEY_POINT_MAX_AGE_MS` (2 d) older, and never after the history was loaded). Never the run's own
+    `HoldingMark.keyScrap`: the recorder compares raw keys and metal, so a run goes on through a key move, and a
+    start-of-run price made the figure depend on where the app restarted (review). With no key history in memory a
+    recorded end with keys is not observed (the help says opening the history of an item priced in keys loads it);
+    metal-only ends need none. Reading the key curve cache sends nothing;
+  - the figure comes from the recorded exit runs when they hold 20 windows from 3 items, else from the PriceDB history
+    `item.detail` loaded this session (`historyCache`, read, never filled: the method never calls `historyFor` or a
+    connector method that sends a request, only `loadedKeyHistory`'s in-memory read, and answers with the network
+    paused or PriceDB off), else "not enough data" with both counts; the two sources are never pooled;
+  - Settings → Profit thresholds shows it under the fields (`ReserveSuggestionNote`, `reserveSuggestionView`: the hold
+    it used and its sales, one line per band with its n and source, the units still held the typical hold leaves out),
+    re-read on `journal.changed`. It is text only, never applied: "a suggestion from past data, never a forecast"; the
+    reserve's hint now ends "Flip Desk never sets it" (`exitReserveHint`).
+- **Mock parity.** The mock's `evaluateOpportunity` and `mockMarketRow` call the same `exitDepthOf`, `buyerDepthOf`,
+  `exitRiskAt` and `marketRiskCost`; `'opps.list'` sorts with `sortOpportunities` and `'market.list'` with
+  `marketComparator`; `'item.detail'` keeps the history it served per base (`historyOpened`, cleared past 200 bases,
+  as `historyCache`), and `'profit.reserveSuggestion'` runs `reserveSuggestionOf` over the seeded exit runs, that
+  history, the mock journal's typical hold, `markSettings.at` and the preview's key history (`mockKeyHistory(t0, …)`
+  loaded at t0, the one Holdings' key band reads, as the service's `pricedb.loadedKeyHistory()`). The mock sends no
+  notification, so the gate has nothing to hold back there.
+- **Boundary.** No request kind, host, endpoint, budget, cadence, credential, push or `openUrl` was added, and
+  `net/policy.ts`, `budgets.ts` and `http.ts` are untouched: the keys come from the local `listings` book the engine
+  and the Live market already read, the suggestion from `holding_marks`, the journal, the in-memory history cache and
+  the in-memory PriceDB key curve (`PriceDb.loadedKeyHistory`, which sends nothing), and the gate only suppresses
+  toasts (opt-in). Nothing touches scrap.tf (R1, R10), and nothing is bought, listed or
+  traded (R4). V16 adds three nullable columns. The new modules are held to the F20 scan, and `exitRisk.ts` is a
+  listed `flipProfit` caller that neither reads `.frictionScrap` nor subtracts friction (`profitPath.test.ts`).
+- **Tests.** `test/shared/exitRisk.test.ts` (the `breakEvenFor` equivalence), `test/shared/reserveSuggest.test.ts`
+  (one meaning per band across sources), `test/domain/engineRanking090.test.ts` (the gate holds a one-buyer flip and
+  writes no told record; a pre-V16 row is upserted once), `test/domain/marketRanking090.test.ts`,
+  `test/domain/bankStockDepthNotify090.test.ts`, `test/service/reserveSuggestionRpc090.test.ts` (the PriceDB spy is
+  called by `item.detail` only), `test/renderer/riskModel.test.ts` (the drawer line agrees with `nextBuyerLine` on one
+  book; no "chance", "probability" or "will"), `test/renderer/oppSort090.test.ts` (`compareOpps` against the repo's
+  SQL order), `test/renderer/mockRanking090.test.ts` (parity; nothing fetched) and `test/main/settingsRisk090.test.ts`;
+  `settingsFields.test.ts` (the hint's last sentence), `marketRpc.test.ts` (the market CSV line's four blank cells),
+  `profitPath.test.ts` (`exitRisk.ts` among the `flipProfit` callers) and the static scan's `F20_FILES`
+  (`renderer/riskModel.ts`).
+
+### History: order persistence, recorded community prices, scrap.tf lows (#6, #7)
+
+From data that already arrives, Flip Desk keeps three histories and shows them; no number, verdict, notification or
+ranking changes, and there is no settings key (H10: like 0.8's `holding_marks`, the recording is storage only).
+
+- **Order persistence (#6).** For the buy orders of watched, held and scrap.tf-priced bases (core's
+  `watchedBookSet()`) seen on the live feed, `createOrderSpellTracker` (`domain/orderSpells.ts`) writes one
+  `order_spells` row per *spell*: one order at one price, with its base SKU, intent, bot flag, raw keys + metal,
+  backpack.tf's `listedAt`, first seen, last confirmed, and the end time and kind. No SteamID, listing id or name is
+  stored: the listing id is a key of the tracker's memory only (H4, R5).
+  - *What is followed (H1).* A spell opens only on a feed **update** of a buy order of a tracked base that is worth at
+    least `ORDER_SPELL_FOLLOW_SHARE` (0.7) of the base's top non-outlier order (`consScrap ?? bestScrap`, so one outlier
+    does not exclude the real top), is not marketplace, not banned, not flagged as an impersonator (D9) and has a
+    price (`orderSpellFollows`). Lowball orders persist for months and never matter for an exit. At most 20,000 orders
+    are followed at once (logged once past it).
+  - *How a spell ends (H2, D9).* `deleted` (a feed delete), `inactive` (the feed reported it not live: its id is in
+    `FeedBatch.inactive`), `lowered` / `raised` (an update at another price, by `rawPriceCompare`), `relisted`, or
+    `unwatched`. A delete or inactive report is held for `ORDER_SPELL_RELIST_GRACE_MS` (60 s) and at least to the next
+    status tick: an update of the same id at the same or a higher price in that time ends it `relisted` at the delete
+    (bots relist, and buy-order ids are deterministic, so without the grace a bot restart reads as a burst of ends); a
+    lower re-create ends it `lowered`; a feed break, epoch change or stop inside the grace ends it `unwatched` at the
+    delete. The Kaplan-Meier events are `deleted`, `inactive` and `lowered`; `raised`, `relisted` and `unwatched` are
+    censored. "Still up at its price or higher" is the flipper's question, and an inactive order is not up.
+  - *Continuity (H3).* The socket's `epoch` grows on every new connection and on every `buffer-limit-exceeded`, and the
+    socket flushes before growing it, so a batch never mixes two streams. A new epoch, the status tick seeing the feed
+    not live, a clock moved back and the app stopping end every followed spell `unwatched` at the stream's last batch;
+    `start()` ends rows a crash left open at their `last_seen_at`. Gaps are never filled. `last_seen_at` is written at
+    most every `ORDER_SPELL_TOUCH_MS` (10 min), never on a held row (review: a touch past its delete let a crash in the
+    grace censor it after the order was gone), and an ended spell's `last_seen_at` is its end. One transaction runs per
+    batch only when a followed id changes or a buy update of a tracked base arrives (R-3). The tracker logs the spells
+    written per day.
+  - *The age (H5).* The origin is `listedAt` on the update that opened the spell, and the entry age is first seen −
+    origin (0 when bp.tf's clock is ahead): delayed entry, because most orders were already old when first seen. It is
+    **time since backpack.tf's listing time**, never "time at this price": a price edit need not reset `listedAt` (two
+    repriced listings in ws-sample.json kept theirs), so every text says "listed N ago". Spells without `listedAt` are
+    counted, never estimated.
+  - *The estimate (H6).* `orderPersistenceOf` answers "of orders like this one, at this age, how many were still up at
+    their price (or higher) 1 h / 1 d / 7 d later" (`persistenceWindowOf`, O((n + k) log n) per window). It needs
+    `ORDER_PERSISTENCE_MIN_AT_RISK` (8) spells followed at the order's age and `ORDER_PERSISTENCE_MIN_AT_RISK_END` (3) at
+    every point of the window, its end included, mirroring timing's gates. The scope ladder is `like` (same bot flag,
+    value within 15 %) → `band` (value within 15 %) → `all`: the first scope whose 1 h window passes, then every
+    horizon in that scope. Otherwise the answer is "not enough data" with its reason (`no-listed-time`, `few-at-risk`,
+    `past-the-data`).
+  - *What is shown.* The item drawer's "Order book history" (`BookHistorySection`, between the Sell listings and
+    "Reference prices") asks `'item.bookHistory'` for its top 3 eligible distinct buyers (`bookHistoryOrderIds`) and
+    shows the spell summary (counts per end, worded as order-price spells: one order counts again after each price
+    change or feed restart), one line per order ("listed 3 h ago · est. 82 % of orders like it still up 1 d later", with
+    every horizon's spells followed and ended in its hover), and `ORDER_PERSISTENCE_NOTE`. It is order persistence,
+    never a fill rate (Lo, MacKinlay and Zhang): an order ends because it bought an item or because its owner removed
+    or repriced it or ran out of currency, and nobody can see which. Nothing is a forecast.
+- **Recorded community prices (#7).** The `bptf-prices` job keeps, for each incoming IGetPrices row that differs from
+  its stored row, both the stored row (the price it replaces) and the incoming one as `source 'prices'`; a SKU with no
+  stored row is kept only on a delta, so a first full fetch (~100k rows) is not copied (H7,
+  `communityHistoryPointsOf`). `bptf_community` is still overwritten exactly as in 0.8, and a failed history step costs
+  only the history (a nested transaction). The feed's `item.price.community` (`wsCommunityPriceOf`; on 249 of the 299
+  captured events) is batched per base and written by `createCommunityFeedRecorder` for tracked bases when it differs
+  from the last one written for that SKU (H8, source `'feed'`); it is never written to `bptf_community` and never used
+  as a reference. The unique point index makes repeats no-ops. The drawer draws the steps (`communityHistoryOf`: twin
+  SKUs and both sources joined, the stored current price appended when new) as a step chart, valued with
+  `communityValueScrap` (H12: `pricing.ts`'s `communityScrap` re-implemented in shared and pinned by a parity test, so
+  the renderer and the mock need not import the service), worded "backpack.tf's accepted price suggestions, not sales".
+  `deal` and `price.steam` are not read (their meaning is unverified). A high equal to the low is no range
+  (`communityHighOf`, review): the feed always sends `valueHigh` (equal to `value` for a single price, 84 of the 249)
+  where IGetPrices leaves `value_high` out, so `wsCommunityPriceOf` reads it as null and the point key, the comparison
+  and the stored row treat both spellings as one price; the drawer shows one step for it, not two.
+- **scrap.tf lows.** Per copy and bank, the lowest on-sale price in the user's saves, with when (the first and last save
+  at that price) and since when (H9). The low is the minimum by `rawPriceCompare` (equal keys: the metal; else valued
+  at the key price, fewer keys first on a tie), a total order, so the fold is order-independent; /items family rows
+  and sold-out rows never count. `ScraptfHistory.lowsFor` merges the retained saves (in memory, rebuilt per runs
+  rebuild and key price) with `scraptf_lows`, which `recordLows` writes at each import from 0.9 on (inside the
+  import's transaction, as a nested SAVEPOINT, changed rows only), so the low reaches back past the 90-day thinned
+  saves without a backfill. Raw keys + metal are kept and valued at the read's key price, so a key move alone never
+  reads as a price move. It shows in the drawer's scrap.tf history block (`scraptfLowLine`: "Lowest in your saves since
+  …" when the price now is at or under it) and in the bank stock price cell's hover (`scraptfLowSentence`, joined to
+  `BankStockRow.low` after the watch join). No toast reads it.
+- **`item.bookHistory` (H11).** One RPC, computed in the service through the shared rule (`readItemBookHistory` →
+  `itemBookHistoryOf`; the mock calls the same rule). The drawer passes listing ids from its own `OrderSummary` objects
+  (at most 5), and the service looks them up in the local book for their `listedAt` (an `OrderSummary` has none;
+  adding one would ripple into the stored opportunity JSON); a sell listing, a foreign base's order and an unknown id
+  are left out, and the ids are never stored or logged.
+- **Tables and retention (V16, Foundation).**
+  - `order_spells` (indexes `(base_sku, first_seen_at)`, `(first_seen_at)` and the partial `order_spells_open`): ended
+    spells only, 60 days / 300 per base / 400,000 in all. Every cut (the age, both caps, the read's `since` and limit of
+    2,000) selects on `first_seen_at`, the spell's entry, never on its end: a sample chosen by when spells ended keeps
+    long spells and drops their short siblings, which delayed entry cannot undo. The prunes take ended spells only, so
+    every read also cuts on entry what they leave behind (an open spell whose ended siblings were pruned is a
+    survivor): by age, the read's `since`; the whole table, `orderSpells` reads only spells first seen after the
+    newest entry that cap ever deleted (kept in `meta` as `orderSpells.entryCut`, never moved back); per base,
+    `itemBookHistoryOf` applies `spellsEntryCutOf`: for a base with at least 300 ended spells in the read, spells (open
+    or ended) first seen at or before its 300th newest ended spell are left out. That cut is at or after every boundary
+    the cap drew, also once a survivor it left has ended, and a batch opened at the boundary instant goes whole (review:
+    the cap splits such a batch by id but keeps all its open spells). A capped-base simulation reads 0.250 against a
+    truth of 0.247 at 7 d. The 60 days are a ceiling: about 30,000-50,000 spells a day for a user
+    tracking ~2,000 bases fill the 400,000 cap in 8-13 days and a busy base's 300 in a few days, so the caps usually
+    set the window; the drawer's "since" date (and the summary's hover) says how far back the spells reach. About 150
+    bytes a row, so 400,000 rows are about 60 MB; the 10-minute touch of followed rows updates no index.
+  - `bptf_community_history` (the unique point index, `(recorded_at)`): 365 days / 200 per SKU / 300,000 in all.
+  - `scraptf_lows` (primary key bank, SKU, special key): 365 days after `seen_at`.
+  - The daily maintenance prunes all three (`runMaintenance` gains `orderSpells`, `communityHistory`, `scraptfLows`,
+    and a pruned low refreshes the history index).
+- **Boundary.** No new host, credential, request kind, budget, cadence, push or setting. The feed's community price is
+  a field of payloads the socket already receives from `wss://ws.backpack.tf/events`, and the epoch is a counter; no
+  connection, header, cadence or cap changes (R2, R7). The `bptf-prices` job's single request
+  (`bptfApi.prices(since)`, its existing budget and 2 h cadence) is unchanged; the history is written from its answer.
+  `'item.bookHistory'` reads only `order_spells`, `bptf_community_history`, `bptf_community` and `listings` by id. The
+  lows come only from the user's saved pages and window reads, already imported (R1, R10): nothing is loaded, no URL
+  is built and nothing is opened. Text and charts only (R4).
+- **Mock parity.** The mock's `'item.bookHistory'` runs `itemBookHistoryOf` over each book's seeded spells and community
+  prices (`seedOrderSpells`: eight per eligible buy order within 10 % of its value, on its own RNG per SKU;
+  `seedCommunityHistory`: four points over 120 days around the book's community reference), memoised per base, with
+  each asked order's listing time from its id (`mockOrderListedAt`). Its bank stock rows and item histories join the
+  same `scraptfLowsOf` / `scraptfCopyLowOf` fold over its saves (the mock has no `scraptf_lows` table: its saves are
+  all it has), rebuilt when the saves or the key price change.
+- **Known limits.** An order that is never bumped or edited while the feed runs is not followed, so human orders are
+  under-represented; persistence needs the feed running for the hours it measures. Counts are order-price spells, not
+  distinct orders. A scrap.tf low covers only what the user saved: what happened between two saves is unknown.
+- **Compliance.** `F20_FILES` lists the three shared rules, `service/domain/orderSpells.ts`, `communityFeed.ts`,
+  `bookHistory.ts`, `renderer/bookHistoryModel.ts` and `renderer/components/BookHistorySection.tsx`.
+  `test/compliance/history090.test.ts` pins that the three tables have no column naming a buyer, listing or offer,
+  that the tracker and the feed recorder never name `steamid`, `userName`, `tradeOfferUrl` or `details`, that
+  `wsCommunityPriceOf` reads no `user`, `steam` or `deal`, that the `bptf-prices` job calls `bptfApi.prices(` exactly once
+  and no other `bptfApi`/`http` method, and that none of the eight new modules imports `service/net`, `electron` or
+  `node:http(s)`. The drawer section calls only `item.bookHistory` and opens nothing (`drawerBookHistory.test.ts`).
+- **Tests.** `test/shared/orderPersistence.test.ts` (the Kaplan-Meier worked example, the observation edges, the scope
+  ladder and the capped-base bias check), `test/shared/communityHistory.test.ts` (with the `communityScrap` parity),
+  `test/shared/scraptfLows.test.ts`, `test/bptf/bptfItem.community.test.ts`, `test/bptf/bptfSocket.history.test.ts`,
+  `test/domain/orderSpells.test.ts` (the tracker over a real `:memory:` repo: relists, the grace, epochs, failures and
+  no listing id in any row), `test/domain/communityFeed.test.ts`, `test/domain/scraptfLowsHistory.test.ts`,
+  `test/domain/bookHistory.test.ts`, `test/service/bookHistoryRpc.test.ts`, `test/service/communityPricesJob.test.ts`,
+  `test/service/bookHistoryCore.test.ts` (end to end from a fake feed, with no URL outside the 0.8 set),
+  `test/renderer/bookHistoryModel.test.ts`, `test/renderer/drawerBookHistory.test.ts`, the mock parity test
+  `test/renderer/mockBookHistory.test.ts` and `test/compliance/history090.test.ts`; `engine.test.ts`'s
+  `runMaintenance` pin gains the three counts. The repo and V16 tests are Foundation's.
+
+### Timing: how sure buy timing is (#10)
+
+Buy timing (0.8, Cycles) now says how sure it is, from the same saves and pooled tables: no setting, no V16
+statement, no RPC method or push, and no new file under `src/`; `ScraptfBuyTiming` and `ScraptfTimingBrief` gain the
+optional `uncertainty` and `saveTiming`, and `ScraptfTimingWhy` gains `unsure-gain`.
+
+- **Ranges clustered by copy.** `scraptfTimingInfluenceOf` is the infinitesimal jackknife of the Aalen-Johansen
+  shares over (age, age + H], each copy's states summed (one item repriced five times is one item), checked against
+  finite differences. `scraptfTimingSpreadOf` turns it into (co)variances times copies / (copies − 1), memoised per
+  table (rows of a page share their ages). pDrop and *went or rose first* carry a 90 % Wilson range at the effective
+  sample size p(1 − p) / variance (capped at the states behind it; at the copies behind it when every copy says the
+  same, the share is 0 or 1, or one item is behind it), with the items behind it named: "Allowing for chance across the 13 items behind these (a 90 % range): 48-86 %
+  dropped, 3-28 % went or rose first." (`timingRangesText`, rounded outward to whole percents).
+- **The Wait gate.** The horizon is picked as in 0.8 (best evWait, a tie to the shorter; no search over horizons for
+  one that passes). *Wait* needs c0 or c1 within Pay up to and the gain on the estimate over max(3 scrap, 10 %), as
+  before, and now the gain's one-sided 95 % low end (q's spread included) at least 1 whole scrap
+  (`SCRAPTF_WAIT_MIN_GAIN_LOW_SCRAP`), for the picked horizon taken alone: the pick among up to four horizons on the
+  same saves is not allowed for, so the measured false-Wait rates below are what the gate gives, never 95 %. This
+  replaces 0.8's fixed pDrop >= 0.3 (`SCRAPTF_WAIT_MIN_P_DROP`, removed). The gain is against the better of buying
+  now and not buying (max(evBuy, 0)): 0.8's `evBuy ?? 0` could be negative over Pay up to, which its drop chance hid.
+  When only the low end fails, the verdict is *Buy now* or *Over* with `unsure-gain` ("waiting looked worth more, but
+  allowing for chance it may add nothing"). A share whose jackknife says nothing of its spread (one item behind the
+  window, whose influence sums to 0 because the shares do not change when every weight is scaled alike; every copy the
+  same; or no drop, or no gone or rise, in the window) is never taken as exact: the gate gives it the spread that puts
+  it at the far end of its shown range (pDrop at its low end, *went or rose first* at its high end) and adds that
+  beside the other terms' as an independent spread (review; before, such a share counted as exact whenever q had a
+  spread, so a window resting on one item could pass on q's spread alone, and a window with no gone or rise ignored
+  the gone risk its own range showed).
+- **The drop size at its low end (T9-3b).** A false *Wait* is the costlier error (the item can sell while the user
+  waits), so the low end is taken with c1 after a conservative drop. `scraptfDropLowOf` takes the k-th smallest of the
+  drop sizes the point estimate uses (the copy's own with 3 or more, else the pool's), k the largest with
+  P(Binomial(n, 1/2) < k) <= 5 % (`SCRAPTF_DROP_LOW_ALPHA`, `scraptfMedianLowRank`; the smallest below 5 sizes): a
+  one-sided 95 % lower bound of the median single-step drop whatever the sizes' distribution, never above the point
+  size. When at least 5 (`SCRAPTF_DROP_SHORT_BRACKET_MIN`) of those drops have a bracket no longer than the look gap,
+  only those count, because several drops between distant saves read as one bigger step; `uncertainty.dropLow` and
+  `dropSizeFrom` ('short-brackets' or 'all') say which, and the drawer's money line names the drop it took. The
+  horizon pick and the gain bar keep the point size.
+- **Measured false Waits, the pick included.** On a known-rate synthetic bank (0.8's generator, run from the
+  scratchpad, not a repo test): 150 items with exponential times to a drop, going off sale and a rise (means below),
+  a true drop of 7 %, Sells for the factor times the price, Pay up to at a 5 % margin, 8 seeds per setting. A false
+  Wait is a *Wait* whose true gain at the picked horizon is under 1 scrap.
+
+  | Saves; mean hours to drop / gone / rise; Sells for | Waits, false: 0.8 | low end at the point drop | 0.9 (shipped) | true gain under the low end, gated rows: at the point drop | 0.9 (shipped) |
+  |---|---|---|---|---|---|
+  | A: hourly for 10 d; 30 / 60 / 200; 1.12 x | 0 | 0 | 0 | none gated | none gated |
+  | B: hourly for 10 d; 30 / 60 / 200; 1.20 x | 0 | 0 | 0 | none gated | none gated |
+  | C: 3-hourly for 20 d; 20 / 80 / 300; 1.15 x | 19, 6 (32 %) | 13, 6 (46 %) | 5, 3 (60 %) | 11 of 19 | 4 of 19 |
+  | D: hourly for 6 d; 15 / 40 / 300; 1.15 x | 6, 6 (100 %) | 2, 2 (100 %) | 1, 1 (100 %) | 3 of 6 | 2 of 6 |
+  | E: hourly for 10 d; 60 / 40 / 200; 1.08 x (drops rare) | 0 | 0 | 0 | none gated | none gated |
+  | F: 3-hourly ± 90 % jitter for 20 d; 20 / 80 / 300; 1.15 x | 31, 7 (23 %) | 24, 6 (25 %) | 19, 3 (16 %) | 14 of 31 | 9 of 31 |
+  | G: 6-hourly for 20 d; 12 / 80 / 300; 1.15 x | 88, 1 (1 %) | 88, 1 (1 %) | 37, 0 | 56 of 88 | 2 of 88 |
+
+  In all: 20 false of 144 Waits under 0.8's rule, 15 of 127 with the low end at the point drop, 7 of 62 as shipped.
+  T9-3b's bar (at most 1 false Wait per setting or 15 % of its Waits, whichever is larger) holds in A, B, D, E and G
+  and is missed in C (3 of 5) and F (3 of 19). The review fix above (a spreadless share at its range's far end) took
+  out one false Wait in D, at 43 h, whose window had no gone or rise among its 8 items (true gain 0.01 scrap); every
+  other row of the table is as before it. The variants tried (before that fix): a 1 % drop-size level and z = 1.69 gave
+  the same table; z = 2.24 (one-sided Bonferroni over four horizons) and z = 2.6 meet the bar in more settings (2.6 in
+  all) but turn the 0.8 `drop-likely` fixture of `scraptfTiming.test.ts`, whose own figures give a gain of 5 scrap,
+  into *Buy now*. So, as T9-3b directs, the shipped gate (z = 1.645, the drop size at 5 %) is the most conservative
+  variant that keeps that fixture a *Wait*. The false Waits left take the drop size right (6.6-7 % against the true
+  7 %) but read pDrop high at their picked wait (0.69-0.79 against a true 0.60 in C and F, 0.49 against 0.31 in D,
+  all at ages of 34-87 h): among many rows the gate passes the ones whose odds read high by chance, which a low end
+  for one row taken alone does not allow for. Their true gains were 0.14-1.0 scrap: none loses in expectation (waiting
+  gained less than the 1-scrap bar, never less than buying now), where 0.8's rule let Waits through at -0.09 scrap. The
+  stricter gates would also have dropped Waits that cleared the bar: 20 at z = 2.24 and 25 at z = 2.6 (of the 55 the
+  shipped gate keeps across the seven settings), to remove 5 or 7 of these near-misses.
+- **Depends on save timing.** `scraptfTimingTableOf(…, 'left')` dates every price change at the left end of its
+  bracket (a state runs startPrevAt to lastAt; a censoring at a sighting stays). When the same rules on that table,
+  at the copy's left age, give another of wait / buy-now / over, `saveTiming` names it: the tag reads *Wait ~1 d?* /
+  *Buy now?* (muted), and the titles and the drawer say "Depends on save timing: had each price change come just
+  after your last save before it, not just before the save that showed it, your saves would suggest …". The verdict
+  never changes. The left table is built lazily, only when the verdict could turn, and cached as `…|left`. G4's
+  *Buy now* toast never fires on a flagged Buy now (`timingTurned`), and a flagged Buy now ends the Wait streak like
+  any other non-wait, so the next unflagged one does not toast either.
+- **Where it shows.** `timingBadge`'s title: lead, the judged price, the odds, the ranges, the save-timing sentence,
+  the copy read, the save, then scraptf's checkout guard last on a *Buy now* (D5); `timingVerdictTitle` the same
+  without the copy read and the guard. The drawer's odds line carries the ranges, its money line the low end ("waiting
+  adds at least +0.11 ref (the low end for the wait your saves picked, taken alone, at a drop of 6 %)", or "waiting
+  may add nothing (low end …)"), and the save-timing sentence follows it. Ranges and the flag appear only when
+  present, so every 0.8 text without them is unchanged.
+- **What the ranges do not cover**, said in `TIMING_ESTIMATE_NOTE`: when the user chose to save (a save prompted by
+  a toast makes censoring informative), brackets merging events (on a synthetic known-rate bank the 90 % range of
+  pDrop covered the truth 88-94 % of the time at hourly saves, but *went or rose first* only 60 % at 3-hourly saves),
+  scrap.tf changing its rules, and, for the Wait check's low end, the pick among up to four waits; it also says the
+  drop size is taken at its low end.
+- **On the mock.** The stranges and list banks' one *Wait* each (both `drop-makes-flip`) became *Over* /
+  `unsure-gain`; hats is unchanged (`mockCycles.test.ts`), and no mock row is flagged.
+- **Performance.** Memoised per table (`SCRAPTF_TIMING_SPREAD_CACHE_MAX`), and the drop sizes' low end per (table,
+  look gap). In this build, on a machine shared with the other Wave 2 runs, `marketTimingPerf.test.ts`'s 2,000-row
+  window refresh took 64-70 ms against 0.8's 48-49 ms in the same conditions, and its cold page about 1.35-1.4 times
+  0.8's; the test's bounds are unchanged.
+- **Boundary unchanged.** Pure functions over the lifecycle the history index already caches: no repo query,
+  request kind, host, budget, timer, notification kind, `openUrl` or URL; nothing reaches scrap.tf (R1, R10);
+  profit still goes through `flipProfit` only; the edited modules were already in `F20_FILES`.
+- **Tests.** New `test/shared/scraptfTimingCi.test.ts` and `test/renderer/timingUncertainty.test.ts` (with the mock
+  parity case); changed `test/shared/scraptfTiming.test.ts` (the pDrop 0.25 case reads `unsure-gain`; the brief
+  carries `uncertainty`) and `test/shared/bankStockNotify.test.ts` (G4 skips a flagged Buy now).
+
+### Docs: brief corrections and feed fields
+
+Documents and their test only: no code, setting, request, push or schema change. The texts state what exits, scrap.tf
+and holdings-ledger landed in Wave 1 and history's `wsCommunityPriceOf` (Wave 2), from the 2026-10-22 research
+(`docs/RESEARCH.md`).
+
+- **DESIGN_BRIEF corrections (`docs/DESIGN_BRIEF.md`, D6).** Every original line is kept as written. A note under the
+  opening caveat says how the notes are marked: a **Correction (2026-10-22)** quote block in the corrected line's own
+  section, after the line (or, below a table, before the paragraph that follows it), and a **Note (0.9)** where 0.9
+  changed a rule the brief states. A note on a list item is indented into its list.
+  - §1.5: Trade Protection's CS2-only reading is contested (RESEARCH §4.6, §9 q15: Valve's FAQ did not render;
+    DMarket's docs say every game); Settings → Trade lock asks the user.
+  - §2.0 (Note): the SCM budget's cap of 300 a day, `x-eresult` 25/84 as a rate limit, and the host block on a
+    Cloudflare challenge script (RESEARCH §4.6, §8 #14).
+  - §2.7: PriceDB's key history is 900 s apart only in its recent tail (328 points since 2025-09-25, RESEARCH §4.7),
+    which the key move band allows for.
+  - §5.1: `Math.round(ref * 9)` is not safe for the capture's six half-scrap values (RESEARCH §4.2); integer scrap stays
+    (half-scrap units, #20, are deferred).
+  - §5.4: mannco's fee is 5%, the seller's net rounded up, per mannco's own docs (RESEARCH §4.4); mannco.store is a
+    journal venue.
+  - §5.5: a bot, and so Instant, is an event with a `userAgent` object, not `source` (253 against 294 events,
+    RESEARCH §4.2); the bot service is a label only.
+  - §5.7: the online +5 is gone (true on all 299 events, RESEARCH §4.2, #11); `notifications.minConfidence` stays 45.
+  - §5.8: the Trade Protection flag did not exist before 0.9 (RESEARCH §1.2); Settings → Trade lock changes Holdings,
+    not opportunities.
+  - §8: the mannco fee is settled, and Trade Protection's TF2 scope is contested.
+  - Appendix C: the email (`PERMISSION_TEMPLATE`, `src/renderer/aboutModel.ts`) no longer says "never connects to
+    scrap.tf", untrue since F21, and asks three more questions.
+- **Feed fields (`test/fixtures/bptf/FIELDS.md`).** Four rows: `payload.status` (read by `bptfListingActive`);
+  `payload.deal` (on 9 of the 78 sell events, at the community price, on none of the 221 buys; it read "only on some
+  deletes"; its meaning is RESEARCH §9 question 22, and the mapper does not read it); the `user` bullet
+  (`flagImpersonated` on `events[288]`, object-form bans by `isBannedFromBans`, the `botServiceOf` label); and the
+  `price` row (`community` read by `wsCommunityPriceOf`; `steam`, `suggested` and `deal` are not read). The intro now
+  says the sample holds 299 events (its `_meta.eventsSelected`; it said 300) and which counts are out of the full
+  1,556-event capture.
+- **Test.** `test/shared/audit-090-brief-corrections.test.ts` pins each corrected line, verbatim, with its dated note
+  in the same section naming its source, and exactly ten notes. It checks the notes' claims against the code (no
+  online bonus in `confidence.ts`, the SCM budget, the `x-eresult` set, mannco's rounding, the Trade lock default,
+  `isBot` from the `userAgent` object over the capture, the email's wording) and against `ws-sample.json` (the
+  half-scrap values, the `source` and `userAgent` counts, the `deal` arithmetic, the one impersonator, every status
+  active), and FIELDS.md's rows. The brief keeps `with "HTML only"`, which `importGuidance.test.ts` reads.
+
+### Tests and version
+
+- **New test files.** 74: 8 from Foundation, 64 from the packages (each package's mock parity test marked), 1 from
+  docs and 1 from integration.
+  - Foundation: `test/db/v16Round090.test.ts`, `test/db/listingsImpersonated090.test.ts`,
+    `test/db/opportunitiesRanking090.test.ts`, `test/db/orderSpells.test.ts`, `test/db/communityHistory.test.ts`,
+    `test/db/scraptfLows.test.ts`, `test/db/audit-v16-scraptf-columns.test.ts`, `test/service/contracts090.test.ts`.
+  - Exits: `test/shared/exitFees090.test.ts`, `test/shared/breakEven090.test.ts`,
+    `test/renderer/breakEvenModel090.test.ts`, `test/renderer/mockExits090.test.ts` (parity),
+    `test/renderer/settingsExits090.test.ts`, `test/bptf/buyerSignals090.test.ts`,
+    `test/domain/impersonator090.test.ts`, `test/net/steamEresult090.test.ts`, `test/net/challenge429090.test.ts`,
+    `test/shared/scraptfChallenge090.test.ts`.
+  - scrap.tf: `test/shared/checkoutGuard.test.ts`, `test/shared/bankStockNotifyGuard090.test.ts`,
+    `test/renderer/checkoutGuardModel.test.ts`, `test/renderer/aboutModel.test.ts`,
+    `test/import/parserEvidence090.test.ts`, `test/service/bankUnavailable090.test.ts`,
+    `test/shared/banksNotice090.test.ts`, `test/domain/banksUnavailable090.test.ts`,
+    `test/renderer/banksUnavailable090.test.ts`, `test/renderer/bankStockMarkdown090.test.ts`,
+    `test/renderer/importEvidence090.test.ts`, `test/pricedb/schema.names090.test.ts`,
+    `test/import/effectAlias090.test.ts`, `test/renderer/mockScraptf090.test.ts` (parity).
+  - Holdings and ledger: `test/shared/robustStats.test.ts`, `test/shared/holdingTradeLock.test.ts`,
+    `test/shared/holdingTrendSize.test.ts`, `test/shared/keyMoveBand.test.ts`, `test/shared/holdingsValuation.test.ts`,
+    `test/domain/holdingsTradeLock.test.ts`, `test/service/journalValuationRpc.test.ts`,
+    `test/pricedb/pricedb.keyHistory.test.ts`, `test/renderer/holdingsLedgerText.test.ts`,
+    `test/renderer/tradeLock.test.ts`, `test/renderer/journalValuation.test.ts`,
+    `test/renderer/mockHoldings09.test.ts` (parity).
+  - Ranking: `test/shared/exitRisk.test.ts`, `test/shared/reserveSuggest.test.ts`,
+    `test/domain/engineRanking090.test.ts`, `test/domain/marketRanking090.test.ts`,
+    `test/domain/bankStockDepthNotify090.test.ts`, `test/service/reserveSuggestionRpc090.test.ts`,
+    `test/renderer/riskModel.test.ts`, `test/renderer/oppSort090.test.ts`, `test/renderer/mockRanking090.test.ts`
+    (parity), `test/main/settingsRisk090.test.ts`.
+  - History: `test/shared/orderPersistence.test.ts`, `test/shared/communityHistory.test.ts`,
+    `test/shared/scraptfLows.test.ts`, `test/bptf/bptfItem.community.test.ts`, `test/bptf/bptfSocket.history.test.ts`,
+    `test/domain/orderSpells.test.ts`, `test/domain/communityFeed.test.ts`, `test/domain/scraptfLowsHistory.test.ts`,
+    `test/domain/bookHistory.test.ts`, `test/service/bookHistoryRpc.test.ts`,
+    `test/service/communityPricesJob.test.ts`, `test/service/bookHistoryCore.test.ts`,
+    `test/renderer/bookHistoryModel.test.ts`, `test/renderer/drawerBookHistory.test.ts`,
+    `test/renderer/mockBookHistory.test.ts` (parity), `test/compliance/history090.test.ts`.
+  - Timing: `test/shared/scraptfTimingCi.test.ts`, `test/renderer/timingUncertainty.test.ts` (with the mock parity
+    case).
+  - Docs: `test/shared/audit-090-brief-corrections.test.ts`.
+  - Integration: `test/shared/audit-090-docs.test.ts`.
+- **What pins the round.**
+  - `test/shared/audit-090-docs.test.ts`: this section names every shipped RESEARCH rank (#1, #2, #3, #6, #7, #9,
+    #10, #11, #12, #13, #14, #17, #22, #25), V16 and the three settings keys, states the boundary (no budget raised;
+    the SCM cap only lowers one), has a subsection per package whose test files exist and gives `package.json`'s
+    version; the README has "New in 0.9" (before 0.8's notes, with the boundary in its intro, the not-a-forecast,
+    demand-not-sales and order-persistence wording, and the one-time effects), names `docs/RESEARCH.md` in its
+    Documentation list and lists the 0.9 known limits; no 0.9 build marker comment is left in this file, and no wave
+    marker in `static.test.ts`.
+  - `test/shared/audit-080-docs.test.ts`: the 0.8 round's slice ends at this section (D15), and its version check
+    reads that round's own `**Version.** 0.8.0` line, no longer `package.json`.
+  - `test/shared/audit-074-docs-consistency.test.ts` still holds over the new text: the installer path equals
+    `package.json`'s version (review R41); the ownership table has a row for every `src/shared` module both the mock
+    and the service import (`exitRisk.ts`, `reserveSuggest.ts`, `orderPersistence.ts` and `scraptfLows.ts` among the
+    new ones) and `ceiling.ts` keeps its cost-check names; the README's current text, "New in 0.9" included, keeps its
+    counted phrases (the 0.9 text says "seen in the last 24 h", never "in the last day", and never "half the cards").
+  - `test/shared/audit-090-brief-corrections.test.ts`: the DESIGN_BRIEF corrections and the FIELDS.md rows, against
+    the code and the capture.
+  - `test/compliance/static.test.ts`: `F20_FILES` holds the new modules of holdings-ledger, scrap.tf, ranking and
+    history (no request, socket, URL opener, `href=`/`src=` or http text, and no import of electron, node:http(s)/net or
+    `../net`); `JOURNAL_FILES`, `DOMAIN_AND_SHARED_BEFORE_080` and `F20_OPENING_FILES` are unchanged; exits' automation
+    deny-list finds nothing in `src/` and no browser-automation package among the dependencies, and `EXIT_FILES` opens
+    and loads nothing; scrap.tf's boundary panel describe pins that the About panel copies and never opens; the
+    dashboard file that shows a `StepSparkline` (`BookHistorySection.tsx`) is scanned; `nonStaticOpenUrls` still
+    finds only `scraptfResaveNotice`, and `notifyOpenProblems` one guarded `openExternal`; the F21 window checks are
+    unchanged (exits' phrase check loads nothing). `test/renderer/externalLinks.test.ts` skips only `aboutModel.ts`,
+    whose addresses are copied, never opened (D8).
+  - `test/shared/profitPath.test.ts`: rules (1) and (2) pass with no new allowlist entry (breakEvenModel.ts
+    destructures `frictionScrap`, D7), and rule (3) lists `shared/exitRisk.ts` among the `flipProfit` callers.
+  - The migration pins (D1): `audit-v15-journal-fees.test.ts`, `watches.test.ts` and `holdingMarks.test.ts` check V15
+    with `MIGRATIONS.slice(0, 15)`, `db.test.ts` lists `bptf_community_history`, `order_spells` and `scraptf_lows`,
+    `bankStock.test.ts` and `importBank.test.ts` pin the new columns, and `SCHEMA_VERSION === MIGRATIONS.length`
+    (16); V15's text is byte-identical to 0.8.0's.
+- **Totals.** `npx vitest run`: 625 test files and 8,404 tests, all passing, the timed group included
+  (0.8.0 as committed: 551 files and 7,638 tests); `npm run typecheck` clean; `npm run build` succeeds.
+- **Version.** 0.9.0 (`package.json`, `package-lock.json`'s root entries; README's installer path, which
+  audit-074-docs-consistency pins). The mock's `MOCK_APP_VERSION` reads `package.json`.
+
 ## Conventions
 
 - TypeScript strict, ESM `import` without file extensions, named exports only.
@@ -4726,10 +5817,16 @@ paragraph lists the kinds, titles, gates and dedupe; F20 the click order.
     Instant never takes an unverified bot, such rows are not notified until a snapshot or feed event confirms them
     (§5.6), "+5 online" needs an event within 2 h and the near-buyer count verified orders. The cost checks
     (`variant-suspect`, `cost-below-market`) add a cost-side rule to §5.7's buy-side table. Integration ("Revenue
-    picks", "Reference age", Notifications).
+    picks", "Reference age", Notifications). From 0.9 (#11) no "+5 online" is given at all (RESEARCH §4.2); the rest
+    stands.
 12. **Unusual skins and defindex aliases (0.7.4).** Brief §4.3 keyed an unusual skin as quality 15 plus the effect
     (the brief, §4.2 and test/fixtures/bptf/FIELDS.md now say 5); backpack.tf's buy orders key it as 5 plus the
     effect, so the app does (F15 P2). Brief §4.2's "defindex aliases"
     from IGetPrices' defindex[] are built from the schema instead (same item_name and item_class, `pickDefindex` as
     the canonical choice) and applied when books are read, not stored (Integration "Book twins"), so they hold before
     the first IGetPrices fetch and without a backpack.tf key.
+13. **Trade lock (0.9).** Brief §5.8 and §8 planned a settings flag adding a 7-day lock warning to every opportunity.
+    0.9's Settings → Trade lock (RESEARCH #1) defaults to Not sure and applies to Holdings only: a buy decision comes
+    before the lock starts, and the lock delays only the resale. With a 7-day lock, Holdings shows Locked advice with
+    the tradable date, leaves the item out of Sellable now and holds its "Sell:" toast until it unlocks. Prices and
+    profits are unchanged.

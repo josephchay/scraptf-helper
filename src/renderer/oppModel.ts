@@ -246,6 +246,11 @@ function sortValue(o: Opportunity, sort: SortKey): number | string | null {
   switch (sort) {
     case 'profit':
       return o.profitScrap;
+    // 0.9 (#3): absent (a row stored before V16, no other buyer) sorts last, as the repo's OPP_SORT.
+    case 'backup':
+      return o.backupProfitScrap ?? null;
+    case 'depth':
+      return o.profitableDepth ?? null;
     case 'margin':
       return o.margin;
     case 'confidence':
@@ -269,10 +274,33 @@ export function compareOpps(sort: SortKey, dir: SortDir): (a: Opportunity, b: Op
       if (typeof va === 'string' && typeof vb === 'string') return sign * va.localeCompare(vb);
       return sign * ((va as number) - (vb as number));
     }
+    // 0.9 (#3): the risk keys tie by profit (descending, null last) before the name, as the repo's oppOrder.
+    if (sort === 'backup' || sort === 'depth') {
+      const pa = a.profitScrap;
+      const pb = b.profitScrap;
+      if (pa === null && pb !== null) return 1;
+      if (pb === null && pa !== null) return -1;
+      if (pa !== null && pb !== null && pa !== pb) return pb - pa;
+    }
     const byName = a.name.localeCompare(b.name);
     return byName !== 0 ? byName : a.key.localeCompare(b.key);
   };
 }
+
+/** 0.9 (#3): the Opportunities Sort select's labels, in OPP_SORTS order. */
+export const OPP_SORT_LABELS: Record<SortKey, string> = {
+  profit: 'Profit',
+  backup: 'If this buyer leaves',
+  depth: 'Buyers at break-even',
+  margin: 'Margin',
+  confidence: 'Confidence',
+  updated: 'Updated',
+  name: 'Name',
+};
+
+/** 0.9 (#3): the Opportunities Sort select's hover: what the two risk keys measure (demand, never sales). */
+export const OPP_SORT_HELP =
+  "If this buyer leaves: the profit at the next buyer seen in the last 24 h, should the buyer your profit uses fill or withdraw. Buyers at break-even: different buyers seen in the last 24 h whose order pays at least break-even at the row's cost. Hover Buyers for each row's figures. Buyer counts show demand, not sales.";
 
 export function sortOpportunities(rows: readonly Opportunity[], sort: SortKey = 'profit', dir: SortDir = 'desc'): Opportunity[] {
   return [...rows].sort(compareOpps(sort, dir));

@@ -25,7 +25,9 @@ const HOUR = 60 * MIN;
 const DAY = 24 * HOUR;
 const KEY: KeyPriceState = { valueScrap: 600, source: 'bptf', observedAt: NOW, stale: false, quotes: [], scraptfFromList: null };
 const T = NOW - 10 * HOUR;
-const BUY_NOW_BODY = '11.11 ref, sells for 22.22 ref to KeyBot, +11.11 ref; your saves said wait on the read before, now buy now (an estimate from your saves, not a forecast)';
+/** 0.9 (#9): a G4 toast that tells a flip ends with the checkout guard's sentence (186 characters, under 200). */
+const BUY_NOW_BODY =
+  "11.11 ref, sells for 22.22 ref to KeyBot, +11.11 ref; your saves said wait on the read before, now buy now (an estimate from your saves, not a forecast). Accept the bot's offer promptly.";
 
 const repos: Repo[] = [];
 afterEach(() => {

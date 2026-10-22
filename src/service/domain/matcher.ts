@@ -12,6 +12,8 @@ export const EXCLUDING_FLAGS: ReadonlySet<string> = new Set([
   'not-buy-order',
   'marketplace',
   'banned',
+  // 0.9 (#11): backpack.tf flags the account as impersonating another user (user.flagImpersonated); like a ban.
+  'impersonator',
   'blocklisted',
   'attribute-specific',
   'duplicate',
@@ -255,6 +257,7 @@ export function classifyOrder(listing: Listing, target: MatchTarget, ctx: MatchC
   if (listing.intent !== 'buy') flags.push('not-buy-order');
   if (listing.isMarketplace) flags.push('marketplace');
   if (listing.userBanned) flags.push('banned');
+  if (listing.userImpersonated === true) flags.push('impersonator');
   if (ctx.blocklist.has(listing.steamid)) flags.push('blocklisted');
 
   // Most orders are generic; only normalise the attributes when there is something to compare.

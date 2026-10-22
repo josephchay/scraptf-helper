@@ -4,9 +4,12 @@
 // journal, the stored exit runs and the same book). It opens nothing, links nothing and writes nothing (R4): the
 // advice is text, and Record sale stays the drawer's own button. Refetched on 'journal.changed' (300 ms) and on
 // 'market.changed', 'scraptf.listChanged' and 'prices.changed' (2 s), throttled and only while the window is shown.
-// Pure helpers: holdingDetailModel.ts and holdingsModel.ts. Styles: styles/holdings.css (holding-*).
+// Pure helpers: holdingDetailModel.ts and holdingsModel.ts. Styles: styles/holdings.css (holding-*). 0.9 (#1): with the
+// user's 7-day Trade lock each locked lot says when it becomes tradable; with Not sure (answered) a unit bought in the
+// last 7 days gets a dated caution. Both from the user's own setting; nothing reads the Steam account.
 
 import { useMemo, useState } from 'react';
+import { tradeLockModeOf } from '../../shared/holdingAdvice';
 import type { Scrap } from '../../shared/types';
 import { fmtSaveTime } from '../changesModel';
 import { fmtAge, fmtInt, fmtMoney } from '../format';
@@ -21,7 +24,8 @@ import {
   recordedSinceText,
   typicalHoldLine,
 } from '../holdingDetailModel';
-import { ADVICE_FOOTER, ADVICE_LABELS, ADVICE_TONES, adviceReasonText, adviceTitle } from '../holdingsModel';
+import { ADVICE_FOOTER, ADVICE_LABELS, ADVICE_TONES, adviceReasonText, adviceTitle, tradeLockCautionOn, tradeLockDrawerCaution } from '../holdingsModel';
+import { useApp } from '../hooks/appContext';
 import { useRpcQuery, useThrottled, useVisiblePush } from '../hooks/useRpc';
 import { StepSparkline } from './Sparkline';
 
@@ -37,6 +41,10 @@ export function HoldingSection({ sku, keyScrap, now }: { sku: string; keyScrap: 
   useVisiblePush('scraptf.listChanged', reload);
   useVisiblePush('prices.changed', reload);
   const [allTrades, setAllTrades] = useState(false);
+  // 0.9 (#1): the user's Trade lock answer (only '7d' dates the lots; an answered Not sure adds the drawer's caution).
+  const { settings } = useApp();
+  const lockMode = tradeLockModeOf(settings);
+  const cautionOn = tradeLockCautionOn(settings);
 
   const d = q.data;
   const key = d?.keyScrap ?? keyScrap;
@@ -48,7 +56,8 @@ export function HoldingSection({ sku, keyScrap, now }: { sku: string; keyScrap: 
 
   const row = d.row;
   const advice = row?.advice ?? null;
-  const lots = holdingLotLines(d.lots, key, now);
+  const lots = holdingLotLines(d.lots, key, now, lockMode);
+  const caution = row && cautionOn ? tradeLockDrawerCaution(row.heldSince, now) : null;
   const since = recordedSinceText(d);
   const typical = typicalHoldLine(d.typicalHold);
   const trades = closedTradeLines(d.closed, key);
@@ -79,6 +88,7 @@ export function HoldingSection({ sku, keyScrap, now }: { sku: string; keyScrap: 
               <p className="muted small">{ADVICE_FOOTER}</p>
             </>
           ) : null}
+          {row && lockMode === 'unknown' && caution ? <p className="muted small holding-lock-caution">{caution}</p> : null}
         </>
       ) : null}
       {lots.length ? (

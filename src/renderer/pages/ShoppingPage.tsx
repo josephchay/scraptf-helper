@@ -9,6 +9,7 @@ import { SCRAPTF_BOUNDARY_SHORT } from '../../shared/boundaryText';
 import type { Category, Scrap, ShoppingRow } from '../../shared/types';
 import { CATEGORIES, CATEGORY_LABELS } from '../../shared/types';
 import { rpc, saveCsv } from '../api';
+import { CheckoutGuard } from '../components/CheckoutGuard';
 import { CheckList, Popover } from '../components/Controls';
 import { openOrCopy } from '../components/ExternalLink';
 import { Banner, EmptyState, ErrorBanner, LoadingBlock } from '../components/Feedback';
@@ -142,6 +143,8 @@ export function ShoppingPage() {
           Change thresholds
         </button>
       </Banner>
+      {/* 0.9 (#9): the list suggests buying, so it says what to know before joining a bank's queue (text only). */}
+      <CheckoutGuard variant="line" />
 
       <div className="toolbar" role="toolbar" aria-label="Filters">
         <div className="search-box">

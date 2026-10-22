@@ -6,6 +6,7 @@ import { SCRAPTF_BOUNDARY_SHORT } from '../shared/boundaryText';
 import { isReservedAccelerator, isValidAccelerator, sameAccelerator } from '../shared/accelerator';
 import { BANK_STOCK_MAX_NOTIFICATIONS, BANK_STOCK_NOTIFY_DEDUP_MS } from '../shared/bankStock';
 import { CHECK_PRIVACY_SENTENCE } from '../shared/check';
+import { MIN_PROFITABLE_DEPTH_MAX } from '../shared/exitRisk';
 import { parsePrice } from '../shared/currency';
 import type { HotkeyState } from '../shared/rpc';
 import { SCRAPTF_RESAVE_MAX_MIN } from '../shared/scraptfHistory';
@@ -38,6 +39,13 @@ export const REFERENCE_MAX_AGE_DAYS = { min: 0, max: 365 } as const;
 /** 0.8 (PC-1): profit.exitReservePct, shown in percent: the schema allows 0 to 0.5. */
 export const EXIT_RESERVE_PCT = { min: 0, max: 50 } as const;
 
+/** 0.9 (#2): profit.marketplaceFeePct, shown in percent: the schema allows 0 to 0.5. */
+export const MARKETPLACE_FEE_PCT = { min: 0, max: 50 } as const;
+
+/** 0.9 (#2): what the marketplace.tf fee is used for, and where its default comes from. */
+export const MARKETPLACE_FEE_HINT =
+  "What marketplace.tf keeps of a sale. Used for its break-even price and the journal's fee hint, never for profit. About 10% rests on one 2019 forum report: check your seller page. Flip Desk reads nothing from marketplace.tf.";
+
 const DAY_MS = 24 * 60 * 60 * 1000;
 
 /** A stored ratio as the percentage text a field shows ("2" -> "200"). */
@@ -67,7 +75,7 @@ export function suspectMarginHint(ratio: number): string {
 /** 0.8 (PC-1): what the price-move reserve does, and that the number is the user's, not measured. */
 export function exitReserveHint(ratio: number): string {
   const base =
-    "Taken off what the buyer pays, for a price drop between buying on scrap.tf and the buyer accepting. Lowers Profit and Pay up to wherever a buy is judged. A sale into a live buy order (selling what you hold now, or to the next buyer) is judged without it; Holdings' advice includes it for exits nobody pays today (a listing, a recorded high, a reference). Your own allowance: Flip Desk does not measure price swings.";
+    "Taken off what the buyer pays, for a price drop between buying on scrap.tf and the buyer accepting. Lowers Profit and Pay up to wherever a buy is judged. A sale into a live buy order (selling what you hold now, or to the next buyer) is judged without it; Holdings' advice includes it for exits nobody pays today (a listing, a recorded high, a reference). Your own allowance: Flip Desk never sets it. Below it, what your recorded exits or PriceDB history suggest, with how many changes it rests on.";
   return ratio > 0 ? base : `Off. ${base}`;
 }
 
@@ -188,6 +196,22 @@ export function buyTimingNotifyHint(a: { notificationsOn: boolean; newOnScraptfO
   if (!a.importKind) missing.push('"Imported pages" is not ticked under Notify for');
   if (!a.importOn) missing.push('saved-page import is off (Import)');
   return silentHint(missing, base);
+}
+
+/** 0.9 (#3): notifications.minProfitableDepth, whole buyers; the schema allows 0 to MIN_PROFITABLE_DEPTH_MAX. */
+export const MIN_PROFITABLE_DEPTH = { min: 0, max: MIN_PROFITABLE_DEPTH_MAX } as const;
+/** 0.9 (#3): the risk control's label in Settings → Notifications. */
+export const MIN_PROFITABLE_DEPTH_LABEL = 'Only tell flips with at least this many buyers at break-even';
+/**
+ * 0.9 (#3): notifications.minProfitableDepth's description: what a buyer at break-even is, which toasts wait and which
+ * never do, and that buyer counts are demand, not sales. "Off." first at 0; otherwise how to turn it off.
+ */
+export function minProfitableDepthHint(n: number): string {
+  const base =
+    'Buyers at break-even: different buyers seen in the last 24 h whose order pays at least your price plus friction and the price-move reserve. ' +
+    'With a number set, a flip is told (Profit and Candidate toasts, the Watch: toast for a price you type or import, and New, Cheaper, Back on scrap.tf and Buy now flips) only when at least that many such buyers are there; 2 asks for a backup buyer besides the one your profit uses. ' +
+    "A flip held back stays in the lists and is told once enough buyers are seen. A watch's price or profit target met on a page you read or save, Sell toasts and the Live check are not held back. Buyer counts show demand, not sales.";
+  return n > 0 ? `${base} 0 turns this off.` : `Off. ${base}`;
 }
 
 // ---------------------------------------------------------------------------

@@ -87,9 +87,11 @@ export const BUDGETS: NetBudgetSpec[] = [
     host: 'steamcommunity.com',
     minIntervalMs: 5 * SEC,
     maxPerHour: 120,
+    // 0.9 (#14): at most 300 a day, under the community-measured 1,000 (RESEARCH §4.6); a rolling 24 h, seeded at start.
+    maxPerDay: 300,
     concurrency: 1,
     on429PauseMs: 6 * HOUR,
-    description: 'Market priceoverview: on click only, at most 1 per 5 s; a 429 disables it for 6 h',
+    description: 'Market priceoverview: on click only, at most 1 per 5 s and 300 per day; a 429 disables it for 6 h',
   },
   {
     id: 'mannco',

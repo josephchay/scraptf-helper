@@ -6,7 +6,7 @@
 // user browses; Flip Desk itself never fetches scrap.tf (the HTTP layer still refuses it, R1).
 
 import { bankStockPagePath } from '../shared/bankStock';
-import { LAYOUT_CHANGED, NO_PRICE_COLUMN, NO_STOCK_LIMIT, PARTIAL_READ, UNUSUALS_INDEX } from '../shared/importCodes';
+import { BANK_UNAVAILABLE, LAYOUT_CHANGED, NO_PRICE_COLUMN, NO_STOCK_LIMIT, PARTIAL_READ, UNUSUALS_INDEX } from '../shared/importCodes';
 import { SCRAPTF_BANKS } from '../shared/links';
 import {
   READ_AUTO_MIN_GAP_MS,
@@ -264,6 +264,8 @@ const WINDOW_WARNINGS: Readonly<Record<string, string | ((n: readonly number[]) 
   'schema-not-loaded': 'item names are still loading; read again in a moment',
   'too-large': 'the page is over the 20 MB import limit',
   // 0.7.1 (F21-10), the codes main picks first, in its order.
+  // 0.9 (#13): a page saying its bank is not trading outranks them all (main's WARNING_ORDER).
+  [BANK_UNAVAILABLE]: 'scrap.tf says this bank is not trading right now: no stock save, and nothing on it reads as sold',
   [PARTIAL_READ]: (n: readonly number[]) =>
     `${n.length >= 2 ? `only ${fmtInt(n[0])} of ~${fmtInt(n[1])} items were on screen` : 'only part of the page was on screen'}, so no stock save: Read page now once every card shows`,
   [LAYOUT_CHANGED]: "scrap.tf changed this page's layout: its items could not be read",

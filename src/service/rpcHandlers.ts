@@ -12,6 +12,8 @@ import {
   bankStockTargetOf,
 } from '../shared/bankStock';
 import { CHECK_MAX_CHARS } from '../shared/check';
+import { holdingsValuationOf, journalValuerOf } from '../shared/holdings';
+import type { JournalLotValuer } from '../shared/journal';
 import {
   JOURNAL_ENTRY_GONE,
   JOURNAL_MAX_FEE_KEYS,
@@ -19,6 +21,7 @@ import {
   JOURNAL_WRITE_OFF_NOTHING,
   feeOf,
   feePatchOf,
+  typicalHoldOf,
 } from '../shared/journal';
 import {
   WATCHES_FULL,
@@ -78,6 +81,7 @@ import {
   JOURNAL_SIDES,
   MARKET_SOURCES,
   MARKET_VERDICTS,
+  OPP_SORTS,
   SCRAPTF_BANK_IDS,
   SCRAPTF_CHANGE_KINDS,
   SECRET_NAMES,
@@ -95,15 +99,19 @@ import {
   type HealthReport,
   type HistoryPoint,
   type HoldingDetail,
+  type LoadedKeyHistory,
   type ImportOrigin,
   type ImportReport,
   type ImportResult,
   type ImportTopFlip,
+  type ItemBookHistory,
   type JournalSide,
   type MarketSort,
   type MarketSource,
   type MarketVerdict,
+  type OppSort,
   type ParsedScrapItem,
+  type ReserveSuggestion,
   type ScrapPrice,
   type ScrapPriceInput,
   type ScraptfBank,
@@ -122,6 +130,8 @@ import {
   type SpecialAttrs,
   type UnixMs,
 } from '../shared/types';
+import { RESERVE_LOOKBACK_MS, RESERVE_MAX_MARKS, reserveSuggestionOf } from '../shared/reserveSuggest';
+import { BOOK_HISTORY_ORDERS_MAX } from '../shared/orderPersistence';
 import type { BptfApi, Clock, Engine, HttpClient, Logger, PriceDb, Repo, SchemaService, SteamMarket } from './contracts';
 import {
   buildItemDetail,
@@ -135,6 +145,7 @@ import {
 import type { BanksSummary } from './domain/banks';
 import { bankStockCsv, type BankStock } from './domain/bankStock';
 import type { ScraptfHistory } from './domain/scraptfHistory';
+import { readItemBookHistory } from './domain/bookHistory';
 import type { WatchCache } from './domain/watches';
 import { holdingsCsv, type Holdings } from './domain/holdings';
 import type { LiveCheck } from './domain/liveCheck';
@@ -193,9 +204,10 @@ export interface HandlerContext {
    * F20: the history of the user's saves (runs index, change feed); in memory plus scraptf_events; no
    * network. importSavedPage calls onImport(batchId) inside its transaction after insertBankStock and
    * pushes 'scraptf.changed' after the commit when it wrote events. 0.8 (T4/T7): timingForCopy (optional, so test
-   * stubs compile) joins 'opps.list' rows' timing from the cached saves.
+   * stubs compile) joins 'opps.list' rows' timing from the cached saves. 0.9 (history): recordLows (optional, D29) keeps
+   * the save's lowest prices per copy in the same transaction, right after onImport.
    */
-  scraptfHistory: Pick<ScraptfHistory, 'onImport' | 'itemHistory' | 'changes' | 'csv'> & Partial<Pick<ScraptfHistory, 'timingForCopy'>>;
+  scraptfHistory: Pick<ScraptfHistory, 'onImport' | 'itemHistory' | 'changes' | 'csv'> & Partial<Pick<ScraptfHistory, 'timingForCopy' | 'recordLows'>>;
   /** F16 live check: copied or typed text against the local book and the saved list, plus the recent ring; no network. */
   liveCheck: Pick<LiveCheck, 'check' | 'recent'>;
   /** The saved-page folder watch as it runs (a missing folder or a failed OS watch is not active) and its last error. */
@@ -250,7 +262,8 @@ const oppQuery = z
     minConfidence: finite.optional(),
     inputKinds: z.array(inputKindEnum).max(5).optional(),
     search: z.string().max(200).optional(),
-    sort: z.enum(['profit', 'margin', 'confidence', 'updated', 'name']).optional(),
+    // 0.9 (#3): 'backup' and 'depth' join the sorts (OPP_SORTS; the repo's OPP_SORT orders them, missing last).
+    sort: z.enum(OPP_SORTS as unknown as [OppSort, ...OppSort[]]).optional(),
     dir: z.enum(['asc', 'desc']).optional(),
     limit: z.number().int().min(1).max(5000).optional(),
     offset: z.number().int().min(0).optional(),
@@ -464,6 +477,8 @@ const importParams = z.object({
 export type ImportSavedPageParams = z.output<typeof importParams>;
 
 const skuOnly = z.object({ sku: skuText });
+/** 0.9 (history): 'item.bookHistory' params: the drawer's top buy order ids (at most BOOK_HISTORY_ORDERS_MAX). */
+const itemBookHistoryParams = z.object({ sku: skuText, orders: z.array(z.string().min(1).max(200)).max(BOOK_HISTORY_ORDERS_MAX).optional() });
 const idOnly = z.object({ id });
 
 // F16. Every message is fixed text: a zod default may quote the input one day, and this input is the
@@ -652,6 +667,9 @@ function bankStockRowsOf(schema: SchemaService, items: readonly ParsedScrapItem[
       costScrap: sells?.scrap ?? null,
       stock: item.stock,
       assetId: item.assetId,
+      // 0.9 (#13): the card's own price-drop wording (evidence only; the cheapest on-sale card of a key carries its
+      // own). An /items row never does.
+      ...(!list && Array.isArray(item.markdown) && item.markdown.length > 0 ? { markdown: [...item.markdown] } : {}),
     };
     const onSale = bankStockOnSale(row);
     const total = sells ? Math.round(sells.keys * keyScrap) + sells.scrap : Number.POSITIVE_INFINITY;
@@ -965,6 +983,8 @@ function tryReport(ctx: HandlerContext, input: ImportReportInput): void {
  * save when it read every row's stock and about every row of the page's last save (F06).
  * Refused unless the user enabled import and acknowledged the ToS note (R10); a window read also needs
  * the window itself on (settings.scraptfWindow.enabled, behind its own risk acknowledgement).
+ * 0.9 (#13): a page whose own text says its bank is not trading (`bankNotice`) stores its prices but no bank
+ * stock save, and a window read of such a page records its batch even with no items, so the Banks card can say so.
  */
 export function importSavedPage(ctx: HandlerContext, p: ImportSavedPageParams): ImportResult {
   const s = ctx.settings();
@@ -1021,7 +1041,8 @@ export function importSavedPage(ctx: HandlerContext, p: ImportSavedPageParams): 
   // Date seconds before the file's mtime). A window read is dated by its read.
   const savedAt = origin === 'file' && typeof parsed.savedAt === 'number' && Number.isFinite(parsed.savedAt) ? parsed.savedAt : null;
   const mtime = savedAt !== null && savedAt > 0 && savedAt < fileTime - PAGE_DATE_SLACK_MS ? savedAt : fileTime;
-  if (origin === 'window' && parsed.items.length === 0) {
+  // 0.9 (#13): a read of a page saying its bank is not trading records its batch (S5), so the Banks card can date it.
+  if (origin === 'window' && parsed.items.length === 0 && parsed.bankNotice !== 'unavailable') {
     // F21: the user browses scrap.tf's front page, a profile or a bank whose cards have not arrived yet
     // (the settle read gets them). Such a read stores nothing either way, so it records no batch and
     // pushes nothing: the Import page lists no row per page browsed, and no "saved without its cards"
@@ -1150,7 +1171,10 @@ export function importSavedPage(ctx: HandlerContext, p: ImportSavedPageParams): 
     // read is whole when every row's stock was read and it shows (about) every row of the page's last save:
     // stored as a save, not left unsettled (ACT-4 stands for the bank pages, whose cards arrive late).
     const short = listBank ? listLookShort(ctx, parsed.page, stockRows.length, mtime, unsettled) : null;
-    if (unsettled && !(listBank && noStock === 0 && short === null)) stockSave = 'unsettled';
+    // 0.9 (#13): the page says its bank is not trading: its prices are stored, but no save (nothing reads as sold).
+    // The parser's bank-unavailable warning already says so.
+    if (parsed.bankNotice === 'unavailable') stockSave = 'partial';
+    else if (unsettled && !(listBank && noStock === 0 && short === null)) stockSave = 'unsettled';
     else if (futureFile) {
       // 0.7.4 (F82): an old page whose time was reset ahead of the clock would become the newest whole save,
       // read cards on sale as gone and sold ones as restocked, and (dated now) do so again at every start.
@@ -1282,6 +1306,8 @@ export function importSavedPage(ctx: HandlerContext, p: ImportSavedPageParams): 
         categories,
         bank: parsed.bank,
         origin,
+        // 0.9 (#13): the Banks card dates the bank's newest "not trading" look from this.
+        bankNotice: parsed.bankNotice ?? null,
       });
       for (const { id: priceId, sku, item } of writes) {
         ctx.repo.upsertScrapPrice({
@@ -1319,6 +1345,8 @@ export function importSavedPage(ctx: HandlerContext, p: ImportSavedPageParams): 
       if (stockSave === 'written' && parsed.bank !== null) stockWritten = ctx.repo.insertBankStock(batchId, parsed.bank, stockRows, parsed.page);
       // F20 S2: this save's changes against the previous save of its page, in the same transaction.
       if (stockWritten > 0) eventsWritten = ctx.scraptfHistory.onImport(batchId);
+      // 0.9 (history): this save's lowest prices per copy, in the same transaction (never throws).
+      if (stockWritten > 0) ctx.scraptfHistory.recordLows?.(batchId);
       // DM-1: a card this save shows gone from the bank (its own 'gone' events: never on a first save, an
       // out-of-order save, the same file again, or a card another page's newest save still lists) was
       // sold, so its imported price goes too; else it stays a flip in every view but Bank stock. Only
@@ -1698,7 +1726,8 @@ export function createRpcHandlers(ctx: HandlerContext): RpcHandler {
       }
       // The dashboard's filters and sort, so the file matches the list; paging and grouping do not apply.
       const rows = repo.queryOpportunities(withoutUndefined(query ?? {}));
-      return { csv: opportunitiesCsv(rows, engine.keyPrice().valueScrap), suggestedName: `flipdesk-opportunities-${stamp}.csv` };
+      // 0.9 (#2): the settings give the break_even_ref column.
+      return { csv: opportunitiesCsv(rows, engine.keyPrice().valueScrap, ctx.settings().profit), suggestedName: `flipdesk-opportunities-${stamp}.csv` };
     },
 
     // 0.7.1 (ACT-9): knownStock is the stock scrap.tf showed with the price behind the known row (one read per
@@ -1723,6 +1752,39 @@ export function createRpcHandlers(ctx: HandlerContext): RpcHandler {
     'holdings.detail': (params, m): HoldingDetail => {
       const { sku } = parse(skuOnly, params, m);
       return ctx.holdings.detail(splitSku(sku).full, clock.now());
+    },
+
+    // 0.9 (#12): local reads only: the recorded exit runs, the journal and the PriceDB history 'item.detail' already cached
+    // this session (historyCache). It never calls historyFor or the PriceDB connector, so it sends no request.
+    'profit.reserveSuggestion': (): ReserveSuggestion => {
+      const now = clock.now();
+      const histories = new Map<string, readonly HistoryPoint[]>();
+      for (const [base, hit] of historyCache) if (hit.points.length > 0) histories.set(base, hit.points);
+      const summary = journalSummary(repo.listJournal());
+      let settingsAt: UnixMs | null = null;
+      try {
+        settingsAt = ctx.holdings?.buyerSettingsAt?.(now) ?? null;
+      } catch {
+        settingsAt = null;
+      }
+      // Review: the PriceDB key history already in memory (the key curve cache; reading it sends nothing) values each
+      // recorded end with keys at that instant's key price. None loaded: those ends are not observed.
+      let keyHistory: LoadedKeyHistory | null = null;
+      try {
+        keyHistory = ctx.pricedb?.loadedKeyHistory?.() ?? null;
+      } catch {
+        keyHistory = null;
+      }
+      return reserveSuggestionOf({
+        marks: repo.holdingMarksSince(now - RESERVE_LOOKBACK_MS, RESERVE_MAX_MARKS),
+        histories,
+        // typicalHoldOf's lookup for a SKU with no own sales is the median over every sale; no SKU is ''.
+        hold: typicalHoldOf(summary.closed, summary.open)(''),
+        keyScrap: engine.keyPrice().valueScrap,
+        settingsAt,
+        now,
+        keyHistory,
+      });
     },
 
     'item.detail': async (params, m) => {
@@ -1811,6 +1873,13 @@ export function createRpcHandlers(ctx: HandlerContext): RpcHandler {
         throw new Error(`Steam Market check failed (${h.disabledReason ?? h.lastError ?? 'no answer'}). Nothing was read; try again later.`);
       }
       return { lowest: r.lowest, median: r.median, volume: r.volume, marketHashName };
+    },
+
+    // 0.9 (history): local only: the stored spells and community points of the item's book, the asked orders' listing
+    // times from the local book; nothing is fetched.
+    'item.bookHistory': (params, m): ItemBookHistory => {
+      const { sku, orders } = parse(itemBookHistoryParams, params, m);
+      return readItemBookHistory({ repo, schema, base: splitSku(sku).base, orders: orders ?? [], keyScrap: engine.keyPrice().valueScrap, now: clock.now() });
     },
 
     'links.forSku': (params, m) => {
@@ -2056,7 +2125,17 @@ export function createRpcHandlers(ctx: HandlerContext): RpcHandler {
 
     'journal.summary': () => journalSummary(repo.listJournal()),
 
-    'journal.exportCsv': () => ({ csv: journalCsv(repo.listJournal()), suggestedName: `flipdesk-journal-${dateStamp(clock.now())}.csv` }),
+    'journal.exportCsv': () => {
+      const now = clock.now();
+      // 0.9: the open lots valued as Holdings values them now (local reads only); blank when Holdings cannot answer.
+      let valuer: JournalLotValuer | null = null;
+      try {
+        valuer = journalValuerOf(holdingsValuationOf(ctx.holdings.list({}, now)), ctx.settings().profit);
+      } catch (err) {
+        log.warn('Journal export could not value the open lots', { error: String(err) });
+      }
+      return { csv: journalCsv(repo.listJournal(), valuer), suggestedName: `flipdesk-journal-${dateStamp(now)}.csv` };
+    },
 
     'import.html': (params, m) => importSavedPage(ctx, parse(importParams, params, m)),
 

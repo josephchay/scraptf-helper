@@ -24,7 +24,7 @@ import { createMarketIndex, type MarketIndex } from '../../src/service/domain/ma
 import { createScraptfListCache, type ScraptfListCache } from '../../src/service/domain/scraptfList';
 import { buildItemDetail } from '../../src/service/domain/views';
 import { CHECK_NOT_ITEM_REASON, CHECK_RECENT_MAX } from '../../src/shared/check';
-import { buyerDepthOf, exitCostsOf, exitOrdersOfSummaries, flipProfit, frictionOf, maxCostFor, profitStatus, singleExitOf } from '../../src/shared/ceiling';
+import { breakEvensOf, buyerDepthOf, exitCostsOf, exitOrdersOfSummaries, flipProfit, frictionOf, maxCostFor, profitStatus, singleExitOf } from '../../src/shared/ceiling';
 import { baseSku, fromString } from '../../src/shared/sku';
 import type { CheckResult, CheckSource, ItemSuggestion, Listing, MarketRow, ResolvedItem, ScrapPrice, ScraptfListStored, Settings } from '../../src/shared/types';
 import { FakeClock, FakeTimers, MIN, T0, createStubSchema, makeDeps, makeListing, noNetwork, recordingLogger, silentLogger, special, testSettings } from './helpers';
@@ -273,6 +273,29 @@ describe('evaluation parity', () => {
     expect([...verdicts].sort()).toEqual(['flip', 'over']);
     // No revenue: nothing was taken off.
     expect(h.check('Taunt: The Bunnyhopper, 1 ref')).toMatchObject({ exitCosts: null, profitScrap: null });
+  });
+
+  it('0.9 (#2): carries breakEvensOf the price', () => {
+    const h = setup();
+    seedBook(h.repo);
+    h.settings.current = testSettings({ profit: { frictionScrap: 2, exitReservePct: 0.05 } });
+    h.build();
+    const p = h.settings.current.profit;
+    for (const text of ['Team Captain, 9 ref', 'Team Captain, 11.66 ref', 'Team Captain, 1 key', "Bill's Hat, 1 ref"]) {
+      const r = h.check(text);
+      expect(r.price, text).not.toBeNull();
+      expect(r.breakEven, text).toEqual(breakEvensOf(r.price!.valueScrap, p, 'buy'));
+      expect(r.breakEven!.mode, text).toBe('buy');
+    }
+    // A priced check without a revenue still says what a sale must clear.
+    const noBuyer = h.check('Taunt: The Bunnyhopper, 1 ref');
+    expect(noBuyer.revenue?.revenueScrap ?? null).toBeNull();
+    expect(noBuyer.breakEven).toEqual(breakEvensOf(noBuyer.price!.valueScrap, p, 'buy'));
+    // No price: no break-even key at all.
+    const unpriced = h.check('Rocket Launcher');
+    expect(unpriced.status).toBe('item');
+    expect(unpriced.price).toBeNull();
+    expect('breakEven' in unpriced).toBe(false);
   });
 
   it('0.8 (PC-2): names a flip only the revenue order buyer makes (singleExit), never an over, and leaves reason as it was', () => {

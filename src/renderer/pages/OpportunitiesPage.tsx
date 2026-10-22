@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { GroupBy, OppListResult, OppQuery, Opportunity } from '../../shared/types';
-import { CATEGORIES, CATEGORY_LABELS, PROFIT_TIER_LABELS } from '../../shared/types';
+import { CATEGORIES, CATEGORY_LABELS, OPP_SORTS, PROFIT_TIER_LABELS } from '../../shared/types';
 import { rpc, saveCsv } from '../api';
 import { CheckList, Popover, Segmented } from '../components/Controls';
 import { Banner, EmptyState, ErrorBanner, LoadingBlock } from '../components/Feedback';
@@ -24,6 +24,8 @@ import {
   GROUP_PAGE,
   INPUT_ORDER,
   OPP_MAX_SEARCH_CHARS,
+  OPP_SORT_HELP,
+  OPP_SORT_LABELS,
   STATUS_ORDER,
   TIER_ORDER,
   activeFilterCount,
@@ -52,7 +54,8 @@ import {
 const ROW_LIMIT = 5000;
 
 const GROUPS: readonly GroupBy[] = ['category', 'tier', 'confidence', 'input'];
-const SORTS: readonly SortKey[] = ['profit', 'margin', 'confidence', 'updated', 'name'];
+// 0.9 (#3): every OppQuery sort, the two risk keys included (sanitizeSort restores a persisted one).
+const SORTS: readonly SortKey[] = OPP_SORTS;
 
 const CONFIDENCE_STEPS = [
   { value: 0, label: 'Any' },
@@ -153,6 +156,45 @@ function useGroupPages(data: OppListResult | undefined, query: OppQuery, groupBy
     return out;
   }, [loaded, wanted]);
   return { rows, loading, loadMore };
+}
+
+/**
+ * 0.9 (#3): the Sort select, as the Live market's SortPicker: every sort (the two risk keys have no column header), a
+ * change takes the key's default direction and the arrow flips it. The column headers keep sorting as before.
+ */
+function OppSortPicker({ value, onChange }: { value: { sort: SortKey; dir: SortDir }; onChange: (v: { sort: SortKey; dir: SortDir }) => void }) {
+  const flip: SortDir = value.dir === 'asc' ? 'desc' : 'asc';
+  return (
+    <div className="market-sort" title={OPP_SORT_HELP}>
+      <label className="muted small" htmlFor="opps-sort">
+        Sort
+      </label>
+      <select
+        id="opps-sort"
+        className="input select small"
+        value={value.sort}
+        onChange={(e) => {
+          const sort = e.target.value as SortKey;
+          onChange({ sort, dir: defaultDir(sort) });
+        }}
+      >
+        {SORTS.map((s) => (
+          <option key={s} value={s}>
+            {OPP_SORT_LABELS[s]}
+          </option>
+        ))}
+      </select>
+      <button
+        type="button"
+        className="icon-btn"
+        aria-label={value.dir === 'asc' ? 'Ascending; switch to descending' : 'Descending; switch to ascending'}
+        title={value.dir === 'asc' ? 'Ascending' : 'Descending'}
+        onClick={() => onChange({ sort: value.sort, dir: flip })}
+      >
+        <Icon name={value.dir === 'asc' ? 'arrowUp' : 'arrowDown'} size={14} />
+      </button>
+    </div>
+  );
 }
 
 export function OpportunitiesPage() {
@@ -301,6 +343,7 @@ export function OpportunitiesPage() {
           </button>
         ) : null}
         <div className="toolbar-spacer" />
+        <OppSortPicker value={sort} onChange={setSort} />
         <Segmented ariaLabel="Group by" value={groupBy} options={GROUPS.map((g) => ({ value: g, label: GROUP_BY_LABELS[g] }))} onChange={setGroupBy} small />
       </div>
 
@@ -381,6 +424,8 @@ export function OpportunitiesPage() {
             dir={sort.dir}
             onSort={onSort}
             onContextMenu={onRowMenu}
+            // 0.9 (#2): the Cost hover's break-even.
+            profit={settings?.profit ?? null}
           />
         )}
       </div>

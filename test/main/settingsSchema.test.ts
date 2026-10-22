@@ -425,3 +425,53 @@ describe('0.8 settings keys (exitReservePct, watches, buyTiming, ownSteamIds)', 
     expect(parseSettings(junk).ownSteamIds).toEqual(['76561198000000001', '76561198000000002']);
   });
 });
+
+describe('0.9 settings keys (marketplaceFeePct, minProfitableDepth, tradeLock)', () => {
+  it('profit.marketplaceFeePct: 0 to 0.5 accepted, outside refused; a file from before 0.9 reads 0.1, unreported', () => {
+    for (const pct of [0, 0.25, 0.5]) expect(applySettingsPatch(clone(), { profit: { marketplaceFeePct: pct } }).profit.marketplaceFeePct).toBe(pct);
+    expect(() => applySettingsPatch(clone(), { profit: { marketplaceFeePct: 0.6 } })).toThrow(/profit\.marketplaceFeePct/);
+    expect(() => applySettingsPatch(clone(), { profit: { marketplaceFeePct: -0.1 } })).toThrow(/profit\.marketplaceFeePct/);
+    const old = clone() as unknown as Record<string, any>;
+    delete old.profit.marketplaceFeePct;
+    const loaded = parseSettingsWithReport(old);
+    expect(loaded.settings.profit.marketplaceFeePct).toBe(0.1);
+    expect(loaded.invalid).toEqual([]);
+  });
+
+  it('notifications.minProfitableDepth: whole buyers 0 to 10; a file from before 0.9 reads 0 (off), unreported; junk reads 0, reported', () => {
+    for (let n = 0; n <= 10; n++) {
+      expect(applySettingsPatch(clone(), { notifications: { minProfitableDepth: n } }).notifications.minProfitableDepth).toBe(n);
+    }
+    for (const bad of [11, -1, 2.5, '2', true]) {
+      expect(() => applySettingsPatch(clone(), { notifications: { minProfitableDepth: bad } })).toThrow(/notifications\.minProfitableDepth/);
+    }
+    const old = clone() as unknown as Record<string, any>;
+    delete old.notifications.minProfitableDepth;
+    const loaded = parseSettingsWithReport(old);
+    expect(loaded.settings.notifications.minProfitableDepth).toBe(0);
+    expect(loaded.invalid).toEqual([]);
+    const junk = clone() as unknown as Record<string, any>;
+    junk.notifications.minProfitableDepth = 'lots';
+    const parsed = parseSettingsWithReport(junk);
+    expect(parsed.settings.notifications.minProfitableDepth).toBe(0);
+    expect(parsed.invalid).toEqual(['notifications.minProfitableDepth']);
+  });
+
+  it("tradeLock: 'unknown', 'none' and '7d' accepted, another mode refused; a 0.8 file loads not answered, unreported", () => {
+    for (const mode of ['7d', 'none', 'unknown'] as const) {
+      expect(applySettingsPatch(clone(), { tradeLock: { mode } }).tradeLock).toEqual({ mode, answeredAt: null });
+    }
+    expect(() => applySettingsPatch(clone(), { tradeLock: { mode: '14d' } })).toThrow(/tradeLock\.mode/);
+    expect(applySettingsPatch(clone(), { tradeLock: { mode: '7d', answeredAt: 1 } }).tradeLock).toEqual({ mode: '7d', answeredAt: 1 });
+    const old = clone() as unknown as Record<string, any>;
+    delete old.tradeLock;
+    const loaded = parseSettingsWithReport(old);
+    expect(loaded.settings.tradeLock).toEqual({ mode: 'unknown', answeredAt: null });
+    expect(loaded.invalid).toEqual([]);
+    const junk = clone() as unknown as Record<string, any>;
+    junk.tradeLock = { mode: '14d', answeredAt: null };
+    const parsed = parseSettingsWithReport(junk);
+    expect(parsed.settings.tradeLock).toEqual({ mode: 'unknown', answeredAt: null });
+    expect(parsed.invalid).toEqual(['tradeLock.mode']);
+  });
+});

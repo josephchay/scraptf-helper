@@ -342,9 +342,13 @@ describe('scraptfBuyTimingOf: every verdict and why', () => {
     expect(judge({ states: rich(), buy: { revenueScrap: 120, maxCostScrap: null } })).toMatchObject({ verdict: 'over', why: 'over' });
   });
 
-  it("'buy-now': flip-now when a drop is unlikely, gone-risk when going or rising first is at least as likely", () => {
+  it("'buy-now': unsure-gain when waiting fails at its low end, gone-risk when going or rising first is at least as likely", () => {
+    // 0.9 (#10): pDrop 0.25 was 0.8's flip-now (under 0.3); waiting clears the bar on the estimate but not at its low end.
     const flipNow = [...many(5, 'd', 10, 'reprice-down'), ...many(11, 'g', 200, 'gone'), ...many(4, 'o', 300, 'open')];
-    expect(judge({ states: flipNow })).toMatchObject({ verdict: 'buy-now', why: 'flip-now' });
+    const unsure = judge({ states: flipNow });
+    expect(unsure).toMatchObject({ verdict: 'buy-now', why: 'unsure-gain' });
+    // No gone or rise in its window: went-or-rose first is taken at its range's high end (review), so -1, not 0.
+    expect(unsure.uncertainty?.gainLowScrap).toBe(-1);
     // The events fall inside the chosen window (6 h from an age of 1 h): gone or rose first in 11 of 20.
     const goneRisk = [...many(5, 'd', 4, 'reprice-down'), ...many(5, 'g', 4, 'gone'), ...many(6, 'r', 4, 'reprice-up'), ...many(4, 'o', 300, 'open')];
     const t = judge({ states: goneRisk });
@@ -517,6 +521,8 @@ describe('steps, earlier runs and the brief', () => {
       // The price judged and its Pay up to, for the Live market and Opportunities tag titles.
       costScrap: t.costScrap,
       maxCostScrap: t.maxCostScrap,
+      // 0.9 (#10): the ranges, whenever the timing has them.
+      uncertainty: t.uncertainty,
     });
     expect(b.steps).toHaveLength(5);
   });

@@ -21,6 +21,8 @@ import { formatKeysMetal, formatRef, formatScrap } from './currency';
 import { BANK_STOCK_NOTIFY_KINDS } from './types';
 import type { BankStockNotifyKind, BankStockOpenFilter, BankStockRow, Scrap, ScraptfBank, ScraptfWatch, ScraptfWatchMet, UnixMs } from './types';
 import { watchFloorOf, watchFresh, watchHitOf, watchRowSpecialKey, watchTargetsText, watchesFor, type ScraptfWatchIndex } from './watches';
+import { withCheckoutGuard } from './checkoutGuard';
+import { depthGateOk, minProfitableDepthOf } from './exitRisk';
 
 /** One on-sale row of a told look, and whether it is back on sale (scraptfIsRestock). */
 export interface BankStockLookRow {
@@ -103,6 +105,10 @@ export interface BankStockNotifyArgs {
   timing: boolean;
   /** G4: this row's Wait memory (bankStockWaitKey in bankStock.timing), else null. */
   waitOf(row: BankStockRow): BankStockWaitMemo | null;
+  /** 0.9 (#3): notifications.minProfitableDepth (0 or absent: off). The flip kinds (S3's gates) need at least this many buyers at break-even. */
+  minDepth?: number;
+  /** 0.9 (#3): BankStock.depthOf: distinct buyers seen in the last 24 h at or above break-even at the row's cost; null: unknown (a set minDepth then holds the row back). */
+  depthOf?(row: BankStockRow): number | null;
 }
 
 function finite(v: unknown): v is number {
@@ -149,12 +155,13 @@ export function bankStockNotifyOrder(a: Pick<BankStockNotifyCandidate, 'kind' | 
  * `at` is the look's previous save), and only when the data moved: a drop showed since the streak began, or the first
  * Wait's horizon has passed. Between two reads a copy only ages, and crossing one pooled event time can move the
  * verdict back and forth with nothing new in the copy's data, so aging alone never fires. Not-enough-data, over and
- * no-buyers never fire and never count as wait.
+ * no-buyers never fire and never count as wait. 0.9 (#10): nor does a Buy now that depends on save timing (its brief's
+ * saveTiming): the user's saves cannot settle that turn.
  */
 function timingTurned(a: BankStockNotifyArgs, r: BankStockRow): boolean {
   const { look } = a;
   const t = r.timing;
-  if (!a.timing || look.previousSavedAt === null || t === undefined || t.verdict !== 'buy-now') return false;
+  if (!a.timing || look.previousSavedAt === null || t === undefined || t.verdict !== 'buy-now' || t.saveTiming !== undefined) return false;
   const w = a.waitOf(r);
   if (w === null || w.at !== look.previousSavedAt) return false;
   return (finite(t.dropsThisRun) && t.dropsThisRun > w.drops) || (w.horizonMs !== null && look.savedAt - w.since >= w.horizonMs);
@@ -177,9 +184,16 @@ function candidateOf(a: BankStockNotifyArgs, r: BankStockRow, restock: boolean):
     return v;
   };
   const unverified = r.revenueOrder?.flags.includes('unverified') === true;
-  // Today's S3 gates; the suspect check (local reads) last and only when a candidate needs it.
+  // Today's S3 gates; the suspect check (local reads) last and only when a candidate needs it. 0.9 (#3): with
+  // notifications.minProfitableDepth set, also that many buyers at break-even (depthOf is read only then).
   const gates =
-    a.flips && r.verdict === 'flip' && (r.confidence ?? 0) >= a.minConfidence && finite(r.profitScrap) && r.profitScrap >= a.minProfitScrap && !unverified;
+    a.flips &&
+    r.verdict === 'flip' &&
+    (r.confidence ?? 0) >= a.minConfidence &&
+    finite(r.profitScrap) &&
+    r.profitScrap >= a.minProfitScrap &&
+    !unverified &&
+    (minProfitableDepthOf(a.minDepth) === 0 || depthGateOk(a.depthOf?.(r) ?? null, a.minDepth));
   let ok: boolean | undefined;
   const flipOk = (): boolean => (ok ??= gates && !suspect('flip'));
   const s3Key = bankStockNotifyKey(look.bank, r.sku);
@@ -425,6 +439,18 @@ export function bankStockNoticeOf(c: BankStockNotifyCandidate, label: string, K:
     case 'timing':
       return bankStockBuyNowNotice(label, r, K, savedAgoMs);
   }
+}
+
+/**
+ * 0.9 (#9): bankStockNoticeOf, with the checkout guard's short sentence on the body of a toast that suggests buying (a
+ * watch hit or a G4 "Buy now" that tells a flip: c.tellsFlip, with no doubt) when it still fits
+ * CHECKOUT_GUARD_TOAST_BODY_MAX (withCheckoutGuard). Every other toast is bankStockNoticeOf's, word for word, and the
+ * title never changes.
+ */
+export function bankStockNoticeWithGuard(c: BankStockNotifyCandidate, label: string, K: Scrap | null, savedAgoMs: number | null, timing = false): { title: string; body: string } {
+  const n = bankStockNoticeOf(c, label, K, savedAgoMs, timing);
+  const buys = c.tellsFlip && (c.doubt ?? null) === null && ((c.kind === 'watch' && c.watch !== null && c.hit !== null) || c.kind === 'timing');
+  return buys ? { ...n, body: withCheckoutGuard(n.body) } : n;
 }
 
 const WORDS = ['new', 'cheaper', 'back on sale', 'buy now', 'watched'] as const;

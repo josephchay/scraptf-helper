@@ -13,6 +13,7 @@ import { createScraptfHistory, type ScraptfHistory } from '../../src/service/dom
 import { createWatchCache, type WatchCache } from '../../src/service/domain/watches';
 import { BANK_STOCK_MORE_BODY, bankStockSpecialKey } from '../../src/shared/bankStock';
 import { bankStockWatchNotice, bankStockWatchNotifyKey } from '../../src/shared/bankStockNotify';
+import { withCheckoutGuard } from '../../src/shared/checkoutGuard';
 import { watchUndoInput } from '../../src/renderer/watchesModel';
 import { maxCostFor } from '../../src/shared/ceiling';
 import { DEFAULT_SETTINGS, mergeSettings } from '../../src/shared/defaults';
@@ -149,9 +150,11 @@ describe('G1: when a watch fires (the stateless edge)', () => {
     expect(h.run('hats', first, T + MIN)).toBe(1);
     const row = h.stock.lookOf('hats', first)!.rows.find((x) => x.row.sku === '101;6')!.row;
     expect(row.watch).toEqual({ id: w.id, anyCopy: true, maxCostScrap: 120, minProfitScrap: null, onRestock: false, met: 'price', overTargetScrap: -20 });
-    expect(h.sent).toEqual([{ ...bankStockWatchNotice('Hats', row, w, 'price', false, KEY.valueScrap, MIN), sku: '101;6' }]);
+    // 0.9 (#9): a watch hit that tells a flip gains the checkout guard's short sentence (it fits under 200).
+    const n = bankStockWatchNotice('Hats', row, w, 'price', false, KEY.valueScrap, MIN);
+    expect(h.sent).toEqual([{ ...n, body: withCheckoutGuard(n.body), sku: '101;6' }]);
     expect(h.sent[0]!.title).toBe('Watch (Hats): Ghastly Gibus');
-    expect(h.sent[0]!.body).toBe('11.11 ref, at or under your ≤ 13.33 ref; sells for 22.22 ref to KeyBot, +11.11 ref');
+    expect(h.sent[0]!.body).toBe("11.11 ref, at or under your ≤ 13.33 ref; sells for 22.22 ref to KeyBot, +11.11 ref. Accept the bot's offer promptly.");
     expect(h.stock.list({ bank: 'hats', filter: 'watched' }, NOW).rows.map((r) => r.sku)).toEqual(['101;6']);
   });
 
@@ -178,7 +181,7 @@ describe('G1: when a watch fires (the stateless edge)', () => {
     const ok = setup();
     const w = ok.watch('101;6', { minProfitScrap: 50 }, T - HOUR);
     expect(ok.run('hats', save(ok.repo, 'hats', T, [s('101;6', 100)]), T + MIN)).toBe(1);
-    expect(ok.sent[0]!.body).toBe('11.11 ref, sells for 22.22 ref to KeyBot, +11.11 ref: at or over your +5.55 ref');
+    expect(ok.sent[0]!.body).toBe("11.11 ref, sells for 22.22 ref to KeyBot, +11.11 ref: at or over your +5.55 ref. Accept the bot's offer promptly.");
     expect(w.minProfitScrap).toBe(50);
   });
 });
@@ -332,7 +335,9 @@ describe('G1, G3: texts', () => {
     const first = save(h.repo, 'hats', T, [s('101;6', 500)]);
     expect(h.run('hats', first, T + MIN)).toBe(1);
     const row = h.stock.lookOf('hats', first)!.rows[0]!.row;
-    expect(h.sent[0]).toEqual({ ...bankStockWatchNotice('Hats', row, w, 'price', false, KEY.valueScrap, MIN), sku: '101;6' });
+    // 0.9 (#9): the cost 500 against revenue 700 tells a flip, so the body gains the checkout guard's sentence.
+    const n = bankStockWatchNotice('Hats', row, w, 'price', false, KEY.valueScrap, MIN);
+    expect(h.sent[0]).toEqual({ ...n, body: withCheckoutGuard(n.body), sku: '101;6' });
     expect(h.sent[0]!.body).toMatch(/^55\.55 ref, at or under your ≤ 1 key; compared at 1 key = 66\.66 ref; sells for /);
   });
 

@@ -166,12 +166,13 @@ describe('scoreConfidence: the cost checks (F22, F70)', () => {
 describe('scoreConfidence: buyer liveness and near buyers (F23, F29, F19)', () => {
   const plain = (over: Partial<ConfidenceInput>) => scoreConfidence(input({ costScrap: null, twin: null, references: refs(null, null), ...over }));
 
-  it("gives no '+5 Buyer is online' from an event days old", () => {
+  it("gives no '+5 Buyer is online' from an event days old, nor (0.9, #11) from a fresh one", () => {
     const stale = order(115, { userOnline: true, lastEventAt: T0 - 136 * HOUR, steamid: 'PAYAH' });
     const r = plain({ order: stale, eligible: [stale], revenueScrap: 115 });
     expect(r.reasons).not.toContain('+5 Buyer is online');
+    // 0.9 (#11): the bonus is gone; the flag was true on every captured feed event (RESEARCH §4.2).
     const fresh = order(115, { userOnline: true, lastEventAt: T0 - 10 * MIN });
-    expect(plain({ order: fresh, eligible: [fresh], revenueScrap: 115 }).reasons).toContain('+5 Buyer is online');
+    expect(plain({ order: fresh, eligible: [fresh], revenueScrap: 115 }).reasons).not.toContain('+5 Buyer is online');
   });
 
   it('counts only verified neighbours as buyers within 10%', () => {

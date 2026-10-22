@@ -27,6 +27,7 @@ import type {
   ImportOrigin,
   ImportReport,
   ImportResult,
+  ItemBookHistory,
   ItemDetail,
   ItemSuggestion,
   JournalEntry,
@@ -41,6 +42,7 @@ import type {
   OpportunityEvent,
   PriceRule,
   PriceRuleInput,
+  ReserveSuggestion,
   ResolvedItem,
   ScrapPrice,
   ScrapPriceInput,
@@ -144,6 +146,13 @@ export interface RpcContract {
    */
   'holdings.detail': { params: { sku: string }; result: HoldingDetail };
   /**
+   * 0.9 (#12): what the user's own data suggests for profit.exitReservePct, per value band (reserveSuggestionOf): the
+   * recorded exit runs (holding_marks), the journal's typical hold, the PriceDB history 'item.detail' already loaded
+   * this session and the PriceDB key history already in memory (keys at each end's own time). Local reads only: it
+   * never asks PriceDB for history. Text beside the setting; never applied.
+   */
+  'profit.reserveSuggestion': { params: void; result: ReserveSuggestion };
+  /**
    * `history: false` skips the PriceDB history fetch (local only, fast); default true.
    * `target: 'plain'` classifies the book against a clean copy of `sku` (the row quick
    * entry saves) instead of the newest stored copy's extras (the drawer, default).
@@ -158,6 +167,13 @@ export interface RpcContract {
   'links.forSku': { params: { sku: string; assetId?: string | null }; result: LinkSpec[] };
   /** Steam Community Market price overview (off unless enabled in settings; on click only). */
   'item.scm': { params: { sku: string }; result: { lowest: string | null; median: string | null; volume: string | null; marketHashName: string | null } | null };
+  /**
+   * 0.9 (history, RESEARCH #6/#7): how long the item's buy orders stayed at their price while the live feed ran (order
+   * persistence, never a fill rate) for `orders` (listing ids of the drawer's top buy orders, at most
+   * BOOK_HISTORY_ORDERS_MAX), from the orders Flip Desk followed for the item's book, and the backpack.tf community prices
+   * it recorded. Local reads only (order_spells, bptf_community_history, the local book); nothing is fetched.
+   */
+  'item.bookHistory': { params: { sku: string; orders?: string[] }; result: ItemBookHistory };
   'prices.list': { params: { q?: string }; result: ScrapPrice[] };
   'prices.upsert': { params: ScrapPriceInput; result: ScrapPrice };
   'prices.delete': { params: { id: number }; result: { ok: true } };
@@ -380,6 +396,7 @@ export const SERVICE_METHODS: readonly RpcMethod[] = [
   'market.list',
   'holdings.list',
   'holdings.detail',
+  'profit.reserveSuggestion',
   'item.detail',
   'buyer.check',
   'item.refresh',
@@ -387,6 +404,7 @@ export const SERVICE_METHODS: readonly RpcMethod[] = [
   'item.resolve',
   'links.forSku',
   'item.scm',
+  'item.bookHistory',
   'prices.list',
   'prices.upsert',
   'prices.delete',

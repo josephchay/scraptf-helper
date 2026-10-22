@@ -4,6 +4,7 @@
 import { refToScrap, valueScrap } from '../../shared/currency';
 import { COMMUNITY_MIN_MAX_AGE_MS, communityMaxAgeMs } from '../../shared/referenceAge';
 import { craftabilityTwin } from '../../shared/ceiling';
+import { botServiceOf } from '../../shared/buyerSeen';
 import { toLegacy } from '../../shared/sku';
 import type {
   CommunityRow,
@@ -179,6 +180,8 @@ export function toOrderSummary(o: ValuedOrderLike & Partial<OrderClass>, extraFl
   const flags = [...(o.flags ?? [])];
   for (const f of extraFlags) if (!flags.includes(f)) flags.push(f);
   const details = typeof l.details === 'string' ? l.details : '';
+  // 0.9 (#11): the bot service its client names, a label only (E-D8).
+  const service = l.isBot === true ? botServiceOf(l.uaClient) : null;
   return {
     listingId: l.id,
     steamid: l.steamid,
@@ -188,6 +191,7 @@ export function toOrderSummary(o: ValuedOrderLike & Partial<OrderClass>, extraFl
     valueScrap: o.valueScrap,
     isBot: l.isBot === true,
     online: l.userOnline ?? null,
+    ...(service !== null ? { botService: service } : {}),
     lastEventAt: l.lastEventAt,
     bumpedAt: l.bumpedAt,
     details: details.length > MAX_DETAILS_CHARS ? `${details.slice(0, MAX_DETAILS_CHARS - 1)}…` : details,

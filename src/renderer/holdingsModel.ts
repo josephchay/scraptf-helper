@@ -7,11 +7,11 @@
 
 import { buyerPresenceText } from '../shared/buyerSeen';
 import { frictionOf } from '../shared/ceiling';
-import { HOLDING_LIST_UNDERCUT_SCRAP } from '../shared/holdingAdvice';
+import { HOLDING_LIST_UNDERCUT_SCRAP, KEY_BAND_SPAN_MS, TRADE_LOCK_MS, tradeLockModeOf } from '../shared/holdingAdvice';
 import { TYPICAL_HOLD_MIN_ITEM } from '../shared/journal';
 import { SCRAPTF_LIST_FAMILY_LABEL, SCRAPTF_LIST_FRESH_MS, scraptfListFresh } from '../shared/scraptfList';
 import { HOLDING_EXIT_VENUES } from '../shared/types';
-import type { HoldingAdvice, HoldingAdviceKind, HoldingAdviceReason, HoldingAskSide, HoldingRefs, HoldingRow, HoldingStatus, HoldingsQuery, HoldingsResult, OrderSummary, ProfitSettings, Scrap, TypicalHold, UnixMs } from '../shared/types';
+import type { HoldingAdvice, HoldingAdviceKind, HoldingAdviceReason, HoldingAskSide, HoldingRefs, HoldingRow, HoldingStatus, HoldingsQuery, HoldingsResult, KeyMoveBand, OrderSummary, ProfitSettings, Scrap, TradeLockMode, TradeLockSettings, TypicalHold, UnixMs } from '../shared/types';
 import { DASH, fmtAge, fmtAgo, fmtDate, fmtDateTime, fmtHold, fmtInt, fmtMoney, fmtPct, fmtRefOnly, fmtSignedMoney, type Tone } from './format';
 import { SCRAPTF_SALE_NOTE, buyerProfileUrls, scraptfSaleInit } from './itemMenuModel';
 import { splitAtKey, type RecordTradeInit } from './recordTradeModel';
@@ -131,11 +131,29 @@ export function typicalHoldText(t: TypicalHold): string {
     : `Your sales came a median ${fmtHold(t.medianMs)} after the buy (${t.count} sales; fewer than ${TYPICAL_HOLD_MIN_ITEM} of this item${held}).`;
 }
 
-/** The Held for cell's tooltip: the oldest unit's buy and (0.8, H5) the user's typical hold when there is one. */
-export function heldForTitle(r: Pick<HoldingRow, 'heldSince'> & Partial<Pick<HoldingRow, 'typicalHold'>>): string | undefined {
+/**
+ * The Held for cell's tooltip: the oldest unit's buy and (0.8, H5) the user's typical hold when there is one. 0.9 (#1):
+ * with the user's 7-day Trade lock, when the next unit (or a later one) becomes tradable; unchanged without a lock.
+ */
+export function heldForTitle(r: Pick<HoldingRow, 'heldSince'> & Partial<Pick<HoldingRow, 'typicalHold' | 'tradeLock' | 'qty'>>): string | undefined {
   if (!(r.heldSince > 0)) return undefined;
   const oldest = `Oldest unit bought ${fmtDateTime(r.heldSince)}`;
-  return r.typicalHold ? `${oldest}. ${typicalHoldText(r.typicalHold)}` : oldest;
+  const base = r.typicalHold ? `${oldest}. ${typicalHoldText(r.typicalHold)}` : oldest;
+  const lock = heldLockText(r);
+  return lock ? `${base.endsWith('.') ? base : `${base}.`}${lock}` : base;
+}
+
+/** 0.9 (#1): heldForTitle's lock sentence (with its leading space); '' without a lock. */
+function heldLockText(r: Partial<Pick<HoldingRow, 'tradeLock' | 'qty'>>): string {
+  const l = r.tradeLock;
+  if (!l || !(l.lockedQty > 0)) return '';
+  const n = l.lockedQty;
+  const qty = finiteScrap(r.qty) ? r.qty : n;
+  if (finiteScrap(l.nextLotTradableAt)) {
+    const more = n > 1 ? ` ${fmtInt(n)} of ${fmtInt(qty)} units are locked.` : '';
+    return ` Tradable from ${fmtDateTime(l.nextLotTradableAt)} (your 7-day Trade lock, from the buy you logged).${more}`;
+  }
+  return ` ${fmtInt(n)} of ${fmtInt(qty)} units ${n === 1 ? 'is' : 'are'} still locked; the first is tradable from ${fmtDateTime(l.firstTradableAt)}.`;
 }
 
 export function buyerName(o: Pick<OrderSummary, 'userName' | 'steamid' | 'isBot'>): string {
@@ -329,16 +347,19 @@ export function holdingStatusTitle(r: Pick<HoldingRow, 'status'> & Partial<Pick<
 // 0.8 (H6): advice, the ask side (H3) and the references (H4)
 // ---------------------------------------------------------------------------
 
-/** 0.8 (H6): the Advice column's words for each kind (the status pills say only where the thresholds stand). */
-export const ADVICE_LABELS: Readonly<Record<HoldingAdviceKind, string>> = { 'sell-now': 'Sell now', list: 'List and wait', hold: 'Hold', unclear: 'No clear signal' };
+/** 0.8 (H6): the Advice column's words for each kind (the status pills say only where the thresholds stand). 0.9 (#1): 'locked' with a 7-day trade lock. */
+export const ADVICE_LABELS: Readonly<Record<HoldingAdviceKind, string>> = { 'sell-now': 'Sell now', list: 'List and wait', hold: 'Hold', unclear: 'No clear signal', locked: 'Locked' };
 /** 0.8 (H6): each kind's pill tone. */
-export const ADVICE_TONES: Readonly<Record<HoldingAdviceKind, Tone>> = { 'sell-now': 'good', list: 'info', hold: 'warn', unclear: 'muted' };
+export const ADVICE_TONES: Readonly<Record<HoldingAdviceKind, Tone>> = { 'sell-now': 'good', list: 'info', hold: 'warn', unclear: 'muted', locked: 'warn' };
 /** 0.8 (H6): what each kind means, first in the advice hover. "List and wait" says a listing's time is unknown and Flip Desk never lists. */
 export const ADVICE_HELP: Readonly<Record<HoldingAdviceKind, string>> = {
   'sell-now': 'Selling now is what the book and your thresholds support.',
   list: "Listing it yourself on backpack.tf at about the lowest matching ask could beat today's buyers. Flip Desk sees no completed sales, so it cannot say how long that takes, and it never lists, bumps or trades for you.",
   hold: "An exit Flip Desk recorded while it ran (a buy order that stood for an hour or more, or scrap.tf's price from a fresh list) paid more than you would get now. Nothing says it will again.",
   unclear: 'What Flip Desk has seen does not point either way, or it has not recorded enough yet.',
+  // 0.9 (#1): only with Settings → Trade lock '7d'; says nothing about the price on the day it unlocks.
+  locked:
+    "Your Trade lock setting says Steam keeps items you receive for 7 days, so this unit cannot be traded yet. The lines below say what today's book would support if it could; they say nothing about the day it unlocks.",
 };
 /**
  * 0.8 (H6): adviceTitle's help when below-target decides 'sell-now' (ADVICE_HELP['sell-now'] would contradict "under
@@ -440,8 +461,18 @@ export function adviceReasonText(r: HoldingAdviceReason, keyScrap: Scrap | null,
     }
     case 'key-exposure': {
       const n = Math.abs(Math.round(r.netKeys * 100) / 100);
-      return `This sale nets ${signedKeys(r.netKeys)} ${n === 1 ? 'key' : 'keys'} against what you paid, so each 1 ref the key moves changes this profit by about ${n} ref. A key was ${fmtRefOnly(r.boughtKeyScrap)} when you bought, ${fmtRefOnly(r.nowKeyScrap)} now.`;
+      // 0.9 (#17): with the key's 7-day move band from PriceDB history already loaded, how far such moves went.
+      return `This sale nets ${signedKeys(r.netKeys)} ${n === 1 ? 'key' : 'keys'} against what you paid, so each 1 ref the key moves changes this profit by about ${n} ref. A key was ${fmtRefOnly(r.boughtKeyScrap)} when you bought, ${fmtRefOnly(r.nowKeyScrap)} now.${r.band ? ` ${keyBandText(r.band, r.netKeys)}` : ''}`;
     }
+    // 0.9 (#1, #17): the trade lock (by the user's own Trade lock answer) and the trend's size (measured, never a forecast).
+    case 'trade-locked':
+      return `Tradable from ${fmtDateTime(r.tradableAt)} (in ${fmtAge(r.tradableAt - now)}): 7 days after the buy you logged on ${fmtDateTime(r.boughtAt)}, by your Trade lock setting. Today's book alone would say: ${ADVICE_LABELS[r.todayKind]}.`;
+    case 'units-locked':
+      return `${fmtInt(r.lockedQty)} of your ${fmtInt(r.qty)} units ${r.lockedQty === 1 ? 'is' : 'are'} still inside your 7-day Trade lock; the first becomes tradable ${fmtDateTime(r.firstTradableAt)}.`;
+    case 'trend-size':
+      return r.changeScrap === 0
+        ? `Between ${fmtDate(r.fromAt)} and ${fmtDate(r.toAt)} a line through ${fmtInt(r.points)} recorded exit stretches (Theil-Sen) stayed level; half of them sat within ${$m(r.spreadScrap)} of it.`
+        : `Between ${fmtDate(r.fromAt)} and ${fmtDate(r.toAt)} a line through ${fmtInt(r.points)} recorded exit stretches (Theil-Sen) moved ${$s(r.changeScrap)}; half of them sat within ${$m(r.spreadScrap)} of it. Measured, not a forecast.`;
     case 'list-age':
       return `scrap.tf's price is from your list saved ${fmtAgo(r.listAt, now)}.`;
     case 'has-extras':
@@ -513,6 +544,111 @@ export function refsText(refs: HoldingRefs | null | undefined, keyScrap: Scrap |
   if (text) parts.push(`${text.charAt(0).toUpperCase()}${text.slice(1)}. References only, never a sale price.`);
   for (const why of refs.ignored ?? []) parts.push(`${why}.`);
   return parts.length ? parts.join(' ') : null;
+}
+
+/**
+ * 0.9 (#17): the key band sentence for a sale netting `netKeys` keys: the spans (overlapping 7-day spans a day apart),
+ * their dates and the separate weeks they cover (the honest n), the 10th-90th percentile move, and the profit range that
+ * move would give (netKeys x low / high, rounded, sorted, so a negative netKeys swaps them). A description of past moves.
+ */
+export function keyBandText(b: KeyMoveBand, netKeys: number): string {
+  const a = Math.round(netKeys * b.lowScrap) || 0;
+  const c = Math.round(netKeys * b.highScrap) || 0;
+  const lo = Math.min(a, c);
+  const hi = Math.max(a, c);
+  // The spans overlap (6 of 7 days), so the separate weeks they cover are the honest count.
+  const weeks = Math.max(1, Math.floor((b.toAt - b.fromAt) / KEY_BAND_SPAN_MS));
+  return `In the PriceDB key history Flip Desk has loaded (${fmtInt(b.spans)} overlapping 7-day spans from ${fmtDate(b.fromAt)} to ${fmtDate(b.toAt)}, about ${fmtInt(weeks)} separate ${weeks === 1 ? 'week' : 'weeks'}), the middle 8 in 10 of those 7-day key moves were between ${fmtSignedMoney(b.lowScrap, null)} and ${fmtSignedMoney(b.highScrap, null)}; a move like those would change this profit by ${fmtSignedMoney(lo, null)} to ${fmtSignedMoney(hi, null)}.`;
+}
+
+// ---------------------------------------------------------------------------
+// 0.9 (#1): the Trade lock (the user's answer; Flip Desk cannot read the account)
+// ---------------------------------------------------------------------------
+
+/** 0.9 (#1): Holdings' first-run question (TradeLockCard). */
+export const TRADE_LOCK_QUESTION = 'Does Steam lock TF2 items you receive for 7 days?';
+/** 0.9 (#1): what Trade Protection is, what is known about TF2, and that the answer is the user's (the card and Settings' intro). */
+export const TRADE_LOCK_BODY =
+  "Steam's Trade Protection keeps an item you receive in a trade from being traded again, and lets that trade be reversed, for 7 days. Valve's FAQ named only CS2 when it was last read (2026-10-14); a marketplace's API documentation said on 2026-10-22 that it applies to every Steam game. Flip Desk cannot see your account: look for a \"Trade Protected\" line on a TF2 item you received recently, or read Valve's FAQ, and tell it.";
+/** 0.9 (#1): each answer's button and segment label. */
+export const TRADE_LOCK_LABELS: Readonly<Record<TradeLockMode, string>> = { unknown: 'Not sure', none: 'No lock', '7d': '7-day lock' };
+/** 0.9 (#1): each answer's hover. */
+export const TRADE_LOCK_TITLES: Readonly<Record<TradeLockMode, string>> = {
+  unknown: 'Flip Desk shows a caution and changes nothing else',
+  none: 'Items I receive can be traded again at once',
+  '7d': 'Items I receive cannot be traded for 7 days',
+};
+/** The Holdings card's button order. */
+export const TRADE_LOCK_CARD_ORDER: readonly TradeLockMode[] = ['7d', 'none', 'unknown'];
+/** 0.9 (#1): Settings → Trade lock's hint per answer: what Holdings does with it. Prices and profits never change. */
+export const TRADE_LOCK_HELP: Readonly<Record<TradeLockMode, string>> = {
+  unknown: 'Not sure: Holdings shows a one-line caution and changes nothing else.',
+  none: 'No lock: every unit you hold counts as tradable now, as before.',
+  '7d': 'A 7-day lock: each unit you logged becomes tradable 7 days after its buy time in your journal. Until then its advice reads Locked, it is not counted as Sellable now and its "Sell:" notification waits. Prices and profits are unchanged.',
+};
+/** 0.9 (#1): the question card's last line. */
+export const TRADE_LOCK_CARD_FOOTER =
+  'Change it any time in Settings → Trade lock. With a 7-day lock Holdings shows when each unit becomes tradable; prices and profits stay as they are.';
+/** 0.9 (#1): Holdings' one-line caution once the user answered Not sure. */
+export const TRADE_LOCK_CAUTION =
+  "Trade lock: not sure. If Steam's Trade Protection covers TF2 items for you, anything bought in the last 7 days cannot be traded yet, and Flip Desk does not count that.";
+/** 0.9 (#1): the label of the link to Valve's Trade Protection FAQ (links.ts STEAM_TRADE_PROTECTION_FAQ_URL). */
+export const TRADE_LOCK_FAQ_LABEL = "Valve's Trade Protection FAQ";
+
+/** 0.9 (#1): Settings → Trade lock's answered line: when the user answered, or that Holdings asks until they do. */
+export function tradeLockAnsweredText(at: UnixMs | null): string {
+  return typeof at === 'number' && Number.isFinite(at) ? `Answered ${fmtDateTime(at)}.` : 'Not answered yet: Holdings asks until you choose.';
+}
+
+/** 0.9 (#1): the toast after an answer on Holdings' card. */
+export function tradeLockSetToast(mode: TradeLockMode): string {
+  return `Trade lock set to ${TRADE_LOCK_LABELS[mode]}. Change it in Settings → Trade lock.`;
+}
+
+/**
+ * 0.9 (#1): the Not sure caution shows (Holdings' line, the drawer's dated line) only once the user answered Not sure:
+ * before an answer Holdings asks instead (TradeLockCard), and the drawer adds nothing, as in 0.8.
+ */
+export function tradeLockCautionOn(s: { tradeLock?: Partial<TradeLockSettings> | null } | null | undefined): boolean {
+  const at = s?.tradeLock?.answeredAt;
+  return tradeLockModeOf(s) === 'unknown' && typeof at === 'number' && Number.isFinite(at);
+}
+
+/**
+ * The drawer's one-line caution with mode 'unknown' for a next unit bought less than 7 days ago (heldSince +
+ * TRADE_LOCK_MS > now, the lock's own rule); null otherwise or without a buy time.
+ */
+export function tradeLockDrawerCaution(heldSince: UnixMs, now: UnixMs): string | null {
+  if (!finiteScrap(heldSince) || !(heldSince > 0) || !(heldSince + TRADE_LOCK_MS > now)) return null;
+  return `Bought ${fmtDateTime(heldSince)}: if Steam's 7-day Trade Protection covers TF2 for you, it is tradable from ${fmtDateTime(heldSince + TRADE_LOCK_MS)}. Set Trade lock in Settings.`;
+}
+
+/** "Sellable now"'s hover; with totals.locked it adds which items were left out. */
+export const SELLABLE_TITLE = "Items whose oldest unit clears your profit thresholds at its better exit: today's best buyer, or scrap.tf by your saved price list";
+
+/** 0.9 (#1): SELLABLE_TITLE, then (with a 7-day Trade lock and locked items) that those items are not counted. */
+export function sellableTitle(t: Partial<Pick<HoldingsResult['totals'], 'locked'>>): string {
+  const n = t.locked;
+  if (!finiteScrap(n) || !(n > 0)) return SELLABLE_TITLE;
+  return `${SELLABLE_TITLE}. ${fmtInt(n)} ${n === 1 ? 'item' : 'items'} whose oldest unit is still inside your 7-day Trade lock ${n === 1 ? 'is' : 'are'} not counted.`;
+}
+
+/** 0.9 (#1): when the first row's trade lock ends (firstTradableAt + 1: locked while tradableAt > now); null without one. */
+export function tradeLockLapseAt(rows: readonly Partial<Pick<HoldingRow, 'tradeLock'>>[]): UnixMs | null {
+  let first: UnixMs | null = null;
+  for (const r of rows) {
+    const at = r?.tradeLock?.firstTradableAt;
+    if (!finiteScrap(at)) continue;
+    if (first === null || at + 1 < first) first = at + 1;
+  }
+  return first;
+}
+
+/** The earlier of scraptfExitLapseAt and tradeLockLapseAt; the page refetches then. */
+export function holdingsLapseAt(rows: readonly Partial<Pick<HoldingRow, 'bestExit' | 'scraptfListAt' | 'tradeLock'>>[]): UnixMs | null {
+  const a = scraptfExitLapseAt(rows);
+  const b = tradeLockLapseAt(rows);
+  return a === null ? b : b === null ? a : Math.min(a, b);
 }
 
 // ---------------------------------------------------------------------------

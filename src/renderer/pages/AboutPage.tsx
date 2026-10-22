@@ -1,5 +1,8 @@
 import { ExternalLink } from '../components/ExternalLink';
 import { Icon } from '../components/Icon';
+import { PERMISSION_TEMPLATE, SCRAPTF_UNSUPPORTED, UNSUPPORTED_INTRO, boundarySourceTitle } from '../aboutModel';
+import { copyText } from '../clipboard';
+import { useApp } from '../hooks/appContext';
 
 const NEVER: { rule: string; text: string }[] = [
   {
@@ -39,6 +42,46 @@ const TERMS: { label: string; url: string; note?: string }[] = [
   { label: 'PriceDB terms of service', url: 'https://pricedb.io/terms-of-service' },
 ];
 
+/**
+ * 0.9 (#25): "Unsupported by scrap.tf": what scrap.tf does not offer or allow, why, what Flip Desk does instead, and
+ * the dated sources (aboutModel.ts). A source's address is copied to the clipboard for the user's own browser, never
+ * opened: no ExternalLink, openOrCopy or links.open here (R1, R3). Then the email the user may send themselves.
+ */
+export function UnsupportedPanel() {
+  const { toast } = useApp();
+  const copy = (text: string, done: string) => void copyText(text).then((ok) => toast(ok ? done : 'Could not copy.', ok ? 'good' : 'bad'));
+  return (
+    <section className="card" aria-labelledby="about-unsupported">
+      <h2 id="about-unsupported">Unsupported by scrap.tf</h2>
+      <p className="muted small">{UNSUPPORTED_INTRO}</p>
+      <ul className="unsupported-list">
+        {SCRAPTF_UNSUPPORTED.map((row) => (
+          <li key={row.id}>
+            <strong>{row.what}</strong>
+            <div className="small">{row.why}</div>
+            <div className="muted small">Instead: {row.instead}</div>
+            <div className="unsupported-sources small">
+              {row.sources.map((s) => (
+                <button key={s.url} type="button" className="link-btn" title={boundarySourceTitle(s)} onClick={() => copy(s.url, 'Copied the address; paste it into your browser.')}>
+                  <Icon name="copy" size={12} /> {s.label}
+                </button>
+              ))}
+            </div>
+          </li>
+        ))}
+      </ul>
+      <p className="small">Want certainty? Ask scrap.tf yourself, from your own email (the app never sends it):</p>
+      <details className="unsupported-email">
+        <summary>Show the email</summary>
+        <pre className="template">{PERMISSION_TEMPLATE}</pre>
+      </details>
+      <button type="button" className="btn small" onClick={() => copy(PERMISSION_TEMPLATE, 'Copied the email text.')}>
+        <Icon name="copy" size={14} /> Copy the email
+      </button>
+    </section>
+  );
+}
+
 export function AboutPage() {
   return (
     <div className="page about-page narrow">
@@ -72,6 +115,8 @@ export function AboutPage() {
           ))}
         </ol>
       </section>
+
+      <UnsupportedPanel />
 
       <section className="card" aria-labelledby="about-terms">
         <h2 id="about-terms">Platform rules</h2>

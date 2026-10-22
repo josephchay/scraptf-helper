@@ -8,7 +8,10 @@
 import { formatScrap, scrapToRef } from '../../shared/currency';
 import type { JournalEntry, Opportunity, OpportunityEvent, Scrap, UnixMs } from '../../shared/types';
 import { JOURNAL_CSV_COLUMNS, journalCsvCells, journalLedger } from '../../shared/journal';
+import type { JournalLotValuer } from '../../shared/journal';
 import { revenueOrderByValue } from './engine';
+import { breakEvenFor, type BreakEvenSettings } from '../../shared/ceiling';
+import { liquidityTagOf } from '../../shared/exitRisk';
 
 export type CsvCell = string | number | boolean | null | undefined;
 
@@ -48,7 +51,8 @@ function iso(ts: UnixMs | null | undefined): string {
   return Number.isNaN(d.getTime()) ? '' : d.toISOString();
 }
 
-export function opportunitiesCsv(rows: readonly Opportunity[], keyScrap: Scrap): string {
+/** The Opportunities CSV; 0.9 (#2): `profit` (the buy settings) fills break_even_ref, empty without it. */
+export function opportunitiesCsv(rows: readonly Opportunity[], keyScrap: Scrap, profit: BreakEvenSettings | null = null): string {
   const out: CsvCell[][] = [
     [
       'sku',
@@ -80,6 +84,13 @@ export function opportunitiesCsv(rows: readonly Opportunity[], keyScrap: Scrap):
       'input_observed_at',
       'first_seen_at',
       'updated_at',
+      // 0.9 (#2): the lowest backpack.tf sale price that loses nothing at this cost (friction and reserve); empty without settings.
+      'break_even_ref',
+      // 0.9 (#3): the risk keys (exitRiskAt); blank on a row stored before V16 until the engine rewrites it (D10 names).
+      'backup_profit_ref',
+      'profitable_depth',
+      'book_depth',
+      'book_depth_tag',
     ],
   ];
   const keyRef = ref(keyScrap);
@@ -115,6 +126,11 @@ export function opportunitiesCsv(rows: readonly Opportunity[], keyScrap: Scrap):
       iso(o.inputObservedAt),
       iso(o.firstSeenAt),
       iso(o.updatedAt),
+      ref(profit ? breakEvenFor(o.costScrap, profit, 'buy') : null),
+      ref(o.backupProfitScrap ?? null),
+      typeof o.profitableDepth === 'number' ? o.profitableDepth : null,
+      typeof o.bookDepth === 'number' ? o.bookDepth : null,
+      liquidityTagOf(o.bookDepth) ?? '',
     ]);
   }
   return toCsv(out);
@@ -133,7 +149,9 @@ export function eventsCsv(events: readonly OpportunityEvent[]): string {
 /**
  * 0.8 (J5): the ledger in FIFO order (journalOrder; before, (ts, id) listed a same-minute sale before its buy), each
  * row with its fee and FIFO state and, on a sale, the buy it closed, its cost, proceeds, fees, profit and hold.
+ * 0.9: three appended columns, worth_now_ref, unrealised_ref and valued_at, value each open buy with `valuer`
+ * (shared/holdings.ts journalValuerOf over a holdings read); blank on other rows and without a valuer.
  */
-export function journalCsv(entries: readonly JournalEntry[]): string {
-  return toCsv([JOURNAL_CSV_COLUMNS, ...journalLedger(entries).map(journalCsvCells)]);
+export function journalCsv(entries: readonly JournalEntry[], valuer: JournalLotValuer | null = null): string {
+  return toCsv([JOURNAL_CSV_COLUMNS, ...journalLedger(entries, valuer).map(journalCsvCells)]);
 }

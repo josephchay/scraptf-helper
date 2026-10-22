@@ -11,7 +11,7 @@
 // items' true total and per-reason counts, refusals first (P5); the parser report the user copies (P4);
 // what turning import off also does to the scrap.tf window (UX-12).
 
-import { BENIGN_SKIP_REASONS, UNUSUALS_INDEX } from '../shared/importCodes';
+import { BANK_UNAVAILABLE, BENIGN_SKIP_REASONS, UNUSUALS_INDEX } from '../shared/importCodes';
 import type { ImportReport, ImportResult } from '../shared/types';
 
 /** The save type every instruction recommends. */
@@ -91,6 +91,14 @@ function warningsOf(r: Pick<ImportResult, 'warnings'> | null | undefined): strin
 /** True when the import says the page was saved without its cards ('no-cards-saved'). */
 export function importSavedWithoutCards(r: Pick<ImportResult, 'warnings'> | null | undefined): boolean {
   return warningsOf(r).some((w) => importWarningCode(w) === NO_CARDS_SAVED);
+}
+
+/**
+ * 0.9 (#13): true when the page's own text said its bank is not trading ('bank-unavailable'): the look stored no bank
+ * stock save, so nothing on it reads as sold.
+ */
+export function importBankUnavailable(r: Pick<ImportResult, 'warnings'> | null | undefined): boolean {
+  return warningsOf(r).some((w) => importWarningCode(w) === BANK_UNAVAILABLE);
 }
 
 /** 0.7.3: true when the page was scrap.tf's bare Unusuals index ('unusuals-index'), which lists no items. */
@@ -225,17 +233,77 @@ export function importReportText(reports: readonly ImportReport[] | null | undef
 }
 
 /**
+ * 0.8 (LC-6) and 0.9 (#13): what the copied reports marked, summed (importReportMarkers): reserved and not-tradable
+ * cards, and the scrap.tf wording the parser only records (price-drop lines, countdowns, "recently traded" evidence,
+ * bank notices). The 0.9 counts are optional, so a 0.8 caller's markers still type.
+ */
+export interface ImportReportMarkers {
+  reserved: number;
+  notTradable: number;
+  markdown?: number;
+  countdowns?: number;
+  /** counts.recentlyTraded: "recently traded" phrases the page showed. */
+  recentlyTraded?: number;
+  /** counts.recentCards: cards inside an element whose id or class merely names "recent" (no wording seen). */
+  recentCards?: number;
+  bankNotices?: number;
+}
+
+/** A count as a whole non-negative number: a missing, non-finite or negative one (an older service's report) is 0. */
+function countOf(v: unknown): number {
+  return typeof v === 'number' && Number.isFinite(v) && v > 0 ? Math.floor(v) : 0;
+}
+
+/**
+ * 0.9 (#13): the copied reports' markers, summed: reserved, notTradable, markdownSoon + markdownOff, countdownCards,
+ * recentlyTraded, recentCards (kept apart: only the first is wording the page showed) and bankNotices. Missing or
+ * non-finite fields (a 0.8 report) count 0.
+ */
+export function importReportMarkers(reports: readonly ImportReport[] | null | undefined): Required<ImportReportMarkers> {
+  const m: Required<ImportReportMarkers> = { reserved: 0, notTradable: 0, markdown: 0, countdowns: 0, recentlyTraded: 0, recentCards: 0, bankNotices: 0 };
+  for (const r of Array.isArray(reports) ? reports : []) {
+    const c: Partial<Record<keyof ImportReport['counts'], unknown>> = r && typeof r.counts === 'object' && r.counts !== null ? r.counts : {};
+    m.reserved += countOf(c.reserved);
+    m.notTradable += countOf(c.notTradable);
+    m.markdown += countOf(c.markdownSoon) + countOf(c.markdownOff);
+    m.countdowns += countOf(c.countdownCards);
+    m.recentlyTraded += countOf(c.recentlyTraded);
+    m.recentCards += countOf(c.recentCards);
+    m.bankNotices += countOf(c.bankNotices);
+  }
+  return m;
+}
+
+/**
  * The toast after Copy parser report. 0.8 (LC-6): `markers` (the copied reports' counts.reserved / notTradable,
  * summed) adds how many cards the reads marked reserved or not tradable, so the user knows the report shows how
- * scrap.tf marks them (nothing stored changes).
+ * scrap.tf marks them (nothing stored changes). 0.9 (#13): when the reads showed scrap.tf wording the parser only
+ * records (price-drop lines, countdowns, a "recently traded" section, bank notices), one more sentence says so; with
+ * those counts 0 or absent every 0.8 text is unchanged. A "recently traded" section is named only when that wording
+ * was seen; cards in a part of the page whose id or class merely names "recent" are counted as such.
  */
-export function importReportToast(copied: boolean, count: number, markers?: { reserved: number; notTradable: number }): { text: string; tone: 'good' | 'warn' | 'bad' } {
+export function importReportToast(copied: boolean, count: number, markers?: ImportReportMarkers): { text: string; tone: 'good' | 'warn' | 'bad' } {
   if (count === 0) return { text: 'No page read yet in this session: import or read a page first, then copy the report.', tone: 'warn' };
   if (!copied) return { text: 'Could not copy the parser report.', tone: 'bad' };
   const reserved = markers && Number.isFinite(markers.reserved) && markers.reserved > 0 ? markers.reserved : 0;
   const notTradable = markers && Number.isFinite(markers.notTradable) && markers.notTradable > 0 ? markers.notTradable : 0;
   const marked = reserved + notTradable > 0 ? ` Your reads marked ${reserved} ${reserved === 1 ? 'card' : 'cards'} reserved and ${notTradable} not tradable; the report shows how.` : '';
-  return { text: `Copied the parser report (${count} ${count === 1 ? 'read' : 'reads'}). Nothing was sent.${marked}`, tone: 'good' };
+  const markdown = countOf(markers?.markdown);
+  const countdowns = countOf(markers?.countdowns);
+  const notices = countOf(markers?.bankNotices);
+  const recentCards = countOf(markers?.recentCards);
+  const parts = [
+    markdown > 0 ? `${markdown} price-drop ${markdown === 1 ? 'line' : 'lines'}` : null,
+    countdowns > 0 ? `${countdowns} ${countdowns === 1 ? 'countdown' : 'countdowns'}` : null,
+    countOf(markers?.recentlyTraded) > 0
+      ? 'a "recently traded" section'
+      : recentCards > 0
+        ? `${recentCards} ${recentCards === 1 ? 'card' : 'cards'} in a part of the page marked "recent"`
+        : null,
+    notices > 0 ? `${notices} bank ${notices === 1 ? 'notice' : 'notices'}` : null,
+  ].filter((p): p is string => p !== null);
+  const evidence = parts.length > 0 ? ` They also showed scrap.tf wording Flip Desk only records (${parts.join(', ')}); the report shows it.` : '';
+  return { text: `Copied the parser report (${count} ${count === 1 ? 'read' : 'reads'}). Nothing was sent.${marked}${evidence}`, tone: 'good' };
 }
 
 /**

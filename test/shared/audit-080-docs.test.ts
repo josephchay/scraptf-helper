@@ -13,7 +13,9 @@ const root = fileURLToPath(new URL('../../', import.meta.url));
 const read = (rel: string): string => readFileSync(join(root, rel), 'utf8');
 const README = read('README.md');
 const ARCH = read('docs/ARCHITECTURE.md');
-const ROUND = ARCH.slice(ARCH.indexOf('## 0.8 round'), ARCH.indexOf('## Conventions'));
+// 0.9: the 0.8 round ends where the 0.9 round starts (before 0.9, at the conventions).
+const ROUND_END = ARCH.indexOf('## 0.9 round') > 0 ? ARCH.indexOf('## 0.9 round') : ARCH.indexOf('## Conventions');
+const ROUND = ARCH.slice(ARCH.indexOf('## 0.8 round'), ROUND_END);
 
 /** The README's `## <title>` section, without its heading line. */
 function section(doc: string, title: string): string {
@@ -90,11 +92,9 @@ describe('ARCHITECTURE 0.8 round summary', () => {
     expect(paths).toContain('test/shared/audit-080-docs.test.ts');
   });
 
-  it("gives package.json's version", () => {
-    const version = (JSON.parse(read('package.json')) as { version: string }).version;
-    expect(version).toBe('0.8.0');
+  it('states its own version (0.8.0; package.json moved on in 0.9)', () => {
     const tests = ROUND.slice(ROUND.indexOf('### Tests and version'));
-    expect(tests).toContain(`**Version.** ${version}`);
+    expect(tests).toContain('**Version.** 0.8.0');
   });
 
   it('keeps no build marker (the waves wrote under markers; integration removed them)', () => {

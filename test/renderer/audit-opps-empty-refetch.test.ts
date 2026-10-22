@@ -31,6 +31,15 @@ beforeAll(async () => {
   const g = globalThis as Record<string, unknown>;
   g['HTMLElement'] ??= ShimElement;
   g['Element'] ??= ShimElement;
+  // 0.9 (#3): the page's Sort select is a <select>: React marks its options.
+  if (!Object.getOwnPropertyDescriptor(ShimElement.prototype, 'options')) {
+    Object.defineProperty(ShimElement.prototype, 'options', {
+      configurable: true,
+      get(this: ShimElement) {
+        return this.tagName === 'SELECT' ? this.descendants().filter((e) => e.tagName === 'OPTION') : undefined;
+      },
+    });
+  }
   ({ createRoot } = await import('react-dom/client'));
   ({ AppProvider } = await import('../../src/renderer/hooks/appContext'));
   ({ OpportunitiesPage } = await import('../../src/renderer/pages/OpportunitiesPage'));

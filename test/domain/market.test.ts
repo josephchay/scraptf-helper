@@ -211,8 +211,8 @@ describe('evaluateMarketBase', () => {
     const references = { pricedb: null, community: null };
     const match = matchContext(settings, T0);
     const ev = evaluateMarketBase({ base, listings, references, isUnusual: false, settings, keyScrap: 567, now: T0, match })!;
-    // 50 + 20 active bot + 5 online + 10 confirmed + 10 two buyers within 10% - 10 no reference.
-    expect(ev.confidence).toBe(85);
+    // 50 + 20 active bot + 10 confirmed + 10 two buyers within 10% - 10 no reference (0.9, #11: no +5 online).
+    expect(ev.confidence).toBe(80);
     expect(ev.confidenceLevel).toBe('high');
     expect(ev.flags).toEqual(['no-reference']);
 

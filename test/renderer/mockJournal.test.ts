@@ -8,6 +8,7 @@ import { createMockBridge, type MockBridge } from '../../src/renderer/mock';
 import { mockJournalSummary } from '../../src/renderer/mockData';
 import { journalCsv } from '../../src/service/domain/csv';
 import { JOURNAL_CSV_COLUMNS, JOURNAL_ENTRY_GONE, JOURNAL_MAX_FEE_KEYS, JOURNAL_MAX_FEE_SCRAP, journalSummary, typicalHoldOf } from '../../src/shared/journal';
+import { holdingsValuationOf, journalValuerOf } from '../../src/shared/holdings';
 import type { JournalInput } from '../../src/shared/types';
 
 const T0 = Date.UTC(2026, 9, 20, 12, 0, 0);
@@ -100,10 +101,13 @@ describe('the mock journal (0.8)', () => {
     const lines = csv.trim().split('\r\n');
     expect(lines[0]).toBe(JOURNAL_CSV_COLUMNS.join(','));
     expect(lines).toHaveLength(rows.length + 1);
-    expect(csv).toBe(journalCsv(rows).replace(/^﻿/, ''));
+    // 0.9: the open lots valued as the service values them, over an unfiltered holdings read.
+    const valuer = journalValuerOf(holdingsValuationOf(await b.rpc('holdings.list', {})), (await b.rpc('settings.get', undefined)).profit);
+    expect(csv).toBe(journalCsv(rows, valuer).replace(/^﻿/, ''));
     // A negative profit stays a number (the service's csvCell), not a formula-guarded text.
     const writeoff = lines.find((l) => l.includes(',writeoff,'))!;
-    expect(writeoff).toMatch(/,closed,\d+,1,0,,-1,\d+(\.\d+)?$/);
+    // 0.9: then the open-lot valuation columns, blank on a write-off.
+    expect(writeoff).toMatch(/,closed,\d+,1,0,,-1,\d+(\.\d+)?,,,$/);
   });
 
   it("puts the user's typical hold on Holdings rows, from every open position, as the service does", async () => {

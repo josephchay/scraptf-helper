@@ -22,6 +22,7 @@ describe('links rendered by the dashboard', () => {
     for (const file of walk(RENDERER)) {
       const rel = path.relative(RENDERER, file);
       if (/^mock(Data)?\.ts$/.test(rel)) continue; // fake data for the browser preview
+      if (rel === 'aboutModel.ts') continue; // 0.9 (#25): the About panel's sources are copied, never opened (static.test pins it).
       for (const line of readFileSync(file, 'utf8').split('\n')) {
         if (/placeholder=/.test(line)) continue; // example text in an input, not a link
         for (const m of line.matchAll(/https:\/\/[^\s'"`)<>{}]+/g)) urls.push({ file: rel, url: m[0] });

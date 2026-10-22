@@ -38,6 +38,7 @@ import {
   bankStockLastSeen,
   bankStockListedCell,
   bankStockLoadingMore,
+  bankStockMarkdownTag,
   bankStockMore,
   bankStockOlderPages,
   bankStockPayTitle,
@@ -1080,6 +1081,8 @@ const StockRow = memo(function StockRow({
   const timingTitle = timingVerdictTitle(r.timing, now);
   // 0.8 (G1): the row's watch (BankStockRow.watch) and where it stands, after the extras tag.
   const watchTag = bankStockWatchTag(r, keyScrap);
+  // 0.9 (#13): scrap.tf's own price-drop wording on the card (evidence only), after the timing tag.
+  const markdownTag = bankStockMarkdownTag(r);
   return (
     <div
       id={`bsrow-${index}`}
@@ -1102,7 +1105,7 @@ const StockRow = memo(function StockRow({
       <div role="gridcell" className="bs-item">
         <ItemName sku={r.sku} name={r.name} maxTags={2} />
         {/* 0.8: the tags share what the name leaves (bank-stock.css .bs-tags), so the name always keeps a floor. */}
-        {(change && change.kind !== 'gone') || badge || r.hasExtras || watchTag ? (
+        {(change && change.kind !== 'gone') || badge || markdownTag || r.hasExtras || watchTag ? (
           <span className="bs-tags">
             {change?.kind === 'new' ? (
               <span className="pill tone-good bs-new" title={change.title}>
@@ -1116,6 +1119,11 @@ const StockRow = memo(function StockRow({
             {badge ? (
               <span className={`pill tone-${badge.tone} timing-badge`} title={badge.title}>
                 {badge.text}
+              </span>
+            ) : null}
+            {markdownTag ? (
+              <span className={`pill tone-${markdownTag.tone} bs-markdown`} title={markdownTag.title}>
+                {markdownTag.text}
               </span>
             ) : null}
             {r.hasExtras ? (

@@ -441,14 +441,15 @@ describe('the ledger CSV (J5)', () => {
   });
 
   it('writes the 0.7.4 cells, then the fee, the FIFO state and the pair', () => {
-    expect(JOURNAL_CSV_COLUMNS).toHaveLength(20);
+    // 0.9: 23 with the open lot's valuation (worth_now_ref, unrealised_ref, valued_at), blank without a valuer.
+    expect(JOURNAL_CSV_COLUMNS).toHaveLength(23);
     expect(JOURNAL_CSV_COLUMNS.slice(0, 11)).toEqual(['id', 'time', 'side', 'venue', 'sku', 'name', 'keys', 'metal_ref', 'key_price_ref', 'value_ref', 'note']);
     const buy = row('buy', 'C', 12, { ts: T0, feeKeys: 0.01, feeScrap: 1 });
     const sale = row('sell', 'C', 3, { ts: T0 + 1.5 * DAY, keys: 1, note: 'sold' });
     const [b, s] = journalLedger([buy, sale]);
-    expect(journalCsvCells(b!)).toEqual([buy.id, new Date(T0).toISOString(), 'buy', 'scrap.tf', 'C', 'Item C', 0, 1.33, 63, 1.33, null, 0.01, 0.11, 'closed', null, null, null, null, null, null]);
+    expect(journalCsvCells(b!)).toEqual([buy.id, new Date(T0).toISOString(), 'buy', 'scrap.tf', 'C', 'Item C', 0, 1.33, 63, 1.33, null, 0.01, 0.11, 'closed', null, null, null, null, null, null, null, null, '']);
     // Cost 12 + 1 + 0.01 key (6 at 567); proceeds 1 key + 3.
-    expect(journalCsvCells(s!)).toEqual([sale.id, new Date(T0 + 1.5 * DAY).toISOString(), 'sell', 'backpack.tf', 'C', 'Item C', 1, 0.33, 63, 63.33, 'sold', null, null, 'closed', buy.id, 2.11, 63.33, 0.77, 61.22, 1.5]);
+    expect(journalCsvCells(s!)).toEqual([sale.id, new Date(T0 + 1.5 * DAY).toISOString(), 'sell', 'backpack.tf', 'C', 'Item C', 1, 0.33, 63, 63.33, 'sold', null, null, 'closed', buy.id, 2.11, 63.33, 0.77, 61.22, 1.5, null, null, '']);
     expect(journalCsvCells(s!)).toHaveLength(JOURNAL_CSV_COLUMNS.length);
   });
 
@@ -456,6 +457,6 @@ describe('the ledger CSV (J5)', () => {
     const junk = { ...row('buy', 'C', 9), ts: Number.NaN, side: 'hold' as 'buy' };
     const cells = journalCsvCells(journalLedger([junk])[0]!);
     expect(cells[1]).toBe('');
-    expect(cells.slice(11)).toEqual([null, null, '', null, null, null, null, null, null]);
+    expect(cells.slice(11)).toEqual([null, null, '', null, null, null, null, null, null, null, null, '']);
   });
 });

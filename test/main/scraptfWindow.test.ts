@@ -7,7 +7,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { SCRAPTF_BAR_URL } from '../../src/main/paths';
 import { DEFAULT_SETTINGS } from '../../src/shared/defaults';
-import { IMPORT_SCHEMA_LOADING_MESSAGE } from '../../src/shared/importCodes';
+import { BANK_UNAVAILABLE_WARNING, IMPORT_SCHEMA_LOADING_MESSAGE } from '../../src/shared/importCodes';
 import { SCRAPTF_BANKS, SCRAPTF_HOME_URL, SCRAPTF_ITEMS_URL } from '../../src/shared/links';
 import {
   EXTERNAL_OPEN_MIN_GAP_MS,
@@ -1276,6 +1276,20 @@ describe('reads', () => {
     await expect(s.m.readNow()).resolves.toMatchObject({ read: { items: 0, warning: 'no-cards-saved' }, reason: null });
   });
 
+  it('0.9 (#13): a page saying its bank is not trading shows bank-unavailable before every other code', async () => {
+    const s = setup({ readOnLoad: false });
+    s.m.open();
+    s.land(HATS);
+    // The service records such a read even with no items (batchId > 0), so the toolbar ranks its codes.
+    s.importHtml.mockResolvedValueOnce(importResult({ batchId: 9, parsed: 0, stored: 0, bank: 'hats', warnings: ['page-kind-guessed: x', BANK_UNAVAILABLE_WARNING] }));
+    await expect(s.m.readNow()).resolves.toMatchObject({ read: { items: 0, warning: 'bank-unavailable' }, reason: null });
+    // With items on screen it still outranks the others (no-sku here).
+    s.ctl.t += READ_MANUAL_MIN_GAP_MS;
+    s.wc().html = '<html>2</html>';
+    s.importHtml.mockResolvedValueOnce(importResult({ batchId: 10, parsed: 48, warnings: ['no-sku: 1 48', BANK_UNAVAILABLE_WARNING] }));
+    await expect(s.m.readNow()).resolves.toMatchObject({ read: { items: 48, warning: 'bank-unavailable' }, reason: null });
+  });
+
   it("0.7.4 (F53): carries the import's stock save onto the read, and only the known values", async () => {
     const s = setup({ readOnLoad: false });
     s.m.open();
@@ -1675,6 +1689,38 @@ describe('0.7.1: what the window reads (F21-3, F21-4, F21-7)', () => {
     s.ctl.t += READ_MANUAL_MIN_GAP_MS;
     s.importHtml.mockResolvedValueOnce(importResult({ batchId: 0, parsed: 0, stored: 0, bank: 'hats', newFlips: undefined, warnings: [] }));
     await expect(s.m.readNow()).resolves.toMatchObject({ read: { warning: 'no-cards-saved' } });
+  });
+
+  it('0.9 (#14): never imports a check page served with a 200, by its words', async () => {
+    const s = setup();
+    s.m.open(HATS);
+    s.toolbarReady();
+    landWith(s, HATS, 200, '<html><body>Please complete the following captcha to enter Scrap.TF</body></html>');
+    // The status says nothing is wrong, so the page is read on load; its words make it a check.
+    expect(lastNav(s).notice).toBeNull();
+    await s.settle();
+    expect(s.importHtml).not.toHaveBeenCalled();
+    expect(lastNav(s).notice).toBe(SCRAPTF_WINDOW_NOTICES.challenge);
+    // The pushed read carries the page notice (the toolbar words it "Could not read …"), not the read reason.
+    const reads = s.pushes<ScraptfWindowRead>('scraptfWindow.read');
+    expect(reads.at(-1)).toMatchObject({ path: '/buy/hats', items: 0, bank: null, newFlips: 0, warning: SCRAPTF_WINDOW_NOTICES.challenge });
+    // No settle read follows: the check was read once.
+    expect(s.wc().executeJavaScriptInIsolatedWorld).toHaveBeenCalledTimes(1);
+    // Read page now reads it again and gets the read reason, still with no import.
+    s.ctl.t += READ_MANUAL_MIN_GAP_MS;
+    await expect(s.m.readNow()).resolves.toMatchObject({ reason: SCRAPTF_READ_REASONS.challenge, read: { warning: SCRAPTF_WINDOW_NOTICES.challenge } });
+    expect(s.importHtml).not.toHaveBeenCalled();
+    // An in-page step of the check is not read on its own.
+    s.wc().emit('did-navigate-in-page', {}, HATS, true);
+    await s.settle();
+    expect(s.wc().executeJavaScriptInIsolatedWorld).toHaveBeenCalledTimes(2);
+    // The user solved it: the next real page at status 200 imports.
+    s.ctl.t += 3_000;
+    landWith(s, HATS, 200, '<html>hats cards</html>');
+    expect(lastNav(s).notice).toBeNull();
+    await s.settle();
+    expect(s.importHtml.mock.calls.map(([p]) => p.html)).toEqual(['<html>hats cards</html>']);
+    expect(s.logged()).not.toContain('Please complete');
   });
 
   it('reads only pages the import reads: never the front page, raffles or settings, on load or on Read page now (F21-4)', async () => {

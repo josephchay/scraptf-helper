@@ -6,6 +6,8 @@
 // 0.7.1: price changes and stock moves are listed apart (DM-6), and a sighting long past reads as one (DM-5).
 // 0.8 (T5, LC-3): the Cycles block: the buy-timing verdict with its n and its save (historyTimingView), each
 // listing run of the copy (historyRunLines) and the chart's down markers (stepChartGeom's `downs`).
+// 0.9 (#10): the odds line carries the 90 % ranges, the money line the gain's low end for the picked wait taken alone,
+// and a verdict that turns with save timing says so (timingModel's sentences).
 
 import { bankStockPagePath } from '../shared/bankStock';
 import { SCRAPTF_BOUNDARY_SHORT } from '../shared/boundaryText';
@@ -26,7 +28,7 @@ import type {
 } from '../shared/types';
 import { CHANGE_KIND_HELP, CHANGE_KIND_LABELS, CHANGE_KIND_TONES, changePctText, changePriceText, changeStockText, fmtSaveTime, fromToText } from './changesModel';
 import { DASH, fmtAgo, fmtDateTime, fmtInt, fmtMoney, fmtSignedMoney, type Tone } from './format';
-import { TIMING_ESTIMATE_NOTE, timingBadge, timingDurText, timingWhyText } from './timingModel';
+import { TIMING_ESTIMATE_NOTE, timingBadge, timingDurText, timingRangesText, timingSaveTimingText, timingWhyText } from './timingModel';
 
 /** The block re-reads at most this often on pushes ('scraptf.changed', 'prices.changed'). */
 export const HISTORY_REFRESH_MS = 2_000;
@@ -267,32 +269,56 @@ function dropsLine(t: ScraptfBuyTiming, path: string, now: UnixMs): string | nul
   return t.dropsThisRun > 0 ? head : null;
 }
 
-/** The odds line: every percentage over its own denominator (n.atRisk), then the prices and items behind the table. */
+/**
+ * The odds line: every percentage over its own denominator (n.atRisk), then the prices and items behind the table.
+ * 0.9 (#10): the ranges sentence (timingRangesText, with the items behind it) before "From your save", when present.
+ */
 function oddsLine(t: ScraptfBuyTiming, path: string, now: UnixMs): string | null {
   if (!finite(t.horizonMs) || !finite(t.pDrop)) return null;
   const similar = t.scope === 'band' ? ' of similar value' : '';
   const end = finite(t.n.atRiskEnd) ? `; ${fmtInt(t.n.atRiskEnd)} ${t.n.atRiskEnd === 1 ? 'was' : 'were'} still at their price at the end of that time` : '';
   const pct = (p: number) => `${Math.round(Math.max(0, Math.min(1, p)) * 100)} %`;
+  const ranges = timingRangesText(t);
   return (
     `On ${path} in your saves, of the ${fmtInt(t.n.atRisk)} prices${similar} still at their price at this age (${fmtInt(t.n.states)} prices of ${fmtInt(t.n.copies)} ${t.n.copies === 1 ? 'item' : 'items'}): ` +
-    `within ${timingDurText(t.horizonMs)} ${pct(t.pDrop)} dropped, ${pct((t.pGone ?? 0) + (t.pRise ?? 0))} went or rose first${end}. From your save ${fmtAgo(Math.min(t.lastSeenAt, now), now)}.`
+    `within ${timingDurText(t.horizonMs)} ${pct(t.pDrop)} dropped, ${pct((t.pGone ?? 0) + (t.pRise ?? 0))} went or rose first${end}. ${ranges ? `${ranges} ` : ''}From your save ${fmtAgo(Math.min(t.lastSeenAt, now), now)}.`
   );
 }
 
-/** The money line: the expected profit of waiting against buying now, both through flipProfit (scraptfTimingEv). */
+/** T9-3b: the drop size the Wait check's low end took, as whole percents (", at a drop of 6 %"), or '' when it has none. */
+function gateDropText(u: ScraptfBuyTiming['uncertainty']): string {
+  const d = u?.dropLow;
+  if (!finite(d) || d <= 0) return '';
+  return `, at a drop of ${d < 0.005 ? 'under 1' : Math.round(d * 100)} %`;
+}
+
+/**
+ * The money line: the expected profit of waiting against buying now, both through flipProfit (scraptfTimingEv).
+ * 0.9 (#10): when the Wait check ran (`uncertainty.gainLowScrap`), the gain's low end for the picked wait taken alone
+ * (and the drop size it took, T9-3b); never a claim of 95 % over the pick.
+ */
 function moneyLine(t: ScraptfBuyTiming, keyScrap: Scrap | null): string | null {
   if (!finite(t.horizonMs) || !finite(t.evWaitScrap) || !finite(t.evBuyScrap)) return null;
   const sells = finite(t.revenueScrap) ? `Sells for ${fmtMoney(t.revenueScrap, keyScrap)}` : null;
   const pay = finite(t.maxCostScrap) ? `Pay up to ${fmtMoney(t.maxCostScrap, keyScrap)}` : null;
   const ctx = [sells, pay].filter(Boolean).join(', ');
-  return `Wait ${timingDurText(t.horizonMs)}: expected ${fmtSignedMoney(t.evWaitScrap, keyScrap)} vs ${fmtSignedMoney(t.evBuyScrap, keyScrap)} now${ctx ? ` (${ctx})` : ''}`;
+  const g = t.uncertainty?.gainLowScrap;
+  const drop = gateDropText(t.uncertainty);
+  const low = !finite(g)
+    ? ''
+    : g >= 1
+      ? `; allowing for chance in the odds, waiting adds at least ${fmtSignedMoney(g, keyScrap)} (the low end for the wait your saves picked, taken alone${drop})`
+      : `; allowing for chance in the odds, waiting may add nothing (low end ${fmtSignedMoney(g, keyScrap)} for the wait your saves picked${drop})`;
+  return `Wait ${timingDurText(t.horizonMs)}: expected ${fmtSignedMoney(t.evWaitScrap, keyScrap)} vs ${fmtSignedMoney(t.evBuyScrap, keyScrap)} now${ctx ? ` (${ctx})` : ''}${low}`;
 }
 
 /**
  * 0.8 (T5): the drawer's buy-timing block: a pill ('Wait ~1 d' warn, 'Buy now' good, 'Over Pay up to' bad, 'No buyers'
  * and 'Not enough data' muted), its lines (the run's drops and rhythm, the odds with n.atRisk as their denominator
- * and n.states / n.copies / n.atRiskEnd behind it, the expected profits, the earlier runs' last prices, or why there
- * is not enough data), each only when its data exists, and TIMING_ESTIMATE_NOTE. Null without a timing.
+ * and n.states / n.copies / n.atRiskEnd behind it, the expected profits (with the gain's low end, 0.9), whether the
+ * verdict depends on save timing (0.9), the earlier runs' last prices, or why there is not enough data), each only
+ * when its data exists, and TIMING_ESTIMATE_NOTE. Null without a timing. 0.9 (#10): the pill comes from timingBadge,
+ * so a flagged one reads 'Wait ~1 d?' (muted).
  */
 export function historyTimingView(
   t: ScraptfBuyTiming | null | undefined,
@@ -315,6 +341,9 @@ export function historyTimingView(
   if (odds) lines.push(odds);
   const money = moneyLine(t, keyScrap);
   if (money) lines.push(money);
+  // 0.9 (#10): a verdict that turns with save timing says so, under the money.
+  const saveTiming = timingSaveTimingText(t);
+  if (saveTiming) lines.push(saveTiming);
   const ends = t.earlierRunEnds.filter((e) => finite(e.lastScrap)).map((e) => fmtMoney(e.lastScrap, keyScrap));
   if (ends.length) lines.push(`Earlier ${ends.length === 1 ? 'run' : 'runs'} ended at ${listText(ends)} (the lowest seen so far is not a floor)`);
   return { pill, lines, note: TIMING_ESTIMATE_NOTE };

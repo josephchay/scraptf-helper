@@ -1,6 +1,6 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type KeyboardEvent, type MouseEvent } from 'react';
 import type { Opportunity, Scrap } from '../../shared/types';
-import { INPUT_KIND_LABELS, STATUS_LABELS, flagInfo, fmtAge, fmtAgo, fmtDateTime, fmtInt, fmtKeysDecimal, fmtKeysMetal, fmtMoney, fmtPct, fmtRefOnly } from '../format';
+import { INPUT_KIND_LABELS, STATUS_LABELS, flagInfo, fmtAge, fmtAgo, fmtDateTime, fmtInt, fmtKeysDecimal, fmtMoney, fmtPct, fmtRefOnly } from '../format';
 import {
   REVENUE_ORDER_TITLES,
   copyLabelOf,
@@ -11,7 +11,6 @@ import {
   nextGroupPageSize,
   payUpToTitle,
   revenueOrderOf,
-  singleExitTitleOf,
   type DisplayRow,
   type SortDir,
   type SortKey,
@@ -25,6 +24,11 @@ import { ConfidenceBadge, OnlineDot, UnverifiedOrderMark } from './Pills';
 import { Tip } from './Tip';
 // 0.8 cycles (T7): the Wait / Buy now tag.
 import { timingBadge } from '../timingModel';
+// 0.9 (#2): the Cost hover's break-even.
+import type { BreakEvenSettings } from '../../shared/ceiling';
+import { oppCostTitle } from '../breakEvenModel';
+// 0.9 (#3): the Buyers hover's risk figures (buyers at break-even, if this buyer leaves, book depth).
+import { oppBuyersTitle } from '../riskModel';
 
 export const ROW_HEIGHT = { comfortable: 38, compact: 30 } as const;
 
@@ -48,6 +52,8 @@ interface Props {
   onSort: (k: SortKey) => void;
   /** Right-click, Shift+F10 or the ContextMenu key on an opportunity row (the F9 item menu). */
   onContextMenu?: (o: Opportunity, at: { x: number; y: number }) => void;
+  /** 0.9 (#2): Settings.profit, for the Cost hover's break-even (breakEvenModel.oppCostTitle); none without it. */
+  profit?: BreakEvenSettings | null;
 }
 
 const SORTABLE: { key: SortKey; label: string; cls: string; title: string }[] = [
@@ -91,6 +97,7 @@ export function OppTable({
   dir,
   onSort,
   onContextMenu,
+  profit,
 }: Props) {
   const scroller = useRef<HTMLDivElement>(null);
   const header = useRef<HTMLDivElement>(null);
@@ -268,7 +275,7 @@ export function OppTable({
         <SortHeader k="profit" sort={sort} dir={dir} onSort={onSort} />
         <SortHeader k="margin" sort={sort} dir={dir} onSort={onSort} />
         <SortHeader k="confidence" sort={sort} dir={dir} onSort={onSort} />
-        <div role="columnheader" className="c-buyers num" title="Distinct buyers with eligible orders">
+        <div role="columnheader" className="c-buyers num" title="Distinct buyers with eligible orders. Hover a value for buyers at break-even and the profit if this buyer leaves.">
           Buyers
         </div>
         <div role="columnheader" className="c-btype">
@@ -300,6 +307,7 @@ export function OppTable({
               onSelect={onSelect}
               onOpen={onOpen}
               onMenu={onContextMenu}
+              profit={profit}
             />
           );
         })}
@@ -429,6 +437,7 @@ const OppRow = memo(function OppRow({
   onSelect,
   onOpen,
   onMenu,
+  profit,
 }: {
   opp: Opportunity;
   index: number;
@@ -441,6 +450,8 @@ const OppRow = memo(function OppRow({
   onSelect: (id: string) => void;
   onOpen: (o: Opportunity) => void;
   onMenu?: (o: Opportunity, at: { x: number; y: number }) => void;
+  /** 0.9 (#2): Settings.profit for the Cost hover's break-even; none without settings. */
+  profit?: BreakEvenSettings | null;
 }) {
   const inputAge = now - o.inputObservedAt;
   const stale = o.inputKind !== 'rule' && inputAge > staleMs;
@@ -503,7 +514,8 @@ const OppRow = memo(function OppRow({
         ) : null}
       </div>
       <div role="gridcell" className="c-cost num">
-        <Money scrap={o.costScrap} keyScrap={keyScrap} title={o.costKeys ? `Entered as ${fmtKeysMetal(o.costKeys, o.costScrapRaw)} (${fmtRefOnly(o.costScrap)} at the current key price)` : undefined} />
+        {/* 0.9 (#2): the hover adds the lowest backpack.tf sale price that loses nothing at this cost (breakEvenModel). */}
+        <Money scrap={o.costScrap} keyScrap={keyScrap} title={oppCostTitle(o, keyScrap, profit ?? null)} />
       </div>
       <div role="gridcell" className="c-pay num">
         <Money scrap={o.maxCostScrap} keyScrap={keyScrap} title={payUpToTitle(o, keyScrap)} />
@@ -557,7 +569,7 @@ const OppRow = memo(function OppRow({
       <div role="gridcell" className="c-conf">
         <ConfidenceBadge score={o.confidence} level={o.confidenceLevel} reasons={o.reasons} />
       </div>
-      <div role="gridcell" className={`c-buyers num${thin ? ' tone-text-warn' : ''}`} title={singleExitTitleOf(o)}>
+      <div role="gridcell" className={`c-buyers num${thin ? ' tone-text-warn' : ''}`} title={oppBuyersTitle(o, keyScrap, useOrder)}>
         {o.buyerCount}
       </div>
       <div role="gridcell" className="c-btype">

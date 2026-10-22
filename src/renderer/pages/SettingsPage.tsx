@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { bankStockPagePath } from '../../shared/bankStock';
 import { CHECK_PRIVACY_SENTENCE, CHECK_SAMPLE_TEXT } from '../../shared/check';
 import { parsePrice } from '../../shared/currency';
-import { BPTF_API_ACCESS_URL, SCRAPTF_BANKS } from '../../shared/links';
+import { BPTF_API_ACCESS_URL, SCRAPTF_BANKS, STEAM_TRADE_PROTECTION_FAQ_URL } from '../../shared/links';
 import type { HotkeysStatus } from '../../shared/rpc';
 import { SCRAPTF_RESAVE_HELP } from '../../shared/scraptfHistory';
 import type { CheckResult, InputKind, ScraptfBank, SecretName, Settings } from '../../shared/types';
@@ -59,8 +59,13 @@ import {
   INPUT_STALE_HINT,
   inputKindsHint,
   keyPriceHint,
+  MARKETPLACE_FEE_HINT,
+  MARKETPLACE_FEE_PCT,
   MIN_MARGIN_PCT,
   MIN_PROFIT_PCT_OF_COST,
+  MIN_PROFITABLE_DEPTH,
+  MIN_PROFITABLE_DEPTH_LABEL,
+  minProfitableDepthHint,
   msToDaysText,
   NEW_ON_SCRAPTF_NOTIFY_LABEL,
   newOnScraptfNotifyHint,
@@ -92,6 +97,11 @@ import {
   WATCHES_NOTIFY_LABEL,
   watchesNotifyHint,
 } from '../settingsFields';
+import { reserveSuggestionView } from '../riskModel';
+// 0.9 (#1): Settings → Trade lock (the user's answer; Holdings counts a 7-day lock).
+import { tradeLockModeOf } from '../../shared/holdingAdvice';
+import { TRADE_LOCK_MODES, type TradeLockMode } from '../../shared/types';
+import { TRADE_LOCK_BODY, TRADE_LOCK_FAQ_LABEL, TRADE_LOCK_HELP, TRADE_LOCK_LABELS, TRADE_LOCK_TITLES, tradeLockAnsweredText } from '../holdingsModel';
 
 const SECTIONS = [
   ['set-access', 'backpack.tf access'],
@@ -105,6 +115,7 @@ const SECTIONS = [
   ['set-connectors', 'Data sources'],
   ['set-block', 'Blocklist'],
   ['set-own', 'Your accounts'],
+  ['set-trade', 'Trade lock'],
   ['set-app', 'App behaviour'],
   ['set-check', 'Live check'],
   ['set-look', 'Appearance'],
@@ -149,6 +160,8 @@ export function SettingsPage() {
         <BlocklistSection s={settings} />
         {/* 0.8 (H3): your own SteamID64s, so your listings leave "Others ask". */}
         <OwnAccountsSection s={settings} />
+        {/* 0.9 (#1): Steam's Trade Protection as you know it; Holdings counts a 7-day lock. */}
+        <TradeLockSection s={settings} />
         <AppSection s={settings} />
         {/* F16. Main's settings load always adds the check group; the guard keeps the page up regardless. */}
         {settings.check ? <CheckSection s={settings} /> : null}
@@ -408,6 +421,10 @@ function ProfitSection({ s }: { s: Settings }) {
         <Field label="Price-move reserve" htmlFor="p-reserve" hint={exitReserveHint(p.exitReservePct)}>
           <CommitInput id="p-reserve" inputMode="decimal" value={ratioToPctText(p.exitReservePct)} validate={numberValidator(EXIT_RESERVE_PCT.min, EXIT_RESERVE_PCT.max)} onCommit={(v) => set({ exitReservePct: pctTextToRatio(v) })} suffix="%" />
         </Field>
+        {/* 0.9 (#2): the user's marketplace.tf fee, for its break-even price and the journal's fee hint only. */}
+        <Field label="marketplace.tf fee" htmlFor="p-mptf-fee" hint={MARKETPLACE_FEE_HINT}>
+          <CommitInput id="p-mptf-fee" inputMode="decimal" value={ratioToPctText(p.marketplaceFeePct)} validate={numberValidator(MARKETPLACE_FEE_PCT.min, MARKETPLACE_FEE_PCT.max)} onCommit={(v) => set({ marketplaceFeePct: pctTextToRatio(v) })} suffix="%" />
+        </Field>
         <Field label="Outlier vs median" htmlFor="p-om" hint="Best order above this multiple of the median is an outlier.">
           <CommitInput id="p-om" inputMode="decimal" value={String(p.outlierVsMedian)} validate={numberValidator(1, 10)} onCommit={(v) => set({ outlierVsMedian: Number(v) })} suffix="×" />
         </Field>
@@ -421,6 +438,8 @@ function ProfitSection({ s }: { s: Settings }) {
           <CommitInput id="p-stale" inputMode="numeric" value={String(Math.round(p.inputStaleMs / 60_000))} validate={numberValidator(1, 60 * 24 * 30)} onCommit={(v) => set({ inputStaleMs: Math.round(Number(v)) * 60_000 })} suffix="min" />
         </Field>
       </div>
+      {/* 0.9 (#12): what the user's own data suggests for the reserve, per value band: text only, never applied. */}
+      <ReserveSuggestionNote />
       <div className="form-grid two">
         <Field label="Ignore reference prices older than" htmlFor="p-refage" hint={referenceAgeHint(p.referenceMaxAgeMs)}>
           <CommitInput
@@ -461,6 +480,25 @@ function ProfitSection({ s }: { s: Settings }) {
   );
 }
 
+/**
+ * 0.9 (#12): the suggested price-move reserve per value band ('profit.reserveSuggestion': local reads only), with its
+ * n, source and hold. Text only: nothing here sets the reserve. Renders nothing while loading or on an error.
+ */
+function ReserveSuggestionNote() {
+  const q = useRpcQuery('profit.reserveSuggestion', undefined);
+  usePush('journal.changed', () => void q.reload());
+  const view = reserveSuggestionView(q.data);
+  if (!view) return null;
+  return (
+    <div className="reserve-suggest small" title={view.title}>
+      <p className="muted">{view.head}</p>
+      {view.lines.map((l) => (
+        <p key={l.band}>{l.text}</p>
+      ))}
+    </div>
+  );
+}
+
 /** Exported for the render tests. */
 export function NotifySection({ s }: { s: Settings }) {
   const { updateSettings } = useApp();
@@ -497,6 +535,10 @@ export function NotifySection({ s }: { s: Settings }) {
           <CommitInput id="n-dedup" inputMode="numeric" value={String(Math.round(n.dedupMs / 60_000))} validate={numberValidator(1, 60 * 24)} onCommit={(v) => set({ dedupMs: Math.round(Number(v)) * 60_000 })} suffix="min" />
         </Field>
       </div>
+      {/* 0.9 (#3): the risk control (0, the default: off). */}
+      <Field label={MIN_PROFITABLE_DEPTH_LABEL} htmlFor="n-depth" hint={minProfitableDepthHint(n.minProfitableDepth)}>
+        <CommitInput id="n-depth" inputMode="numeric" value={String(n.minProfitableDepth)} validate={numberValidator(MIN_PROFITABLE_DEPTH.min, MIN_PROFITABLE_DEPTH.max)} onCommit={(v) => set({ minProfitableDepth: Math.round(Number(v)) })} suffix="buyers" />
+      </Field>
       <Field label="Notify for" hint={inputKindsHint(kinds)}>
         <CheckGroup ariaLabel="Notify for these inputs" values={kinds} options={NOTIFY_INPUT_KINDS} onToggle={toggleKind} />
       </Field>
@@ -700,6 +742,40 @@ function useHotkeys(): HotkeysStatus | null {
   const q = useRpcQuery('app.hotkeys', undefined);
   usePush('settings.changed', () => void q.reload());
   return q.data ?? null;
+}
+
+/**
+ * 0.9 (#1): Settings → Trade lock: the user's answer (Not sure / No lock / 7-day lock), when it was given, Valve's FAQ
+ * (opened in the user's browser), and while unanswered a button that keeps Not sure and stops Holdings asking. Every
+ * choice writes `tradeLock` with answeredAt now; Flip Desk cannot read the account.
+ */
+export function TradeLockSection({ s }: { s: Settings }) {
+  const { updateSettings } = useApp();
+  const mode = tradeLockModeOf(s);
+  const answeredAt = s.tradeLock?.answeredAt ?? null;
+  const answer = (m: TradeLockMode) => void updateSettings({ tradeLock: { mode: m, answeredAt: Date.now() } });
+  return (
+    <Section id="set-trade" title="Trade lock" intro={TRADE_LOCK_BODY}>
+      <Field label="When you receive a TF2 item in a trade" hint={TRADE_LOCK_HELP[mode]}>
+        <Segmented
+          ariaLabel="Trade lock"
+          value={mode}
+          options={TRADE_LOCK_MODES.map((m) => ({ value: m, label: TRADE_LOCK_LABELS[m], title: TRADE_LOCK_TITLES[m] }))}
+          onChange={(m) => answer(m)}
+        />
+      </Field>
+      <p className="muted small">
+        {tradeLockAnsweredText(answeredAt)} <ExternalLink url={STEAM_TRADE_PROTECTION_FAQ_URL}>{TRADE_LOCK_FAQ_LABEL}</ExternalLink>
+      </p>
+      {answeredAt === null ? (
+        <div className="form-actions">
+          <button type="button" className="btn small" onClick={() => answer('unknown')}>
+            Keep &quot;Not sure&quot; and stop asking
+          </button>
+        </div>
+      ) : null}
+    </Section>
+  );
 }
 
 function AppSection({ s }: { s: Settings }) {

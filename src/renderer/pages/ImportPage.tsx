@@ -1,6 +1,7 @@
 // The Import page: the saved-page import's opt-in gate, its file and folder controls, the last import and
 // the recent batches. 0.7.1: the skipped items' true total and per-reason counts (P5), Copy parser report
-// (P4, the clipboard only), and what turning import off does to the scrap.tf window (UX-12).
+// (P4, the clipboard only), and what turning import off does to the scrap.tf window (UX-12). 0.9 (#13): a look whose
+// page said its bank was not trading, and the scrap.tf wording the report only records; (#25) the longer email.
 
 import { useState } from 'react';
 import { PERMISSION_FIELD_MAX, type ImportResult, type PermissionRecord } from '../../shared/types';
@@ -17,6 +18,7 @@ import { ExternalLink } from '../components/ExternalLink';
 import { SaveModeChoice, ScraptfListCard } from '../components/ScraptfListCard';
 import { chooseWatchFolder, importListFamilyText, importListRowsText, importToastText, listRereadNote } from '../scraptfListModel';
 import { importBankText, importBatchItemsRemoved } from '../banksModel';
+import { PERMISSION_TEMPLATE } from '../aboutModel';
 import { importOriginView } from '../scraptfWindowModel';
 import {
   IMPORT_FILE_HINT,
@@ -26,7 +28,9 @@ import {
   SAVE_MODE_HTML_ONLY_NOTE,
   SAVE_MODE_LIST_ONLY,
   importFailedToast,
+  importBankUnavailable,
   importOffText,
+  importReportMarkers,
   importReportText,
   importReportToast,
   importSavedWithoutCards,
@@ -40,18 +44,9 @@ export { chooseWatchFolder };
 
 const PAGE_KIND_LABELS: Record<string, string> = { buy: 'Buy page', unusuals: 'Unusuals page', 'items-list': 'Price list (scrap.tf/items)', unknown: 'Unknown page' };
 
-export const PERMISSION_TEMPLATE = `To: admin@scrap.tf
-Subject: Question about a personal price-tracking tool and the ToS
-
-Hello,
-
-I use a personal desktop tool that never connects to scrap.tf.
-I type in prices I see on scrap.tf, and the tool compares them with backpack.tf buy orders from backpack.tf's official API.
-Is this acceptable under your Terms of Service?
-Would you permit importing pages I save myself (Ctrl+S in my browser), for personal use only?
-I will follow whatever you decide.
-
-Thank you.`;
+// 0.9 (#25): the Appendix C email moved to aboutModel.ts (the About page's Unsupported panel shows it too, with its
+// three questions); it stays importable from here.
+export { PERMISSION_TEMPLATE } from '../aboutModel';
 
 export function ImportPage() {
   const { settings } = useApp();
@@ -185,11 +180,9 @@ function ImportEnabled() {
       const reports = await rpc('import.report', {});
       const text = importReportText(reports);
       const copied = text !== null && (await copyText(text));
-      // 0.8 (LC-6): the copied reads' reserved / not-tradable markers, summed (an older service sends none).
-      const markers = reports.reduce(
-        (m, r) => ({ reserved: m.reserved + (r.counts?.reserved ?? 0), notTradable: m.notTradable + (r.counts?.notTradable ?? 0) }),
-        { reserved: 0, notTradable: 0 },
-      );
+      // 0.8 (LC-6): the copied reads' reserved / not-tradable markers, summed (an older service sends none); 0.9 (#13):
+      // with the scrap.tf wording the parser only records.
+      const markers = importReportMarkers(reports);
       const t = importReportToast(copied, text === null ? 0 : reports.length, markers);
       toast(t.text, t.tone);
     } catch (e) {
@@ -287,7 +280,8 @@ function ImportEnabled() {
                   // F18: a bank page that stored nothing reads "not counted", as the banks page treats it; a batch
                   // keeps no warnings, so whether its save type was to blame is unknown and the remedy is hedged.
                   // 0.7.3: a batch the 0.7.2 bare-kit cleanup emptied (count 0, categories kept) names that cause instead.
-                  const bank = b.bank ? importBankText(b.bank, b.itemCount, undefined, b.origin === 'window', importBatchItemsRemoved(b)) : null;
+                  // 0.9 (#13): a look whose page said its bank was not trading says so first.
+                  const bank = b.bank ? importBankText(b.bank, b.itemCount, undefined, b.origin === 'window', importBatchItemsRemoved(b), false, b.bankNotice === 'unavailable') : null;
                   // F21: a read of the scrap.tf window names the window and its page, not a file.
                   const from = importOriginView(b);
                   return (
@@ -342,8 +336,9 @@ export function ImportResultView({ r }: { r: ImportResult }) {
   // 0.7.4: the page's family rows are on the list but no cost of their own (scraptfListModel).
   const familyText = importListFamilyText(r);
   // F15: which banks card this save counts for (the parser's recognised page); F18: none when it stored nothing,
-  // blaming the save type only when the page came without its cards; 0.7.3: the bare Unusuals index has none to show.
-  const bank = importBankText(r.bank, r.stored, importSavedWithoutCards(r), r.origin === 'window', false, importUnusualsIndex(r));
+  // blaming the save type only when the page came without its cards; 0.7.3: the bare Unusuals index has none to show;
+  // 0.9 (#13): a page saying its bank is not trading stored no stock save.
+  const bank = importBankText(r.bank, r.stored, importSavedWithoutCards(r), r.origin === 'window', false, importUnusualsIndex(r), importBankUnavailable(r));
   // F18: a bank page saved without its cards leads, with what to do; the other warnings follow.
   const warnings = importWarningsView(r);
   // F21: a read of the scrap.tf window names the window and its page, not a file.

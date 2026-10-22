@@ -69,6 +69,8 @@ describe('migration V6 on an existing version 5 database', () => {
       ['page', 'TEXT', 1, "''", 0],
       // 0.7.4 (V14): the /items list's rows' craftability; NULL on a bank page's card.
       ['craft', 'TEXT', 0, null, 0],
+      // 0.9 (V16, #13): a bank page card's price-drop wording; NULL on /items rows.
+      ['markdown', 'TEXT', 0, null, 0],
     ]);
     const index = check.prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'bank_stock' AND name NOT LIKE 'sqlite_%'").all();
     expect(index.map((r) => r['name'])).toEqual(['bank_stock_bank_batch']);

@@ -7,11 +7,12 @@
 
 import { z } from 'zod';
 import { DEFAULT_SETTINGS, mergeSettings } from './defaults';
-import { PERMISSION_FIELD_MAX, SCRAPTF_BANK_IDS, type DeepPartial, type ScraptfBank, type Settings } from './types';
+import { PERMISSION_FIELD_MAX, SCRAPTF_BANK_IDS, TRADE_LOCK_MODES, type DeepPartial, type ScraptfBank, type Settings, type TradeLockMode } from './types';
 import { isValidAccelerator, sameAccelerator } from './accelerator';
 import { CHECK_HOTKEY_CONFLICT } from './check';
 import { CONTACT_MAX, CONTACT_RE } from './contact';
 import { gateScraptfWindow, scraptfWindowEnableProblem } from './scraptfWindowPolicy';
+import { MIN_PROFITABLE_DEPTH_MAX } from './exitRisk';
 
 const MAX_SCRAP = 1_000_000_000;
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -66,6 +67,8 @@ const profitSchema = z.object({
   frictionScrap: scrap,
   // 0.8 (PC-1): a share of the sale price. Missing from files before 0.8: the lenient load (parseGroup) reads 0.
   exitReservePct: z.number().min(0).max(0.5),
+  // 0.9 (#2): marketplace.tf's fee for its break-even and the journal hint, never profit. Missing before 0.9: the lenient load reads 0.1.
+  marketplaceFeePct: z.number().min(0).max(0.5),
   outlierVsMedian: z.number().min(1).max(100),
   outlierVsRef: z.number().min(1).max(100),
   unusualRiskKeys: z.number().min(0).max(100_000),
@@ -129,6 +132,8 @@ const notificationsSchema = z.object({
   watches: bool,
   // 0.8 (G4); missing from files before 0.8, so the lenient load reads false (off).
   buyTiming: bool,
+  // 0.9 (#3); missing from files before 0.9, so the lenient load reads 0 (off).
+  minProfitableDepth: z.number().int().min(0).max(MIN_PROFITABLE_DEPTH_MAX),
 });
 
 const hotkey = z
@@ -165,6 +170,9 @@ const uiSchema = z.object({
   density: z.enum(['comfortable', 'compact']),
 });
 
+// 0.9 (#1). Missing from files before 0.9: the lenient load (parseGroup) reads 'unknown', not answered, unreported.
+const tradeLockSchema = z.object({ mode: z.enum(TRADE_LOCK_MODES as unknown as [TradeLockMode, ...TradeLockMode[]]), answeredAt: timestamp.nullable() });
+
 export const settingsSchema = z.object({
   contactUrl,
   keyPrice: keyPriceSchema,
@@ -180,6 +188,7 @@ export const settingsSchema = z.object({
   blocklist: z.array(steamId64).max(10_000),
   // 0.8 (H3): the user's own accounts, left out of "Others ask"; a filter only, never sent.
   ownSteamIds: z.array(steamId64).max(10),
+  tradeLock: tradeLockSchema,
   ui: uiSchema,
 });
 
@@ -198,6 +207,7 @@ export const settingsPatchSchema = z.object({
   networkPaused: bool.optional(),
   blocklist: z.array(steamId64).max(10_000).optional(),
   ownSteamIds: z.array(steamId64).max(10).optional(),
+  tradeLock: tradeLockSchema.partial().optional(),
   ui: uiSchema.partial().optional(),
 });
 

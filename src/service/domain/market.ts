@@ -29,6 +29,8 @@ import {
   marketPage,
   marketProfit,
   marketProfitTie,
+  marketProfitTiesFirst,
+  marketRiskCost,
   marketSearchTokens,
   marketUpdatedAt,
   marketUserSideMatches,
@@ -70,6 +72,7 @@ import { scoreConfidence } from './confidence';
 import { toCsv } from './csv';
 import { bookFlags, buyerCountOf, cleanTarget, exitOrdersOfBook, explicitInput, priceBook, validRule } from './engine';
 import { buyerDepthOf } from '../../shared/ceiling';
+import { exitDepthOf, exitRiskAt, marketRiskFields, type ExitDepth, type ExitRisk } from '../../shared/exitRisk';
 import { anyEffectBaseOf, matchContext, ruleMatches } from './matcher';
 import type { MatchContext } from './matcher';
 import { bookBasesOf, canonicalBookBase, mergedBook, twinBasesOf, withTwins } from './bookTwins';
@@ -234,6 +237,8 @@ export interface MarketEval {
   nextBuyer?: NextBuyer | null;
   /** 0.8 (H2): distinct buyers with an eligible order seen in the last 24 h; set like nextBuyer. */
   verifiedBuyerCount?: number;
+  /** 0.9 (#3): the book's usable buyers seen in the last 24 h (exitDepthOf); evaluateMarketBase always sets it, optional for hand-built entries. */
+  exitDepth?: ExitDepth;
   eligibleCount: number;
   maxCostScrap: Scrap | null;
   confidence: number;
@@ -267,7 +272,9 @@ export function evaluateMarketBase(a: MarketEvalArgs): MarketEval | null {
   if (book.eligible.length === 0) return null;
   const rev = itemRevenue(book.prices, book.eligible.length, a.settings);
   // 0.8 (PC-2, H2): who pays if the revenue order's buyer fills or withdraws, over the same priced book.
-  const depth = buyerDepthOf(exitOrdersOfBook(book), rev.order?.listingId ?? null, p.useOrder);
+  // 0.9 (#3): the same orders give the risk keys' ExitDepth (exitDepthOf), judged per read at the row's cost.
+  const orders = exitOrdersOfBook(book);
+  const depth = buyerDepthOf(orders, rev.order?.listingId ?? null, p.useOrder);
   // A fresh typed input with no margin: input age costs nothing and the suspect-margin guard
   // (which treats a free item as an unbounded margin) stays off, so only buyers and references count.
   const conf = scoreConfidence({
@@ -307,6 +314,7 @@ export function evaluateMarketBase(a: MarketEvalArgs): MarketEval | null {
     buyerCount: buyerCountOf(book.eligible),
     nextBuyer: depth.nextBuyer,
     verifiedBuyerCount: depth.verifiedBuyerCount,
+    exitDepth: exitDepthOf(orders, p.useOrder),
     eligibleCount: book.eligible.length,
     maxCostScrap: rev.maxCostScrap,
     confidence: conf.score,
@@ -1318,7 +1326,8 @@ export function createMarketIndex(deps: MarketIndexDeps): MarketIndex {
     return coverage.value.map((c) => ({ ...c }));
   }
 
-  function sortValueOf(key: MarketSort, e: Entry | null, profit: Scrap | null, knownObservedAt: UnixMs | null): number | null {
+  /** `risk` (0.9, #3): exitRiskAt at marketRiskCost, read only for the 'backup' and 'depth' keys (null otherwise). */
+  function sortValueOf(key: MarketSort, e: Entry | null, profit: Scrap | null, knownObservedAt: UnixMs | null, risk: ExitRisk | null): number | null {
     // Mirrors the shared comparator's values (test/domain/market.test.ts pins the order to marketComparator).
     switch (key) {
       case 'ceiling':
@@ -1333,6 +1342,11 @@ export function createMarketIndex(deps: MarketIndexDeps): MarketIndex {
         return marketUpdatedAt({ lastOrderChangeAt: e?.lastOrderChangeAt ?? null, knownObservedAt });
       case 'seen':
         return finiteOrNull(knownObservedAt);
+      // 0.9 (#3): the risk keys toRow shows, at the same cost; null (no book, no price to judge) sorts last.
+      case 'backup':
+        return finiteOrNull(risk?.backupProfitScrap);
+      case 'depth':
+        return finiteOrNull(risk?.profitableDepth);
       case 'name':
         return null;
     }
@@ -1476,7 +1490,7 @@ export function createMarketIndex(deps: MarketIndexDeps): MarketIndex {
     q: MarketQuery,
     now: UnixMs,
     keep = true,
-  ): { matched: readonly Cand[]; counts: Record<MarketVerdict, number>; kp: KeyPriceState; kn: KnownState } {
+  ): { matched: readonly Cand[]; counts: Record<MarketVerdict, number>; kp: KeyPriceState; kn: KnownState; p: Settings['profit'] } {
     checkSchema();
     const kp = readKeyPrice();
     const K = kp.valueScrap;
@@ -1498,7 +1512,8 @@ export function createMarketIndex(deps: MarketIndexDeps): MarketIndex {
     const listedSig = listedOnly ? [historyVersion(), bankStockVersion(), Math.floor(now / 60_000)] : null;
     // The profit settings set every profit (and are read here, not through a rebuild).
     const sig = JSON.stringify([filters, K, p, ver, stockVer, listedSig]);
-    if (selected !== null && selected.sig === sig) return { matched: selected.matched, counts: { ...selected.counts }, kp, kn };
+    // 0.9 (#3): `p` is part of sig, so the current settings equal the cached pass's.
+    if (selected !== null && selected.sig === sig) return { matched: selected.matched, counts: { ...selected.counts }, kp, kn, p };
     const tokens = marketSearchTokens(q.search);
     const key: MarketSort = q.sort && MARKET_SORTS.includes(q.sort) ? q.sort : 'ceiling';
     const counts = emptyMarketCounts();
@@ -1549,7 +1564,13 @@ export function createMarketIndex(deps: MarketIndexDeps): MarketIndex {
         ruleUnderScraptf: estimate?.underScraptf,
         verdict,
         profit,
-        v: sortValueOf(key, e, profit, k?.observedAt ?? null),
+        v: sortValueOf(
+          key,
+          e,
+          profit,
+          k?.observedAt ?? null,
+          key === 'backup' || key === 'depth' ? exitRiskAt(e, marketRiskCost({ knownCostScrap: knownCost, ruleCostScrap: ruleCost ?? null, verdict }), p) : null,
+        ),
         r: ranks.rankOf(row.sku, row.name),
       });
     };
@@ -1577,8 +1598,8 @@ export function createMarketIndex(deps: MarketIndexDeps): MarketIndex {
     // marketComparator's order, with the name tie-break read from the ranks where both rows have one.
     const sign = (q.dir ?? (key === 'name' ? 'asc' : 'desc')) === 'asc' ? 1 : -1;
     const nameTie = (a: Cand, b: Cand): number => (a.r >= 0 && b.r >= 0 ? a.r - b.r : byName(a, b));
-    // 0.7.1 'seen': rows seen on the same save tie by profit first, as marketComparator.
-    const tie = key === 'seen' ? (a: Cand, b: Cand): number => marketProfitTie(a.profit, b.profit) || nameTie(a, b) : nameTie;
+    // 0.7.1 'seen' (rows seen on the same save) and the 0.9 risk keys tie by profit first, as marketComparator.
+    const tie = marketProfitTiesFirst(key) ? (a: Cand, b: Cand): number => marketProfitTie(a.profit, b.profit) || nameTie(a, b) : nameTie;
     if (key === 'name') matched.sort((a, b) => sign * tie(a, b));
     else {
       matched.sort((a, b) => {
@@ -1592,7 +1613,7 @@ export function createMarketIndex(deps: MarketIndexDeps): MarketIndex {
       });
     }
     if (keep) selected = { sig, matched, counts };
-    return { matched, counts: { ...counts }, kp, kn };
+    return { matched, counts: { ...counts }, kp, kn, p };
   }
 
   /** F14: the base's saved-list row at the read's key price; a failed read shows no list data for it. */
@@ -1615,9 +1636,10 @@ export function createMarketIndex(deps: MarketIndexDeps): MarketIndex {
 
   /**
    * `withTiming` (0.8, T7): only list()'s page joins scraptfTiming, judged with the page's key price and profit
-   * settings (read once per page); the CSV and the banks cards do not.
+   * settings (read once per page); the CSV and the banks cards do not. `p` (0.9, #3): the profit settings select()
+   * read, for the risk keys.
    */
-  function toRow(c: Cand, now: UnixMs, K: Scrap, kn: KnownState, withTiming: ScraptfTimingInputs | null = null): MarketRow {
+  function toRow(c: Cand, now: UnixMs, K: Scrap, kn: KnownState, p: Settings['profit'], withTiming: ScraptfTimingInputs | null = null): MarketRow {
     const e = c.e;
     const flags = e ? [...e.flags] : [];
     // F19: the static bank page the row's scrap.tf button opens (SCRAPTF_BANKS only, never item data):
@@ -1631,6 +1653,8 @@ export function createMarketIndex(deps: MarketIndexDeps): MarketIndex {
     if (estimate.underScraptf && !flags.includes('rule-under-scraptf')) flags.push('rule-under-scraptf');
     const listed = listedOf(c.sku, link);
     const timing = withTiming ? timingOf(c.sku, link, e ?? null, now, withTiming) : null;
+    // 0.9 (#3): the risk keys at the row's cost (marketRiskCost: the same cost select() sorted by), per read.
+    const risk = e ? exitRiskAt(e, marketRiskCost({ knownCostScrap: c.knownCost, ruleCostScrap: estimate.cost, verdict: c.verdict }), p) : null;
     return {
       sku: c.sku,
       name: c.name,
@@ -1651,6 +1675,7 @@ export function createMarketIndex(deps: MarketIndexDeps): MarketIndex {
       stock: c.known?.source === 'page' ? c.known.stock : null,
       ruleCostScrap: estimate.cost,
       profitScrap: c.profit,
+      ...marketRiskFields(risk),
       verdict: c.verdict,
       lastOrderChangeAt: e?.lastOrderChangeAt ?? null,
       evaluatedAt: e?.evaluatedAt ?? now,
@@ -1750,14 +1775,14 @@ export function createMarketIndex(deps: MarketIndexDeps): MarketIndex {
     },
 
     list(q, now) {
-      const { matched, counts, kp, kn } = select(q, now);
+      const { matched, counts, kp, kn, p } = select(q, now);
       const { limit, offset } = marketPage(q);
       const s = deps.settings();
       const importEnabled = s.import.enabled && s.import.acknowledgedAt !== null;
       // 0.8 (T7): the page's timing join, at the page's key price and settings (one read, not one per row).
       const timing: ScraptfTimingInputs = { keyScrap: kp.valueScrap, profit: s.profit };
       return {
-        rows: matched.slice(offset, offset + limit).map((c) => toRow(c, now, kp.valueScrap, kn, timing)),
+        rows: matched.slice(offset, offset + limit).map((c) => toRow(c, now, kp.valueScrap, kn, p, timing)),
         total: matched.length,
         counts,
         scraptf: {
@@ -1777,8 +1802,8 @@ export function createMarketIndex(deps: MarketIndexDeps): MarketIndex {
     },
 
     all(q, now) {
-      const { matched, kp, kn } = select(q, now);
-      return matched.map((c) => toRow(c, now, kp.valueScrap, kn));
+      const { matched, kp, kn, p } = select(q, now);
+      return matched.map((c) => toRow(c, now, kp.valueScrap, kn, p));
     },
 
     stats,
@@ -1811,7 +1836,7 @@ export function createMarketIndex(deps: MarketIndexDeps): MarketIndex {
       const n = Number.isFinite(top) ? Math.max(0, Math.floor(top)) : 0;
       // The default sort is Pay up to, highest first, ties by name then SKU: bankLookFor's order, so
       // each group's first qualifying rows are its top ones and no second sort is needed.
-      const { matched, kp, kn } = select(UNCHECKED_QUERY, now, false);
+      const { matched, kp, kn, p } = select(UNCHECKED_QUERY, now, false);
       const groups = new Map<ReturnType<typeof groupOf>, { count: number; best: Cand[] }>();
       for (const c of matched) {
         // 0.7.4 (F36): the page the row's button opens. 0.7.4 (R26): a sighting on the /items list only goes
@@ -1827,7 +1852,7 @@ export function createMarketIndex(deps: MarketIndexDeps): MarketIndex {
         if (ceiling !== null && ceiling > 0 && (c.e?.revenueScrap ?? null) !== null) s.best.push(c);
       }
       const out = new Map<ReturnType<typeof groupOf>, UncheckedGroup>();
-      for (const [g, s] of groups) out.set(g, { count: s.count, rows: s.best.map((c) => toRow(c, now, kp.valueScrap, kn)) });
+      for (const [g, s] of groups) out.set(g, { count: s.count, rows: s.best.map((c) => toRow(c, now, kp.valueScrap, kn, p)) });
       return out;
     },
   };
